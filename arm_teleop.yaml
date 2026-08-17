@@ -47,12 +47,13 @@ body:
   base_command_mode: delta
 
   # 按住左 Grip 后，左主摇杆独立控制底盘；头显失效不会阻断平移。
-  # 主摇杆 X：左/右横移；Y：前进/后退。
-  stick_x_axis: 2
-  stick_y_axis: 3
+  # 当前 PICO 客户端上传的主摇杆顺序是 Joy[2]=前后、Joy[3]=左右。
+  # 横移读取 Joy[3]，前后读取 Joy[2]。
+  stick_x_axis: 3
+  stick_y_axis: 2
   stick_deadzone: 0.12
   stick_forward_direction: 1.0
-  # Joy X 向左为负；机器人 lateral 向左为正，因此默认取反。
+  # 横向轴向左为负；机器人 lateral 向左为正，因此默认取反。
   stick_lateral_direction: -1.0
   max_linear_velocity: 0.25
   max_lateral_velocity: 0.20
@@ -127,8 +128,8 @@ control:
   clutch_axis: 1
   clutch_threshold: 0.55
 
-  # 双摇杆向外拨一次：左主摇杆 X<-0.8 且右主摇杆 X>0.8，双臂平滑回零。
-  home_gesture_axis: 2
+  # 双摇杆向外拨一次：读取同一个物理左右轴 Joy[3]，双臂平滑回零。
+  home_gesture_axis: 3
   home_gesture_threshold: 0.80
   home_gesture_release_threshold: 0.35
   home_joint_velocity: 0.70
