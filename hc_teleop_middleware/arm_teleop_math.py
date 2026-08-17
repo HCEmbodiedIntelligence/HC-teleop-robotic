@@ -173,6 +173,49 @@ def sticks_outward(left_x: float, right_x: float, threshold: float) -> bool:
     return left_x <= -threshold and right_x >= threshold
 
 
+def joystick_base_velocity(
+    stick_x: float,
+    stick_y: float,
+    deadzone: float,
+    max_linear_velocity: float,
+    max_lateral_velocity: float,
+    forward_direction: float = 1.0,
+    lateral_direction: float = -1.0,
+) -> tuple[float, float]:
+    """Map a primary joystick to robot forward and left-positive velocity."""
+    values = tuple(
+        float(value)
+        for value in (
+            stick_x,
+            stick_y,
+            deadzone,
+            max_linear_velocity,
+            max_lateral_velocity,
+            forward_direction,
+            lateral_direction,
+        )
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("joystick base mapping values must be finite")
+    x, y, deadzone, max_linear, max_lateral, forward_sign, lateral_sign = values
+    if not 0.0 <= deadzone < 1.0:
+        raise ValueError("joystick deadzone must be in [0, 1)")
+    if max_linear < 0.0 or max_lateral < 0.0:
+        raise ValueError("joystick velocity limits must be non-negative")
+    if forward_sign not in (-1.0, 1.0) or lateral_sign not in (-1.0, 1.0):
+        raise ValueError("joystick directions must be -1 or 1")
+
+    def shape(value: float) -> float:
+        value = float(np.clip(value, -1.0, 1.0))
+        if abs(value) <= deadzone:
+            return 0.0
+        return math.copysign((abs(value) - deadzone) / (1.0 - deadzone), value)
+
+    forward = shape(y) * max_linear * forward_sign
+    lateral = shape(x) * max_lateral * lateral_sign
+    return forward, lateral
+
+
 def adaptive_damping(
     smallest_singular_value: float,
     minimum: float,

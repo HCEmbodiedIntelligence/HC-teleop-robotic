@@ -6,6 +6,7 @@ import numpy as np
 from hc_teleop_middleware.arm_teleop_math import (
     adaptive_damping,
     clamp_step,
+    joystick_base_velocity,
     joint_limit_avoidance,
     mapped_relative_yaw,
     orientation_error,
@@ -111,6 +112,20 @@ class ArmTeleopMathTests(unittest.TestCase):
         self.assertTrue(sticks_outward(-0.9, 0.85, 0.8))
         self.assertFalse(sticks_outward(0.9, -0.85, 0.8))
         self.assertFalse(sticks_outward(-0.7, 0.85, 0.8))
+
+    def test_left_stick_maps_to_forward_and_lateral_base_motion(self):
+        self.assertEqual(
+            joystick_base_velocity(0.05, -0.1, 0.12, 0.25, 0.2),
+            (0.0, 0.0),
+        )
+        forward, lateral = joystick_base_velocity(0.0, 1.0, 0.12, 0.25, 0.2)
+        self.assertAlmostEqual(forward, 0.25)
+        self.assertAlmostEqual(lateral, 0.0)
+        forward, lateral = joystick_base_velocity(-1.0, 0.0, 0.12, 0.25, 0.2)
+        self.assertAlmostEqual(forward, 0.0)
+        self.assertAlmostEqual(lateral, 0.2)
+        _, lateral = joystick_base_velocity(1.0, 0.0, 0.12, 0.25, 0.2)
+        self.assertAlmostEqual(lateral, -0.2)
 
     def test_joint_step_and_limits(self):
         result = clamp_step([2, -2], [0, 0], [-1, -0.05], [1, 1], 0.1)

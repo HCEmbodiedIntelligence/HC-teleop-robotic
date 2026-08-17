@@ -46,10 +46,14 @@ body:
   # 仿真节点接收每周期位姿增量；切到实机底盘桥时改为 velocity。
   base_command_mode: delta
 
-  # 左摇杆主轴：X 左右，Y 前后。
+  # 按住左 Grip 后，左主摇杆独立控制底盘；头显失效不会阻断平移。
+  # 主摇杆 X：左/右横移；Y：前进/后退。
   stick_x_axis: 2
   stick_y_axis: 3
   stick_deadzone: 0.12
+  stick_forward_direction: 1.0
+  # Joy X 向左为负；机器人 lateral 向左为正，因此默认取反。
+  stick_lateral_direction: -1.0
   max_linear_velocity: 0.25
   max_lateral_velocity: 0.20
 

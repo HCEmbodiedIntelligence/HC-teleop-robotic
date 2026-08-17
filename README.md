@@ -156,6 +156,8 @@ PyBullet IK 可用 `./run_sim_teleop.sh --legacy` 排障。
 
 仿真底盘坐标约定为 `+X` 前进、`+Y` 向左，底盘消息顺序为 `[yaw, forward, lateral]`。PyBullet 窗口需要先点击获得焦点；按住 `Ctrl` 并拖动鼠标左键旋转视角，按住 `Ctrl` 并拖动中键平移视角，滚轮缩放。修改仿真相机或坐标配置后需要退出并重新运行脚本。
 
+按住左手柄中指 Grip 后，左主摇杆 Y 控制底盘前进/后退，X 控制左/右横移。摇杆平移直接使用左手柄 `Joy` 数据，不再依赖头显跟踪是否有效；松开 Grip、输入超时、急停或双臂回零时都会发布零命令。
+
 机械臂只使用手柄相对位姿增量：手柄 `+Z` 向前对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
 
 默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `vendor/io_unicontroller_ros2/control_v23_reconstructed`，参数位于 `robot_configs/hc_tj_description/controller_v23.yml`。压缩包中错误的相对 Jacobian 已按 HC-TJ 有限差分结果修正，重构说明同时保留了尚未确认的行为假设。

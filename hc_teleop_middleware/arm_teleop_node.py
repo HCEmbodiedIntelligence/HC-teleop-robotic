@@ -21,6 +21,7 @@ from std_srvs.srv import Trigger
 from .arm_teleop_math import (
     adaptive_damping,
     clamp_step,
+    joystick_base_velocity,
     joint_limit_avoidance,
     mapped_relative_yaw,
     orientation_error,
@@ -323,10 +324,32 @@ class HcTjArmTeleopNode(Node):
         filter_alpha = float(self.config["control"].get("target_filter_alpha", 1.0))
         if not math.isfinite(filter_alpha) or not 0.0 < filter_alpha <= 1.0:
             raise ValueError("control.target_filter_alpha must be in (0, 1]")
-        for key in ("yaw_direction", "height_direction", "pitch_direction"):
+        for key in (
+            "stick_forward_direction",
+            "stick_lateral_direction",
+            "yaw_direction",
+            "height_direction",
+            "pitch_direction",
+        ):
             value = float(self.config["body"].get(key, 1.0))
             if value not in (-1.0, 1.0):
                 raise ValueError(f"body.{key} must be -1 or 1")
+        for key in ("stick_x_axis", "stick_y_axis"):
+            value = self.config["body"].get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"body.{key} must be a non-negative integer")
+        stick_deadzone = float(self.config["body"].get("stick_deadzone", -1.0))
+        if not math.isfinite(stick_deadzone) or not 0.0 <= stick_deadzone < 1.0:
+            raise ValueError("body.stick_deadzone must be finite and in [0, 1)")
+        for key in ("max_linear_velocity", "max_lateral_velocity"):
+            value = float(self.config["body"].get(key, -1.0))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"body.{key} must be finite and non-negative")
+        if self.config["body"].get("base_command_mode", "delta") not in {
+            "delta",
+            "velocity",
+        }:
+            raise ValueError("body.base_command_mode must be delta or velocity")
         for key in (
             "ik_position_tolerance",
             "ik_orientation_tolerance",
@@ -1201,12 +1224,6 @@ class HcTjArmTeleopNode(Node):
     def _wrap_angle(value: float) -> float:
         return (value + math.pi) % (2.0 * math.pi) - math.pi
 
-    @staticmethod
-    def _deadzone(value: float, threshold: float) -> float:
-        if abs(value) <= threshold:
-            return 0.0
-        return math.copysign((abs(value) - threshold) / (1.0 - threshold), value)
-
     def _engage_body(self) -> None:
         body = self.body
         body.active = True
@@ -1267,7 +1284,6 @@ class HcTjArmTeleopNode(Node):
         self._set_group(body.joint_indices, solution)
         for name, value in zip(body.joint_names, solution):
             command[name] = float(value)
-        self._publish_base_command()
 
     def _update_body_target(self) -> None:
         """Update the torso task without solving joints in the VR adapter."""
@@ -1310,47 +1326,58 @@ class HcTjArmTeleopNode(Node):
         body.target_base = self._relative_pose(
             self._root_pose(), (target_position, target_orientation)
         )
-        self._publish_base_command()
 
-    def _publish_base_command(self) -> None:
+    def _publish_base_command(self, *, track_head_yaw: bool) -> None:
         left = self.arms["left"]
         body = self.body
-        assert left.joy is not None and body.head_pose is not None and body.reference_head is not None
+        assert left.joy is not None
         axes = left.joy.axes
         x_index = int(self.body_config["stick_x_axis"])
         y_index = int(self.body_config["stick_y_axis"])
         stick_x = axes[x_index] if len(axes) > x_index else 0.0
         stick_y = axes[y_index] if len(axes) > y_index else 0.0
-        deadzone = float(self.body_config["stick_deadzone"])
-        stick_x = self._deadzone(float(stick_x), deadzone)
-        stick_y = self._deadzone(float(stick_y), deadzone)
-        forward = stick_y * float(self.body_config["max_linear_velocity"])
-        lateral = -stick_x * float(self.body_config["max_lateral_velocity"])
-        relative_yaw = self._wrap_angle(
-            mapped_relative_yaw(
-                body.head_pose[1],
-                body.reference_head[1],
-                self.control.get(
-                    "head_axis_mapping", self.control["axis_mapping"]
-                ),
-            )
+        forward, lateral = joystick_base_velocity(
+            stick_x,
+            stick_y,
+            float(self.body_config["stick_deadzone"]),
+            float(self.body_config["max_linear_velocity"]),
+            float(self.body_config["max_lateral_velocity"]),
+            float(self.body_config.get("stick_forward_direction", 1.0)),
+            float(self.body_config.get("stick_lateral_direction", -1.0)),
         )
-        yaw_deadzone = float(self.body_config["yaw_deadzone"])
-        yaw_error = 0.0 if abs(relative_yaw) <= yaw_deadzone else relative_yaw
-        yaw = float(
-            np.clip(
-                yaw_error
-                * float(self.body_config.get("yaw_direction", 1.0))
-                * float(self.body_config["yaw_gain"]),
-                -float(self.body_config["max_angular_velocity"]),
-                float(self.body_config["max_angular_velocity"]),
+        yaw = 0.0
+        if track_head_yaw:
+            assert body.head_pose is not None and body.reference_head is not None
+            relative_yaw = self._wrap_angle(
+                mapped_relative_yaw(
+                    body.head_pose[1],
+                    body.reference_head[1],
+                    self.control.get(
+                        "head_axis_mapping", self.control["axis_mapping"]
+                    ),
+                )
             )
-        )
+            yaw_deadzone = float(self.body_config["yaw_deadzone"])
+            yaw_error = 0.0 if abs(relative_yaw) <= yaw_deadzone else relative_yaw
+            yaw = float(
+                np.clip(
+                    yaw_error
+                    * float(self.body_config.get("yaw_direction", 1.0))
+                    * float(self.body_config["yaw_gain"]),
+                    -float(self.body_config["max_angular_velocity"]),
+                    float(self.body_config["max_angular_velocity"]),
+                )
+            )
         if self.body_config.get("base_command_mode", "delta") == "delta":
             period = 1.0 / float(self.control["rate_hz"])
             yaw, forward, lateral = yaw * period, forward * period, lateral * period
         self.base_pub.publish(Float64MultiArray(data=[yaw, forward, lateral]))
         self.base_zero_pending = True
+
+    def _stop_base_if_pending(self) -> None:
+        if self.base_zero_pending:
+            self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
+            self.base_zero_pending = False
 
     def _engage_arm(self, arm: ArmRuntime) -> None:
         arm.active = True
@@ -1520,6 +1547,8 @@ class HcTjArmTeleopNode(Node):
 
     def _set_generic_home_targets(self) -> None:
         """Capture the configured arm home as chest-relative Cartesian tasks."""
+        self._release_all(send_base_zero=True)
+        self.base_zero_pending = False
         for arm in self.arms.values():
             for name in arm.joint_names:
                 bullet.resetJointState(
@@ -1580,13 +1609,19 @@ class HcTjArmTeleopNode(Node):
                 )
             self._publish_status(now, feedback_fresh)
             return
+        if self.home_gesture_latched:
+            self._stop_base_if_pending()
+            self._publish_status(now, feedback_fresh)
+            return
 
         left_input_fresh = self._input_fresh(self.arms["left"], now)
         right_input_fresh = self._input_fresh(self.arms["right"], now)
+        base_requested = left_input_fresh and self._clutch_pressed(
+            self.arms["left"]
+        )
         body_requested = (
-            left_input_fresh
+            base_requested
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
-            and self._clutch_pressed(self.arms["left"])
         )
         arms_requested = right_input_fresh and self._clutch_pressed(
             self.arms["right"]
@@ -1600,9 +1635,12 @@ class HcTjArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
-            self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
-            self.base_zero_pending = False
-            self.get_logger().info("left clutch released: base + waist hold")
+            self.get_logger().info("head/left clutch released: waist + yaw hold")
+
+        if base_requested:
+            self._publish_base_command(track_head_yaw=body_requested)
+        else:
+            self._stop_base_if_pending()
 
         arm_was_active = any(arm.active for arm in self.arms.values())
         for side in ("right", "left"):
@@ -1670,10 +1708,12 @@ class HcTjArmTeleopNode(Node):
             return
         left_input_fresh = self._input_fresh(self.arms["left"], now)
         right_input_fresh = self._input_fresh(self.arms["right"], now)
+        base_requested = left_input_fresh and self._clutch_pressed(
+            self.arms["left"]
+        )
         body_requested = (
-            left_input_fresh
+            base_requested
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
-            and self._clutch_pressed(self.arms["left"])
         )
         arms_requested = right_input_fresh and self._clutch_pressed(self.arms["right"])
         any_active = False
@@ -1687,9 +1727,12 @@ class HcTjArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
-            self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
-            self.base_zero_pending = False
-            self.get_logger().info("left clutch released: base + waist hold")
+            self.get_logger().info("head/left clutch released: waist + yaw hold")
+
+        if base_requested:
+            self._publish_base_command(track_head_yaw=body_requested)
+        else:
+            self._stop_base_if_pending()
 
         arm_was_active = any(arm.active for arm in self.arms.values())
         for side in ("right", "left"):
