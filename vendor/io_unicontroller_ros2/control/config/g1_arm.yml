@@ -1,0 +1,47 @@
+ros_interface:
+  node_name: controller_v2_2
+  rate: 400
+  sub_topic:
+    joint_state: "/io_teleop/joint_states"
+    tf_target: "/io_align/tf"
+  pub_topic:
+    joint_target: "/io_teleop/joint_cmd"
+control:
+  method: "control" # retarget / control
+  dt: 0.0025
+  joints_init: []
+model:
+  urdf: g1_29dof_rev_1_0_with_inspire_hand_DFQ.urdf
+  free_joints: [
+                # left arm
+                "left_shoulder_pitch_joint",
+                "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint",
+                "left_elbow_joint",
+                "left_wrist_roll_joint",
+                "left_wrist_pitch_joint",
+                "left_wrist_yaw_joint",
+                # right arm
+                "right_shoulder_pitch_joint",
+                "right_shoulder_roll_joint",
+                "right_shoulder_yaw_joint",
+                "right_elbow_joint",
+                "right_wrist_roll_joint",
+                "right_wrist_pitch_joint",
+                "right_wrist_yaw_joint",
+              ]
+task:
+  pose: [
+          [["torso_link", "left_wrist_yaw_link"], 0.0, 1.0, 1.0],
+          [["torso_link", "right_wrist_yaw_link"], 0.0, 1.0, 1.0],
+        ]
+  axis: [
+          [["torso_link", "left_shoulder_roll_link"], "Z", 1.0, 1.0],
+          [["torso_link", "left_elbow_link"], "X", 1.0, 1.0],
+          [["torso_link", "right_shoulder_roll_link"], "Z", 1.0, 1.0],
+          [["torso_link", "right_elbow_link"], "X", 1.0, 1.0],
+        ]
+  joint: []
+limit:
+  velocity: [180,180,180,180,180,180,180,180,180,180,180,180,180,180]
+  

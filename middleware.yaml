@@ -1,0 +1,55 @@
+server:
+  host: 0.0.0.0
+  port: 7876
+
+ros:
+  enabled: true
+  node_name: hc_teleop_middleware
+  subscriptions:
+    - topic: /io_teleop/joint_states
+      type: sensor_msgs/msg/JointState
+      enabled: true
+      outputs: [websocket, udp]
+      max_hz: 30
+    - topic: /teleop/arm/status
+      type: std_msgs/msg/String
+      enabled: true
+      outputs: [websocket]
+      max_hz: 10
+    - topic: /tf
+      type: tf2_msgs/msg/TFMessage
+      enabled: false
+      outputs: [websocket]
+      max_hz: 20
+
+vr:
+  enabled: true
+  listen_host: 0.0.0.0
+  pose_port: 5005
+  discovery_port: 5006
+  # 留空时，使用最近一次位姿包的来源 IP。
+  outbound_host: ""
+  outbound_port: 5007
+  pose_timeout_ms: 200
+  publish_pose_to_ros: true
+  publish_input_to_ros: true
+  pose_topics:
+    head: /vr/head_pose
+    left: /vr/left_controller_pose
+    right: /vr/right_controller_pose
+  input_topics:
+    left: /vr/left_controller/input
+    right: /vr/right_controller/input
+  event_topic: /vr/controller_events
+
+safety:
+  enabled: true
+  stop_on_startup: true
+  stop_topic: /teleop/emergency_stop
+
+camera:
+  enabled: false
+  width: 1280
+  height: 720
+  fps: 30
+  codec: H264

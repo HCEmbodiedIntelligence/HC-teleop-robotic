@@ -1,0 +1,47 @@
+ros_interface:
+  node_name: controller_v2_2
+  rate: 400
+  sub_topic:
+    joint_state: "/io_teleop/joint_states"
+    tf_target: "/io_align/tf"
+  pub_topic:
+    joint_target: "/io_teleop/joint_cmd"
+control:
+  method: "retarget" # retarget / control
+  dt: 0.0025
+  joints_init: []
+model:
+  urdf: openarm_robot.urdf
+  free_joints: [
+                # left arm
+                "openarm_joint_l1",
+                "openarm_joint_l2",
+                "openarm_joint_l3",
+                "openarm_joint_l4",
+                "openarm_joint_l5",
+                "openarm_joint_l6",
+                "openarm_joint_l7",
+                # right arm
+                "openarm_joint_r1",
+                "openarm_joint_r2",
+                "openarm_joint_r3",
+                "openarm_joint_r4",
+                "openarm_joint_r5",
+                "openarm_joint_r6",
+                "openarm_joint_r7",
+              ]
+task:
+  pose: [
+          [["base_link", "io_teleop_ee_link_right"], 0.0, 1.0, 1.0],
+          [["base_link", "io_teleop_ee_link_left"], 0.0, 1.0, 1.0],
+        ]
+  axis: [
+          [["base_link", "openarm_link_r2"], "Z", 1.0, 1.0],
+          [["base_link", "openarm_link_r4"], "Z", 1.0, 1.0],
+          [["base_link", "openarm_link_l2"], "Z", 1.0, 1.0],
+          [["base_link", "openarm_link_l4"], "Z", 1.0, 1.0],
+        ]
+  joint: []
+limit:
+  velocity: [180,180,180,180,180,180,180,180,180,180,180,180,180,180]
+  

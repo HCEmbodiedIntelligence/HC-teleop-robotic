@@ -1,0 +1,5 @@
+-r requirements.txt
+aiortc>=1.6,<2
+av>=10
+numpy>=1.21
+pyrealsense2>=2.50

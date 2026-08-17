@@ -1,0 +1,40 @@
+ros_interface:
+  node_name: controller_v2_3_hc_tj
+  rate: 100
+  sub_topic:
+    joint_state: /io_teleop/joint_states
+    ee_target: /io_teleop/controller_target_ee_poses
+  pub_topic:
+    # VR adapter merges this arm/body command with the simulated grippers.
+    joint_target: /io_teleop/joint_cmd_arm
+    solver_state: /io_teleop/sol_q
+
+control:
+  method: control
+  dt: 0.01
+  damping: 1.0e-5
+  joints_init: []
+
+model:
+  urdf: urdf/hc_tj_robot.urdf
+  free_joints:
+    [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R,
+     Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L,
+     leg_1, leg_2, zhi]
+
+# Pose order matches the VR adapter's PoseArray: right, left, torso. The fourth
+# scalar is the reconstructed task gain: arms use 3.0 for responsive tracking;
+# the folding torso remains at 1.0 to avoid abrupt body motion.
+task:
+  pose:
+    - [[R_arm_0_Link, io_teleop_ee_link_right], 5.0, 1.0, 3.0]
+    - [[L_arm_0_Link, io_teleop_ee_link_left], 5.0, 1.0, 3.0]
+    - [[base_link, zhi_Link], 5.0, 1.0, 1.0]
+  axis: []
+  joint: []
+
+limit:
+  # Degrees/second, retaining the original HC-TJ controller limits.
+  velocity: [180, 180, 180, 180, 180, 180, 180,
+             180, 180, 180, 180, 180, 180, 180,
+             60, 60, 60]

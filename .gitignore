@@ -1,0 +1,21 @@
+# Local dependency bundles and virtual environments
+.deps/
+.venv/
+venv/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime-generated diagnostics and logs
+runtime/
+*.log
+
+# Editor and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+*~

@@ -1,0 +1,188 @@
+robot:
+  urdf_path: /home/maple/hc_io_suit/src/io_teleop_robot_descriptions/hc_tj_description/urdf/hc_tj_robot.urdf
+  base_position: [0.0, 0.0, 0.07]
+  base_orientation: [0.0, 0.0, 0.70710678, 0.70710678]
+  initial_joints:
+    leg_1: 0.5
+    leg_2: 1.2
+    zhi: -0.6
+    Joint1_R: -1.44
+    Joint2_R: -0.77
+    Joint3_R: 1.44
+    Joint4_R: -1.57
+    Joint5_R: 0.0
+    Joint6_R: 0.0
+    Joint7_R: 0.0
+    Joint1_L: 1.44
+    Joint2_L: -0.77
+    Joint3_L: -1.44
+    Joint4_L: -1.57
+    Joint5_L: 0.0
+    Joint6_L: 0.0
+    Joint7_L: 0.0
+
+arms:
+  right:
+    pose_topic: /vr/right_controller_pose
+    input_topic: /vr/right_controller/input
+    # 两侧末端增量统一在胸部坐标系中定义，再分别进行机械臂 IK。
+    base_link: zhi_Link
+    generic_task_base_link: R_arm_0_Link
+    ee_link: io_teleop_ee_link_right
+    joint_names: [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
+  left:
+    pose_topic: /vr/left_controller_pose
+    input_topic: /vr/left_controller/input
+    base_link: zhi_Link
+    generic_task_base_link: L_arm_0_Link
+    ee_link: io_teleop_ee_link_left
+    joint_names: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L]
+
+body:
+  head_pose_topic: /vr/head_pose
+  waist_joint_names: [leg_1, leg_2, zhi]
+  torso_link: zhi_Link
+  base_command_topic: /io_teleop/target_base_move
+  # 仿真节点接收每周期位姿增量；切到实机底盘桥时改为 velocity。
+  base_command_mode: delta
+
+  # 左摇杆主轴：X 左右，Y 前后。
+  stick_x_axis: 2
+  stick_y_axis: 3
+  stick_deadzone: 0.12
+  max_linear_velocity: 0.25
+  max_lateral_velocity: 0.20
+
+  # 头显绕竖直 Y 轴的相对转头，经 head_axis_mapping 映射为机器人 Z-yaw。
+  # 绕视线轴的左右歪头不会控制底盘。
+  yaw_deadzone: 0.20
+  yaw_gain: 1.2
+  # 当前头显数据的左右转向符号与机器人底盘相反。
+  yaw_direction: -1.0
+  max_angular_velocity: 0.60
+
+  # 头显相对 z 控制腰部升降，相对 y 控制躯干俯仰。
+  head_height_axis: 2
+  head_pitch_position_axis: 1
+  height_scale: 0.70
+  pitch_scale: 1.20
+  # 实测头显上/下和前/后增量的符号与腰部目标相反。
+  height_direction: -1.0
+  pitch_direction: -1.0
+  max_height_delta: 0.18
+  max_pitch_delta: 0.40
+  # 模型 base 绕 z 旋转 90° 后，腰部俯仰轴对应世界 -X。
+  pitch_axis_world: [-1.0, 0.0, 0.0]
+  joint_lower: [-0.628319, -0.418879, -1.832596]
+  joint_upper: [1.082104, 2.356194, 1.117011]
+  max_joint_velocity: 0.35
+  ik_iterations: 10
+  ik_damping: 0.05
+  ik_max_update: 0.08
+
+grippers:
+  # 两侧食指扳机均在 Joy.axes[0]；右侧 Grip 离合生效时才更新。
+  trigger_axis: 0
+  max_velocity: 2.5
+  include_sim_joints: true
+  right:
+    sim_joint: R_ban
+    sim_closed_position: 1.5707
+    finger_topic: /io_teleop/joint_cmd_finger_right
+    finger_joint_names: [R_thumb_roll_joint, R_thumb_abad_joint, R_thumb_mcp_joint, R_index_abad_joint, R_index_pip_joint, R_middle_pip_joint, R_ring_abad_joint, R_ring_pip_joint, R_pinky_abad_joint, R_pinky_pip_joint]
+    finger_open: [0.4, -1.642, 0.0, -0.13, 0.0, 0.0, 0.05, 0.0, 0.05, 0.0]
+    finger_closed: [1.121, 0.045, 1.0, -0.05, 2.5, 2.5, 0.13, 2.5, 0.13, 2.5]
+  left:
+    sim_joint: L_ban
+    sim_closed_position: 1.5707
+    finger_topic: /io_teleop/joint_cmd_finger_left
+    finger_joint_names: [L_thumb_roll_joint, L_thumb_abad_joint, L_thumb_mcp_joint, L_index_abad_joint, L_index_pip_joint, L_middle_pip_joint, L_ring_abad_joint, L_ring_pip_joint, L_pinky_abad_joint, L_pinky_pip_joint]
+    finger_open: [-0.4, -0.045, 0.0, 0.05, 0.0, 0.0, -0.13, 0.0, -0.13, 0.0]
+    finger_closed: [-1.121, 1.642, -1.0, 0.13, 2.5, 2.5, -0.05, 2.5, 0.05, 2.5]
+
+control:
+  # v23: 重构的 task + limits + differential IK，直接生成关节命令。
+  # generic: 开发板原版 sol_q + PID；legacy: 本节点 PyBullet IK。
+  backend: v23
+  enabled_on_start: true       # 仅仿真默认 true；接实机前必须改为 false
+  rate_hz: 60.0
+  joint_state_topic: /io_teleop/joint_states
+  command_topic: /io_teleop/joint_cmd
+  generic_command_topic: /io_teleop/joint_cmd_arm
+  solver_topic: /io_teleop/sol_q
+  # 仿真 marker 使用胸部坐标；外部 IK 使用左右肩基任务坐标，不能复用。
+  target_pose_topic: /io_teleop/target_ee_poses
+  controller_target_pose_topic: /io_teleop/controller_target_ee_poses
+  actual_pose_topic: /io_teleop/actual_ee_poses
+  status_topic: /teleop/arm/status
+  safety_stop_topic: /teleop/emergency_stop
+  enable_topic: /teleop/arm/enabled
+
+  # Joy.axes = [食指 trigger, 中指 grip, primary_x, primary_y, secondary_x, secondary_y]
+  # 左 Grip 接管底盘/腰部；右 Grip 同时接管双臂/夹爪。
+  clutch_axis: 1
+  clutch_threshold: 0.55
+
+  # 双摇杆向外拨一次：左主摇杆 X<-0.8 且右主摇杆 X>0.8，双臂平滑回零。
+  home_gesture_axis: 2
+  home_gesture_threshold: 0.80
+  home_gesture_release_threshold: 0.35
+  home_joint_velocity: 0.70
+  home_tolerance: 0.015
+  # UDP 网关自身仍在 200 ms 触发急停；这里留出一次 IK 计算调度余量。
+  pose_timeout: 0.50
+  input_timeout: 0.50
+  joint_state_timeout: 0.50
+
+  # 实际手柄数据：x=右, y=上, +z=前；zhi_Link：x=前, y=左, z=上。
+  # 仅映射手柄相对增量；左右臂使用同一个胸部基准，不使用镜像臂基座坐标。
+  axis_mapping:
+    - [0.0, 0.0, 1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+  # 头显数据保持已验证的 OpenXR 映射，避免改变底盘转向。
+  head_axis_mapping:
+    - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+  position_scale: 0.8
+  max_displacement: 0.45
+  orientation_enabled: true
+  orientation_weight: 0.35
+
+  # 抑制静止手柄的追踪微噪声和 7DoF IK 数值抖动。
+  target_position_deadband: 0.002       # m
+  target_orientation_deadband: 0.015   # rad
+  target_filter_alpha: 0.35             # (0, 1]，越小越平滑
+  command_joint_deadband: 0.001         # rad
+
+  # IK 安全策略：自适应阻尼、限位零空间回避、多初值重选；不收敛时保持上一有效命令。
+  ik_iterations: 16
+  ik_position_tolerance: 0.010          # m
+  ik_orientation_tolerance: 0.060      # rad
+  ik_damping_min: 0.035
+  ik_damping_max: 0.35
+  ik_singularity_threshold: 0.08
+  ik_limit_margin: 0.12                 # 进入关节行程两端 12% 后开始回避
+  ik_reseed_limit_margin: 0.08          # 解过于靠近限位时主动尝试其他初值
+  ik_failure_retry_interval: 0.20       # s，保持期间以 5 Hz 检查目标是否重新可达
+  ik_reseed_interval: 0.50              # s，多分支搜索限频为 2 Hz
+  # 同一个静止目标不重复切换肘部分支；目标明显变化后才重新搜索。
+  ik_reseed_target_position_delta: 0.005
+  ik_reseed_target_orientation_delta: 0.035
+  ik_reseed_perturbation: 0.30          # rad，跳出伸直奇异位形的确定性分支扰动
+  ik_limit_avoidance_gain: 0.035
+  ik_posture_gain: 0.020
+  ik_solution_limit_weight: 4.0
+  # 参考实机 100 Hz 速度级控制：完整 IK 尚未到容差内时，只要下一限速步
+  # 使归一化末端误差稳定下降，就作为安全渐进解输出，避免追踪滞后被锁死。
+  ik_min_progress_ratio: 0.001
+  ik_min_progress_absolute: 0.0001
+  # 在伸直奇异位形中，末端轴向回缩需要先弯肘，第一小步可能暂时不降误差。
+  # 仅当重选解的最终误差至少改善 5%，且限速步的归一化回退不超过 0.25 时放行。
+  ik_reseed_escape_progress_ratio: 0.05
+  ik_reseed_escape_max_regression: 0.25
+  ik_max_update: 0.08
+  max_joint_velocity: 1.2
+  # 除逐关节限速外再限制 7 轴速度向量，避免重选解时多关节同时打满造成末端跳动。
+  max_joint_velocity_norm: 1.2
