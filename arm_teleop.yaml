@@ -52,9 +52,9 @@ body:
   stick_x_axis: 3
   stick_y_axis: 2
   stick_deadzone: 0.12
-  stick_forward_direction: -1.0
+  stick_forward_direction: 1.0
   # 横向轴向左为负；机器人 lateral 向左为正，因此默认取反。
-  stick_lateral_direction: -1.0
+  stick_lateral_direction: 1.0
   max_linear_velocity: 0.25
   max_lateral_velocity: 0.20
 
