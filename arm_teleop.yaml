@@ -52,7 +52,7 @@ body:
   stick_x_axis: 3
   stick_y_axis: 2
   stick_deadzone: 0.12
-  stick_forward_direction: 1.0
+  stick_forward_direction: -1.0
   # 横向轴向左为负；机器人 lateral 向左为正，因此默认取反。
   stick_lateral_direction: -1.0
   max_linear_velocity: 0.25
@@ -128,8 +128,9 @@ control:
   clutch_axis: 1
   clutch_threshold: 0.55
 
-  # 双摇杆向外拨一次：读取同一个物理左右轴 Joy[3]，双臂平滑回零。
-  home_gesture_axis: 3
+  # 双摇杆向外拨一次：回零手势使用手柄原始横向轴 Joy[2]。
+  # 该轴与上面的底盘方向重映射相互独立，不要随 stick_x_axis 一起交换。
+  home_gesture_axis: 2
   home_gesture_threshold: 0.80
   home_gesture_release_threshold: 0.35
   home_joint_velocity: 0.70
