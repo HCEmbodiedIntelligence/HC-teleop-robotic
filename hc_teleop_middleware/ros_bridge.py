@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import queue
 import threading
 import time
 import traceback
 from typing import Any, Callable
 
-from .protocol import ControllerInput, Pose, envelope
+from .protocol import envelope
 
 
 EventCallback = Callable[[dict[str, Any], list[str]], None]
@@ -23,8 +22,10 @@ class RosBridge:
         self._commands: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        domain_id = int(config.get("domain_id", 0))
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", True) else "starting",
+            "domain_id": domain_id,
             "error": None,
             "subscriptions": [],
             "discovered_topics": [],
@@ -50,23 +51,6 @@ class RosBridge:
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
         return self._enqueue("publish", (topic, msg_type, data))
 
-    def publish_pose(self, topic: str, pose: Pose, sequence: int) -> bool:
-        return self._enqueue("pose", (topic, pose, sequence))
-
-    def publish_controller_input(
-        self,
-        topic: str,
-        event_topic: str,
-        side: str,
-        controller_input: ControllerInput,
-        sequence: int,
-        vr_timestamp: float,
-    ) -> bool:
-        return self._enqueue(
-            "controller_input",
-            (topic, event_topic, side, controller_input, sequence, vr_timestamp),
-        )
-
     def emergency_stop(self, topic: str, reason: str) -> bool:
         return self._enqueue("stop", (topic, reason))
 
@@ -88,12 +72,16 @@ class RosBridge:
         node = None
         executor = None
         try:
+            import os
             import rclpy
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.qos import qos_profile_sensor_data
             from rosidl_runtime_py.convert import message_to_ordereddict
             from rosidl_runtime_py.set_message import set_message_fields
             from rosidl_runtime_py.utilities import get_message
+
+            domain_id = int(self.config.get("domain_id", 0))
+            os.environ["ROS_DOMAIN_ID"] = str(domain_id)
 
             rclpy.init(args=[])
             node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"))
@@ -104,6 +92,7 @@ class RosBridge:
             subscription_names = []
             last_emit: dict[str, float] = {}
 
+            from rclpy.serialization import serialize_message
             for item in self.config.get("subscriptions", []):
                 if not item.get("enabled", True):
                     continue
@@ -125,12 +114,20 @@ class RosBridge:
                     if max_hz and now - last_emit.get(topic, 0.0) < 1.0 / max_hz:
                         return
                     last_emit[topic] = now
+                    raw_bytes = None
+                    if "record" in outputs:
+                        try:
+                            raw_bytes = bytes(serialize_message(message))
+                        except Exception:
+                            pass
                     event = envelope(
                         "ros_message",
                         "ros2",
                         message_to_ordereddict(message),
                         topic=topic,
                         msg_type=msg_type_name,
+                        _raw=raw_bytes,
+                        stamp_ns=time.time_ns(),
                     )
                     self.on_event(event, outputs)
                     with self._lock:
@@ -197,26 +194,6 @@ class RosBridge:
                     message = message_type()
                     set_message_fields(message, data)
                     publisher.publish(message)
-                elif command == "pose":
-                    topic, pose, sequence = args
-                    from geometry_msgs.msg import PoseStamped
-
-                    publisher = self._publisher(
-                        node, publishers, topic, "geometry_msgs/msg/PoseStamped", PoseStamped
-                    )
-                    message = PoseStamped()
-                    message.header.stamp = node.get_clock().now().to_msg()
-                    message.header.frame_id = "vr"
-                    message.pose.position.x, message.pose.position.y, message.pose.position.z = (
-                        pose.position
-                    )
-                    (
-                        message.pose.orientation.x,
-                        message.pose.orientation.y,
-                        message.pose.orientation.z,
-                        message.pose.orientation.w,
-                    ) = pose.quaternion
-                    publisher.publish(message)
                 elif command == "stop":
                     topic, reason = args
                     from std_msgs.msg import Bool
@@ -227,58 +204,6 @@ class RosBridge:
                     message = Bool(data=True)
                     publisher.publish(message)
                     node.get_logger().warning(f"Emergency stop: {reason}")
-                elif command == "controller_input":
-                    (
-                        topic,
-                        event_topic,
-                        side,
-                        controller_input,
-                        sequence,
-                        vr_timestamp,
-                    ) = args
-                    from sensor_msgs.msg import Joy
-
-                    publisher = self._publisher(
-                        node, publishers, topic, "sensor_msgs/msg/Joy", Joy
-                    )
-                    message = Joy()
-                    message.header.stamp = node.get_clock().now().to_msg()
-                    message.header.frame_id = f"vr_{side}_controller"
-                    message.axes = controller_input.joy_axes()
-                    message.buttons = controller_input.joy_buttons()
-                    publisher.publish(message)
-
-                    if controller_input.pressed_mask or controller_input.released_mask:
-                        from std_msgs.msg import String
-
-                        event_publisher = self._publisher(
-                            node,
-                            publishers,
-                            event_topic,
-                            "std_msgs/msg/String",
-                            String,
-                        )
-                        event_publisher.publish(
-                            String(
-                                data=json.dumps(
-                                    {
-                                        "side": side,
-                                        "sequence": sequence,
-                                        "vr_timestamp": vr_timestamp,
-                                        "pressed": controller_input.decode_buttons(
-                                            controller_input.pressed_mask
-                                        ),
-                                        "released": controller_input.decode_buttons(
-                                            controller_input.released_mask
-                                        ),
-                                        "pressed_mask": controller_input.pressed_mask,
-                                        "released_mask": controller_input.released_mask,
-                                    },
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                            )
-                        )
             except Exception as exc:
                 self._set_status(error=f"publish failed: {type(exc).__name__}: {exc}")
 

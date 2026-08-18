@@ -27,11 +27,11 @@
 
 双臂末端目标带位置/姿态死区和低通滤波，用于抑制静止手柄追踪噪声；v2.3 每周期求解带速度及一步关节位置边界的加权最小二乘，再通过 Pinocchio `integrate()` 生成小步关节命令。
 
-v2.3 的 URDF、任务权重和速度限制来自 `robot_configs/hc_tj_description/controller_v23.yml`，关节位置限制来自 URDF。第四个 task 标量目前按 gain 解释；HC-TJ 双臂使用 `3.0`，躯干使用 `1.0`，兼顾手臂响应和身体平稳，这仍属于待与 vendor 差分验证的行为假设。原加密 `Controller.Run_IK + PID` 后端保留为 `--generic` 回退。
+v2.3 的 URDF、任务权重和速度限制来自 `robot_configs/<机器人名>/controller_v23.yml`，关节位置限制来自 URDF。第四个 task 标量目前按 gain 解释；HC-TJ 双臂使用 `3.0`，躯干使用 `1.0`，兼顾手臂响应和身体平稳。逆运动学控制器已完全重构为纯开源 Python 实现（位于 `vendor/io_unicontroller_ros2/control_v23_reconstructed`）。
 
 双臂末端目标统一保存在胸部 `zhi_Link` 坐标系中。腰部运动时，末端目标会随躯干整体运动，不会反向补偿成世界坐标不动。
 
-`/io_teleop/target_ee_poses` 与 `/io_teleop/actual_ee_poses` 都使用胸部坐标，供仿真 marker 和诊断直接比较。VR 节点另将目标转换到左右肩基，并通过 `/io_teleop/controller_target_ee_poses` 送入控制器；显示和 IK 坐标不能混用。
+`/hc_teleop/target_ee_poses` 与 `/hc_teleop/actual_ee_poses` 都使用胸部坐标，供仿真 marker 和诊断直接比较。VR 节点另将目标转换到左右肩基，并通过 `/hc_teleop/controller_target_ee_poses` 送入控制器；显示和 IK 坐标不能混用。
 
 ## 启动
 
@@ -54,6 +54,12 @@ cd /home/maple/test/HC-teleop-robotic
 ./run_sim_teleop.sh
 ```
 
+脚本默认读取 `middleware.yaml` 中 `robot_profiles.active` 指向的网页已选配置。HC 通用格式导入会在 `robot_configs/<配置ID>/` 生成仿真、遥操作和 v2.3 控制器所需文件；网页切换配置后需要退出并重新启动本脚本。临时覆盖示例：
+
+```bash
+HC_ROBOT_NAME=hc_tj_description ./run_sim_teleop.sh
+```
+
 没有图形显示时：
 
 ```bash
@@ -70,23 +76,21 @@ cd /home/maple/test/HC-teleop-robotic
 
 输入：
 
-- `/vr/head_pose`
-- `/vr/left_controller_pose`、`/vr/right_controller_pose`
-- `/vr/left_controller/input`、`/vr/right_controller/input`
-- `/io_teleop/joint_states`
-- `/io_teleop/sol_q`（求解器健康/关节目标；原版后端也用它连接 PID）
+- `/vrdata`（`std_msgs/msg/String` JSON，包含头显/双手位姿、摇杆、Trigger、Grip 和按键边沿）
+- `/hc_teleop/joint_states`
+- `/hc_teleop/sol_q`（求解器健康/关节目标；原版后端也用它连接 PID）
 - `/teleop/emergency_stop`
 - `/teleop/arm/enabled`（`Bool`，网页或 ROS 命令使能/停用）
 
 输出：
 
-- `/io_teleop/joint_cmd`
-- `/io_teleop/joint_cmd_arm`（v2.3 或原版 PID 的内部输出，由 VR 适配器合并夹爪）
-- `/io_teleop/target_base_move`
-- `/io_teleop/target_ee_poses`
-- `/io_teleop/controller_target_ee_poses`（内部肩基任务目标）
-- `/io_teleop/actual_ee_poses`
-- `/io_teleop/joint_cmd_finger_left`、`/io_teleop/joint_cmd_finger_right`
+- `/hc_teleop/joint_cmd`
+- `/hc_teleop/joint_cmd_arm`（v2.3 或原版 PID 的内部输出，由 VR 适配器合并夹爪）
+- `/hc_teleop/target_base_move`
+- `/hc_teleop/target_ee_poses`
+- `/hc_teleop/controller_target_ee_poses`（内部肩基任务目标）
+- `/hc_teleop/actual_ee_poses`
+- `/hc_teleop/joint_cmd_finger_left`、`/hc_teleop/joint_cmd_finger_right`
 - `/teleop/arm/status`
 
 控制服务：
@@ -99,7 +103,7 @@ ros2 service call /teleop/arm/reset_reference std_srvs/srv/Trigger '{}'
 
 ## 实机切换前必须修改
 
-当前 [arm_teleop.yaml](arm_teleop.yaml) 是仿真配置。连接 TJ 实机前至少要：
+当前 `robot_configs/hc_tj_description/arm_teleop.yaml` 是仿真配置。连接 TJ 实机前至少要：
 
 1. 将 `control.enabled_on_start` 改为 `false`，由人工服务显式使能。
 2. 将 `body.base_command_mode` 改为 `velocity`。

@@ -1,13 +1,13 @@
 control_ros:
   rate: 100
-  joint_target: /io_teleop/target_joint_from_mocap
+  joint_target: /hc_teleop/target_joint_from_mocap
   # PID 先输出到内部话题，由 VR 适配器合并夹爪后发布标准 joint_cmd。
-  joint_cmd: /io_teleop/joint_cmd_arm
-  joint_state: /io_teleop/joint_states
-  ee_target: /io_teleop/controller_target_ee_poses
-  ee_state: /io_teleop/state_ee_poses
-  sol_q: /io_teleop/sol_q
-  ee_pose_cmd: /io_teleop/cmd_ee_poses
+  joint_cmd: /hc_teleop/joint_cmd_arm
+  joint_state: /hc_teleop/joint_states
+  ee_target: /hc_teleop/controller_target_ee_poses
+  ee_state: /hc_teleop/state_ee_poses
+  sol_q: /hc_teleop/sol_q
+  ee_pose_cmd: /hc_teleop/cmd_ee_poses
 
 model:
   urdf: urdf/hc_tj_robot.urdf

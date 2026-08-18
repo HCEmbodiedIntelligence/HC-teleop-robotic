@@ -65,16 +65,16 @@ class TeleopDiagnosticsNode(Node):
                 qos_profile_sensor_data,
             )
         self.create_subscription(
-            PoseArray, "/io_teleop/target_ee_poses", self._target_callback, 10
+            PoseArray, "/hc_teleop/target_ee_poses", self._target_callback, 10
         )
         self.create_subscription(
-            PoseArray, "/io_teleop/actual_ee_poses", self._actual_callback, 10
+            PoseArray, "/hc_teleop/actual_ee_poses", self._actual_callback, 10
         )
         self.create_subscription(
-            JointState, "/io_teleop/joint_states", self._joint_state_callback, 10
+            JointState, "/hc_teleop/joint_states", self._joint_state_callback, 10
         )
         self.create_subscription(
-            JointState, "/io_teleop/joint_cmd", self._joint_command_callback, 10
+            JointState, "/hc_teleop/joint_cmd", self._joint_command_callback, 10
         )
         self.create_subscription(String, "/teleop/arm/status", self._status_callback, 10)
         self.timer = self.create_timer(1.0 / rate_hz, self._record)

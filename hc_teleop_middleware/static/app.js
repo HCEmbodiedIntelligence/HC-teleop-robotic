@@ -1,58 +1,144 @@
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 let config = null;
-let statusData = null;
+let profilesData = {active:'', profiles:[], standard_topics:{}};
 let ws = null;
 let pendingVrPose = null;
 let vrPoseFramePending = false;
-const eventBuffer = [];
-const titles = {overview:'运行概览', topics:'ROS 2 话题', config:'系统配置', events:'实时事件'};
+const titles = {overview:'运行概览', topics:'话题录制', datasets:'数据集管理', config:'系统配置'};
+let discoveredTopics = [];
+const standardTopicTypes = {
+  joint_state:'sensor_msgs/msg/JointState', joint_target:'sensor_msgs/msg/JointState',
+  joint_command:'sensor_msgs/msg/JointState', ee_target:'geometry_msgs/msg/PoseArray',
+  ee_visual_target:'geometry_msgs/msg/PoseArray', ee_actual:'geometry_msgs/msg/PoseArray',
+  solver_state:'sensor_msgs/msg/JointState', base_move:'std_msgs/msg/Float64MultiArray',
+};
+
+const STANDARD_ROS_TYPES = [
+  'sensor_msgs/msg/JointState',
+  'sensor_msgs/msg/Joy',
+  'sensor_msgs/msg/Imu',
+  'sensor_msgs/msg/Image',
+  'sensor_msgs/msg/CompressedImage',
+  'sensor_msgs/msg/LaserScan',
+  'sensor_msgs/msg/PointCloud2',
+  'geometry_msgs/msg/Pose',
+  'geometry_msgs/msg/PoseStamped',
+  'geometry_msgs/msg/PoseArray',
+  'geometry_msgs/msg/TransformStamped',
+  'geometry_msgs/msg/Twist',
+  'geometry_msgs/msg/TwistStamped',
+  'geometry_msgs/msg/WrenchStamped',
+  'std_msgs/msg/String',
+  'std_msgs/msg/Float64MultiArray',
+  'std_msgs/msg/Float32MultiArray',
+  'std_msgs/msg/Bool',
+  'std_msgs/msg/Int32',
+  'std_msgs/msg/Float64',
+  'tf2_msgs/msg/TFMessage',
+  'nav_msgs/msg/Odometry',
+  'trajectory_msgs/msg/JointTrajectory',
+];
 
 function toast(message, error=false) {
-  const el = $('#toast'); el.textContent = message; el.className = error ? 'show error' : 'show';
-  clearTimeout(toast.timer); toast.timer = setTimeout(() => el.className='', 2600);
+  const el = $('#toast');
+  el.textContent = message;
+  el.className = error ? 'show error' : 'show';
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => el.className='', 3200);
 }
+
 async function api(url, options={}) {
-  const response = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  const request = {...options};
+  if (request.body && !(request.body instanceof FormData)) {
+    request.headers = {'Content-Type':'application/json', ...(request.headers||{})};
+  }
+  const response = await fetch(url, request);
   if (!response.ok) throw new Error((await response.text()) || `${response.status}`);
   return response.json();
 }
+
 function route() {
-  const page = location.hash.slice(1) || 'overview';
+  const requested = location.hash.slice(1) || 'overview';
+  const page = titles[requested] ? requested : 'overview';
   $$('.page').forEach(el => el.classList.toggle('hidden', el.id !== page));
   $$('nav a').forEach(el => el.classList.toggle('active', el.dataset.page === page));
-  $('#pageTitle').textContent = titles[page] || titles.overview;
+  $('#pageTitle').textContent = titles[page];
   if (page === 'topics') loadTopics();
+  if (page === 'datasets') loadDatasets();
+  if (page === 'config') loadProfiles($('#robotProfileSelect')?.value);
 }
+
 function setState(id, state) {
-  const el = $(id); el.textContent = state || '--'; el.className = state === 'running' ? 'running' : (state === 'error' ? 'error' : '');
+  const el = $(id);
+  el.textContent = state || '--';
+  el.className = state === 'running' ? 'running' : (state === 'error' ? 'error' : '');
 }
+
 function renderStatus(data) {
-  statusData = data; const ros=data.ros, vr=data.vr, cam=data.camera;
-  setState('#rosState', ros.state); $('#rosMeta').textContent = `${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息`;
-  setState('#vrState', vr.state); $('#vrMeta').textContent = vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包 · ${vr.controller_events||0} 事件`;
-  setState('#cameraState', cam.state); $('#cameraMeta').textContent = cam.error || `${cam.capture_fps||0} FPS · ${cam.peers||0} peers`;
-  $('#wsClients').textContent = data.websocket_clients;
+  const ros=data.ros||{}, vr=data.vr||{}, cam=data.camera||{};
+  const domain = ros.domain_id ?? config?.ros?.domain_id ?? 0;
+  $('#rosMeta').textContent = `${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`;
+  setState('#vrState', vr.state);
+  $('#vrMeta').textContent = vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`;
+  setState('#cameraState', cam.state);
+  $('#cameraMeta').textContent = cam.error || `${cam.capture_fps||0} FPS · ${cam.peers||0} peers`;
+  $('#wsClients').textContent = data.websocket_clients||0;
+  const recording=data.recording||{};
+  const isRecording=Boolean(recording.recording);
+  if($('#recordingBadge')) {
+    $('#recordingBadge').className = isRecording ? 'recording-badge active' : 'recording-badge';
+    $('#recordingBadgeText').textContent = isRecording ? `正在录制 (${recording.messages||0} 条)` : '未录制';
+  }
+  if($('#startRecordingBtn')) $('#startRecordingBtn').disabled = isRecording;
+  if($('#stopRecordingBtn')) $('#stopRecordingBtn').disabled = !isRecording;
+  if($('#recordingMeta')) {
+    $('#recordingMeta').textContent = isRecording
+      ? `正在录制：已写入 ${recording.messages||0} 条消息到 ${recording.path||''}`
+      : `未录制 · 保存目录：${config?.ros?.recording?.directory || 'runtime/topic_recordings'}`;
+  }
   $('#vrPeer').textContent = vr.peer ? `${vr.peer[0]}:${vr.peer[1]}` : '未连接';
-  for (const name of ['Head','Left','Right']) $('#track'+name).className = vr.tracking?.[name.toLowerCase()] ? 'online' : 'offline';
-  $('#vrReceived').textContent=vr.received||0; $('#vrLost').textContent=vr.lost||0; $('#vrInvalid').textContent=vr.invalid||0; $('#vrSent').textContent=vr.sent||0;
+  for (const name of ['Head','Left','Right']) {
+    $('#track'+name).className = vr.tracking?.[name.toLowerCase()] ? 'online' : 'offline';
+  }
+  $('#vrReceived').textContent=vr.received||0;
+  $('#vrLost').textContent=vr.lost||0;
+  $('#vrInvalid').textContent=vr.invalid||0;
+  $('#vrSent').textContent=vr.sent||0;
   $('#vrProtocol').textContent=protocolLabel(vr.protocol_version);
-  renderController('left',vr.inputs?.left||{}); renderController('right',vr.inputs?.right||{});
+  renderController('left',vr.inputs?.left||{});
+  renderController('right',vr.inputs?.right||{});
 }
-function protocolLabel(version) { return version===1?'协议 v1 · 不含手柄输入':`协议 v${version||'--'}`; }
+
+function protocolLabel(version) {
+  return version===1 ? '协议 v1 · 不含手柄输入' : `协议 v${version||'--'}`;
+}
+
 function renderController(side,input) {
-  const prefix=side[0].toUpperCase()+side.slice(1), held=input.held||[], clamp=value=>Math.max(0,Math.min(1,Number(value)||0)), number=value=>(Number(value)||0).toFixed(3), axis=value=>(value||[0,0]).map(number).join(', ');
+  const held=input.held||[];
+  const clamp=value=>Math.max(0,Math.min(1,Number(value)||0));
+  const number=value=>(Number(value)||0).toFixed(3);
+  const axis=value=>(value||[0,0]).map(number).join(', ');
   $(`#${side}Held`).textContent=held.length?held.join(' · '):'无按键';
-  for(const name of ['Trigger','Grip']) { const value=clamp(input[name.toLowerCase()]); $(`#${side}${name}`).style.width=`${value*100}%`; $(`#${side}${name}Value`).textContent=number(value); }
-  $(`#${side}PrimaryAxis`).textContent=axis(input.primary_axis); $(`#${side}SecondaryAxis`).textContent=axis(input.secondary_axis);
+  for(const name of ['Trigger','Grip']) {
+    const value=clamp(input[name.toLowerCase()]);
+    $(`#${side}${name}`).style.width=`${value*100}%`;
+    $(`#${side}${name}Value`).textContent=number(value);
+  }
+  $(`#${side}PrimaryAxis`).textContent=axis(input.primary_axis);
+  $(`#${side}SecondaryAxis`).textContent=axis(input.secondary_axis);
 }
+
 function renderVrPose(pose) {
   const tracking=pose.tracking||{};
-  for(const name of ['Head','Left','Right']) $('#track'+name).className=tracking[name.toLowerCase()]?'online':'offline';
+  for(const name of ['Head','Left','Right']) {
+    $('#track'+name).className=tracking[name.toLowerCase()]?'online':'offline';
+  }
   $('#vrProtocol').textContent=protocolLabel(pose.protocol_version);
   renderController('left',pose.inputs?.left||{});
   renderController('right',pose.inputs?.right||{});
 }
+
 function queueVrPose(pose) {
   pendingVrPose=pose;
   if(vrPoseFramePending)return;
@@ -63,70 +149,601 @@ function queueVrPose(pose) {
     pendingVrPose=null;
   });
 }
-function eventRow(event) {
-  const row=document.createElement('div'); row.className='event'+(event.payload?.level==='warning'?' warning':'');
-  const time=document.createElement('time'); time.textContent=new Date(event.timestamp*1000).toLocaleTimeString();
-  const kind=document.createElement('b'); kind.textContent=event.kind||'event';
-  const body=document.createElement('span');
-  if(event.kind==='vr_controller_event') { const p=event.payload||{}, actions=[]; if(p.pressed?.length)actions.push(`pressed=[${p.pressed.join(', ')}]`); if(p.released?.length)actions.push(`released=[${p.released.join(', ')}]`); body.textContent=`${p.side||'?'}: ${actions.join(' ')}`; }
-  else body.textContent=event.payload?.message || event.payload?.reason || JSON.stringify(event.payload);
-  row.append(time,kind,body); return row;
-}
-function addEvent(event) {
-  if(event.kind==='ros_message' && event.topic==='/teleop/arm/status') renderTeleopStatus(event);
-  eventBuffer.push(event); if(eventBuffer.length>300) eventBuffer.shift();
-  for(const selector of ['#allEvents','#recentEvents']) { const box=$(selector); box.prepend(eventRow(event)); while(box.children.length>(selector==='#recentEvents'?8:300)) box.lastChild.remove(); }
-}
+
 function renderTeleopStatus(event) {
-  try { const value=JSON.parse(event.payload?.data||'{}'), names={hold:'保持',base_waist:'底盘 + 腰部',arms_grippers:'双臂 + 夹爪',both:'全部并发',homing:'双臂回零'};
-    const external=value.backend==='generic'||value.backend==='v23', solver=value.generic_controller||{}, healthy=solver.solver_fresh&&solver.command_fresh;
+  try {
+    const value=JSON.parse(event.payload?.data||'{}');
+    const names={hold:'保持',base_waist:'底盘 + 腰部',arms_grippers:'双臂 + 夹爪',both:'全部并发',homing:'双臂回零'};
+    const external=value.backend==='generic'||value.backend==='v23';
+    const solver=value.generic_controller||{};
+    const healthy=solver.solver_fresh&&solver.command_fresh;
     const backendLabel=value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
-    $('#teleopMode').textContent=value.enabled?(names[value.mode]||value.mode):'已停用'; $('#teleopBackend').textContent=external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel; $('#teleopLeft').textContent=value.left_clutch?'已离合':'保持'; $('#teleopRight').textContent=value.right_clutch?'已离合':'保持'; $('#teleopFeedback').textContent=value.feedback_fresh?'正常':'超时';
+    $('#teleopMode').textContent=value.enabled?(names[value.mode]||value.mode):'已停用';
+    $('#teleopBackend').textContent=external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel;
+    $('#teleopLeft').textContent=value.left_clutch?'已离合':'保持';
+    $('#teleopRight').textContent=value.right_clutch?'已离合':'保持';
+    $('#teleopFeedback').textContent=value.feedback_fresh?'正常':'超时';
   } catch(_) {}
 }
+
 function connectWebSocket() {
-  const scheme=location.protocol==='https:'?'wss':'ws'; ws=new WebSocket(`${scheme}://${location.host}/ws`);
-  ws.onopen=()=>{ $('#connectionDot').className='online'; $('#connectionText').textContent='实时通道已连接'; };
-  ws.onmessage=e=>{ try {
-    const event=JSON.parse(e.data);
-    if(event.kind==='connected')renderStatus(event.payload);
-    else if(event.kind==='vr_pose')queueVrPose(event.payload||{});
-    else addEvent(event);
-  } catch (_) {} };
-  ws.onclose=()=>{ $('#connectionDot').className='offline'; $('#connectionText').textContent='连接断开，正在重试'; setTimeout(connectWebSocket,1500); };
+  const scheme=location.protocol==='https:'?'wss':'ws';
+  ws=new WebSocket(`${scheme}://${location.host}/ws`);
+  ws.onopen=()=>{
+    $('#connectionDot').className='online';
+    $('#connectionText').textContent='实时状态已连接';
+  };
+  ws.onmessage=event=>{
+    try {
+      const value=JSON.parse(event.data);
+      if(value.kind==='connected')renderStatus(value.payload);
+      else if(value.kind==='vr_pose')queueVrPose(value.payload||{});
+      else if(value.kind==='ros_message'&&value.topic==='/teleop/arm/status')renderTeleopStatus(value);
+    } catch (_) {}
+  };
+  ws.onclose=()=>{
+    $('#connectionDot').className='offline';
+    $('#connectionText').textContent='连接断开，正在重试';
+    setTimeout(connectWebSocket,1500);
+  };
 }
-function getPath(object,path) { return path.split('.').reduce((value,key)=>value?.[key],object); }
-function setPath(object,path,value) { const keys=path.split('.'); const last=keys.pop(); const target=keys.reduce((value,key)=>value[key],object); target[last]=value; }
+
+function getPath(object,path) {
+  return path.split('.').reduce((value,key)=>value?.[key],object);
+}
+
+function setPath(object,path,value) {
+  const keys=path.split('.');
+  const last=keys.pop();
+  const target=keys.reduce((value,key)=>value[key],object);
+  target[last]=value;
+}
+
 function renderConfig() {
-  $$('[data-path]').forEach(input=>{ const value=getPath(config,input.dataset.path); if(input.type==='checkbox') input.checked=Boolean(value); else input.value=value??''; });
-  const body=$('#subscriptionRows'); body.textContent=''; (config.ros.subscriptions||[]).forEach(addSubscriptionRow);
+  $$('[data-path]').forEach(input=>{
+    const value=getPath(config,input.dataset.path);
+    if(input.type==='checkbox') input.checked=Boolean(value);
+    else input.value=value??'';
+  });
+  if($('#topicRecordingDirectory')) {
+    $('#topicRecordingDirectory').value = config?.ros?.recording?.directory || 'runtime/topic_recordings';
+  }
+  renderRecordingRules();
+  renderStandardTopics();
+  renderConfigInterface();
 }
-function addSubscriptionRow(item={enabled:true,topic:'/topic',type:'std_msgs/msg/String',max_hz:0,outputs:['websocket']}) {
-  const row=document.createElement('tr');
-  const values=[['checkbox','enabled',item.enabled],['text','topic',item.topic],['text','type',item.type],['number','max_hz',item.max_hz],['checkbox','websocket',item.outputs.includes('websocket')],['checkbox','udp',item.outputs.includes('udp')]];
-  for(const [type,name,value] of values) { const td=document.createElement('td'), input=document.createElement('input'); input.type=type; input.dataset.field=name; if(type==='checkbox') input.checked=value; else {input.value=value; if(type==='number') input.min=0;} td.append(input); row.append(td); }
-  const action=document.createElement('td'), button=document.createElement('button'); button.className='remove'; button.textContent='删除'; button.onclick=()=>row.remove(); action.append(button); row.append(action); $('#subscriptionRows').append(row);
+
+function standardTopicSet() {
+  return new Set(Object.values(profilesData.standard_topics||{}));
 }
+
+function customRecordingRules() {
+  const standard = standardTopicSet();
+  return (config?.ros?.subscriptions||[]).filter(item=>(item.outputs||[]).includes('record') && !standard.has(item.topic));
+}
+
+function setTopicRecording(topic,type,enabled,maxHz=0) {
+  const subscriptions=config.ros.subscriptions||(config.ros.subscriptions=[]);
+  let item=subscriptions.find(value=>value.topic===topic);
+  if(enabled) {
+    if(!item) {
+      item={enabled:true,topic,type,max_hz:Number(maxHz)||0,outputs:[]};
+      subscriptions.push(item);
+    }
+    item.type=type||item.type;
+    item.enabled=true;
+    item.max_hz=Number(maxHz)||0;
+    if(!item.outputs.includes('record'))item.outputs.push('record');
+  } else if(item) {
+    item.outputs=(item.outputs||[]).filter(output=>output!=='record');
+    if(!item.outputs.length)subscriptions.splice(subscriptions.indexOf(item),1);
+  }
+  renderRecordingRules();
+  renderStandardTopics();
+}
+
+function renderRecordingRules() {
+  const body=$('#recordingRows');
+  if(!body||!config)return;
+  body.textContent='';
+  for(const item of customRecordingRules()) {
+    const row=document.createElement('tr');
+    const enabledCell=document.createElement('td'), enabled=document.createElement('input');
+    enabled.type='checkbox'; enabled.checked=item.enabled!==false;
+    enabled.onchange=()=>{item.enabled=enabled.checked;};
+    enabledCell.append(enabled);
+    const topic=document.createElement('td'), topicCode=document.createElement('code');
+    topicCode.textContent=item.topic; topic.append(topicCode);
+    const type=document.createElement('td'); type.textContent=item.type;
+    const rateCell=document.createElement('td'), rate=document.createElement('input');
+    rate.type='number'; rate.min='0'; rate.value=item.max_hz||0;
+    rate.onchange=()=>{item.max_hz=Number(rate.value)||0;}; rateCell.append(rate);
+    const action=document.createElement('td'), remove=document.createElement('button');
+    remove.className='remove'; remove.textContent='删除';
+    remove.onclick=()=>setTopicRecording(item.topic,item.type,false);
+    action.append(remove); row.append(enabledCell,topic,type,rateCell,action); body.append(row);
+  }
+  if(!body.children.length) {
+    const row=document.createElement('tr'), cell=document.createElement('td');
+    cell.colSpan=5; cell.textContent='暂无自定义录制消息，可从下方添加。'; row.append(cell); body.append(row);
+  }
+}
+
 function collectConfig() {
-  $$('[data-path]').forEach(input=>{ let value=input.type==='checkbox'?input.checked:input.value; if(input.type==='number') value=Number(value); setPath(config,input.dataset.path,value); });
-  config.ros.subscriptions=$$('#subscriptionRows tr').map(row=>{ const field=name=>$(`[data-field="${name}"]`,row); return {enabled:field('enabled').checked,topic:field('topic').value.trim(),type:field('type').value.trim(),max_hz:Number(field('max_hz').value),outputs:['websocket','udp'].filter(name=>field(name).checked)}; }); return config;
+  $$('[data-path]').forEach(input=>{
+    let value=input.type==='checkbox'?input.checked:input.value;
+    if(input.type==='number') value=Number(value);
+    setPath(config,input.dataset.path,value);
+  });
+  if($('#topicRecordingDirectory')) {
+    if(!config.ros) config.ros = {};
+    if(!config.ros.recording) config.ros.recording = {};
+    config.ros.recording.directory = $('#topicRecordingDirectory').value.trim() || 'runtime/topic_recordings';
+  }
+  return config;
 }
+
+function renderStandardTopics() {
+  const labels={
+    joint_state:'关节反馈', joint_target:'控制器关节目标', joint_command:'机器人关节命令',
+    ee_target:'控制器末端目标', ee_visual_target:'可视化末端目标', ee_actual:'实际末端位姿',
+    solver_state:'求解器状态', base_move:'底盘运动',
+  };
+  const body=$('#standardTopicRows');
+  if(!body)return;
+  body.textContent='';
+  for(const [key,topic] of Object.entries(profilesData.standard_topics||{})) {
+    const type=standardTopicTypes[key]||'std_msgs/msg/String';
+    const row=document.createElement('tr');
+    const recordCell=document.createElement('td'), record=document.createElement('input');
+    record.type='checkbox';
+    record.checked=(config?.ros?.subscriptions||[]).some(item=>item.topic===topic&&item.enabled!==false&&(item.outputs||[]).includes('record'));
+    record.onchange=()=>setTopicRecording(topic,type,record.checked);
+    recordCell.append(record);
+    const purpose=document.createElement('td');
+    purpose.textContent=labels[key]||key;
+    const value=document.createElement('td'), code=document.createElement('code');
+    code.textContent=topic;
+    value.append(code);
+    const typeCell=document.createElement('td');
+    typeCell.textContent=type;
+    row.append(recordCell,purpose,value,typeCell);
+    body.append(row);
+  }
+}
+
+function renderConfigInterface() {
+  const labels={
+    joint_state:'关节反馈', joint_target:'控制器关节目标', joint_command:'机器人关节命令',
+    ee_target:'控制器末端目标', ee_visual_target:'可视化末端目标', ee_actual:'实际末端位姿',
+    solver_state:'求解器状态', base_move:'底盘运动',
+  };
+  const body=$('#configInterfaceRows');
+  if(!body)return;
+  body.textContent='';
+  for(const [key,topic] of Object.entries(profilesData.standard_topics||{})) {
+    const row=document.createElement('tr');
+    const purpose=document.createElement('td');
+    purpose.textContent=labels[key]||key;
+    const value=document.createElement('td'), code=document.createElement('code');
+    code.textContent=topic;
+    value.append(code);
+    const typeCell=document.createElement('td');
+    typeCell.textContent=standardTopicTypes[key]||'std_msgs/msg/String';
+    row.append(purpose,value,typeCell);
+    body.append(row);
+  }
+}
+
+function renderProfileDetail() {
+  const select=$('#robotProfileSelect');
+  const profile=profilesData.profiles.find(item=>item.id===select.value);
+  const detail=$('#profileDetail');
+  detail.textContent='';
+  const isCurrent = profile && profile.id === profilesData.active;
+  $('#activateProfile').disabled=!profile||isCurrent||profile.schema==='invalid';
+  if($('#deleteProfile')) $('#deleteProfile').disabled=!profile;
+  $('#activeProfileBadge').textContent=profilesData.active?`当前：${profilesData.active}`:'未选择';
+  if(!profile) {
+    detail.textContent='暂无可用机器人配置，请先导入 URDF 和 YAML。';
+    return;
+  }
+  const title=document.createElement('strong');
+  title.textContent=profile.display_name||profile.id;
+  const id=document.createElement('code');
+  id.textContent=profile.id;
+  const summary=document.createElement('div');
+  summary.className='profile-summary';
+  const values=[
+    ['格式',profile.schema||'--'],
+    ['URDF',profile.urdf||'--'],
+    ['关节',profile.joint_count??'--'],
+    ['自由关节',profile.free_joint_count??'--'],
+    ['任务',profile.task_count??'--'],
+    ['机械臂',profile.arm_count??'--'],
+  ];
+  for(const [label,value] of values) {
+    const cell=document.createElement('span');
+    const small=document.createElement('small'); small.textContent=label;
+    const text=document.createElement('b'); text.textContent=String(value);
+    cell.append(small,text); summary.append(cell);
+  }
+  const heading=document.createElement('div');
+  heading.className='profile-heading';
+  heading.append(title,id);
+  detail.append(heading,summary);
+  for(const warning of profile.warnings||[]) {
+    const message=document.createElement('p');
+    message.className='profile-warning';
+    message.textContent=warning;
+    detail.append(message);
+  }
+}
+
+function renderProfiles(preselect='') {
+  const select=$('#robotProfileSelect');
+  const desired=preselect||select.value||profilesData.active;
+  select.textContent='';
+  for(const profile of profilesData.profiles) {
+    const option=document.createElement('option');
+    option.value=profile.id;
+    option.textContent=`${profile.display_name||profile.id}${profile.id===profilesData.active?'（当前）':''}`;
+    option.disabled=profile.schema==='invalid';
+    select.append(option);
+  }
+  if(profilesData.profiles.some(profile=>profile.id===desired))select.value=desired;
+  renderStandardTopics();
+  renderConfigInterface();
+  renderProfileDetail();
+}
+
+async function loadProfiles(preselect='') {
+  try {
+    profilesData=await api('/api/robot-profiles');
+    renderProfiles(preselect);
+  } catch(error) {
+    toast(`机器人配置加载失败：${error.message}`,true);
+  }
+}
+
+function renderRecordTypeOptions(selectedType='') {
+  const select=$('#recordType');
+  if(!select)return;
+  const current=selectedType||select.value||STANDARD_ROS_TYPES[0];
+  const types=new Set(STANDARD_ROS_TYPES);
+  for(const item of discoveredTopics) {
+    for(const type of item.types||[])types.add(type);
+  }
+  select.textContent='';
+  for(const type of [...types].sort()) {
+    const option=document.createElement('option');
+    option.value=type;
+    option.textContent=type;
+    select.append(option);
+  }
+  if(types.has(current))select.value=current;
+}
+
 async function loadTopics() {
-  try { const topics=await api('/api/ros/topics'), active=new Set(config?.ros?.subscriptions?.filter(x=>x.enabled).map(x=>x.topic)||[]), body=$('#topicRows'); body.textContent='';
-    for(const item of topics) { const row=document.createElement('tr'); for(const value of [item.topic,item.types.join(', '),active.has(item.topic)?'已订阅':'—']) { const td=document.createElement('td'); if(value===item.topic){const code=document.createElement('code');code.textContent=value;td.append(code);}else td.textContent=value; row.append(td); } body.append(row); }
-    if(!topics.length) body.innerHTML='<tr><td colspan="3">暂无话题；请确认 ROS 环境和 ROS_DOMAIN_ID。</td></tr>';
+  try {
+    discoveredTopics=await api('/api/ros/topics');
+    const topicOptions=$('#rosTopicOptions');
+    topicOptions.textContent='';
+    for(const item of discoveredTopics) {
+      const option=document.createElement('option');
+      option.value=item.topic;
+      topicOptions.append(option);
+    }
+    renderRecordTypeOptions();
+    toast(discoveredTopics.length?`发现 ${discoveredTopics.length} 个 ROS 2 话题`:'未发现 ROS 2 话题');
   } catch(error) { toast(error.message,true); }
 }
-async function init() {
-  route(); window.addEventListener('hashchange',route);
-  try { config=await api('/api/config'); renderConfig(); const events=await api('/api/events?limit=100'); events.forEach(addEvent); } catch(error){toast(error.message,true);}
-  connectWebSocket();
-  const update=async()=>{try{renderStatus(await api('/api/status'));}catch(_){} }; update(); setInterval(update,1000);
-  $('#refreshTopics').onclick=loadTopics; $('#addSubscription').onclick=()=>addSubscriptionRow(); $('#clearEvents').onclick=()=>{$('#allEvents').textContent='';};
-  $('#saveConfig').onclick=async()=>{try{const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())}); config=result.config; renderConfig(); toast(result.server_restart_required?'已保存；HTTP 地址变更需重启进程':'配置已保存并应用');}catch(error){toast(error.message,true);}};
-  $('#publishButton').onclick=async()=>{try{await api('/api/ros/publish',{method:'POST',body:JSON.stringify({topic:$('#pubTopic').value,type:$('#pubType').value,data:JSON.parse($('#pubData').value)})});toast('消息已进入 ROS 发布队列');}catch(error){toast(error.message,true);}};
-  $('#stopButton').onclick=async()=>{if(!confirm('确认向机器人发送急停信号？'))return;try{await api('/api/safety/stop',{method:'POST',body:JSON.stringify({reason:'dashboard emergency stop'})});toast('急停信号已发送');}catch(error){toast(error.message,true);}};
-  const setTeleop=async enabled=>{try{await api('/api/ros/publish',{method:'POST',body:JSON.stringify({topic:'/teleop/arm/enabled',type:'std_msgs/msg/Bool',data:{data:enabled}})});toast(enabled?'遥操作已使能；按住离合才会运动':'遥操作已停用');}catch(error){toast(error.message,true);}};
-  $('#teleopEnable').onclick=()=>setTeleop(true); $('#teleopDisable').onclick=()=>setTeleop(false);
+
+let datasetsData = { files: [] };
+
+function updateSelectedDatasetCount() {
+  const checked = $$('#datasetRows input[type=checkbox]:checked');
+  const count = checked.length;
+  if ($('#selectedDatasetCount')) $('#selectedDatasetCount').textContent = count;
+  if ($('#batchDeleteDatasets')) $('#batchDeleteDatasets').disabled = count === 0;
+  const all = $$('#datasetRows input[type=checkbox]:not(:disabled)');
+  if ($('#selectAllDatasets')) {
+    $('#selectAllDatasets').checked = all.length > 0 && checked.length === all.length;
+    $('#selectAllDatasets').indeterminate = checked.length > 0 && checked.length < all.length;
+  }
 }
+
+async function loadDatasets() {
+  const body = $('#datasetRows');
+  const summary = $('#datasetsSummary');
+  if (!body) return;
+  body.textContent = '';
+  try {
+    datasetsData = await api('/api/recordings');
+    const files = datasetsData.files || [];
+    if (summary) {
+      summary.textContent = `共 ${datasetsData.total_count || 0} 个数据集 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''}`;
+    }
+    if ($('#selectAllDatasets')) $('#selectAllDatasets').checked = false;
+    updateSelectedDatasetCount();
+
+    if (!files.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 7;
+      cell.style.textAlign = 'center';
+      cell.style.color = 'var(--muted)';
+      cell.style.padding = '24px 0';
+      cell.textContent = '暂无录制数据集文件。可在“话题录制”页面点击“开始录制”生成 MCAP 数据集。';
+      row.append(cell);
+      body.append(row);
+      return;
+    }
+
+    for (const file of files) {
+      const row = document.createElement('tr');
+
+      const selectCell = document.createElement('td');
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.dataset.filename = file.filename;
+      check.disabled = Boolean(file.is_current);
+      check.onchange = updateSelectedDatasetCount;
+      selectCell.append(check);
+
+      const nameCell = document.createElement('td');
+      const nameCode = document.createElement('code');
+      nameCode.textContent = file.filename;
+      nameCell.append(nameCode);
+
+      const sizeCell = document.createElement('td');
+      sizeCell.textContent = file.size_human;
+
+      const formatCell = document.createElement('td');
+      const formatTag = document.createElement('span');
+      formatTag.className = 'tag';
+      formatTag.textContent = file.format || 'MCAP';
+      formatCell.append(formatTag);
+
+      const timeCell = document.createElement('td');
+      timeCell.textContent = file.created_at || file.modified_at;
+
+      const statusCell = document.createElement('td');
+      if (file.is_current) {
+        statusCell.innerHTML = '<span class="recording-badge active" style="padding:2px 6px;font-size:10px;"><i></i>正在写入</span>';
+      } else {
+        statusCell.innerHTML = '<span class="tag" style="border-color:#34434e;color:#8293a0;">就绪</span>';
+      }
+
+      const actionCell = document.createElement('td');
+      actionCell.style.textAlign = 'right';
+      const group = document.createElement('div');
+      group.className = 'btn-group';
+
+      const downloadLink = document.createElement('a');
+      downloadLink.className = 'btn-sm';
+      downloadLink.href = `/api/recordings/${encodeURIComponent(file.filename)}/download`;
+      downloadLink.setAttribute('download', file.filename);
+      downloadLink.textContent = '下载';
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'danger btn-sm';
+      deleteBtn.textContent = '删除';
+      deleteBtn.disabled = Boolean(file.is_current);
+      deleteBtn.onclick = async () => {
+        if (!confirm(`确认删除数据集文件 “${file.filename}”？`)) return;
+        try {
+          await api(`/api/recordings/${encodeURIComponent(file.filename)}`, { method: 'DELETE' });
+          toast(`已删除数据集：${file.filename}`);
+          await loadDatasets();
+        } catch (err) {
+          toast(`删除失败：${err.message}`, true);
+        }
+      };
+
+      group.append(downloadLink, deleteBtn);
+      actionCell.append(group);
+
+      row.append(selectCell, nameCell, sizeCell, formatCell, timeCell, statusCell, actionCell);
+      body.append(row);
+    }
+  } catch (error) {
+    if (summary) summary.textContent = `读取数据集列表失败: ${error.message}`;
+    toast(`加载数据集失败：${error.message}`, true);
+  }
+}
+
+function configureProfileDialog() {
+  const dialog=$('#importProfileDialog');
+  const form=$('#importProfileForm');
+  const errorBox=$('#importProfileError');
+  const clearError=()=>{
+    if(errorBox){
+      errorBox.textContent='';
+      errorBox.classList.add('hidden');
+    }
+  };
+  const close=()=>{
+    clearError();
+    dialog.close();
+  };
+  $('#openImportProfile').onclick=()=>{
+    clearError();
+    dialog.showModal();
+  };
+  $('#closeImportProfile').onclick=close;
+  $('#cancelImportProfile').onclick=close;
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    clearError();
+    const button=$('#submitImportProfile');
+    button.disabled=true;
+    button.textContent='正在校验…';
+    try {
+      const result=await api('/api/robot-profiles/import',{method:'POST',body:new FormData(form)});
+      form.reset();
+      close();
+      await loadProfiles(result.profile.id);
+      toast(`已导入 ${result.profile.display_name||result.profile.id}`);
+    } catch(error) {
+      let msg = error.message;
+      if (msg.includes('already exists')) {
+        const id = msg.replace('robot profile already exists:', '').trim();
+        msg = `导入失败：配置 ID “${id}” 已存在。若需重新导入，请先在主界面点击“删除配置”删除旧配置，或在上方填写不同的“配置 ID”。`;
+      } else {
+        msg = `导入失败：${msg}`;
+      }
+      if(errorBox){
+        errorBox.textContent=msg;
+        errorBox.classList.remove('hidden');
+      }
+      toast(msg,true);
+    } finally {
+      button.disabled=false;
+      button.textContent='校验并导入';
+    }
+  };
+}
+
+async function init() {
+  route();
+  window.addEventListener('hashchange',route);
+  try {
+    [config,profilesData]=await Promise.all([api('/api/config'),api('/api/robot-profiles')]);
+    renderConfig();
+    renderProfiles();
+    renderRecordTypeOptions();
+  } catch(error){toast(error.message,true);}
+  connectWebSocket();
+  const update=async()=>{try{renderStatus(await api('/api/status'));}catch(_){} };
+  update();
+  setInterval(update,1000);
+  $('#refreshTopics').onclick=loadTopics;
+  $('#recordTopic').onchange=()=>{
+    const match=discoveredTopics.find(item=>item.topic===$('#recordTopic').value.trim());
+    if(match?.types?.length)renderRecordTypeOptions(match.types[0]);
+  };
+  $('#addRecording').onclick=()=>{
+    const topic=$('#recordTopic').value.trim();
+    const type=$('#recordType').value.trim();
+    const maxHz=Number($('#recordMaxHz').value)||0;
+    if(!topic.startsWith('/'))return toast('消息名称必须以 / 开头',true);
+    if(!type)return toast('请选择有效的消息类型',true);
+    setTopicRecording(topic,type,true,maxHz);
+    $('#recordTopic').value=''; $('#recordMaxHz').value='0';
+    toast('已添加；点击“保存录制配置”写入文件');
+  };
+  $('#refreshProfiles').onclick=()=>loadProfiles($('#robotProfileSelect').value);
+  $('#robotProfileSelect').onchange=renderProfileDetail;
+  $('#deleteProfile').onclick=async()=>{
+    const profileId=$('#robotProfileSelect').value;
+    if(!profileId)return;
+    const profile=profilesData.profiles.find(p=>p.id===profileId);
+    const name=profile?.display_name||profileId;
+    const isActive=profileId===profilesData.active;
+    const msg=isActive
+      ?`确认删除当前活动机器人配置 “${name}” (${profileId}) 及其全部模型和配置文件？\n注意：删除后当前活动配置将被清空。`
+      :`确认删除机器人配置 “${name}” (${profileId}) 及其全部模型和配置文件？`;
+    if(!confirm(msg))return;
+    try {
+      const result=await api(`/api/robot-profiles/${encodeURIComponent(profileId)}`,{method:'DELETE'});
+      if(result.cleared_active){
+        profilesData.active='';
+        if(config?.robot_profiles)config.robot_profiles.active='';
+      }
+      toast(`已删除机器人配置：${name}`);
+      await loadProfiles();
+    } catch(error){toast(`删除失败：${error.message}`,true);}
+  };
+  $('#activateProfile').onclick=async()=>{
+    const profileId=$('#robotProfileSelect').value;
+    if(!profileId)return;
+    try {
+      const result=await api(`/api/robot-profiles/${encodeURIComponent(profileId)}/activate`,{method:'POST'});
+      profilesData.active=result.active;
+      if(config?.robot_profiles)config.robot_profiles.active=result.active;
+      renderProfiles(result.active);
+      toast(result.restart_simulation_required?'配置已应用；请重启仿真/遥操作进程':'配置已经是活动配置');
+    } catch(error){toast(`应用失败：${error.message}`,true);}
+  };
+  $('#saveConfig').onclick=async()=>{
+    try {
+      const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
+      config=result.config;
+      renderConfig();
+      toast(result.server_restart_required?'已保存；服务地址或配置目录变更需重启进程':'配置已保存并应用');
+    }catch(error){toast(error.message,true);}
+  };
+  $('#saveRecording').onclick=async()=>{
+    try {
+      const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
+      config=result.config; renderConfig();
+      toast('录制配置已写入 middleware.yaml 并应用');
+    }catch(error){toast(error.message,true);}
+  };
+  if($('#startRecordingBtn')) {
+    $('#startRecordingBtn').onclick=async()=>{
+      try {
+        const result=await api('/api/recording/start',{method:'POST'});
+        toast(`已开始话题录制：${result.path}`);
+        renderStatus(await api('/api/status'));
+      } catch(error){toast(`启动录制失败：${error.message}`,true);}
+    };
+  }
+  if($('#stopRecordingBtn')) {
+    $('#stopRecordingBtn').onclick=async()=>{
+      try {
+        const result=await api('/api/recording/stop',{method:'POST'});
+        toast(`话题录制已停止，本次共录制 ${result.status?.messages||0} 条消息`);
+        renderStatus(await api('/api/status'));
+      } catch(error){toast(`停止录制失败：${error.message}`,true);}
+    };
+  }
+  if($('#refreshDatasets')) $('#refreshDatasets').onclick = loadDatasets;
+  if($('#selectAllDatasets')) {
+    $('#selectAllDatasets').onchange = () => {
+      const checked = $('#selectAllDatasets').checked;
+      $$('#datasetRows input[type=checkbox]:not(:disabled)').forEach(cb => {
+        cb.checked = checked;
+      });
+      updateSelectedDatasetCount();
+    };
+  }
+  if($('#batchDeleteDatasets')) {
+    $('#batchDeleteDatasets').onclick = async () => {
+      const selected = $$('#datasetRows input[type=checkbox]:checked')
+        .map(cb => cb.dataset.filename)
+        .filter(Boolean);
+      if (!selected.length) return;
+      if (!confirm(`确认批量删除选中的 ${selected.length} 个数据集文件？此操作不可恢复。`)) return;
+      try {
+        const res = await api('/api/recordings/batch-delete', {
+          method: 'POST',
+          body: JSON.stringify({ filenames: selected }),
+        });
+        toast(`已批量删除 ${res.deleted?.length || 0} 个数据集文件`);
+        await loadDatasets();
+      } catch (err) {
+        toast(`批量删除失败：${err.message}`, true);
+      }
+    };
+  }
+  $('#stopButton').onclick=async()=>{
+    if(!confirm('确认向机器人发送急停信号？'))return;
+    try {
+      await api('/api/safety/stop',{method:'POST',body:JSON.stringify({reason:'dashboard emergency stop'})});
+      toast('急停信号已发送');
+    }catch(error){toast(error.message,true);}
+  };
+  const setTeleop=async enabled=>{
+    try {
+      await api('/api/ros/publish',{method:'POST',body:JSON.stringify({topic:'/teleop/arm/enabled',type:'std_msgs/msg/Bool',data:{data:enabled}})});
+      toast(enabled?'遥操作已使能；按住离合才会运动':'遥操作已停用');
+    }catch(error){toast(error.message,true);}
+  };
+  $('#teleopEnable').onclick=()=>setTeleop(true);
+  $('#teleopDisable').onclick=()=>setTeleop(false);
+  configureProfileDialog();
+}
+
 init();

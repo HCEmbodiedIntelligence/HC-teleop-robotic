@@ -1,0 +1,251 @@
+robot:
+  urdf_path: /home/maple/hc_io_suit/src/io_teleop_robot_descriptions/hc_tj_description/urdf/hc_tj_robot.urdf
+  base_position:
+  - 0.0
+  - 0.0
+  - 0.07
+  base_orientation:
+  - 0.0
+  - 0.0
+  - 0.70710678
+  - 0.70710678
+  initial_joints:
+    leg_1: 0.5
+    leg_2: 1.2
+    zhi: -0.6
+    Joint1_R: -1.44
+    Joint2_R: -0.77
+    Joint3_R: 1.44
+    Joint4_R: -1.57
+    Joint5_R: 0.0
+    Joint6_R: 0.0
+    Joint7_R: 0.0
+    Joint1_L: 1.44
+    Joint2_L: -0.77
+    Joint3_L: -1.44
+    Joint4_L: -1.57
+    Joint5_L: 0.0
+    Joint6_L: 0.0
+    Joint7_L: 0.0
+arms:
+  right:
+    base_link: zhi_Link
+    generic_task_base_link: R_arm_0_Link
+    ee_link: io_teleop_ee_link_right
+    joint_names:
+    - Joint1_R
+    - Joint2_R
+    - Joint3_R
+    - Joint4_R
+    - Joint5_R
+    - Joint6_R
+    - Joint7_R
+  left:
+    base_link: zhi_Link
+    generic_task_base_link: L_arm_0_Link
+    ee_link: io_teleop_ee_link_left
+    joint_names:
+    - Joint1_L
+    - Joint2_L
+    - Joint3_L
+    - Joint4_L
+    - Joint5_L
+    - Joint6_L
+    - Joint7_L
+body:
+  waist_joint_names:
+  - leg_1
+  - leg_2
+  - zhi
+  torso_link: zhi_Link
+  base_command_topic: /hc_teleop/target_base_move
+  base_command_mode: delta
+  stick_x_axis: 3
+  stick_y_axis: 2
+  stick_deadzone: 0.12
+  stick_forward_direction: 1.0
+  stick_lateral_direction: 1.0
+  max_linear_velocity: 0.25
+  max_lateral_velocity: 0.2
+  yaw_deadzone: 0.2
+  yaw_gain: 1.2
+  yaw_direction: -1.0
+  max_angular_velocity: 0.6
+  head_height_axis: 2
+  head_pitch_position_axis: 1
+  height_scale: 0.7
+  pitch_scale: 1.2
+  height_direction: -1.0
+  pitch_direction: -1.0
+  max_height_delta: 0.18
+  max_pitch_delta: 0.4
+  pitch_axis_world:
+  - -1.0
+  - 0.0
+  - 0.0
+  joint_lower:
+  - -0.628319
+  - -0.418879
+  - -1.832596
+  joint_upper:
+  - 1.082104
+  - 2.356194
+  - 1.117011
+  max_joint_velocity: 0.35
+  ik_iterations: 10
+  ik_damping: 0.05
+  ik_max_update: 0.08
+grippers:
+  trigger_axis: 0
+  max_velocity: 2.5
+  include_sim_joints: true
+  right:
+    sim_joint: R_ban
+    sim_closed_position: 1.5707
+    finger_topic: /hc_teleop/joint_cmd_finger_right
+    finger_joint_names:
+    - R_thumb_roll_joint
+    - R_thumb_abad_joint
+    - R_thumb_mcp_joint
+    - R_index_abad_joint
+    - R_index_pip_joint
+    - R_middle_pip_joint
+    - R_ring_abad_joint
+    - R_ring_pip_joint
+    - R_pinky_abad_joint
+    - R_pinky_pip_joint
+    finger_open:
+    - 0.4
+    - -1.642
+    - 0.0
+    - -0.13
+    - 0.0
+    - 0.0
+    - 0.05
+    - 0.0
+    - 0.05
+    - 0.0
+    finger_closed:
+    - 1.121
+    - 0.045
+    - 1.0
+    - -0.05
+    - 2.5
+    - 2.5
+    - 0.13
+    - 2.5
+    - 0.13
+    - 2.5
+  left:
+    sim_joint: L_ban
+    sim_closed_position: 1.5707
+    finger_topic: /hc_teleop/joint_cmd_finger_left
+    finger_joint_names:
+    - L_thumb_roll_joint
+    - L_thumb_abad_joint
+    - L_thumb_mcp_joint
+    - L_index_abad_joint
+    - L_index_pip_joint
+    - L_middle_pip_joint
+    - L_ring_abad_joint
+    - L_ring_pip_joint
+    - L_pinky_abad_joint
+    - L_pinky_pip_joint
+    finger_open:
+    - -0.4
+    - -0.045
+    - 0.0
+    - 0.05
+    - 0.0
+    - 0.0
+    - -0.13
+    - 0.0
+    - -0.13
+    - 0.0
+    finger_closed:
+    - -1.121
+    - 1.642
+    - -1.0
+    - 0.13
+    - 2.5
+    - 2.5
+    - -0.05
+    - 2.5
+    - 0.05
+    - 2.5
+control:
+  backend: v23
+  enabled_on_start: true
+  rate_hz: 60.0
+  vr_data_topic: /vrdata
+  joint_state_topic: /hc_teleop/joint_states
+  command_topic: /hc_teleop/joint_cmd
+  generic_command_topic: /hc_teleop/joint_cmd_arm
+  solver_topic: /hc_teleop/sol_q
+  target_pose_topic: /hc_teleop/target_ee_poses
+  controller_target_pose_topic: /hc_teleop/controller_target_ee_poses
+  actual_pose_topic: /hc_teleop/actual_ee_poses
+  status_topic: /teleop/arm/status
+  safety_stop_topic: /teleop/emergency_stop
+  enable_topic: /teleop/arm/enabled
+  clutch_axis: 1
+  clutch_threshold: 0.55
+  home_gesture_axis: 2
+  home_gesture_threshold: 0.8
+  home_gesture_release_threshold: 0.35
+  home_joint_velocity: 0.7
+  home_tolerance: 0.015
+  pose_timeout: 0.5
+  input_timeout: 0.5
+  joint_state_timeout: 0.5
+  axis_mapping:
+  - - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - -1.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  head_axis_mapping:
+  - - 0.0
+    - 0.0
+    - -1.0
+  - - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  position_scale: 0.8
+  max_displacement: 0.45
+  orientation_enabled: true
+  orientation_weight: 0.35
+  target_position_deadband: 0.002
+  target_orientation_deadband: 0.015
+  target_filter_alpha: 0.35
+  command_joint_deadband: 0.001
+  ik_iterations: 16
+  ik_position_tolerance: 0.01
+  ik_orientation_tolerance: 0.06
+  ik_damping_min: 0.035
+  ik_damping_max: 0.35
+  ik_singularity_threshold: 0.08
+  ik_limit_margin: 0.12
+  ik_reseed_limit_margin: 0.08
+  ik_failure_retry_interval: 0.2
+  ik_reseed_interval: 0.5
+  ik_reseed_target_position_delta: 0.005
+  ik_reseed_target_orientation_delta: 0.035
+  ik_reseed_perturbation: 0.3
+  ik_limit_avoidance_gain: 0.035
+  ik_posture_gain: 0.02
+  ik_solution_limit_weight: 4.0
+  ik_min_progress_ratio: 0.001
+  ik_min_progress_absolute: 0.0001
+  ik_reseed_escape_progress_ratio: 0.05
+  ik_reseed_escape_max_regression: 0.25
+  ik_max_update: 0.08
+  max_joint_velocity: 1.2
+  max_joint_velocity_norm: 1.2

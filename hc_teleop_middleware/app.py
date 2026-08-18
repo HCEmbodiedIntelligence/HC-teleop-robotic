@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import socket
 import time
@@ -13,7 +14,9 @@ from aiohttp import WSMsgType, web
 from .camera import CameraService
 from .config import ConfigError, ConfigStore
 from .protocol import envelope
+from .robot_profiles import RobotProfileError, RobotProfileManager, STANDARD_TOPICS
 from .ros_bridge import RosBridge
+from .topic_recorder import TopicRecorder
 from .vr_gateway import VrGateway
 
 
@@ -29,11 +32,13 @@ def local_ip() -> str:
 
 
 class MiddlewareRuntime:
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], config_dir: Path):
         self.config = config
+        self.config_dir = config_dir
         self.ros: RosBridge | None = None
         self.vr: VrGateway | None = None
         self.camera: CameraService | None = None
+        self.recorder: TopicRecorder | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
@@ -42,6 +47,7 @@ class MiddlewareRuntime:
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
+        self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
         self.ros = RosBridge(self.config["ros"], self.emit)
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_safety_event
@@ -61,6 +67,8 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.ros.stop)
         if self.camera is not None:
             await self.camera.stop()
+        if self.recorder is not None:
+            await asyncio.to_thread(self.recorder.stop)
         self._log("info", "runtime stopped")
 
     async def restart(self, config: dict[str, Any]) -> None:
@@ -71,6 +79,8 @@ class MiddlewareRuntime:
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
+        if "record" in outputs and self.recorder is not None:
+            self.recorder.record(event)
         if "udp" in outputs and self.vr is not None:
             self.vr.send_event(event)
         if "websocket" in outputs and self.loop is not None:
@@ -94,27 +104,18 @@ class MiddlewareRuntime:
     def _on_pose(self, packet: Any) -> None:
         if self.ros is None:
             return
-        if self.config["vr"].get("publish_pose_to_ros", True):
-            topics = self.config["vr"]["pose_topics"]
-            for name in ("head", "left", "right"):
-                if packet.tracked(name):
-                    self.ros.publish_pose(
-                        topics[name], getattr(packet, name), packet.sequence
+        if self.config["vr"].get("publish_to_ros", True):
+            self.ros.publish(
+                self.config["vr"]["data_topic"],
+                "std_msgs/msg/String",
+                {
+                    "data": json.dumps(
+                        packet.as_dict(),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
                     )
-        if (
-            packet.protocol_version >= 2
-            and self.config["vr"].get("publish_input_to_ros", True)
-        ):
-            topics = self.config["vr"]["input_topics"]
-            for side in ("left", "right"):
-                self.ros.publish_controller_input(
-                    topics[side],
-                    self.config["vr"]["event_topic"],
-                    side,
-                    getattr(packet, f"{side}_input"),
-                    packet.sequence,
-                    packet.vr_timestamp,
-                )
+                },
+            )
 
     def _on_safety_event(self, reason: str) -> None:
         self._log("warning", reason)
@@ -136,6 +137,7 @@ class MiddlewareRuntime:
             "ros": self.ros.status() if self.ros else {"state": "stopped"},
             "vr": self.vr.status() if self.vr else {"state": "stopped"},
             "camera": self.camera.status() if self.camera else {"state": "stopped"},
+            "recording": self.recorder.status() if self.recorder else {"recording": False, "enabled": False},
         }
 
 
@@ -147,18 +149,20 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
         response = await handler(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
     return response
 
 
 def create_app(store: ConfigStore) -> web.Application:
     config = store.load()
-    runtime = MiddlewareRuntime(config)
+    runtime = MiddlewareRuntime(config, store.path.parent)
+    profile_root = Path(config["robot_profiles"]["root"]).expanduser()
+    if not profile_root.is_absolute():
+        profile_root = store.path.parent / profile_root
+    profiles = RobotProfileManager(profile_root)
     app = web.Application(
-        client_max_size=4 * 1024 * 1024, middlewares=[cors_middleware]
+        client_max_size=100 * 1024 * 1024, middlewares=[cors_middleware]
     )
-    app["store"] = store
-    app["runtime"] = runtime
     static_dir = Path(__file__).parent / "static"
 
     async def index(_request: web.Request) -> web.FileResponse:
@@ -174,13 +178,123 @@ def create_app(store: ConfigStore) -> web.Application:
         try:
             proposed = await request.json()
             old_server = dict(store.value["server"])
+            old_profile_root = store.value["robot_profiles"]["root"]
             saved = store.save(proposed)
             await runtime.restart(saved)
-            restart_required = saved["server"] != old_server
+            restart_required = (
+                saved["server"] != old_server
+                or saved["robot_profiles"]["root"] != old_profile_root
+            )
             return web.json_response(
                 {"ok": True, "config": saved, "server_restart_required": restart_required}
             )
         except (ConfigError, json.JSONDecodeError, TypeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def get_robot_profiles(_request: web.Request) -> web.Response:
+        active = str(store.value["robot_profiles"].get("active", ""))
+        values = profiles.list()
+        for value in values:
+            value["active"] = value["id"] == active
+        return web.json_response(
+            {
+                "active": active,
+                "root": str(profiles.root),
+                "profiles": values,
+                "standard_topics": STANDARD_TOPICS,
+            }
+        )
+
+    async def import_robot_profile(request: web.Request) -> web.Response:
+        if not request.content_type.startswith("multipart/"):
+            raise web.HTTPBadRequest(text="multipart form data is required")
+        fields: dict[str, str] = {}
+        uploads: dict[str, tuple[str, bytes]] = {}
+        try:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name in {"archive", "file", "zip", "urdf", "config"}:
+                    if not part.filename:
+                        raise RobotProfileError(f"{part.name} file is required")
+                    uploads[part.name] = (
+                        part.filename,
+                        await part.read(decode=False),
+                    )
+                elif part.name in {"id", "display_name"}:
+                    fields[part.name] = (await part.text()).strip()
+
+            archive_key = next((k for k in ("archive", "file", "zip") if k in uploads), None)
+            if archive_key:
+                archive_name, archive_payload = uploads[archive_key]
+                profile = await asyncio.to_thread(
+                    profiles.import_archive,
+                    fields.get("id", ""),
+                    fields.get("display_name", ""),
+                    archive_payload,
+                    archive_name,
+                )
+            elif "urdf" in uploads and "config" in uploads:
+                urdf_name, urdf_payload = uploads["urdf"]
+                config_name, config_payload = uploads["config"]
+                profile = await asyncio.to_thread(
+                    profiles.import_profile,
+                    fields.get("id", ""),
+                    fields.get("display_name", ""),
+                    urdf_name,
+                    urdf_payload,
+                    config_name,
+                    config_payload,
+                )
+            else:
+                raise RobotProfileError("robot zip archive is required")
+
+            return web.json_response({"ok": True, "profile": profile}, status=201)
+        except RobotProfileError as exc:
+            if "already exists" in str(exc):
+                raise web.HTTPConflict(text=str(exc)) from exc
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def activate_robot_profile(request: web.Request) -> web.Response:
+        profile_id = request.match_info["profile_id"]
+        try:
+            profile = profiles.get(profile_id)
+        except RobotProfileError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        if profile.get("schema") == "invalid":
+            raise web.HTTPBadRequest(text="invalid robot profile cannot be activated")
+        previous = str(store.value["robot_profiles"].get("active", ""))
+        if profile_id != previous:
+            proposed = copy.deepcopy(store.value)
+            proposed["robot_profiles"]["active"] = profile_id
+            saved = store.save(proposed)
+            runtime.config = saved
+            runtime._on_safety_event(
+                f"robot profile changed from {previous or 'none'} to {profile_id}; restart teleop"
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "active": profile_id,
+                "profile": profile,
+                "restart_simulation_required": profile_id != previous,
+            }
+        )
+
+    async def delete_robot_profile(request: web.Request) -> web.Response:
+        profile_id = request.match_info["profile_id"]
+        try:
+            await asyncio.to_thread(profiles.delete_profile, profile_id)
+            active = str(store.value["robot_profiles"].get("active", ""))
+            cleared = profile_id == active
+            if cleared:
+                proposed = copy.deepcopy(store.value)
+                proposed["robot_profiles"]["active"] = ""
+                saved = store.save(proposed)
+                runtime.config = saved
+            return web.json_response({"ok": True, "deleted": profile_id, "cleared_active": cleared})
+        except RobotProfileError as exc:
+            if "does not exist" in str(exc):
+                raise web.HTTPNotFound(text=str(exc)) from exc
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     async def get_topics(_request: web.Request) -> web.Response:
@@ -201,13 +315,6 @@ def create_app(store: ConfigStore) -> web.Application:
         data = await request.json() if request.can_read_body else {}
         runtime._on_safety_event(str(data.get("reason", "dashboard emergency stop")))
         return web.json_response({"accepted": True}, status=202)
-
-    async def get_events(request: web.Request) -> web.Response:
-        try:
-            limit = min(max(int(request.query.get("limit", "100")), 1), 300)
-        except ValueError:
-            raise web.HTTPBadRequest(text="limit must be an integer")
-        return web.json_response(list(runtime.events)[-limit:])
 
     async def websocket(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
@@ -249,6 +356,99 @@ def create_app(store: ConfigStore) -> web.Application:
         except (RuntimeError, KeyError, TypeError) as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
+    async def start_recording(request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder is not initialized")
+        data = {}
+        if request.can_read_body:
+            try:
+                data = await request.json()
+            except Exception:
+                pass
+        filename = str(data.get("filename", "")).strip()
+        path = await asyncio.to_thread(runtime.recorder.start, filename)
+        return web.json_response({"ok": True, "recording": True, "path": path})
+
+    async def stop_recording(_request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder is not initialized")
+        rec_status = await asyncio.to_thread(runtime.recorder.stop)
+        return web.json_response({"ok": True, "recording": False, "status": rec_status})
+
+    async def get_recording_status(_request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            return web.json_response({"recording": False, "enabled": False})
+        return web.json_response(runtime.recorder.status())
+
+    async def get_recordings(_request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            return web.json_response({
+                "files": [],
+                "directory": "",
+                "total_count": 0,
+                "total_size_bytes": 0,
+                "total_size_human": "0 B",
+            })
+        files = await asyncio.to_thread(runtime.recorder.list_recordings)
+        total_bytes = sum(f["size_bytes"] for f in files)
+        if total_bytes < 1024:
+            human = f"{total_bytes} B"
+        elif total_bytes < 1024 * 1024:
+            human = f"{total_bytes / 1024:.1f} KB"
+        elif total_bytes < 1024 * 1024 * 1024:
+            human = f"{total_bytes / (1024 * 1024):.2f} MB"
+        else:
+            human = f"{total_bytes / (1024 * 1024 * 1024):.2f} GB"
+        return web.json_response({
+            "files": files,
+            "directory": str(runtime.recorder.directory),
+            "total_count": len(files),
+            "total_size_bytes": total_bytes,
+            "total_size_human": human,
+        })
+
+    async def download_recording(request: web.Request) -> web.FileResponse:
+        filename = Path(request.match_info["filename"]).name
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        target = (runtime.recorder.directory / filename).resolve()
+        if not target.is_relative_to(runtime.recorder.directory) or not target.is_file():
+            raise web.HTTPNotFound(text=f"recording not found: {filename}")
+        return web.FileResponse(
+            target,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "application/octet-stream",
+            },
+        )
+
+    async def delete_recording(request: web.Request) -> web.Response:
+        filename = Path(request.match_info["filename"]).name
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        try:
+            await asyncio.to_thread(runtime.recorder.delete_recording, filename)
+            return web.json_response({"ok": True, "deleted": filename})
+        except FileNotFoundError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def batch_delete_recordings(request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        data = await request.json() if request.can_read_body else {}
+        filenames = list(data.get("filenames", []))
+        deleted = []
+        failed = []
+        for fname in filenames:
+            try:
+                await asyncio.to_thread(runtime.recorder.delete_recording, fname)
+                deleted.append(fname)
+            except Exception as exc:
+                failed.append({"filename": fname, "error": str(exc)})
+        return web.json_response({"ok": True, "deleted": deleted, "failed": failed})
+
     async def startup(_app: web.Application) -> None:
         await runtime.start()
 
@@ -257,6 +457,9 @@ def create_app(store: ConfigStore) -> web.Application:
             await ws.close(code=1001, message=b"server shutdown")
         await runtime.stop()
 
+    async def options(_request: web.Request) -> web.Response:
+        return web.Response(status=204)
+
     app.router.add_get("/", index)
     app.router.add_get("/dashboard/", index)
     app.router.add_static("/static/", static_dir)
@@ -264,14 +467,28 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/health", get_status)
     app.router.add_get("/api/config", get_config)
     app.router.add_put("/api/config", put_config)
+    app.router.add_get("/api/robot-profiles", get_robot_profiles)
+    app.router.add_post("/api/robot-profiles/import", import_robot_profile)
+    app.router.add_post(
+        "/api/robot-profiles/{profile_id}/activate", activate_robot_profile
+    )
+    app.router.add_delete(
+        "/api/robot-profiles/{profile_id}", delete_robot_profile
+    )
     app.router.add_get("/api/ros/topics", get_topics)
     app.router.add_post("/api/ros/publish", publish)
     app.router.add_post("/api/safety/stop", emergency_stop)
-    app.router.add_get("/api/events", get_events)
+    app.router.add_post("/api/recording/start", start_recording)
+    app.router.add_post("/api/recording/stop", stop_recording)
+    app.router.add_get("/api/recording/status", get_recording_status)
+    app.router.add_get("/api/recordings", get_recordings)
+    app.router.add_get("/api/recordings/{filename}/download", download_recording)
+    app.router.add_delete("/api/recordings/{filename}", delete_recording)
+    app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
     app.router.add_get("/ws", websocket)
     app.router.add_post("/api/webrtc/offer", webrtc_offer)
     app.router.add_post("/offer", webrtc_offer)
-    app.router.add_options("/{tail:.*}", lambda _request: web.Response(status=204))
+    app.router.add_options("/{tail:.*}", options)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
     return app

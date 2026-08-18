@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=4">
 </head>
 <body>
   <aside class="sidebar">
     <div class="brand"><span class="brand-mark">HC</span><div>Teleop<small>Middleware</small></div></div>
     <nav>
       <a href="#overview" data-page="overview">运行概览</a>
-      <a href="#topics" data-page="topics">ROS 2 话题</a>
+      <a href="#topics" data-page="topics">话题录制</a>
+      <a href="#datasets" data-page="datasets">数据集管理</a>
       <a href="#config" data-page="config">系统配置</a>
-      <a href="#events" data-page="events">实时事件</a>
     </nav>
     <div class="connection"><i id="connectionDot"></i><span id="connectionText">正在连接</span></div>
   </aside>
@@ -40,8 +40,7 @@
           </div>
           <dl class="stats"><div><dt>已接收</dt><dd id="vrReceived">0</dd></div><div><dt>丢包</dt><dd id="vrLost">0</dd></div><div><dt>无效</dt><dd id="vrInvalid">0</dd></div><div><dt>已转发</dt><dd id="vrSent">0</dd></div></dl>
         </article>
-        <article class="panel"><div class="panel-title"><h2>最近系统事件</h2><span class="tag">LIVE</span></div><div id="recentEvents" class="event-list compact"></div></article>
-        <article class="panel controller-panel"><div class="panel-title"><div><h2>VR 手柄输入</h2><p>v2 协议实时状态；按下和释放事件显示在事件流中</p></div><span id="vrProtocol" class="tag">协议 --</span></div>
+        <article class="panel controller-panel"><div class="panel-title"><div><h2>VR 手柄输入</h2><p>v2 协议实时状态与离合状态</p></div><span id="vrProtocol" class="tag">协议 --</span></div>
           <div class="teleop-strip"><div><label>遥操作模式</label><strong id="teleopMode">未连接</strong></div><div><label>控制后端</label><strong id="teleopBackend">--</strong></div><div><label>左离合</label><strong id="teleopLeft">保持</strong></div><div><label>右离合</label><strong id="teleopRight">保持</strong></div><div><label>关节反馈</label><strong id="teleopFeedback">--</strong></div><div class="teleop-actions"><button id="teleopDisable">停用遥操作</button><button class="primary" id="teleopEnable">启用遥操作</button></div></div>
           <div class="controllers">
             <div class="controller"><h3>LEFT</h3><p class="held" id="leftHeld">无按键</p><label>Trigger <b id="leftTriggerValue">0.000</b></label><div class="meter"><i id="leftTrigger"></i></div><label>Grip <b id="leftGripValue">0.000</b></label><div class="meter"><i id="leftGrip"></i></div><div class="axes"><span>主摇杆 <b id="leftPrimaryAxis">0.000, 0.000</b></span><span>副摇杆 <b id="leftSecondaryAxis">0.000, 0.000</b></span></div></div>
@@ -53,48 +52,112 @@
 
     <section class="page hidden" id="topics">
       <article class="panel">
-        <div class="panel-title"><div><h2>ROS Graph</h2><p>每 2 秒从当前 ROS_DOMAIN_ID 更新</p></div><button id="refreshTopics">刷新</button></div>
-        <div class="table-wrap"><table><thead><tr><th>话题</th><th>消息类型</th><th>中间件订阅</th></tr></thead><tbody id="topicRows"></tbody></table></div>
+        <div class="panel-title">
+          <div>
+            <h2>话题录制</h2>
+            <p id="recordingMeta">配置并录制 ROS 2 消息到标准 MCAP (.mcap) 数据集</p>
+          </div>
+          <div class="recording-actions">
+            <span id="recordingBadge" class="recording-badge"><i></i><span id="recordingBadgeText">未录制</span></span>
+            <button id="startRecordingBtn" class="primary">开始录制</button>
+            <button id="stopRecordingBtn" class="danger" disabled>停止录制</button>
+            <button id="saveRecording">保存录制配置</button>
+          </div>
+        </div>
+        <div class="recording-settings form-grid">
+          <label>录制保存目录<input id="topicRecordingDirectory" placeholder="runtime/topic_recordings"><small>录制 .mcap 文件存放目录，相对路径以项目根目录为基准</small></label>
+        </div>
+
+        <div class="topic-section">
+          <h3>HC 内置标准接口话题</h3>
+          <p>勾选需要自动录制的通用机器人控制与反馈话题</p>
+          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>用途</th><th>Topic</th><th>消息类型</th></tr></thead><tbody id="standardTopicRows"></tbody></table></div>
+        </div>
+
+        <div class="topic-section" style="margin-top:20px;">
+          <h3>自定义录制规则</h3>
+          <p>已添加的自定义消息录制列表</p>
+          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>消息名称</th><th>消息类型</th><th>最大 Hz</th><th></th></tr></thead><tbody id="recordingRows"></tbody></table></div>
+        </div>
       </article>
       <article class="panel publish-panel">
-        <div class="panel-title"><div><h2>测试发布</h2><p>通过中间件向 ROS 2 发布一条消息</p></div></div>
-        <div class="form-grid"><label>Topic<input id="pubTopic" value="/teleop/test"></label><label>Type<input id="pubType" value="std_msgs/msg/String"></label></div>
-        <label>消息 JSON<textarea id="pubData" rows="4">{"data":"hello from dashboard"}</textarea></label>
-        <button class="primary" id="publishButton">发布消息</button>
+        <div class="panel-title"><div><h2>添加自定义录制消息</h2><p>从当前 ROS_DOMAIN_ID 发现话题，或选择标准 ROS 2 消息类型</p></div><button id="refreshTopics">刷新 ROS Graph</button></div>
+        <div class="form-grid"><label>消息名称<input id="recordTopic" list="rosTopicOptions" placeholder="/hc_teleop/joint_states"><datalist id="rosTopicOptions"></datalist></label><label>消息类型<select id="recordType"></select></label><label>最大录制频率（0 = 不限）<input id="recordMaxHz" type="number" min="0" value="0"></label></div>
+        <button class="primary" id="addRecording">添加自定义消息</button>
+      </article>
+    </section>
+
+    <section class="page hidden" id="datasets">
+      <article class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>MCAP 录制数据集</h2>
+            <p id="datasetsSummary">正在加载数据集列表…</p>
+          </div>
+          <div class="dataset-actions">
+            <button id="refreshDatasets">刷新列表</button>
+            <button id="batchDeleteDatasets" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:40px;"><input type="checkbox" id="selectAllDatasets" title="全选 / 取消全选"></th>
+                <th>文件名</th>
+                <th>大小</th>
+                <th>格式</th>
+                <th>生成时间</th>
+                <th>状态</th>
+                <th style="width:160px; text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="datasetRows"></tbody>
+          </table>
+        </div>
       </article>
     </section>
 
     <section class="page hidden" id="config">
+      <article class="panel profile-manager">
+        <div class="panel-title"><div><h2>机器人配置</h2><p>导入包含 URDF + YAML + Mesh 的机器人 ZIP 压缩包</p></div><span id="activeProfileBadge" class="tag">未选择</span></div>
+        <div class="profile-toolbar">
+          <label>已导入配置<select id="robotProfileSelect"></select></label>
+          <button id="refreshProfiles">刷新</button>
+          <button id="openImportProfile">导入机器人</button>
+          <button class="danger" id="deleteProfile">删除配置</button>
+          <button class="primary" id="activateProfile">应用配置</button>
+        </div>
+        <div id="profileDetail" class="profile-detail">正在读取机器人配置…</div>
+        <details class="standard-interface"><summary>HC 标准 ROS 2 接口定义</summary>
+          <div class="table-wrap"><table><thead><tr><th>用途</th><th>Topic</th><th>默认消息类型</th></tr></thead><tbody id="configInterfaceRows"></tbody></table></div>
+        </details>
+      </article>
       <div class="config-actions"><p>保存后 ROS、VR 和相机网关会自动重载。</p><button class="primary" id="saveConfig">保存并应用</button></div>
-      <div class="grid two config-grid">
-        <article class="panel"><h2>服务与 VR</h2>
-          <div class="form-grid"><label>HTTP Host<input data-path="server.host"></label><label>HTTP Port<input type="number" data-path="server.port"></label></div>
-          <label class="toggle"><input type="checkbox" data-path="vr.enabled"><span></span>启用 VR UDP 网关</label>
-          <div class="form-grid"><label>位姿端口<input type="number" data-path="vr.pose_port"></label><label>发现端口<input type="number" data-path="vr.discovery_port"></label><label>VR 转发地址<input data-path="vr.outbound_host" placeholder="留空则使用已发现 VR"></label><label>VR 转发端口<input type="number" data-path="vr.outbound_port"></label><label>失联超时 (ms)<input type="number" data-path="vr.pose_timeout_ms"></label></div>
-        </article>
-        <article class="panel"><h2>ROS 与安全</h2>
-          <label class="toggle"><input type="checkbox" data-path="ros.enabled"><span></span>启用 ROS 2 桥接</label>
-          <label>节点名称<input data-path="ros.node_name"></label>
-          <label class="toggle"><input type="checkbox" data-path="vr.publish_pose_to_ros"><span></span>将 VR 位姿发布到 ROS 2</label>
-          <label class="toggle"><input type="checkbox" data-path="vr.publish_input_to_ros"><span></span>将手柄输入与事件发布到 ROS 2</label>
-          <div class="form-grid"><label>左手柄 Joy 话题<input data-path="vr.input_topics.left"></label><label>右手柄 Joy 话题<input data-path="vr.input_topics.right"></label></div>
-          <label>手柄边沿事件话题<input data-path="vr.event_topic"></label>
-          <label class="toggle"><input type="checkbox" data-path="safety.stop_on_startup"><span></span>中间件启动/重载时发送急停</label>
-          <label>急停话题<input data-path="safety.stop_topic"></label>
-          <label class="toggle"><input type="checkbox" data-path="camera.enabled"><span></span>启用 D435 WebRTC</label>
-          <div class="form-grid"><label>宽度<input type="number" data-path="camera.width"></label><label>高度<input type="number" data-path="camera.height"></label><label>FPS<input type="number" data-path="camera.fps"></label></div>
-        </article>
-      </div>
-      <article class="panel subscriptions"><div class="panel-title"><div><h2>ROS 2 转发规则</h2><p>选择订阅话题、限频和转发目的地</p></div><button id="addSubscription">添加规则</button></div>
-        <div class="table-wrap"><table><thead><tr><th>启用</th><th>Topic</th><th>Type</th><th>最大 Hz<br><small>0 = 不限</small></th><th>WebSocket</th><th>VR UDP</th><th></th></tr></thead><tbody id="subscriptionRows"></tbody></table></div>
+      <article class="panel"><h2>服务、ROS 2 与 VR 网关</h2>
+        <div class="form-grid">
+          <label>HTTP Host<input data-path="server.host"></label>
+          <label>HTTP Port<input type="number" data-path="server.port"></label>
+          <label>ROS 2 Domain ID<input type="number" min="0" max="232" data-path="ros.domain_id" placeholder="0"><small>ROS_DOMAIN_ID（0~232），隔离局域网内不同机器人的通信</small></label>
+          <label>ROS 2 节点名称<input data-path="ros.node_name" placeholder="hc_teleop_middleware"></label>
+        </div>
+        <label class="toggle"><input type="checkbox" data-path="vr.enabled"><span></span>启用 VR UDP 网关</label>
+        <div class="form-grid"><label>VR 数据接收端口<input type="number" data-path="vr.pose_port"><small>接收头显发送的位姿、按键和摇杆数据</small></label><label>VR 自动发现端口<input type="number" data-path="vr.discovery_port"><small>响应头显在局域网内查找中间件的广播</small></label><label>VR 转发地址<input data-path="vr.outbound_host" placeholder="留空则使用已发现 VR"><small>留空时自动使用最近发送数据的头显 IP</small></label><label>VR 数据发送端口<input type="number" data-path="vr.outbound_port"><small>将机器人状态和控制反馈发送回头显</small></label><label>失联超时 (ms)<input type="number" data-path="vr.pose_timeout_ms"></label></div>
       </article>
     </section>
 
-    <section class="page hidden" id="events">
-      <article class="panel"><div class="panel-title"><div><h2>消息与日志</h2><p>最多显示最近 300 条，不影响 ROS 回调线程</p></div><button id="clearEvents">清空显示</button></div><div id="allEvents" class="event-list"></div></article>
-    </section>
+    <dialog id="importProfileDialog">
+      <form id="importProfileForm">
+        <div class="dialog-title"><div><h2>导入机器人配置包</h2><p>上传包含 URDF、YAML 及网格（Mesh）的 .zip 压缩包</p></div><button type="button" class="dialog-close" id="closeImportProfile" aria-label="关闭">×</button></div>
+        <div class="form-grid"><label>配置 ID（可选）<input name="id" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" placeholder="留空则自动提取"></label><label>显示名称（可选）<input name="display_name" maxlength="80" placeholder="留空则使用配置ID"></label></div>
+        <label>机器人压缩包 (.zip)<input name="archive" type="file" accept=".zip" required><small>支持包含 URDF、YAML（如 vr_configs.yml 或 controller_v23.yml）及 mesh/ 网格目录的 .zip 压缩包</small></label>
+        <p class="form-help">系统会自动解析 ZIP 内的 URDF 与控制器配置并解压 3D 模型网格。ROS 2 话题会自动归一化到 /hc_teleop。</p>
+        <div id="importProfileError" class="dialog-error hidden"></div>
+        <div class="dialog-actions"><button type="button" id="cancelImportProfile">取消</button><button class="primary" type="submit" id="submitImportProfile">校验并导入</button></div>
+      </form>
+    </dialog>
     <div id="toast" role="status"></div>
   </main>
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

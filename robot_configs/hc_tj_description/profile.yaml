@@ -1,0 +1,20 @@
+version: 1
+id: hc_tj_description
+display_name: hc_tj_description
+schema: controller-v23
+managed: true
+imported_at: '2026-08-18T02:37:37.765398+00:00'
+robot_name: hc_tj_robot
+urdf: urdf/hc_tj_robot.urdf
+primary_config: controller_v23.yml
+config_files:
+- controller_v23.yml
+- arm_teleop.yaml
+link_count: 49
+joint_count: 48
+movable_joint_count: 29
+free_joint_count: 17
+task_count: 3
+arm_count: 3
+teleop_compatible: true
+warnings: []

@@ -4,7 +4,6 @@ import json
 import math
 import time
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -139,8 +138,12 @@ class HcTjArmTeleopNode(Node):
         self.initial_joints = {
             name: float(value) for name, value in robot.get("initial_joints", {}).items()
         }
+        urdf_path = Path(robot["urdf_path"]).expanduser()
+        if not urdf_path.is_absolute():
+            urdf_path = self.config_path.parent / urdf_path
+        urdf_path = urdf_path.resolve()
         self.robot_id = bullet.loadURDF(
-            str(Path(robot["urdf_path"]).expanduser().resolve()),
+            str(urdf_path),
             robot["base_position"],
             robot["base_orientation"],
             useFixedBase=True,
@@ -152,6 +155,11 @@ class HcTjArmTeleopNode(Node):
         self.dof_by_joint: dict[int, int] = {}
         self.dof_joint_indices: list[int] = []
         dof = 0
+        base_info = bullet.getBodyInfo(
+            self.robot_id, physicsClientId=self.physics_client
+        )
+        if base_info:
+            self.link_by_name[base_info[0].decode()] = -1
         for index in range(
             bullet.getNumJoints(self.robot_id, physicsClientId=self.physics_client)
         ):
@@ -205,13 +213,13 @@ class HcTjArmTeleopNode(Node):
             PoseArray,
             self.control.get(
                 "controller_target_pose_topic",
-                "/io_teleop/controller_target_ee_poses",
+                "/hc_teleop/controller_target_ee_poses",
             ),
             10,
         )
         self.actual_pub = self.create_publisher(
             PoseArray,
-            self.control.get("actual_pose_topic", "/io_teleop/actual_ee_poses"),
+            self.control.get("actual_pose_topic", "/hc_teleop/actual_ee_poses"),
             10,
         )
         self.base_pub = self.create_publisher(
@@ -235,14 +243,14 @@ class HcTjArmTeleopNode(Node):
         if self.external_ik:
             self.create_subscription(
                 JointState,
-                self.control.get("solver_topic", "/io_teleop/sol_q"),
+                self.control.get("solver_topic", "/hc_teleop/sol_q"),
                 self._solver_callback,
                 10,
             )
             self.create_subscription(
                 JointState,
                 self.control.get(
-                    "generic_command_topic", "/io_teleop/joint_cmd_arm"
+                    "generic_command_topic", "/hc_teleop/joint_cmd_arm"
                 ),
                 self._generic_command_callback,
                 10,
@@ -260,25 +268,11 @@ class HcTjArmTeleopNode(Node):
             10,
         )
         self.create_subscription(
-            PoseStamped,
-            self.body_config["head_pose_topic"],
-            self._head_pose_callback,
+            String,
+            self.control.get("vr_data_topic", "/vrdata"),
+            self._vr_data_callback,
             qos_profile_sensor_data,
         )
-        for side, arm in self.arms.items():
-            cfg = self.config["arms"][side]
-            self.create_subscription(
-                PoseStamped,
-                cfg["pose_topic"],
-                partial(self._arm_pose_callback, arm),
-                qos_profile_sensor_data,
-            )
-            self.create_subscription(
-                Joy,
-                cfg["input_topic"],
-                partial(self._joy_callback, arm),
-                qos_profile_sensor_data,
-            )
         self.create_service(Trigger, "/teleop/arm/enable", self._enable_service)
         self.create_service(Trigger, "/teleop/arm/disable", self._disable_service)
         self.create_service(
@@ -304,6 +298,9 @@ class HcTjArmTeleopNode(Node):
         rate = float(self.config["control"].get("rate_hz", 0.0))
         if not math.isfinite(rate) or rate <= 0.0:
             raise ValueError("control.rate_hz must be positive")
+        vr_data_topic = self.config["control"].get("vr_data_topic", "/vrdata")
+        if not isinstance(vr_data_topic, str) or not vr_data_topic.startswith("/"):
+            raise ValueError("control.vr_data_topic must start with /")
         for key in ("axis_mapping", "head_axis_mapping"):
             mapping = np.asarray(
                 self.config["control"].get(
@@ -415,7 +412,10 @@ class HcTjArmTeleopNode(Node):
             raise ValueError(
                 "robot.initial_joints lacks arm home targets: " + ", ".join(missing_home)
             )
-        if not Path(self.config["robot"]["urdf_path"]).expanduser().is_file():
+        urdf_path = Path(self.config["robot"]["urdf_path"]).expanduser()
+        if not urdf_path.is_absolute():
+            urdf_path = self.config_path.parent / urdf_path
+        if not urdf_path.is_file():
             raise ValueError("robot.urdf_path does not exist")
 
     def _joint_group(self, names: list[str]) -> tuple[list[int], list[int], np.ndarray, np.ndarray]:
@@ -505,6 +505,72 @@ class HcTjArmTeleopNode(Node):
         if all(math.isfinite(float(value)) for value in message.axes):
             arm.joy = message
             arm.joy_stamp = self._monotonic()
+
+    def _vr_data_callback(self, message: String) -> None:
+        try:
+            value = json.loads(message.data)
+            if not isinstance(value, dict):
+                return
+            tracking = value.get("tracking", {})
+            poses = value.get("poses", {})
+            inputs = value.get("inputs", {})
+            if not all(isinstance(item, dict) for item in (tracking, poses, inputs)):
+                return
+
+            def pose_message(name: str) -> PoseStamped | None:
+                source = poses.get(name)
+                if not tracking.get(name) or not isinstance(source, dict):
+                    return None
+                position = source.get("position")
+                quaternion = source.get("quaternion")
+                if not isinstance(position, list) or not isinstance(quaternion, list):
+                    return None
+                if len(position) != 3 or len(quaternion) != 4:
+                    return None
+                result = PoseStamped()
+                (
+                    result.pose.position.x,
+                    result.pose.position.y,
+                    result.pose.position.z,
+                ) = [float(item) for item in position]
+                (
+                    result.pose.orientation.x,
+                    result.pose.orientation.y,
+                    result.pose.orientation.z,
+                    result.pose.orientation.w,
+                ) = [float(item) for item in quaternion]
+                return result
+
+            head = pose_message("head")
+            if head is not None:
+                self._head_pose_callback(head)
+            for side in ("left", "right"):
+                pose = pose_message(side)
+                if pose is not None:
+                    self._arm_pose_callback(self.arms[side], pose)
+                source = inputs.get(side)
+                if not isinstance(source, dict):
+                    continue
+                primary = source.get("primary_axis", [0.0, 0.0])
+                secondary = source.get("secondary_axis", [0.0, 0.0])
+                if not isinstance(primary, list) or len(primary) != 2:
+                    continue
+                if not isinstance(secondary, list) or len(secondary) != 2:
+                    continue
+                held_mask = int(source.get("held_mask", 0))
+                joy = Joy()
+                joy.axes = [
+                    float(source.get("trigger", 0.0)),
+                    float(source.get("grip", 0.0)),
+                    float(primary[0]),
+                    float(primary[1]),
+                    float(secondary[0]),
+                    float(secondary[1]),
+                ]
+                joy.buttons = [int(bool(held_mask & (1 << index))) for index in range(11)]
+                self._joy_callback(self.arms[side], joy)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
 
     def _joint_state_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -1621,6 +1687,7 @@ class HcTjArmTeleopNode(Node):
         )
         body_requested = (
             base_requested
+            and bool(self.body_config.get("enabled", True))
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
         )
         arms_requested = right_input_fresh and self._clutch_pressed(
@@ -1713,6 +1780,7 @@ class HcTjArmTeleopNode(Node):
         )
         body_requested = (
             base_requested
+            and bool(self.body_config.get("enabled", True))
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
         )
         arms_requested = right_input_fresh and self._clutch_pressed(self.arms["right"])
@@ -1824,7 +1892,7 @@ class HcTjArmTeleopNode(Node):
                 controller_pose.orientation.w,
             ) = controller_local[1]
             controller_message.poses.append(controller_pose)
-        if self.external_ik:
+        if self.external_ik and bool(self.body_config.get("enabled", True)):
             torso = self.body.target_base or self._relative_pose(
                 self._root_pose(), self._link_pose(self.body.torso_index)
             )

@@ -1,6 +1,6 @@
 # HC Teleop Middleware
 
-一个面向机器人遥操作的局域网中间件：统一订阅 ROS 2 话题，将消息通过 WebSocket 和 UDP 转发给 VR；同时接收 PICO 位姿、发布 ROS 2 位姿话题，并提供网页 Dashboard 进行配置和监控。
+一个面向机器人遥操作的局域网中间件：接收 PICO 位姿和手柄数据，通过单一 `/vrdata` 发布到 ROS 2，并提供机器人导入、话题录制、状态监控和配置网页。
 
 原有的 `d435_webrtc_server.py` 和 `udp_receiver_test.py` 保留不变。新服务兼容它们的关键协议：
 
@@ -20,15 +20,32 @@ chmod +x install.sh run.sh
 ./run.sh
 ```
 
-然后访问 `http://<机器人IP>:7876/dashboard/#config`。需要相机功能时安装可选依赖并在网页中启用：
+然后访问 `http://<机器人IP>:7876/dashboard/#config`。相机不在系统配置页中管理；需要独立启用 WebRTC 服务时安装可选依赖：
 
 ```bash
 ./install.sh --camera
 ```
 
+### 网页导入机器人配置
+
+“系统配置”页顶部提供 HC 机器人配置工作流：选择已导入机器人、导入新配置、应用配置。导入时同时选择一个 URDF 和一个 YAML，配置 ID 只能使用字母、数字、点、下划线或短横线。文件会保存到 `robot_configs/<配置ID>/`，原文件不会覆盖已有配置。
+
+支持两种 YAML：
+
+- HC 通用 `vr_configs.yml`：包含 `urdf_path`、`arms`、`controller_indices`，可选 `folding_waist`。导入器会校验所有 joint/link 索引，并生成标准接口的 `controller_v23.yml`；双臂配置还会生成 `arm_teleop.yaml`。
+- 重构控制器 `controller_v23.yml`：包含 `model.free_joints`、`task` 和 `limit`。导入器会校验 URDF 关节与任务 link，并统一 ROS 话题和 URDF 相对路径。该格式只提供 IK 控制配置，不包含 HC PyBullet 仿真所需的 `vr_configs.yml`。
+
+点击“应用配置”会写入 `middleware.yaml` 的 `robot_profiles.active` 并立即下发软件停止。退出并重新执行 `./run_sim_teleop.sh` 后，仿真、VR 适配器和 v2.3 控制器会共同读取所选配置。也可临时通过 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 覆盖网页选择。
+
+导入接口对齐当前遥操作链路的标准话题：`/hc_teleop/joint_states`、`/hc_teleop/joint_cmd_arm`、`/hc_teleop/joint_cmd`、`/hc_teleop/controller_target_ee_poses`、`/hc_teleop/target_ee_poses`、`/hc_teleop/actual_ee_poses`、`/hc_teleop/sol_q` 和 `/hc_teleop/target_base_move`。网页仅保留配置和运行状态，原“实时事件”页面不再显示。
+
+### 话题录制
+
+“话题录制”页从 ROS Graph 读取当前话题和消息类型，可直接添加自定义消息，也可在“系统配置 → HC 标准 ROS 2 接口”中切换内置消息是否录制。点击“保存录制配置”后写回 `middleware.yaml`；启用录制时，消息按启动会话写入 `runtime/topic_recordings/ros2_YYYYMMDD_HHMMSS.jsonl`。
+
 ### PICO 客户端版本
 
-手柄按键、Trigger、Grip 和摇杆要求 PICO 客户端发送协议 v2。网页右上角应显示“协议 v2”，ROS 2 中应出现 `/vr/left_controller/input` 和 `/vr/right_controller/input`；旧版 v1 只有位姿，所有手柄输入都会显示为零。
+手柄按键、Trigger、Grip 和摇杆要求 PICO 客户端发送协议 v2。网页右上角应显示“协议 v2”，ROS 2 中应出现 `/vrdata`；旧版 v1 只有位姿，所有手柄输入都会显示为零。
 
 当前配套 Unity 工程和最新 APK 位于移动盘：
 
@@ -55,13 +72,12 @@ ROS_DOMAIN_ID=12 ./run.sh
 ## 数据流
 
 ```text
-ROS 2 topics ──> dynamic subscriptions ──> rate limit ──┬─> /ws (Dashboard / VR)
-                                                        └─> VR UDP :5007 (JSON)
+ROS 2 topics ──> recording rules ──> rate limit ──> runtime/topic_recordings/*.jsonl
 
-PICO UDP :5005 ──> packet validation / sequence check ──┬─> /vr/*_pose (PoseStamped)
-                                                        ├─> /vr/*/input (Joy)
-                                                        ├─> /vr/controller_events (String JSON)
-                                                        └─> /ws status/events
+PICO UDP :5005 ──> packet validation / sequence check ──┬─> /vrdata (String JSON)
+                                                        └─> /ws dashboard status
+
+ROS 2 feedback ──> optional UDP :5007 ──> PICO
 
 D435 ──> latest frame only ──> WebRTC H.264 /offer
 ```
@@ -80,14 +96,7 @@ ROS 转发到 VR 的 UDP 消息是 UTF-8 JSON，最大为一个 UDP 数据报。
 }
 ```
 
-VR 位姿默认发布：`/vr/head_pose`、`/vr/left_controller_pose`、`/vr/right_controller_pose`。手柄连续状态发布为 `sensor_msgs/msg/Joy`：
-
-- `/vr/left_controller/input`
-- `/vr/right_controller/input`
-- `axes = [trigger, grip, primary_x, primary_y, secondary_x, secondary_y]`
-- `buttons[0..10]` 依次对应 `primary`、`secondary`、`grip_button`、`trigger_button`、`menu`、主摇杆点击/触摸、副摇杆点击/触摸、主/副按钮触摸。
-
-手柄 `pressed` / `released` 边沿事件以 JSON 字符串发布到 `/vr/controller_events`，并作为 `vr_controller_event` 独立推送到网页 WebSocket。每帧 `vr_pose` 消息内也包含完整 `inputs.left` 和 `inputs.right`。
+`/vrdata` 使用 `std_msgs/msg/String`，每条 JSON 同时包含 `tracking`、头显/左右手柄 `poses`、左右手柄 `inputs`、序号和 VR 时间戳。`inputs` 内含 Trigger、Grip、两个摇杆、`held`、`pressed`、`released` 及对应位掩码，因此位姿、连续状态和按键边沿不再拆成多个 ROS 话题。
 
 位姿中断超过 200 ms 或头显跟踪失效时，服务向 `/teleop/emergency_stop` 发布 `std_msgs/msg/Bool(data=true)`。启动和配置热重载也默认急停，可在配置页关闭。
 
@@ -97,10 +106,12 @@ VR 位姿默认发布：`/vr/head_pose`、`/vr/left_controller_pose`、`/vr/righ
 | --- | --- |
 | `GET /api/status` | ROS、VR、相机和客户端状态 |
 | `GET/PUT /api/config` | 读取或保存配置；保存后热重载 |
+| `GET /api/robot-profiles` | 已导入机器人、当前选择和标准话题 |
+| `POST /api/robot-profiles/import` | 以 multipart 导入 URDF 和 YAML |
+| `POST /api/robot-profiles/{id}/activate` | 应用已导入配置 |
 | `GET /api/ros/topics` | 当前 ROS Graph 话题 |
 | `POST /api/ros/publish` | 通用 ROS 消息发布 |
 | `POST /api/safety/stop` | 人工急停 |
-| `GET /api/events` | 最近事件 |
 | `GET /ws` | 实时 JSON 事件与消息 |
 | `POST /api/webrtc/offer` | D435 WebRTC SDP 协商 |
 
@@ -119,7 +130,7 @@ VR 位姿默认发布：`/vr/head_pose`、`/vr/left_controller_pose`、`/vr/righ
 - Dashboard 当前设计用于可信机器人局域网，没有账号认证。不要直接暴露到公网；生产部署应通过防火墙限制来源，或在前面增加带认证的反向代理。
 - UDP 不保证送达。关节状态等高频实时数据适合 UDP；任务指令和模式切换应使用 WebSocket/ROS service/action，并在应用层确认。
 - 急停话题只是软件联锁，不能替代硬件急停回路。
-- `server.host` 或 `server.port` 改动会保存，但需要重启进程；其余配置会立即应用。
+- 网页“保存并应用”会原子写回 `middleware.yaml` 并热重载。`server.host`、`server.port` 或 `robot_profiles.root` 改动会保存，但需要重启进程；其余配置立即应用。
 
 ## 验证
 
@@ -162,4 +173,5 @@ PyBullet IK 可用 `./run_sim_teleop.sh --legacy` 排障。
 
 默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `vendor/io_unicontroller_ros2/control_v23_reconstructed`，参数位于 `robot_configs/hc_tj_description/controller_v23.yml`。压缩包中错误的相对 Jacobian 已按 HC-TJ 有限差分结果修正，重构说明同时保留了尚未确认的行为假设。
 
-开发板原版加密控制包仍完整保存在 `vendor/io_unicontroller_ros2/control`，其链路和 `controller_v2.yml` 未删除。新机器人使用 v2.3 时，在 `robot_configs/<机器人名>/controller_v23.yml` 配置 URDF、`free_joints`、pose/axis/joint tasks、权重和限速即可；可用 `HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 选择配置，VR 坐标映射仍在 `arm_teleop.yaml` 中配置。
+新机器人优先从网页或 CLI 导入包含 URDF、YAML、Mesh 和 `arm_teleop.yaml` 的 ZIP 压缩包；也可手工在 `robot_configs/<机器人名>/controller_v23.yml` 与 `robot_configs/<机器人名>/arm_teleop.yaml` 配置 URDF、`free_joints`、pose/axis/joint tasks、权重、限速及手柄映射。默认选择来自 `middleware.yaml`，`HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 仍可作为启动时覆盖项。
+

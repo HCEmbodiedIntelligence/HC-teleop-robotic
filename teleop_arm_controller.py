@@ -11,11 +11,19 @@ from rclpy._rclpy_pybind11 import RCLError
 from hc_teleop_middleware.arm_teleop_node import HcTjArmTeleopNode
 
 
+def default_teleop_config() -> str:
+    root = Path(__file__).resolve().parent
+    profile_cfg = root / "robot_configs" / "hc_tj_description" / "arm_teleop.yaml"
+    if profile_cfg.is_file():
+        return str(profile_cfg)
+    return str(root / "arm_teleop.yaml")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="VR relative-pose teleop for HC-TJ arms")
     parser.add_argument(
         "--config",
-        default=str(Path(__file__).with_name("arm_teleop.yaml")),
+        default=default_teleop_config(),
     )
     parser.add_argument(
         "--backend",

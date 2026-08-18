@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import json
+import queue
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from mcap.well_known import MessageEncoding, SchemaEncoding
+from mcap.writer import Writer as McapWriter
+
+
+def _get_msg_def(msg_type: str) -> bytes:
+    try:
+        import ament_index_python
+
+        parts = msg_type.split("/")
+        if len(parts) == 3 and parts[1] == "msg":
+            pkg, _, name = parts
+            share_dir = Path(ament_index_python.get_package_share_directory(pkg))
+            msg_file = share_dir / "msg" / f"{name}.msg"
+            if msg_file.is_file():
+                return msg_file.read_bytes()
+    except Exception:
+        pass
+    return b""
+
+
+class TopicRecorder:
+    """Non-blocking MCAP recorder for ROS 2 CDR messages and telemetry."""
+
+    def __init__(self, config: dict[str, Any], config_dir: Path):
+        directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
+        if not directory.is_absolute():
+            directory = config_dir / directory
+        self.directory = directory.resolve()
+        self.path: Path | None = None
+        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=8192)
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._messages = 0
+        self._dropped = 0
+
+    def start(self, filename: str = "") -> str:
+        self.stop()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = filename.strip() if filename else f"ros2_{stamp}.mcap"
+        if not fname.endswith(".mcap"):
+            fname += ".mcap"
+        self.path = self.directory / fname
+        with self._lock:
+            self._messages = 0
+            self._dropped = 0
+            self._queue = queue.Queue(maxsize=8192)
+        self._thread = threading.Thread(
+            target=self._run, name="topic-recorder", daemon=True
+        )
+        self._thread.start()
+        return str(self.path)
+
+    def stop(self) -> dict[str, Any]:
+        if self._thread is None:
+            return self.status()
+        while True:
+            try:
+                self._queue.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    continue
+                with self._lock:
+                    self._dropped += 1
+        self._thread.join(timeout=3.0)
+        self._thread = None
+        return self.status()
+
+    def record(self, event: dict[str, Any]) -> None:
+        if self._thread is None:
+            return
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            with self._lock:
+                self._dropped += 1
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "recording": self._thread is not None and self._thread.is_alive(),
+                "path": str(self.path) if (self.path and self._thread is not None) else (str(self.path) if self.path else ""),
+                "messages": self._messages,
+                "dropped": self._dropped,
+            }
+
+    def list_recordings(self) -> list[dict[str, Any]]:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        files = []
+        active_path = (
+            self.path.resolve()
+            if (self.path and self._thread is not None and self._thread.is_alive())
+            else None
+        )
+
+        for p in self.directory.iterdir():
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            if not (p.suffix in {".mcap", ".jsonl"}):
+                continue
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            size = stat.st_size
+            is_cur = active_path is not None and p.resolve() == active_path
+
+            if size < 1024:
+                human_size = f"{size} B"
+            elif size < 1024 * 1024:
+                human_size = f"{size / 1024:.1f} KB"
+            elif size < 1024 * 1024 * 1024:
+                human_size = f"{size / (1024 * 1024):.2f} MB"
+            else:
+                human_size = f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+            created_iso = datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
+            modified_iso = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            files.append({
+                "filename": p.name,
+                "size_bytes": size,
+                "size_human": human_size,
+                "created_at": created_iso,
+                "modified_at": modified_iso,
+                "timestamp": stat.st_mtime,
+                "is_current": is_cur,
+                "format": p.suffix.lstrip(".").upper(),
+            })
+        files.sort(key=lambda x: x["timestamp"], reverse=True)
+        return files
+
+    def delete_recording(self, filename: str) -> None:
+        filename = Path(filename).name
+        target = (self.directory / filename).resolve()
+        if not target.is_relative_to(self.directory) or not target.is_file():
+            raise FileNotFoundError(f"recording not found: {filename}")
+        active_path = (
+            self.path.resolve()
+            if (self.path and self._thread is not None and self._thread.is_alive())
+            else None
+        )
+        if active_path is not None and target == active_path:
+            raise ValueError(f"cannot delete actively recording file: {filename}")
+        target.unlink()
+
+    def _run(self) -> None:
+        assert self.path is not None
+        schemas: dict[str, int] = {}
+        channels: dict[tuple[str, str], int] = {}
+
+        with self.path.open("wb") as stream:
+            writer = McapWriter(stream)
+            writer.start()
+            try:
+                while True:
+                    try:
+                        event = self._queue.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                    if event is None:
+                        break
+
+                    topic = str(event.get("topic") or "/events")
+                    msg_type = str(event.get("msg_type") or "std_msgs/msg/String")
+                    raw_data = event.get("_raw")
+                    stamp_ns = int(event.get("stamp_ns") or time.time_ns())
+
+                    if raw_data is not None and isinstance(raw_data, (bytes, bytearray)):
+                        if msg_type not in schemas:
+                            msg_def = _get_msg_def(msg_type)
+                            schemas[msg_type] = writer.register_schema(
+                                name=msg_type,
+                                encoding=SchemaEncoding.ROS2,
+                                data=msg_def,
+                            )
+                        schema_id = schemas[msg_type]
+                        chan_key = (topic, msg_type)
+                        if chan_key not in channels:
+                            channels[chan_key] = writer.register_channel(
+                                topic=topic,
+                                message_encoding=MessageEncoding.CDR,
+                                schema_id=schema_id,
+                            )
+                        channel_id = channels[chan_key]
+                        writer.add_message(
+                            channel_id=channel_id,
+                            log_time=stamp_ns,
+                            data=bytes(raw_data),
+                            publish_time=stamp_ns,
+                        )
+                    else:
+                        payload = event.get("payload")
+                        if payload is None:
+                            payload = event
+                        json_bytes = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        if "teleop_event" not in schemas:
+                            schemas["teleop_event"] = writer.register_schema(
+                                name="teleop_event",
+                                encoding=SchemaEncoding.JSONSchema,
+                                data=b"",
+                            )
+                        schema_id = schemas["teleop_event"]
+                        chan_key = (topic, "teleop_event")
+                        if chan_key not in channels:
+                            channels[chan_key] = writer.register_channel(
+                                topic=topic,
+                                message_encoding=MessageEncoding.JSON,
+                                schema_id=schema_id,
+                            )
+                        channel_id = channels[chan_key]
+                        writer.add_message(
+                            channel_id=channel_id,
+                            log_time=stamp_ns,
+                            data=json_bytes,
+                            publish_time=stamp_ns,
+                        )
+
+                    with self._lock:
+                        self._messages += 1
+            finally:
+                writer.finish()
