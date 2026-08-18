@@ -36,19 +36,19 @@ task:
   pose:
   - - - R_arm_0_Link
       - io_teleop_ee_link_right
-    - 5.0
-    - 1.0
-    - 3.0
+    - 10.0
+    - 2.0
+    - 8.0
   - - - L_arm_0_Link
       - io_teleop_ee_link_left
-    - 5.0
-    - 1.0
-    - 3.0
+    - 10.0
+    - 2.0
+    - 8.0
   - - - base_link
       - zhi_Link
-    - 5.0
-    - 1.0
-    - 1.0
+    - 10.0
+    - 2.0
+    - 4.0
   axis: []
   joint: []
 limit:

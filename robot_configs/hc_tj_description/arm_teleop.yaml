@@ -176,7 +176,7 @@ grippers:
 control:
   backend: v23
   enabled_on_start: true
-  rate_hz: 60.0
+  rate_hz: 100.0
   vr_data_topic: /vrdata
   joint_state_topic: /hc_teleop/joint_states
   command_topic: /hc_teleop/joint_cmd
@@ -218,13 +218,13 @@ control:
   - - 0.0
     - 1.0
     - 0.0
-  position_scale: 0.8
+  position_scale: 1.0
   max_displacement: 0.45
   orientation_enabled: true
   orientation_weight: 0.35
   target_position_deadband: 0.002
   target_orientation_deadband: 0.015
-  target_filter_alpha: 0.35
+  target_filter_alpha: 0.85
   command_joint_deadband: 0.001
   ik_iterations: 16
   ik_position_tolerance: 0.01
@@ -247,5 +247,5 @@ control:
   ik_reseed_escape_progress_ratio: 0.05
   ik_reseed_escape_max_regression: 0.25
   ik_max_update: 0.08
-  max_joint_velocity: 1.2
-  max_joint_velocity_norm: 1.2
+  max_joint_velocity: 3.5
+  max_joint_velocity_norm: 3.5
