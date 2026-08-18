@@ -581,7 +581,7 @@ async function loadDatasets() {
     if (!files.length) {
       const row = document.createElement('tr');
       const cell = document.createElement('td');
-      cell.colSpan = 7;
+      cell.colSpan = 9;
       cell.style.textAlign = 'center';
       cell.style.color = 'var(--muted)';
       cell.style.padding = '24px 0';
@@ -608,28 +608,49 @@ async function loadDatasets() {
       nameCell.append(nameCode);
 
       const sizeCell = document.createElement('td');
+      sizeCell.style.font = '12px monospace';
       sizeCell.textContent = file.size_human;
 
-      const formatCell = document.createElement('td');
-      const formatTag = document.createElement('span');
-      formatTag.className = 'tag';
-      formatTag.textContent = file.format || 'MCAP';
-      formatCell.append(formatTag);
+      const durationCell = document.createElement('td');
+      durationCell.style.font = '12px monospace';
+      durationCell.textContent = file.duration_human || '--';
+
+      const msgCountCell = document.createElement('td');
+      msgCountCell.style.font = '12px monospace';
+      msgCountCell.style.color = 'var(--cyan)';
+      msgCountCell.textContent = file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : '--');
+
+      const topicsCell = document.createElement('td');
+      topicsCell.style.fontSize = '12px';
+      if (file.topic_count) {
+        topicsCell.textContent = `${file.topic_count} 个话题 (${file.avg_rate_hz || 0} Hz)`;
+      } else {
+        topicsCell.textContent = file.is_current ? '录制中…' : '--';
+      }
 
       const timeCell = document.createElement('td');
+      timeCell.style.fontSize = '12px';
       timeCell.textContent = file.created_at || file.modified_at;
 
       const statusCell = document.createElement('td');
       if (file.is_current) {
         statusCell.innerHTML = '<span class="recording-badge active" style="padding:2px 6px;font-size:10px;"><i></i>正在写入</span>';
       } else {
-        statusCell.innerHTML = '<span class="tag" style="border-color:#34434e;color:#8293a0;">就绪</span>';
+        statusCell.innerHTML = '<span class="tag" style="border-color:#1c664b;color:#55d98b;">就绪</span>';
       }
 
       const actionCell = document.createElement('td');
       actionCell.style.textAlign = 'right';
       const group = document.createElement('div');
       group.className = 'btn-group';
+
+      if (!file.is_current && (file.channels?.length || file.message_count)) {
+        const detailBtn = document.createElement('button');
+        detailBtn.className = 'btn-sm';
+        detailBtn.textContent = '详情';
+        detailBtn.onclick = () => showDatasetDetails(file);
+        group.append(detailBtn);
+      }
 
       const downloadLink = document.createElement('a');
       downloadLink.className = 'btn-sm';
@@ -655,13 +676,70 @@ async function loadDatasets() {
       group.append(downloadLink, deleteBtn);
       actionCell.append(group);
 
-      row.append(selectCell, nameCell, sizeCell, formatCell, timeCell, statusCell, actionCell);
+      row.append(selectCell, nameCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
       body.append(row);
     }
   } catch (error) {
     if (summary) summary.textContent = `读取数据集列表失败: ${error.message}`;
     toast(`加载数据集失败：${error.message}`, true);
   }
+}
+
+function showDatasetDetails(file) {
+  const dialog = $('#datasetDetailDialog');
+  if (!dialog) return;
+  $('#datasetDetailTitle').textContent = file.filename;
+  $('#datasetDetailMeta').textContent = `生成时间: ${file.created_at || file.modified_at} · 文件格式: ${file.format || 'MCAP'}`;
+
+  const summary = $('#datasetDetailSummary');
+  summary.textContent = '';
+  const values = [
+    ['文件大小', file.size_human || '--'],
+    ['录制时长', file.duration_human || '--'],
+    ['总消息数', file.message_count ? `${file.message_count.toLocaleString()} 条` : '--'],
+    ['总平均吞吐', file.avg_rate_hz ? `${file.avg_rate_hz} msg/s` : '--'],
+  ];
+  for (const [label, val] of values) {
+    const span = document.createElement('span');
+    const small = document.createElement('small'); small.textContent = label;
+    const b = document.createElement('b'); b.textContent = val;
+    span.append(small, b);
+    summary.append(span);
+  }
+
+  const tbody = $('#datasetDetailChannelRows');
+  tbody.textContent = '';
+  const channels = file.channels || [];
+  if (!channels.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.style.textAlign = 'center';
+    td.style.color = 'var(--muted)';
+    td.textContent = '暂无话题分布详情（文件可能为空或正在录制中）';
+    tr.append(td);
+    tbody.append(tr);
+  } else {
+    for (const ch of channels) {
+      const tr = document.createElement('tr');
+      const tdTopic = document.createElement('td');
+      const code = document.createElement('code');
+      code.textContent = ch.topic;
+      tdTopic.append(code);
+      const tdType = document.createElement('td');
+      tdType.textContent = ch.type;
+      const tdCount = document.createElement('td');
+      tdCount.style.font = '12px monospace';
+      tdCount.textContent = `${(ch.count || 0).toLocaleString()} 条`;
+      const tdRate = document.createElement('td');
+      tdRate.className = 'topic-rate ok';
+      tdRate.textContent = `${Number(ch.rate_hz || 0).toFixed(1)} Hz`;
+      tr.append(tdTopic, tdType, tdCount, tdRate);
+      tbody.append(tr);
+    }
+  }
+
+  dialog.showModal();
 }
 
 function configureProfileDialog() {

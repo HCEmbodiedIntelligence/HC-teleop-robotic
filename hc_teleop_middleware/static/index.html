@@ -109,11 +109,13 @@
               <tr>
                 <th style="width:40px;"><input type="checkbox" id="selectAllDatasets" title="全选 / 取消全选"></th>
                 <th>文件名</th>
-                <th>大小</th>
-                <th>格式</th>
+                <th>文件大小</th>
+                <th>录制时长</th>
+                <th>消息总数</th>
+                <th>录制话题</th>
                 <th>生成时间</th>
                 <th>状态</th>
-                <th style="width:160px; text-align:right;">操作</th>
+                <th style="width:190px; text-align:right;">操作</th>
               </tr>
             </thead>
             <tbody id="datasetRows"></tbody>
@@ -184,6 +186,29 @@
         <div class="dialog-actions">
           <button type="button" onclick="document.getElementById('precheckWarningDialog').close()">取消</button>
           <button type="button" class="danger" id="confirmForceStartBtn">强制开始录制</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="datasetDetailDialog">
+      <form method="dialog" style="max-width:680px;">
+        <div class="dialog-title">
+          <div>
+            <h2 id="datasetDetailTitle">数据集详情</h2>
+            <p id="datasetDetailMeta">文件统计与话题分布</p>
+          </div>
+          <button class="dialog-close" type="button" onclick="document.getElementById('datasetDetailDialog').close()">×</button>
+        </div>
+        <div class="profile-summary" id="datasetDetailSummary" style="margin-top:14px;grid-template-columns:repeat(4,1fr);"></div>
+        <div class="table-wrap" style="margin-top:16px;max-height:260px;">
+          <table>
+            <thead>
+              <tr><th>录制 Topic</th><th>消息类型</th><th>消息条数</th><th>平均频率</th></tr>
+            </thead>
+            <tbody id="datasetDetailChannelRows"></tbody>
+          </table>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" onclick="document.getElementById('datasetDetailDialog').close()">关闭</button>
         </div>
       </form>
     </dialog>

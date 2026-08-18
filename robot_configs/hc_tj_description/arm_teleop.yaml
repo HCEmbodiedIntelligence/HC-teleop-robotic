@@ -199,9 +199,9 @@ control:
   input_timeout: 0.5
   joint_state_timeout: 0.5
   axis_mapping:
-  - - -1.0
+  - - 0.0
     - 0.0
-    - 0.0
+    - 1.0
   - - 0.0
     - 0.0
     - -1.0

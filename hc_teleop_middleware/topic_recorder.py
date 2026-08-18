@@ -28,6 +28,58 @@ def _get_msg_def(msg_type: str) -> bytes:
     return b""
 
 
+def _inspect_mcap_file(path: Path) -> dict[str, Any]:
+    try:
+        from mcap.reader import make_reader
+
+        with path.open("rb") as f:
+            reader = make_reader(f)
+            s = reader.get_summary()
+            if not s or not s.statistics:
+                return {
+                    "duration_sec": 0.0,
+                    "duration_human": "--",
+                    "message_count": 0,
+                    "topic_count": 0,
+                    "channels": [],
+                    "avg_rate_hz": 0.0,
+                }
+            start_ns = s.statistics.message_start_time
+            end_ns = s.statistics.message_end_time
+            duration = (end_ns - start_ns) / 1e9 if (end_ns > start_ns) else 0.0
+            msg_count = s.statistics.message_count
+            schemas = {s_id: sch.name for s_id, sch in s.schemas.items()}
+            channels = []
+            for chan_id, count in sorted(s.statistics.channel_message_counts.items()):
+                chan = s.channels.get(chan_id)
+                if not chan:
+                    continue
+                channels.append({
+                    "topic": chan.topic,
+                    "type": schemas.get(chan.schema_id, "unknown"),
+                    "count": count,
+                    "rate_hz": round((count / duration) if duration > 0 else 0.0, 1),
+                })
+            avg_rate = (msg_count / duration) if duration > 0 else 0.0
+            return {
+                "duration_sec": round(duration, 2),
+                "duration_human": f"{duration:.1f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s",
+                "message_count": msg_count,
+                "topic_count": len(channels),
+                "channels": channels,
+                "avg_rate_hz": round(avg_rate, 1),
+            }
+    except Exception:
+        return {
+            "duration_sec": 0.0,
+            "duration_human": "--",
+            "message_count": 0,
+            "topic_count": 0,
+            "channels": [],
+            "avg_rate_hz": 0.0,
+        }
+
+
 class TopicRecorder:
     """Non-blocking MCAP recorder for ROS 2 CDR messages and telemetry."""
 
@@ -129,6 +181,16 @@ class TopicRecorder:
 
             created_iso = datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
             modified_iso = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+            meta = _inspect_mcap_file(p) if (p.suffix == ".mcap" and not is_cur) else {
+                "duration_sec": 0.0,
+                "duration_human": "正在写入…" if is_cur else "--",
+                "message_count": self._messages if is_cur else 0,
+                "topic_count": 0,
+                "channels": [],
+                "avg_rate_hz": 0.0,
+            }
+
             files.append({
                 "filename": p.name,
                 "size_bytes": size,
@@ -138,6 +200,12 @@ class TopicRecorder:
                 "timestamp": stat.st_mtime,
                 "is_current": is_cur,
                 "format": p.suffix.lstrip(".").upper(),
+                "duration_sec": meta["duration_sec"],
+                "duration_human": meta["duration_human"],
+                "message_count": meta["message_count"],
+                "topic_count": meta["topic_count"],
+                "channels": meta["channels"],
+                "avg_rate_hz": meta["avg_rate_hz"],
             })
         files.sort(key=lambda x: x["timestamp"], reverse=True)
         return files
