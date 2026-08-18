@@ -48,6 +48,7 @@ trap cleanup INT TERM EXIT
 
 LAUNCH_DRIVER=true
 DRIVER_MODE="all"
+DRIVER_EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -59,16 +60,28 @@ while [[ $# -gt 0 ]]; do
       DRIVER_MODE="arms"
       shift
       ;;
+    --no-camera|--no-head-camera|--no-d405|--no-chassis|--no-hands|--no-vr-trigger)
+      DRIVER_EXTRA_ARGS+=("$1")
+      shift
+      ;;
     -h|--help)
-      echo "用法: $0 [--no-driver] [--arms-only]"
+      echo "用法: $0 [--no-driver] [--arms-only] [--no-camera] [--no-d405] [--no-chassis] [--no-hands]"
       exit 0
       ;;
     *)
-      warn "未知参数: $1"
+      DRIVER_EXTRA_ARGS+=("$1")
       shift
       ;;
   esac
 done
+
+# Auto-detect D405 cameras if not explicitly provided
+if [[ "${DRIVER_MODE}" == "all" ]] && ! [[ "${DRIVER_EXTRA_ARGS[*]}" =~ "--no-d405" ]]; then
+  if ! lsusb 2>/dev/null | grep -qiE "RealSense|Intel Corp"; then
+    log "未检测到 Intel RealSense D405 USB 设备，自动添加 --no-d405 避免驱动报错"
+    DRIVER_EXTRA_ARGS+=("--no-d405")
+  fi
+fi
 
 # 1. 环境初始化
 if [[ -f /opt/ros/humble/setup.bash ]]; then
@@ -87,12 +100,12 @@ log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 if [[ "${LAUNCH_DRIVER}" == true ]]; then
   if [[ -d "${HC_IO_SUIT_DIR}/src/hc_tj" ]]; then
     if [[ "${DRIVER_MODE}" == "all" && -f "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" ]]; then
-      log "启动 hc_io_suit 全功能真机驱动..."
-      setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" &
+      log "启动 hc_io_suit 全功能真机驱动 (${DRIVER_EXTRA_ARGS[*]:-默认全部})..."
+      setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" "${DRIVER_EXTRA_ARGS[@]}" &
       PIDS+=($!)
     elif [[ -f "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" ]]; then
       log "启动 hc_io_suit 双臂驱动..."
-      setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" &
+      setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" "${DRIVER_EXTRA_ARGS[@]}" &
       PIDS+=($!)
     fi
     sleep 3
