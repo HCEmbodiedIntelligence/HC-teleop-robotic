@@ -90,8 +90,9 @@ def _get_msg_def(msg_type: str) -> bytes:
             queue.extend(find_dependencies(text, dep_pkg))
 
         out = [top_text.rstrip()]
+        sep = "=" * 80
         for dep_pkg, dep_name, text in sub_defs:
-            out.append(f"\n================================================================================\nMSG: {dep_pkg}/msg/{dep_name}\n{text.rstrip()}")
+            out.append(f"\n{sep}\nMSG: {dep_pkg}/{dep_name}\n{text.rstrip()}")
 
         return "\n".join(out).encode("utf-8")
     except Exception:
