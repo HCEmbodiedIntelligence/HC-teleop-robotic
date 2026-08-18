@@ -96,7 +96,24 @@ class MiddlewareRuntime:
     async def _broadcast(self, event: dict[str, Any]) -> None:
         if not self.websockets:
             return
-        message = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+        def _json_default(obj: Any) -> Any:
+            if isinstance(obj, bytes):
+                return obj.decode("utf-8", errors="replace")
+            if hasattr(obj, "tolist"):
+                return obj.tolist()
+            return str(obj)
+
+        safe_event = {k: v for k, v in event.items() if k != "_raw"}
+        try:
+            message = json.dumps(
+                safe_event,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=_json_default,
+            )
+        except Exception:
+            return
         dead = []
         for ws in tuple(self.websockets):
             try:
