@@ -64,8 +64,7 @@ body:
   stick_y_axis: 3
   stick_deadzone: 0.08
   stick_forward_direction: 1.0
-  stick_lateral_direction: 1.0
-  stick_yaw_direction: -1.0
+  stick_lateral_direction: -1.0
   max_linear_velocity: 0.35
   max_lateral_velocity: 0.25
   yaw_deadzone: 0.1
