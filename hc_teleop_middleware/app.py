@@ -200,6 +200,12 @@ def create_app(store: ConfigStore) -> web.Application:
     async def get_robot_profiles(_request: web.Request) -> web.Response:
         active = str(store.value["robot_profiles"].get("active", ""))
         values = profiles.list()
+        active_topics = dict(STANDARD_TOPICS)
+        if active:
+            try:
+                active_topics = profiles.get_profile_topics(active)
+            except Exception:
+                pass
         for value in values:
             value["active"] = value["id"] == active
         return web.json_response(
@@ -207,7 +213,7 @@ def create_app(store: ConfigStore) -> web.Application:
                 "active": active,
                 "root": str(profiles.root),
                 "profiles": values,
-                "standard_topics": STANDARD_TOPICS,
+                "standard_topics": active_topics,
             }
         )
 

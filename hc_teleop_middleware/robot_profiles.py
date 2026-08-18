@@ -17,14 +17,14 @@ import yaml
 
 
 STANDARD_TOPICS = {
-    "joint_state": "/hc_teleop/joint_states",
-    "joint_target": "/hc_teleop/joint_cmd_arm",
-    "joint_command": "/hc_teleop/joint_cmd",
-    "ee_target": "/hc_teleop/controller_target_ee_poses",
-    "ee_visual_target": "/hc_teleop/target_ee_poses",
-    "ee_actual": "/hc_teleop/actual_ee_poses",
-    "solver_state": "/hc_teleop/sol_q",
-    "base_move": "/hc_teleop/target_base_move",
+    "joint_state": "/io_teleop/joint_states",
+    "joint_target": "/io_teleop/joint_cmd_arm",
+    "joint_command": "/io_teleop/joint_cmd",
+    "ee_target": "/io_teleop/controller_target_ee_poses",
+    "ee_visual_target": "/io_teleop/target_ee_poses",
+    "ee_actual": "/io_teleop/actual_ee_poses",
+    "solver_state": "/io_teleop/sol_q",
+    "base_move": "/io_teleop/target_base_move",
 }
 
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -908,3 +908,23 @@ class RobotProfileManager:
                 shutil.rmtree(temp_path, ignore_errors=True)
                 raise
             return self.get(profile_id)
+
+    def get_profile_topics(self, profile_id: str) -> dict[str, str]:
+        profile_dir = (self.root / profile_id).resolve()
+        arm_teleop = profile_dir / "arm_teleop.yaml"
+        if arm_teleop.is_file():
+            with arm_teleop.open("r", encoding="utf-8") as stream:
+                cfg = yaml.safe_load(stream) or {}
+            control = cfg.get("control", {})
+            body = cfg.get("body", {})
+            return {
+                "joint_state": control.get("joint_state_topic", STANDARD_TOPICS["joint_state"]),
+                "joint_target": control.get("generic_command_topic", STANDARD_TOPICS["joint_target"]),
+                "joint_command": control.get("command_topic", STANDARD_TOPICS["joint_command"]),
+                "ee_target": control.get("controller_target_pose_topic", STANDARD_TOPICS["ee_target"]),
+                "ee_visual_target": control.get("target_pose_topic", STANDARD_TOPICS["ee_visual_target"]),
+                "ee_actual": control.get("actual_pose_topic", STANDARD_TOPICS["ee_actual"]),
+                "solver_state": control.get("solver_topic", STANDARD_TOPICS["solver_state"]),
+                "base_move": body.get("base_command_topic", STANDARD_TOPICS["base_move"]),
+            }
+        return dict(STANDARD_TOPICS)

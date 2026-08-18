@@ -21,6 +21,21 @@ DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
     "/hc_teleop/target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
     "/hc_teleop/actual_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
     "/hc_teleop/target_base_move": {"target_hz": 60.0, "min_hz": 20.0},
+    "/io_teleop/joint_states": {"target_hz": 100.0, "min_hz": 50.0},
+    "/io_teleop/joint_cmd": {"target_hz": 100.0, "min_hz": 50.0},
+    "/io_teleop/joint_cmd_arm": {"target_hz": 100.0, "min_hz": 50.0},
+    "/io_teleop/sol_q": {"target_hz": 100.0, "min_hz": 50.0},
+    "/io_teleop/controller_target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
+    "/io_teleop/target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
+    "/io_teleop/actual_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
+    "/io_teleop/target_base_move": {"target_hz": 60.0, "min_hz": 20.0},
+    "/io_teleop/joint_cmd_finger_left": {"target_hz": 100.0, "min_hz": 50.0},
+    "/io_teleop/joint_cmd_finger_right": {"target_hz": 100.0, "min_hz": 50.0},
+    "/io_teleop/hand_joint_states": {"target_hz": 100.0, "min_hz": 30.0},
+    "/io_teleop/camera_head/color": {"target_hz": 30.0, "min_hz": 10.0},
+    "/io_teleop/camera_head/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/io_teleop/camera_d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/io_teleop/camera_d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/teleop/arm/status": {"target_hz": 10.0, "min_hz": 2.0},
     "/vrdata": {"target_hz": 60.0, "min_hz": 30.0},
     "/tf": {"target_hz": 20.0, "min_hz": 5.0},
@@ -191,10 +206,10 @@ class RosBridge:
             from rosidl_runtime_py.set_message import set_message_fields
             from rosidl_runtime_py.utilities import get_message
 
-            domain_id = int(self.config.get("domain_id", 0))
+            domain_id = int(self.config.get("domain_id", int(os.environ.get("ROS_DOMAIN_ID", 13))))
             os.environ["ROS_DOMAIN_ID"] = str(domain_id)
 
-            rclpy.init(args=[])
+            rclpy.init(args=[], domain_id=domain_id)
             node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"))
             executor = SingleThreadedExecutor()
             executor.add_node(node)

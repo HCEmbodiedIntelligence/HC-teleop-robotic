@@ -99,18 +99,36 @@ class TopicPlayer:
                 self._topic_remap = dict(topic_remap or {})
             elif mode == "drive":
                 # In drive mode, we isolate robot actuator commands + visualization target markers,
-                # ensuring the simulator executes the joints and tracks the end-effector marker.
+                # ensuring the simulator or real robot executes the joints and tracks the end-effector marker.
                 drive_passthrough = {
                     "/hc_teleop/target_ee_poses",
                     "/hc_teleop/controller_target_ee_poses",
                     "/hc_teleop/actual_ee_poses",
                     "/hc_teleop/target_base_move",
                     "/hc_teleop/target_finger_joints",
+                    "/io_teleop/target_ee_poses",
+                    "/io_teleop/controller_target_ee_poses",
+                    "/io_teleop/actual_ee_poses",
+                    "/io_teleop/target_base_move",
+                    "/io_teleop/joint_cmd_finger_left",
+                    "/io_teleop/joint_cmd_finger_right",
                 }
-                if "/hc_teleop/joint_cmd" in avail_topics:
+                if "/io_teleop/joint_cmd" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/io_teleop/joint_cmd"
+                    ]
+                    self._topic_remap = {}
+                elif "/hc_teleop/joint_cmd" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/hc_teleop/joint_cmd"
+                    ]
+                    self._topic_remap = {}
+                elif "/io_teleop/joint_cmd_arm" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/io_teleop/joint_cmd_arm"
                     ]
                     self._topic_remap = {}
                 elif "/hc_teleop/joint_cmd_arm" in avail_topics:
@@ -119,6 +137,12 @@ class TopicPlayer:
                         if t in drive_passthrough or t == "/hc_teleop/joint_cmd_arm"
                     ]
                     self._topic_remap = {}
+                elif "/io_teleop/joint_states" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/io_teleop/joint_states"
+                    ]
+                    self._topic_remap = {"/io_teleop/joint_states": "/io_teleop/joint_cmd"}
                 elif "/hc_teleop/joint_states" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics

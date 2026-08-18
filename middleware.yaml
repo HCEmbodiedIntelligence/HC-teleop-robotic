@@ -6,7 +6,7 @@ robot_profiles:
   active: hc_tj_description
 ros:
   enabled: true
-  domain_id: 12
+  domain_id: 13
   node_name: hc_teleop_middleware
   subscriptions:
   - topic: /teleop/arm/status
