@@ -127,9 +127,23 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
             ConfigStore(self.store.path).load()["robot_profiles"]["active"], ""
         )
 
+    async def test_recording_precheck_api(self):
+        # Precheck endpoint
+        pre_res = await self.client.post("/api/recording/precheck")
+        self.assertEqual(pre_res.status, 200)
+        pre_data = await pre_res.json()
+        self.assertTrue(pre_data["ok"])
+
+        # Without force, start should be rejected if topics not ready or none configured
+        start_fail = await self.client.post("/api/recording/start", json={"filename": "fail.mcap", "force": False})
+        self.assertEqual(start_fail.status, 400)
+        fail_data = await start_fail.json()
+        self.assertFalse(fail_data["ok"])
+        self.assertTrue(fail_data["can_force"])
+
     async def test_recording_api_start_stop(self):
-        # Start recording
-        res = await self.client.post("/api/recording/start", json={"filename": "api_test.mcap"})
+        # Start recording with force=True
+        res = await self.client.post("/api/recording/start", json={"filename": "api_test.mcap", "force": True})
         self.assertEqual(res.status, 200)
         data = await res.json()
         self.assertTrue(data["ok"])
@@ -150,7 +164,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dataset_management_apis(self):
         # Start and stop recording to create a file
-        await self.client.post("/api/recording/start", json={"filename": "ds_test.mcap"})
+        await self.client.post("/api/recording/start", json={"filename": "ds_test.mcap", "force": True})
         await self.client.post("/api/recording/stop")
 
         # List recordings

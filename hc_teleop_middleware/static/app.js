@@ -7,6 +7,17 @@ let pendingVrPose = null;
 let vrPoseFramePending = false;
 const titles = {overview:'运行概览', topics:'话题录制', datasets:'数据集管理', config:'系统配置'};
 let discoveredTopics = [];
+let latestTopicHealth = {};
+const standardTopicStandards = {
+  joint_state: { target_hz: 100, min_hz: 50 },
+  joint_target: { target_hz: 100, min_hz: 50 },
+  joint_command: { target_hz: 100, min_hz: 50 },
+  ee_target: { target_hz: 60, min_hz: 30 },
+  ee_visual_target: { target_hz: 60, min_hz: 30 },
+  ee_actual: { target_hz: 60, min_hz: 30 },
+  solver_state: { target_hz: 100, min_hz: 50 },
+  base_move: { target_hz: 60, min_hz: 20 },
+};
 const standardTopicTypes = {
   joint_state:'sensor_msgs/msg/JointState', joint_target:'sensor_msgs/msg/JointState',
   joint_command:'sensor_msgs/msg/JointState', ee_target:'geometry_msgs/msg/PoseArray',
@@ -108,6 +119,14 @@ function renderStatus(data) {
   $('#vrProtocol').textContent=protocolLabel(vr.protocol_version);
   renderController('left',vr.inputs?.left||{});
   renderController('right',vr.inputs?.right||{});
+  if (ros.topic_health) {
+    latestTopicHealth = ros.topic_health;
+    updateReadinessBanner();
+    if (window.location.hash === '#topics' || (!window.location.hash && $('#topics')?.classList.contains('active'))) {
+      renderStandardTopics();
+      renderRecordingRules();
+    }
+  }
 }
 
 function protocolLabel(version) {
@@ -242,6 +261,92 @@ function setTopicRecording(topic,type,enabled,maxHz=0) {
   renderStandardTopics();
 }
 
+function renderTopicHealthBadge(topic, defaultMinHz = 10, defaultTargetHz = 50) {
+  const info = latestTopicHealth[topic];
+  const hz = Number(info?.hz || 0);
+  const minHz = Number(info?.min_hz || defaultMinHz || 10);
+  const targetHz = Number(info?.target_hz || defaultTargetHz || 50);
+  const hasData = Boolean(info?.has_data);
+  const state = info?.state || (!hasData ? 'no_data' : (minHz > 0 && hz < minHz ? 'low_rate' : 'ok'));
+
+  let badgeClass = 'status-none';
+  let badgeText = '无消息 (0 Hz)';
+  let hzClass = 'none';
+
+  if (state === 'ok') {
+    badgeClass = 'status-ok';
+    badgeText = `达标 (${hz.toFixed(1)} Hz)`;
+    hzClass = 'ok';
+  } else if (state === 'low_rate') {
+    badgeClass = 'status-low';
+    badgeText = `偏低 (${hz.toFixed(1)} Hz)`;
+    hzClass = 'low';
+  }
+
+  const rateCell = document.createElement('td');
+  const rateSpan = document.createElement('span');
+  rateSpan.className = `topic-rate ${hzClass}`;
+  rateSpan.textContent = hasData ? `${hz.toFixed(1)} Hz` : '0.0 Hz';
+  rateCell.append(rateSpan);
+
+  const stdCell = document.createElement('td');
+  const stdSpan = document.createElement('span');
+  stdSpan.className = 'topic-target-rate';
+  stdSpan.textContent = minHz > 0 ? `≥ ${minHz.toFixed(0)} Hz (${targetHz.toFixed(0)} Hz)` : '--';
+  stdCell.append(stdSpan);
+
+  const statusCell = document.createElement('td');
+  const badgeSpan = document.createElement('span');
+  badgeSpan.className = `topic-status-badge ${badgeClass}`;
+  const dot = document.createElement('i');
+  badgeSpan.append(dot, document.createTextNode(badgeText));
+  statusCell.append(badgeSpan);
+
+  return { rateCell, stdCell, statusCell };
+}
+
+function updateReadinessBanner() {
+  const banner = $('#recordingReadinessBanner');
+  const text = $('#recordingReadinessText');
+  if (!banner || !text || !config) return;
+
+  const recordingSubs = (config.ros?.subscriptions || []).filter(
+    item => item.enabled !== false && (item.outputs || []).includes('record')
+  );
+
+  if (!recordingSubs.length) {
+    banner.className = 'recording-readiness-banner warn';
+    text.textContent = '⚠️ 当前未勾选任何需要录制的话题，请在下方勾选内置或自定义话题';
+    return;
+  }
+
+  let noDataCount = 0;
+  let lowRateCount = 0;
+  let okCount = 0;
+
+  for (const item of recordingSubs) {
+    const info = latestTopicHealth[item.topic];
+    if (!info || info.state === 'no_data') {
+      noDataCount++;
+    } else if (info.state === 'low_rate') {
+      lowRateCount++;
+    } else {
+      okCount++;
+    }
+  }
+
+  if (noDataCount === 0 && lowRateCount === 0) {
+    banner.className = 'recording-readiness-banner ready';
+    text.textContent = `🟢 录制检测就绪：已勾选的 ${recordingSubs.length} 个话题全部正常接收且频率达标`;
+  } else {
+    banner.className = 'recording-readiness-banner warn';
+    const problems = [];
+    if (noDataCount > 0) problems.push(`${noDataCount} 个无数据`);
+    if (lowRateCount > 0) problems.push(`${lowRateCount} 个频率不足`);
+    text.textContent = `⚠️ 待录制话题检测未达标：${problems.join('，')}（共勾选 ${recordingSubs.length} 个话题，已就绪 ${okCount} 个）`;
+  }
+}
+
 function renderRecordingRules() {
   const body=$('#recordingRows');
   if(!body||!config)return;
@@ -255,17 +360,20 @@ function renderRecordingRules() {
     const topic=document.createElement('td'), topicCode=document.createElement('code');
     topicCode.textContent=item.topic; topic.append(topicCode);
     const type=document.createElement('td'); type.textContent=item.type;
-    const rateCell=document.createElement('td'), rate=document.createElement('input');
+
+    const { rateCell, stdCell } = renderTopicHealthBadge(item.topic, Number(item.min_hz)||5, Number(item.target_hz)||10);
+
+    const rateCellInput=document.createElement('td'), rate=document.createElement('input');
     rate.type='number'; rate.min='0'; rate.value=item.max_hz||0;
-    rate.onchange=()=>{item.max_hz=Number(rate.value)||0;}; rateCell.append(rate);
+    rate.onchange=()=>{item.max_hz=Number(rate.value)||0;}; rateCellInput.append(rate);
     const action=document.createElement('td'), remove=document.createElement('button');
     remove.className='remove'; remove.textContent='删除';
     remove.onclick=()=>setTopicRecording(item.topic,item.type,false);
-    action.append(remove); row.append(enabledCell,topic,type,rateCell,action); body.append(row);
+    action.append(remove); row.append(enabledCell,topic,type,rateCell,stdCell,rateCellInput,action); body.append(row);
   }
   if(!body.children.length) {
     const row=document.createElement('tr'), cell=document.createElement('td');
-    cell.colSpan=5; cell.textContent='暂无自定义录制消息，可从下方添加。'; row.append(cell); body.append(row);
+    cell.colSpan=7; cell.textContent='暂无自定义录制消息，可从下方添加。'; row.append(cell); body.append(row);
   }
 }
 
@@ -294,6 +402,7 @@ function renderStandardTopics() {
   body.textContent='';
   for(const [key,topic] of Object.entries(profilesData.standard_topics||{})) {
     const type=standardTopicTypes[key]||'std_msgs/msg/String';
+    const std = standardTopicStandards[key] || { target_hz: 50, min_hz: 20 };
     const row=document.createElement('tr');
     const recordCell=document.createElement('td'), record=document.createElement('input');
     record.type='checkbox';
@@ -307,7 +416,9 @@ function renderStandardTopics() {
     value.append(code);
     const typeCell=document.createElement('td');
     typeCell.textContent=type;
-    row.append(recordCell,purpose,value,typeCell);
+
+    const { rateCell, stdCell, statusCell } = renderTopicHealthBadge(topic, std.min_hz, std.target_hz);
+    row.append(recordCell,purpose,value,typeCell,rateCell,stdCell,statusCell);
     body.append(row);
   }
 }
@@ -681,13 +792,65 @@ async function init() {
       toast('录制配置已写入 middleware.yaml 并应用');
     }catch(error){toast(error.message,true);}
   };
+  async function triggerStartRecording(force = false) {
+    try {
+      const result = await api('/api/recording/start', {
+        method: 'POST',
+        body: JSON.stringify({ force }),
+      });
+      toast(`已开始话题录制：${result.path}`);
+      renderStatus(await api('/api/status'));
+    } catch (error) {
+      toast(`启动录制失败：${error.message}`, true);
+    }
+  }
+
   if($('#startRecordingBtn')) {
     $('#startRecordingBtn').onclick=async()=>{
       try {
-        const result=await api('/api/recording/start',{method:'POST'});
-        toast(`已开始话题录制：${result.path}`);
-        renderStatus(await api('/api/status'));
-      } catch(error){toast(`启动录制失败：${error.message}`,true);}
+        const precheck = await api('/api/recording/precheck', { method: 'POST' });
+        if (!precheck.ready) {
+          if (!precheck.topic_count) {
+            toast('尚未勾选任何需要录制的话题，请先在下方勾选待录制话题', true);
+            return;
+          }
+          const dialog = $('#precheckWarningDialog');
+          if (dialog) {
+            $('#precheckWarningSummary').textContent = `检测到 ${precheck.issues.length} 个待录制话题未检测到消息或频率未达标：`;
+            const tbody = $('#precheckIssueRows');
+            tbody.textContent = '';
+            for (const iss of precheck.issues) {
+              const tr = document.createElement('tr');
+              const tdTopic = document.createElement('td');
+              const code = document.createElement('code');
+              code.textContent = iss.topic;
+              tdTopic.append(code);
+              const tdHz = document.createElement('td');
+              tdHz.className = 'topic-rate ' + (iss.hz > 0 ? 'low' : 'none');
+              tdHz.textContent = `${Number(iss.hz || 0).toFixed(1)} Hz`;
+              const tdStd = document.createElement('td');
+              tdStd.className = 'topic-target-rate';
+              tdStd.textContent = `≥ ${Number(iss.min_hz || 0).toFixed(0)} Hz`;
+              const tdDiag = document.createElement('td');
+              const badge = document.createElement('span');
+              badge.className = 'topic-status-badge ' + (iss.hz > 0 ? 'status-low' : 'status-none');
+              badge.textContent = iss.state === 'no_data' ? '未检测到消息' : '频率偏低';
+              tdDiag.append(badge);
+              tr.append(tdTopic, tdHz, tdStd, tdDiag);
+              tbody.append(tr);
+            }
+            $('#confirmForceStartBtn').onclick = async () => {
+              dialog.close();
+              await triggerStartRecording(true);
+            };
+            dialog.showModal();
+            return;
+          }
+        }
+        await triggerStartRecording(false);
+      } catch(error) {
+        toast(`录制预检失败：${error.message}`, true);
+      }
     };
   }
   if($('#stopRecordingBtn')) {

@@ -356,6 +356,65 @@ def create_app(store: ConfigStore) -> web.Application:
         except (RuntimeError, KeyError, TypeError) as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
+    async def precheck_recording(_request: web.Request) -> web.Response:
+        subs = store.value.get("ros", {}).get("subscriptions", [])
+        recording_topics = [
+            item for item in subs
+            if item.get("enabled", True) and "record" in item.get("outputs", [])
+        ]
+        topic_health = runtime.ros.get_topic_health() if runtime.ros is not None else {}
+
+        checked = []
+        issues = []
+        for item in recording_topics:
+            topic = item["topic"]
+            info = topic_health.get(topic)
+            if info is None:
+                from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+                std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
+                target_hz = float(item.get("target_hz", 0) or std["target_hz"])
+                min_hz = float(item.get("min_hz", 0) or std["min_hz"])
+                item_stat = {
+                    "topic": topic,
+                    "type": item.get("type", "std_msgs/msg/String"),
+                    "messages": 0,
+                    "hz": 0.0,
+                    "target_hz": target_hz,
+                    "min_hz": min_hz,
+                    "has_data": False,
+                    "state": "no_data",
+                    "message": "未检测到消息发布 (0 Hz)",
+                }
+            else:
+                item_stat = dict(info)
+            checked.append(item_stat)
+            if item_stat["state"] == "no_data":
+                issues.append({
+                    "topic": topic,
+                    "state": "no_data",
+                    "hz": 0.0,
+                    "min_hz": item_stat["min_hz"],
+                    "reason": f"{topic}: 未检测到消息发布 (0 Hz，标准: ≥ {item_stat['min_hz']:.1f} Hz)",
+                })
+            elif item_stat["state"] == "low_rate":
+                issues.append({
+                    "topic": topic,
+                    "state": "low_rate",
+                    "hz": item_stat["hz"],
+                    "min_hz": item_stat["min_hz"],
+                    "reason": f"{topic}: 消息频率偏低 ({item_stat['hz']:.1f} Hz < 标准 {item_stat['min_hz']:.1f} Hz)",
+                })
+
+        ready = len(issues) == 0 and len(recording_topics) > 0
+        return web.json_response({
+            "ok": True,
+            "ready": ready,
+            "topic_count": len(recording_topics),
+            "topics": checked,
+            "issues": issues,
+            "reason": "" if ready else ("未勾选任何录制话题" if not recording_topics else f"{len(issues)} 个待录制话题未达标"),
+        })
+
     async def start_recording(request: web.Request) -> web.Response:
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder is not initialized")
@@ -365,7 +424,48 @@ def create_app(store: ConfigStore) -> web.Application:
                 data = await request.json()
             except Exception:
                 pass
+        force = bool(data.get("force", False))
         filename = str(data.get("filename", "")).strip()
+
+        if not force:
+            subs = store.value.get("ros", {}).get("subscriptions", [])
+            recording_topics = [
+                item for item in subs
+                if item.get("enabled", True) and "record" in item.get("outputs", [])
+            ]
+            if not recording_topics:
+                return web.json_response({
+                    "ok": False,
+                    "can_force": True,
+                    "reason": "尚未勾选任何需要录制的话题，请先在下方勾选录制话题",
+                    "issues": [{"topic": "none", "reason": "未勾选录制话题"}],
+                }, status=400)
+
+            topic_health = runtime.ros.get_topic_health() if runtime.ros is not None else {}
+            issues = []
+            for item in recording_topics:
+                topic = item["topic"]
+                info = topic_health.get(topic)
+                if not info or info.get("state") != "ok":
+                    hz = info.get("hz", 0.0) if info else 0.0
+                    from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+                    std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
+                    min_hz = float(item.get("min_hz", 0) or (info.get("min_hz") if info else std["min_hz"]))
+                    issues.append({
+                        "topic": topic,
+                        "state": info.get("state", "no_data") if info else "no_data",
+                        "hz": hz,
+                        "min_hz": min_hz,
+                        "reason": f"{topic}: 未检测到消息发布 (0 Hz)" if hz == 0 else f"{topic}: 频率不足 ({hz:.1f} Hz < 标准 {min_hz:.1f} Hz)",
+                    })
+            if issues:
+                return web.json_response({
+                    "ok": False,
+                    "can_force": True,
+                    "reason": "待录制话题未检测到消息或频率未达标",
+                    "issues": issues,
+                }, status=400)
+
         path = await asyncio.to_thread(runtime.recorder.start, filename)
         return web.json_response({"ok": True, "recording": True, "path": path})
 
@@ -478,6 +578,8 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/ros/topics", get_topics)
     app.router.add_post("/api/ros/publish", publish)
     app.router.add_post("/api/safety/stop", emergency_stop)
+    app.router.add_post("/api/recording/precheck", precheck_recording)
+    app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)
     app.router.add_post("/api/recording/stop", stop_recording)
     app.router.add_get("/api/recording/status", get_recording_status)

@@ -67,17 +67,21 @@
         <div class="recording-settings form-grid">
           <label>录制保存目录<input id="topicRecordingDirectory" placeholder="runtime/topic_recordings"><small>录制 .mcap 文件存放目录，相对路径以项目根目录为基准</small></label>
         </div>
+        <div id="recordingReadinessBanner" class="recording-readiness-banner">
+          <span class="readiness-icon">📡</span>
+          <span id="recordingReadinessText">正在检测待录制话题消息发布与频率标准…</span>
+        </div>
 
         <div class="topic-section">
           <h3>HC 内置标准接口话题</h3>
-          <p>勾选需要自动录制的通用机器人控制与反馈话题</p>
-          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>用途</th><th>Topic</th><th>消息类型</th></tr></thead><tbody id="standardTopicRows"></tbody></table></div>
+          <p>勾选需要录制的通用机器人控制与反馈话题，系统将实时监测其消息连通性与接收频率</p>
+          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>用途</th><th>Topic</th><th>消息类型</th><th>实时频率</th><th>标准要求</th><th>检测状态</th></tr></thead><tbody id="standardTopicRows"></tbody></table></div>
         </div>
 
         <div class="topic-section" style="margin-top:20px;">
           <h3>自定义录制规则</h3>
           <p>已添加的自定义消息录制列表</p>
-          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>消息名称</th><th>消息类型</th><th>最大 Hz</th><th></th></tr></thead><tbody id="recordingRows"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>消息名称</th><th>消息类型</th><th>实时频率</th><th>标准要求</th><th>限频 Hz</th><th></th></tr></thead><tbody id="recordingRows"></tbody></table></div>
         </div>
       </article>
       <article class="panel publish-panel">
@@ -154,6 +158,33 @@
         <p class="form-help">系统会自动解析 ZIP 内的 URDF 与控制器配置并解压 3D 模型网格。ROS 2 话题会自动归一化到 /hc_teleop。</p>
         <div id="importProfileError" class="dialog-error hidden"></div>
         <div class="dialog-actions"><button type="button" id="cancelImportProfile">取消</button><button class="primary" type="submit" id="submitImportProfile">校验并导入</button></div>
+      </form>
+    </dialog>
+    <dialog id="precheckWarningDialog">
+      <form method="dialog" style="max-width:620px;">
+        <div class="dialog-title">
+          <div>
+            <h2 style="color:var(--orange);">⚠️ 待录制话题未达标</h2>
+            <p id="precheckWarningSummary">检测到待录制话题未检测到消息或频率未达标：</p>
+          </div>
+          <button class="dialog-close" type="button" onclick="document.getElementById('precheckWarningDialog').close()">×</button>
+        </div>
+        <div class="table-wrap" style="margin-top:14px;max-height:220px;">
+          <table>
+            <thead>
+              <tr><th>待录制 Topic</th><th>当前频率</th><th>标准要求</th><th>检测诊断</th></tr>
+            </thead>
+            <tbody id="precheckIssueRows"></tbody>
+          </table>
+        </div>
+        <p class="form-help" style="margin-top:14px;border-color:var(--orange);">
+          如果相关机器人驱动节点或控制器刚启动尚未输出数据，强行录制可能会导致数据集缺失该话题数据。<br>
+          如确认无需等待，可点击<b>“强制开始录制”</b>。
+        </p>
+        <div class="dialog-actions">
+          <button type="button" onclick="document.getElementById('precheckWarningDialog').close()">取消</button>
+          <button type="button" class="danger" id="confirmForceStartBtn">强制开始录制</button>
+        </div>
       </form>
     </dialog>
     <div id="toast" role="status"></div>

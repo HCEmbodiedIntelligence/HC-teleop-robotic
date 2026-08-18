@@ -4,12 +4,106 @@ import queue
 import threading
 import time
 import traceback
+from collections import deque
 from typing import Any, Callable
 
 from .protocol import envelope
 
 
 EventCallback = Callable[[dict[str, Any], list[str]], None]
+
+DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
+    "/hc_teleop/joint_states": {"target_hz": 100.0, "min_hz": 50.0},
+    "/hc_teleop/joint_cmd": {"target_hz": 100.0, "min_hz": 50.0},
+    "/hc_teleop/joint_cmd_arm": {"target_hz": 100.0, "min_hz": 50.0},
+    "/hc_teleop/sol_q": {"target_hz": 100.0, "min_hz": 50.0},
+    "/hc_teleop/controller_target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
+    "/hc_teleop/target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
+    "/hc_teleop/actual_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
+    "/hc_teleop/target_base_move": {"target_hz": 60.0, "min_hz": 20.0},
+    "/teleop/arm/status": {"target_hz": 10.0, "min_hz": 2.0},
+    "/vrdata": {"target_hz": 60.0, "min_hz": 30.0},
+    "/tf": {"target_hz": 20.0, "min_hz": 5.0},
+}
+
+
+class TopicHealthTracker:
+    """Track message rate and quality for a subscribed ROS topic."""
+
+    def __init__(
+        self,
+        topic: str,
+        msg_type: str,
+        target_hz: float = 0.0,
+        min_hz: float = 0.0,
+        record_enabled: bool = False,
+    ):
+        self.topic = topic
+        self.msg_type = msg_type
+        default_std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
+        self.target_hz = float(target_hz or default_std["target_hz"])
+        self.min_hz = float(min_hz or default_std["min_hz"])
+        self.record_enabled = record_enabled
+        self.messages = 0
+        self.last_stamp = 0.0
+        self._timestamps: deque[float] = deque(maxlen=40)
+        self._lock = threading.Lock()
+
+    def record_message(self, now: float) -> None:
+        with self._lock:
+            self.messages += 1
+            self.last_stamp = now
+            self._timestamps.append(now)
+
+    def compute_hz(self, now: float) -> float:
+        with self._lock:
+            if not self._timestamps or (now - self.last_stamp > 1.8):
+                return 0.0
+            if len(self._timestamps) < 2:
+                return 0.0
+            dt = self._timestamps[-1] - self._timestamps[0]
+            if dt <= 0.0001:
+                return 0.0
+            return (len(self._timestamps) - 1) / dt
+
+    def status(self, now: float) -> dict[str, Any]:
+        with self._lock:
+            messages = self.messages
+            last_stamp = self.last_stamp
+            timestamps_len = len(self._timestamps)
+            dt = (self._timestamps[-1] - self._timestamps[0]) if timestamps_len >= 2 else 0.0
+
+        if not timestamps_len or (now - last_stamp > 1.8):
+            hz = 0.0
+        elif timestamps_len < 2 or dt <= 0.0001:
+            hz = 0.0
+        else:
+            hz = round((timestamps_len - 1) / dt, 1)
+
+        has_data = messages > 0 and (now - last_stamp <= 1.8)
+        if not has_data:
+            state = "no_data"
+            message = "未检测到消息发布 (0 Hz)"
+        elif self.min_hz > 0 and hz < self.min_hz:
+            state = "low_rate"
+            message = f"频率偏低 ({hz:.1f} Hz < 标准 {self.min_hz:.1f} Hz)"
+        else:
+            state = "ok"
+            message = f"正常 ({hz:.1f} Hz)"
+
+        return {
+            "topic": self.topic,
+            "type": self.msg_type,
+            "messages": messages,
+            "hz": hz,
+            "target_hz": self.target_hz,
+            "min_hz": self.min_hz,
+            "record_enabled": self.record_enabled,
+            "has_data": has_data,
+            "state": state,
+            "message": message,
+            "last_received_age": round(now - last_stamp, 2) if last_stamp > 0 else None,
+        }
 
 
 class RosBridge:
@@ -22,6 +116,7 @@ class RosBridge:
         self._commands: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._trackers: dict[str, TopicHealthTracker] = {}
         domain_id = int(config.get("domain_id", 0))
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", True) else "starting",
@@ -31,6 +126,7 @@ class RosBridge:
             "discovered_topics": [],
             "messages": 0,
             "dropped_commands": 0,
+            "topic_health": {},
         }
 
     def start(self) -> None:
@@ -45,8 +141,20 @@ class RosBridge:
             self._thread.join(timeout=5)
 
     def status(self) -> dict[str, Any]:
+        now = time.monotonic()
         with self._lock:
-            return dict(self._status)
+            result = dict(self._status)
+            result["topic_health"] = {
+                topic: tracker.status(now) for topic, tracker in self._trackers.items()
+            }
+            return result
+
+    def get_topic_health(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self._lock:
+            return {
+                topic: tracker.status(now) for topic, tracker in self._trackers.items()
+            }
 
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
         return self._enqueue("publish", (topic, msg_type, data))
@@ -90,6 +198,7 @@ class RosBridge:
             publishers: dict[tuple[str, str], Any] = {}
             subscriptions = []
             subscription_names = []
+            trackers: dict[str, TopicHealthTracker] = {}
             last_emit: dict[str, float] = {}
 
             from rclpy.serialization import serialize_message
@@ -101,6 +210,14 @@ class RosBridge:
                 outputs = list(item.get("outputs", ["websocket"]))
                 max_hz = float(item.get("max_hz", 0))
                 message_type = get_message(msg_type_name)
+                tracker = TopicHealthTracker(
+                    topic,
+                    msg_type_name,
+                    target_hz=float(item.get("target_hz", 0)),
+                    min_hz=float(item.get("min_hz", 0)),
+                    record_enabled="record" in outputs,
+                )
+                trackers[topic] = tracker
 
                 def callback(
                     message: Any,
@@ -109,8 +226,10 @@ class RosBridge:
                     msg_type_name: str = msg_type_name,
                     outputs: list[str] = outputs,
                     max_hz: float = max_hz,
+                    tracker: TopicHealthTracker = tracker,
                 ) -> None:
                     now = time.monotonic()
+                    tracker.record_message(now)
                     if max_hz and now - last_emit.get(topic, 0.0) < 1.0 / max_hz:
                         return
                     last_emit[topic] = now
@@ -140,6 +259,8 @@ class RosBridge:
                 )
                 subscription_names.append(topic)
 
+            with self._lock:
+                self._trackers = trackers
             self._set_status(state="running", subscriptions=subscription_names, error=None)
             last_discovery = 0.0
             while not self._stop.is_set():
