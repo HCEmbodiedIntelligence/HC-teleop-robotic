@@ -29,9 +29,6 @@ model:
   - Joint5_L
   - Joint6_L
   - Joint7_L
-  - leg_1
-  - leg_2
-  - zhi
 task:
   pose:
   - - - R_arm_0_Link
@@ -44,11 +41,6 @@ task:
     - 10.0
     - 3.0
     - 12.0
-  - - - base_link
-      - zhi_Link
-    - 10.0
-    - 2.0
-    - 4.0
   axis: []
   joint: []
 limit:
@@ -67,6 +59,3 @@ limit:
   - 240.0
   - 240.0
   - 240.0
-  - 60.0
-  - 60.0
-  - 60.0
