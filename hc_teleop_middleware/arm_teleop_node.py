@@ -1719,15 +1719,31 @@ class HcTjArmTeleopNode(Node):
             self.arms["right"]
         )
 
+        body_command: dict[str, float] = {}
         if body_requested:
             if not self.body.active:
                 self._engage_body()
-            self._update_body_target()
+            self._update_body(body_command)
         elif self.body.active:
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
+            for name in self.body.joint_names:
+                body_command[name] = float(
+                    self.last_command.get(
+                        name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
+                    )
+                )
+        else:
+            for name in self.body.joint_names:
+                body_command[name] = float(
+                    self.last_command.get(
+                        name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
+                    )
+                )
+        self.generic_aux_command.update(body_command)
+        self.last_command.update(body_command)
 
         if base_requested:
             self._publish_base_command(track_head_yaw=body_requested)
