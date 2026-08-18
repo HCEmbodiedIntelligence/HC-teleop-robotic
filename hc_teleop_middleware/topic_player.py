@@ -98,24 +98,31 @@ class TopicPlayer:
                 self._selected_topics = list(selected_topics)
                 self._topic_remap = dict(topic_remap or {})
             elif mode == "drive":
-                # In drive mode, we isolate actuator command topics to drive the robot cleanly
-                # without duplicate conflicting signals or feeding solver debug topics back.
+                # In drive mode, we isolate robot actuator commands + visualization target markers,
+                # ensuring the simulator executes the joints and tracks the end-effector marker.
+                drive_passthrough = {
+                    "/hc_teleop/target_ee_poses",
+                    "/hc_teleop/controller_target_ee_poses",
+                    "/hc_teleop/actual_ee_poses",
+                    "/hc_teleop/target_base_move",
+                    "/hc_teleop/target_finger_joints",
+                }
                 if "/hc_teleop/joint_cmd" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
-                        if t in {"/hc_teleop/joint_cmd", "/hc_teleop/target_base_move", "/hc_teleop/target_finger_joints"}
+                        if t in drive_passthrough or t == "/hc_teleop/joint_cmd"
                     ]
                     self._topic_remap = {}
                 elif "/hc_teleop/joint_cmd_arm" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
-                        if t in {"/hc_teleop/joint_cmd_arm", "/hc_teleop/target_base_move", "/hc_teleop/target_finger_joints"}
+                        if t in drive_passthrough or t == "/hc_teleop/joint_cmd_arm"
                     ]
                     self._topic_remap = {}
                 elif "/hc_teleop/joint_states" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
-                        if t in {"/hc_teleop/joint_states", "/hc_teleop/target_base_move", "/hc_teleop/target_finger_joints"}
+                        if t in drive_passthrough or t == "/hc_teleop/joint_states"
                     ]
                     self._topic_remap = {"/hc_teleop/joint_states": "/hc_teleop/joint_cmd"}
                 else:
