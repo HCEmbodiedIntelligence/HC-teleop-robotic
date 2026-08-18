@@ -1,5 +1,5 @@
 robot:
-  urdf_path: /home/maple/hc_io_suit/src/io_teleop_robot_descriptions/hc_tj_description/urdf/hc_tj_robot.urdf
+  urdf_path: urdf/hc_tj_robot.urdf
   base_position:
   - 0.0
   - 0.0

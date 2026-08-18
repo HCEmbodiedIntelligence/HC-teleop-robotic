@@ -70,6 +70,54 @@ ros:
     outputs:
     - record
     max_hz: 0.0
+  - topic: /io_teleop/joint_states
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+  - topic: /io_teleop/joint_cmd
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+  - topic: /io_teleop/target_base_move
+    type: std_msgs/msg/Float64MultiArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+  - topic: /io_teleop/joint_cmd_finger_left
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+  - topic: /io_teleop/joint_cmd_finger_right
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+  - topic: /io_teleop/camera_head/color/compressed
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
+  - topic: /io_teleop/camera_d405_left/color/compressed
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
+  - topic: /io_teleop/camera_d405_right/color/compressed
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
   recording:
     enabled: false
     directory: runtime/topic_recordings
