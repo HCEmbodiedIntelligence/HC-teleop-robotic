@@ -1125,18 +1125,20 @@ async function init() {
     };
   }
 
-  $('#stopButton').onclick=async()=>{
-    if(!confirm('确认向机器人发送急停信号？'))return;
-    try {
-      await api('/api/safety/stop',{method:'POST',body:JSON.stringify({reason:'dashboard emergency stop'})});
-      toast('急停信号已发送');
-    }catch(error){toast(error.message,true);}
-  };
+  if($('#stopButton')) {
+    $('#stopButton').onclick=async()=>{
+      if(!confirm('确认向机器人发送急停信号？'))return;
+      try {
+        await api('/api/safety/stop',{method:'POST',body:JSON.stringify({reason:'dashboard emergency stop'})});
+        toast('急停信号已发送');
+      }catch(error){toast(error.message,true);}
+    };
+  }
   if($('#resumeButton')) {
     $('#resumeButton').onclick=async()=>{
       try {
         await api('/api/safety/resume',{method:'POST',body:JSON.stringify({reason:'dashboard safety resume'})});
-        toast('急停已解除，遥操作已恢复使能（按住离合即可运动）');
+        toast('急停已解除，遥操作已恢复使能');
       }catch(error){toast(error.message,true);}
     };
   }

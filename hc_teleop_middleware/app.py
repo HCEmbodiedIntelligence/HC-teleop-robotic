@@ -124,6 +124,9 @@ class MiddlewareRuntime:
             self.websockets.discard(ws)
 
     def _on_pose(self, packet: Any) -> None:
+        if hasattr(packet, "right_input") and packet.right_input is not None:
+            if (packet.right_input.pressed_mask & 1) or (packet.right_input.held_mask & 1):
+                self._on_safety_resume("VR controller A button pressed")
         if self.ros is None:
             return
         if self.config["vr"].get("publish_to_ros", True):

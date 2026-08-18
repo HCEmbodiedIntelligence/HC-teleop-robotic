@@ -110,7 +110,7 @@ vr:
   discovery_port: 5006
   outbound_host: ''
   outbound_port: 5007
-  pose_timeout_ms: 200
+  pose_timeout_ms: 600
   publish_to_ros: true
   data_topic: /vrdata
 safety:

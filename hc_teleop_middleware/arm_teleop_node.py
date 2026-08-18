@@ -560,6 +560,12 @@ class HcTjArmTeleopNode(Node):
                 if not isinstance(secondary, list) or len(secondary) != 2:
                     continue
                 held_mask = int(source.get("held_mask", 0))
+                pressed_mask = int(source.get("pressed_mask", 0))
+                if side == "right" and ((pressed_mask & 1) or (held_mask & 1)):
+                    if not self.enabled or self.stop_reason:
+                        self.enabled = True
+                        self.stop_reason = ""
+                        self.get_logger().info("VR controller A button pressed: teleop re-enabled")
                 joy = Joy()
                 joy.axes = [
                     float(source.get("trigger", 0.0)),
