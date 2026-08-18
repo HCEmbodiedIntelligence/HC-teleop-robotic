@@ -61,6 +61,7 @@ class TopicPlayer:
         filename: str,
         speed: float = 1.0,
         loop: bool = False,
+        mode: str = "drive",
         selected_topics: list[str] | None = None,
         topic_remap: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -74,8 +75,6 @@ class TopicPlayer:
             self._filename = filename
             self._speed = max(0.1, min(10.0, float(speed)))
             self._loop = bool(loop)
-            self._selected_topics = list(selected_topics or [])
-            self._topic_remap = dict(topic_remap or {})
             self._state = "playing"
             self._error = None
             self._current_time_sec = 0.0
@@ -92,6 +91,44 @@ class TopicPlayer:
                 start_ns = stats.message_start_time
                 end_ns = stats.message_end_time
                 self._duration_sec = (end_ns - start_ns) / 1e9 if end_ns > start_ns else 0.0
+
+                avail_topics = {c.topic for c in summary.channels.values()}
+
+            if selected_topics is not None:
+                self._selected_topics = list(selected_topics)
+                self._topic_remap = dict(topic_remap or {})
+            elif mode == "drive":
+                # In drive mode, we isolate actuator command topics to drive the robot cleanly
+                # without duplicate conflicting signals or feeding solver debug topics back.
+                if "/hc_teleop/joint_cmd" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in {"/hc_teleop/joint_cmd", "/hc_teleop/target_base_move", "/hc_teleop/target_finger_joints"}
+                    ]
+                    self._topic_remap = {}
+                elif "/hc_teleop/joint_cmd_arm" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in {"/hc_teleop/joint_cmd_arm", "/hc_teleop/target_base_move", "/hc_teleop/target_finger_joints"}
+                    ]
+                    self._topic_remap = {}
+                elif "/hc_teleop/joint_states" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in {"/hc_teleop/joint_states", "/hc_teleop/target_base_move", "/hc_teleop/target_finger_joints"}
+                    ]
+                    self._topic_remap = {"/hc_teleop/joint_states": "/hc_teleop/joint_cmd"}
+                else:
+                    self._selected_topics = []
+                    self._topic_remap = {}
+            else:
+                self._selected_topics = []
+                self._topic_remap = {}
+
+            # Pause live teleop controller to prevent conflict over /hc_teleop/joint_cmd
+            ros = self._get_ros()
+            if ros is not None and hasattr(ros, "publish"):
+                ros.publish("/teleop/arm/enabled", "std_msgs/msg/Bool", {"data": False})
 
             self._stop_event.clear()
             self._pause_event.set()

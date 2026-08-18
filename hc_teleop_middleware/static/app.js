@@ -1039,13 +1039,6 @@ async function init() {
       const speed = parseFloat($('#startReplaySpeed').value) || 1.0;
       const loop = $('#startReplayLoop').checked;
 
-      let remap = {};
-      if (mode === 'direct') {
-        remap = {
-          '/hc_teleop/joint_states': '/hc_teleop/joint_cmd',
-        };
-      }
-
       try {
         await api('/api/replay/start', {
           method: 'POST',
@@ -1053,11 +1046,11 @@ async function init() {
             filename,
             speed,
             loop,
-            remap,
+            mode: mode === 'direct' ? 'drive' : 'raw',
           }),
         });
         $('#startReplayDialog').close();
-        toast(`已开始重放 ${filename} (${speed}x)`);
+        toast(`已开始重放 ${filename} (${speed}x) · 遥操作已自动暂停以防冲突`);
         renderStatus(await api('/api/status'));
       } catch (err) {
         toast(`启动重放失败：${err.message}`, true);

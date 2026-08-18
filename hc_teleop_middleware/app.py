@@ -564,6 +564,7 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPBadRequest(text="filename is required")
         speed = float(data.get("speed", 1.0))
         loop = bool(data.get("loop", False))
+        mode = str(data.get("mode", "drive"))
         selected_topics = data.get("topics")
         topic_remap = data.get("remap")
         try:
@@ -572,6 +573,7 @@ def create_app(store: ConfigStore) -> web.Application:
                 filename,
                 speed=speed,
                 loop=loop,
+                mode=mode,
                 selected_topics=selected_topics,
                 topic_remap=topic_remap,
             )

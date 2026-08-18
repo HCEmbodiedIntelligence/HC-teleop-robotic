@@ -64,7 +64,7 @@ class TopicPlayerTests(unittest.TestCase):
             writer.finish()
 
     def test_player_play_and_complete(self) -> None:
-        status = self.player.play("test_recording.mcap", speed=10.0)
+        status = self.player.play("test_recording.mcap", speed=10.0, mode="raw")
         self.assertEqual(status["state"], "playing")
         self.assertEqual(status["filename"], "test_recording.mcap")
         self.assertEqual(status["total_messages"], 10)
