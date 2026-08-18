@@ -12,20 +12,90 @@ from mcap.well_known import MessageEncoding, SchemaEncoding
 from mcap.writer import Writer as McapWriter
 
 
+_PRIMITIVE_TYPES = {
+    "bool", "byte", "char", "float32", "float64",
+    "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64",
+    "string", "wstring",
+}
+
+
 def _get_msg_def(msg_type: str) -> bytes:
+    """Recursively resolve ROS 2 message definition and all nested type definitions."""
     try:
+        import re
         import ament_index_python
 
-        parts = msg_type.split("/")
+        parts = msg_type.strip().split("/")
         if len(parts) == 3 and parts[1] == "msg":
-            pkg, _, name = parts
-            share_dir = Path(ament_index_python.get_package_share_directory(pkg))
-            msg_file = share_dir / "msg" / f"{name}.msg"
-            if msg_file.is_file():
-                return msg_file.read_bytes()
+            top_pkg, _, top_name = parts
+        elif len(parts) == 2:
+            top_pkg, top_name = parts
+        else:
+            return b""
+
+        visited = set()
+
+        def get_file(pkg: str, name: str) -> tuple[str, str] | None:
+            try:
+                share_dir = Path(ament_index_python.get_package_share_directory(pkg))
+                msg_file = share_dir / "msg" / f"{name}.msg"
+                if msg_file.is_file():
+                    return f"{pkg}/msg/{name}", msg_file.read_text(encoding="utf-8")
+            except Exception:
+                pass
+            return None
+
+        def find_dependencies(text: str, current_pkg: str) -> list[tuple[str, str]]:
+            deps = []
+            for line in text.splitlines():
+                line = line.split("#")[0].strip()
+                if not line or "=" in line:
+                    continue
+                field_type = line.split()[0]
+                base_type = re.sub(r"\[.*?\]", "", field_type)
+                if base_type in _PRIMITIVE_TYPES or base_type.startswith("string<") or base_type.startswith("wstring<"):
+                    continue
+                type_parts = base_type.split("/")
+                if len(type_parts) == 3 and type_parts[1] == "msg":
+                    dep_pkg, dep_name = type_parts[0], type_parts[2]
+                elif len(type_parts) == 2:
+                    dep_pkg, dep_name = type_parts[0], type_parts[1]
+                elif len(type_parts) == 1:
+                    dep_pkg, dep_name = current_pkg, type_parts[0]
+                else:
+                    continue
+                deps.append((dep_pkg, dep_name))
+            return deps
+
+        top_res = get_file(top_pkg, top_name)
+        if not top_res:
+            return b""
+        _, top_text = top_res
+        visited.add((top_pkg, top_name))
+
+        queue = find_dependencies(top_text, top_pkg)
+        sub_defs = []
+
+        while queue:
+            dep_pkg, dep_name = queue.pop(0)
+            key = (dep_pkg, dep_name)
+            if key in visited:
+                continue
+            visited.add(key)
+            res = get_file(dep_pkg, dep_name)
+            if not res:
+                continue
+            _, text = res
+            sub_defs.append((dep_pkg, dep_name, text))
+            queue.extend(find_dependencies(text, dep_pkg))
+
+        out = [top_text.rstrip()]
+        for dep_pkg, dep_name, text in sub_defs:
+            out.append(f"\n================================================================================\nMSG: {dep_pkg}/msg/{dep_name}\n{text.rstrip()}")
+
+        return "\n".join(out).encode("utf-8")
     except Exception:
-        pass
-    return b""
+        return b""
 
 
 def _inspect_mcap_file(path: Path) -> dict[str, Any]:
@@ -231,7 +301,7 @@ class TopicRecorder:
 
         with self.path.open("wb") as stream:
             writer = McapWriter(stream)
-            writer.start()
+            writer.start(profile="ros2")
             try:
                 while True:
                     try:
