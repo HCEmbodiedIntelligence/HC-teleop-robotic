@@ -1140,6 +1140,14 @@ async function init() {
       }catch(error){toast(error.message,true);}
     };
   }
+  if($('#homeButton')) {
+    $('#homeButton').onclick=async()=>{
+      try {
+        await api('/api/teleop/home',{method:'POST'});
+        toast('双臂开始平滑回零至标准初始姿态...');
+      }catch(error){toast(error.message,true);}
+    };
+  }
   const setTeleop=async enabled=>{
     try {
       await api('/api/ros/publish',{method:'POST',body:JSON.stringify({topic:'/teleop/arm/enabled',type:'std_msgs/msg/Bool',data:{data:enabled}})});

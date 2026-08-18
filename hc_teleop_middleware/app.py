@@ -356,6 +356,11 @@ def create_app(store: ConfigStore) -> web.Application:
         runtime._on_safety_resume(str(data.get("reason", "dashboard safety resume")))
         return web.json_response({"accepted": True}, status=202)
 
+    async def teleop_home(request: web.Request) -> web.Response:
+        if runtime.ros is not None:
+            runtime.ros.publish("/teleop/arm/home", "std_msgs/msg/Bool", {"data": True})
+        return web.json_response({"accepted": True}, status=202)
+
     async def websocket(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
         await ws.prepare(request)
@@ -702,6 +707,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/ros/publish", publish)
     app.router.add_post("/api/safety/stop", emergency_stop)
     app.router.add_post("/api/safety/resume", safety_resume)
+    app.router.add_post("/api/teleop/home", teleop_home)
     app.router.add_post("/api/recording/precheck", precheck_recording)
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)

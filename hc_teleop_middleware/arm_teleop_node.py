@@ -275,6 +275,8 @@ class HcTjArmTeleopNode(Node):
         )
         self.create_service(Trigger, "/teleop/arm/enable", self._enable_service)
         self.create_service(Trigger, "/teleop/arm/disable", self._disable_service)
+        self.create_service(Trigger, "/teleop/arm/home", self._home_service)
+        self.create_subscription(Bool, "/teleop/arm/home", self._home_topic_callback, 10)
         self.create_service(
             Trigger, "/teleop/arm/reset_reference", self._reset_reference_service
         )
@@ -604,25 +606,20 @@ class HcTjArmTeleopNode(Node):
             return
         merged = dict(zip(message.name, (float(value) for value in message.position)))
         if self.homing:
-            # A 7-DoF arm can reach the Cartesian home pose with a different
-            # redundant joint configuration. During homing, override the
-            # external IK result with a bounded joint-space step so the joint
-            # completion test is guaranteed to terminate. Once at home, v23
-            # already has the matching Cartesian target and takes over without
-            # a discontinuity.
             nominal_period = 1.0 / float(self.control["rate_hz"])
             elapsed = nominal_period if previous_stamp <= 0.0 else now - previous_stamp
             elapsed = float(np.clip(elapsed, 0.001, 0.05))
-            max_step = float(self.control["home_joint_velocity"]) * elapsed
+            max_step = float(self.control.get("home_joint_velocity", 0.7)) * elapsed
             for arm in self.arms.values():
                 for name in arm.joint_names:
-                    target = self.initial_joints[name]
-                    current = self.joint_state.get(
-                        name, self.last_command.get(name, merged.get(name, target))
+                    target = float(self.initial_joints[name])
+                    previous = float(
+                        self.last_command.get(
+                            name, self.joint_state.get(name, target)
+                        )
                     )
-                    merged[name] = float(
-                        current + np.clip(target - current, -max_step, max_step)
-                    )
+                    step = float(np.clip(target - previous, -max_step, max_step))
+                    merged[name] = previous + step
         merged.update(self.generic_aux_command)
         output = JointState()
         output.header = message.header
@@ -661,6 +658,26 @@ class HcTjArmTeleopNode(Node):
         response.success = True
         response.message = "teleop disabled"
         return response
+
+    def _home_service(self, _request: Trigger.Request, response: Trigger.Response):
+        self.enabled = True
+        self.stop_reason = ""
+        if self.backend in {"generic", "v23"}:
+            self._set_generic_home_targets()
+        else:
+            self._start_arm_homing()
+        response.success = True
+        response.message = "homing sequence started"
+        return response
+
+    def _home_topic_callback(self, message: Bool):
+        if message.data:
+            self.enabled = True
+            self.stop_reason = ""
+            if self.backend in {"generic", "v23"}:
+                self._set_generic_home_targets()
+            else:
+                self._start_arm_homing()
 
     def _reset_reference_service(
         self, _request: Trigger.Request, response: Trigger.Response
@@ -1628,26 +1645,32 @@ class HcTjArmTeleopNode(Node):
             arm.target_local = self._relative_pose(
                 self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
             )
-            self._release_arm(arm)
-            # _release_arm clears target_local because legacy IK treats it as a
-            # per-clutch value. Restore the home target for the generic backend.
-            arm.target_local = self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-            )
+            arm.reference_local_ee = arm.target_local
         self._sync_model()
         self.body.active = False
         self.body.reference_head = None
         self.body.reference_torso = None
         self.homing = True
+        self.homing_start_time = self._monotonic()
+        for name in self.controlled_names:
+            if name in self.joint_state:
+                self.last_command[name] = float(self.joint_state[name])
         self.get_logger().info(
-            f"both sticks outward: {self.backend} controller homing both arms"
+            f"homing triggered: {self.backend} controller homing both arms to initial_joints"
         )
 
     def _generic_homing_complete(self) -> bool:
         names = self.arms["right"].joint_names + self.arms["left"].joint_names
-        return max(
-            abs(self.joint_state[name] - self.initial_joints[name]) for name in names
-        ) <= float(self.control["home_tolerance"])
+        cmd_reached = all(
+            abs(self.last_command.get(name, 0.0) - self.initial_joints[name]) <= 0.01
+            for name in names
+        )
+        feedback_close = max(
+            abs(self.joint_state.get(name, self.initial_joints[name]) - self.initial_joints[name])
+            for name in names
+        ) <= float(self.control.get("home_tolerance", 0.08))
+        elapsed = self._monotonic() - getattr(self, "homing_start_time", 0.0)
+        return cmd_reached and (feedback_close or elapsed >= 4.0)
 
     def _publish_generic_grippers(self, now: float) -> None:
         command: dict[str, float] = {}
