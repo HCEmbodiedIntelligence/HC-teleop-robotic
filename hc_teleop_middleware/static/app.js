@@ -127,6 +127,30 @@ function renderStatus(data) {
       renderRecordingRules();
     }
   }
+  const replay = data.replay || {};
+  const isReplaying = Boolean(replay.is_active || replay.state === 'playing' || replay.state === 'paused');
+  const replayPanel = $('#replayControlPanel');
+  if (replayPanel) {
+    if (isReplaying) {
+      replayPanel.classList.remove('hidden');
+      if ($('#replayStatusBadge')) {
+        $('#replayStatusBadge').className = replay.state === 'paused' ? 'recording-badge' : 'recording-badge active';
+        $('#replayStatusText').textContent = replay.state === 'paused' ? '已暂停' : '正在重放';
+      }
+      if ($('#replayFileName')) $('#replayFileName').textContent = replay.filename || '';
+      if ($('#pauseResumeReplayBtn')) {
+        $('#pauseResumeReplayBtn').textContent = replay.state === 'paused' ? '▶️ 继续' : '⏸️ 暂停';
+      }
+      if ($('#replayProgressBar')) $('#replayProgressBar').style.width = `${replay.progress || 0}%`;
+      if ($('#replayProgressText')) $('#replayProgressText').textContent = `${(replay.progress || 0).toFixed(1)}%`;
+      if ($('#replayTimeText')) $('#replayTimeText').textContent = `${(replay.current_time_sec || 0).toFixed(1)}s / ${(replay.duration_sec || 0).toFixed(1)}s`;
+      if ($('#replayMsgText')) $('#replayMsgText').textContent = `${(replay.current_message || 0).toLocaleString()} / ${(replay.total_messages || 0).toLocaleString()}`;
+      if ($('#replaySpeedSelect')) $('#replaySpeedSelect').value = String(replay.speed || 1.0);
+      if ($('#replayLoopToggle')) $('#replayLoopToggle').checked = Boolean(replay.loop);
+    } else {
+      replayPanel.classList.add('hidden');
+    }
+  }
 }
 
 function protocolLabel(version) {
@@ -645,6 +669,12 @@ async function loadDatasets() {
       group.className = 'btn-group';
 
       if (!file.is_current && (file.channels?.length || file.message_count)) {
+        const replayBtn = document.createElement('button');
+        replayBtn.className = 'primary btn-sm';
+        replayBtn.textContent = '重放';
+        replayBtn.onclick = () => openStartReplayDialog(file);
+        group.append(replayBtn);
+
         const detailBtn = document.createElement('button');
         detailBtn.className = 'btn-sm';
         detailBtn.textContent = '详情';
@@ -739,6 +769,14 @@ function showDatasetDetails(file) {
     }
   }
 
+  dialog.showModal();
+}
+
+function openStartReplayDialog(file) {
+  const dialog = $('#startReplayDialog');
+  if (!dialog) return;
+  $('#startReplayFilename').value = file.filename;
+  $('#startReplayMeta').textContent = `数据集：${file.filename} · 时长 ${file.duration_human || '--'} · ${(file.message_count || 0).toLocaleString()} 条消息`;
   dialog.showModal();
 }
 
@@ -969,6 +1007,131 @@ async function init() {
       }
     };
   }
+  if($('#importMcapBtn') && $('#importMcapInput')) {
+    $('#importMcapBtn').onclick = () => $('#importMcapInput').click();
+    $('#importMcapInput').onchange = async () => {
+      const file = $('#importMcapInput').files?.[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res = await fetch('/api/recordings/upload', {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '上传失败');
+        toast(`成功导入 MCAP 数据集：${data.filename}`);
+        await loadDatasets();
+      } catch (err) {
+        toast(`导入失败：${err.message}`, true);
+      } finally {
+        $('#importMcapInput').value = '';
+      }
+    };
+  }
+
+  if($('#startReplayForm')) {
+    $('#startReplayForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const filename = $('#startReplayFilename').value;
+      const mode = $('#startReplayMode').value;
+      const speed = parseFloat($('#startReplaySpeed').value) || 1.0;
+      const loop = $('#startReplayLoop').checked;
+
+      let remap = {};
+      if (mode === 'direct') {
+        remap = {
+          '/hc_teleop/joint_states': '/hc_teleop/joint_cmd',
+        };
+      }
+
+      try {
+        await api('/api/replay/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            filename,
+            speed,
+            loop,
+            remap,
+          }),
+        });
+        $('#startReplayDialog').close();
+        toast(`已开始重放 ${filename} (${speed}x)`);
+        renderStatus(await api('/api/status'));
+      } catch (err) {
+        toast(`启动重放失败：${err.message}`, true);
+      }
+    };
+  }
+
+  if($('#pauseResumeReplayBtn')) {
+    $('#pauseResumeReplayBtn').onclick = async () => {
+      const isPaused = $('#pauseResumeReplayBtn').textContent.includes('继续');
+      try {
+        await api(isPaused ? '/api/replay/resume' : '/api/replay/pause', { method: 'POST' });
+        renderStatus(await api('/api/status'));
+      } catch (err) {
+        toast(`操作失败：${err.message}`, true);
+      }
+    };
+  }
+
+  if($('#stopReplayBtn')) {
+    $('#stopReplayBtn').onclick = async () => {
+      try {
+        await api('/api/replay/stop', { method: 'POST' });
+        toast('重放已停止');
+        renderStatus(await api('/api/status'));
+      } catch (err) {
+        toast(`停止失败：${err.message}`, true);
+      }
+    };
+  }
+
+  if($('#replaySpeedSelect')) {
+    $('#replaySpeedSelect').onchange = async () => {
+      const speed = parseFloat($('#replaySpeedSelect').value) || 1.0;
+      const filename = $('#replayFileName').textContent;
+      if (!filename) return;
+      try {
+        await api('/api/replay/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            filename,
+            speed,
+            loop: $('#replayLoopToggle').checked,
+          }),
+        });
+        renderStatus(await api('/api/status'));
+      } catch (err) {
+        toast(`更改倍速失败：${err.message}`, true);
+      }
+    };
+  }
+
+  if($('#replayLoopToggle')) {
+    $('#replayLoopToggle').onchange = async () => {
+      const loop = $('#replayLoopToggle').checked;
+      const speed = parseFloat($('#replaySpeedSelect').value) || 1.0;
+      const filename = $('#replayFileName').textContent;
+      if (!filename) return;
+      try {
+        await api('/api/replay/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            filename,
+            speed,
+            loop,
+          }),
+        });
+        renderStatus(await api('/api/status'));
+      } catch (err) {
+        toast(`更改循环模式失败：${err.message}`, true);
+      }
+    };
+  }
+
   $('#stopButton').onclick=async()=>{
     if(!confirm('确认向机器人发送急停信号？'))return;
     try {

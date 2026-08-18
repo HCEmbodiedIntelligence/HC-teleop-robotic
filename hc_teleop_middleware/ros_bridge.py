@@ -159,6 +159,9 @@ class RosBridge:
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
         return self._enqueue("publish", (topic, msg_type, data))
 
+    def publish_raw(self, topic: str, msg_type: str, raw_data: bytes) -> bool:
+        return self._enqueue("publish_raw", (topic, msg_type, raw_data))
+
     def emergency_stop(self, topic: str, reason: str) -> bool:
         return self._enqueue("stop", (topic, reason))
 
@@ -314,6 +317,16 @@ class RosBridge:
                     )
                     message = message_type()
                     set_message_fields(message, data)
+                    publisher.publish(message)
+                elif command == "publish_raw":
+                    topic, msg_type_name, raw_bytes = args
+                    message_type = get_message(msg_type_name)
+                    publisher = self._publisher(
+                        node, publishers, topic, msg_type_name, message_type
+                    )
+                    from rclpy.serialization import deserialize_message
+
+                    message = deserialize_message(raw_bytes, message_type)
                     publisher.publish(message)
                 elif command == "stop":
                     topic, reason = args

@@ -16,6 +16,7 @@ from .config import ConfigError, ConfigStore
 from .protocol import envelope
 from .robot_profiles import RobotProfileError, RobotProfileManager, STANDARD_TOPICS
 from .ros_bridge import RosBridge
+from .topic_player import TopicPlayer
 from .topic_recorder import TopicRecorder
 from .vr_gateway import VrGateway
 
@@ -39,6 +40,7 @@ class MiddlewareRuntime:
         self.vr: VrGateway | None = None
         self.camera: CameraService | None = None
         self.recorder: TopicRecorder | None = None
+        self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
@@ -48,6 +50,7 @@ class MiddlewareRuntime:
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
+        self.player = TopicPlayer(self.recorder.directory, lambda: self.ros)
         self.ros = RosBridge(self.config["ros"], self.emit)
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_safety_event
@@ -61,6 +64,8 @@ class MiddlewareRuntime:
             self._on_safety_event("middleware startup")
 
     async def stop(self) -> None:
+        if self.player is not None:
+            await asyncio.to_thread(self.player.stop)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
         if self.ros is not None:
@@ -138,6 +143,7 @@ class MiddlewareRuntime:
             "vr": self.vr.status() if self.vr else {"state": "stopped"},
             "camera": self.camera.status() if self.camera else {"state": "stopped"},
             "recording": self.recorder.status() if self.recorder else {"recording": False, "enabled": False},
+            "replay": self.player.status() if self.player else {"state": "idle", "is_active": False},
         }
 
 
@@ -549,6 +555,87 @@ def create_app(store: ConfigStore) -> web.Application:
                 failed.append({"filename": fname, "error": str(exc)})
         return web.json_response({"ok": True, "deleted": deleted, "failed": failed})
 
+    async def start_replay(request: web.Request) -> web.Response:
+        if runtime.player is None:
+            raise web.HTTPServiceUnavailable(text="player is not initialized")
+        data = await request.json() if request.can_read_body else {}
+        filename = str(data.get("filename", "")).strip()
+        if not filename:
+            raise web.HTTPBadRequest(text="filename is required")
+        speed = float(data.get("speed", 1.0))
+        loop = bool(data.get("loop", False))
+        selected_topics = data.get("topics")
+        topic_remap = data.get("remap")
+        try:
+            status = await asyncio.to_thread(
+                runtime.player.play,
+                filename,
+                speed=speed,
+                loop=loop,
+                selected_topics=selected_topics,
+                topic_remap=topic_remap,
+            )
+            return web.json_response({"ok": True, "replay": status})
+        except FileNotFoundError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        except Exception as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def pause_replay(_request: web.Request) -> web.Response:
+        if runtime.player is None:
+            raise web.HTTPServiceUnavailable(text="player is not initialized")
+        status = await asyncio.to_thread(runtime.player.pause)
+        return web.json_response({"ok": True, "replay": status})
+
+    async def resume_replay(_request: web.Request) -> web.Response:
+        if runtime.player is None:
+            raise web.HTTPServiceUnavailable(text="player is not initialized")
+        status = await asyncio.to_thread(runtime.player.resume)
+        return web.json_response({"ok": True, "replay": status})
+
+    async def stop_replay(_request: web.Request) -> web.Response:
+        if runtime.player is None:
+            raise web.HTTPServiceUnavailable(text="player is not initialized")
+        status = await asyncio.to_thread(runtime.player.stop)
+        return web.json_response({"ok": True, "replay": status})
+
+    async def get_replay_status(_request: web.Request) -> web.Response:
+        if runtime.player is None:
+            return web.json_response({"state": "idle", "is_active": False})
+        return web.json_response(runtime.player.status())
+
+    async def import_mcap_file(request: web.Request) -> web.Response:
+        if not request.can_read_body:
+            raise web.HTTPBadRequest(text="multipart form data required")
+        reader = await request.multipart()
+        rec_dir = runtime.recorder.directory if runtime.recorder else store.path.parent / "runtime/topic_recordings"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        uploaded_name = ""
+        while True:
+            field = await reader.next()
+            if field is None:
+                break
+            if field.name in {"file", "archive"}:
+                filename = field.filename or "imported.mcap"
+                if not filename.endswith(".mcap"):
+                    filename += ".mcap"
+                filename = Path(filename).name
+                target_path = rec_dir / filename
+                if target_path.exists():
+                    stem = target_path.stem
+                    target_path = rec_dir / f"{stem}_{int(time.time())}.mcap"
+                with target_path.open("wb") as f:
+                    while True:
+                        chunk = await field.read_chunk()
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                uploaded_name = target_path.name
+
+        if not uploaded_name:
+            raise web.HTTPBadRequest(text="no file uploaded")
+        return web.json_response({"ok": True, "filename": uploaded_name}, status=201)
+
     async def startup(_app: web.Application) -> None:
         await runtime.start()
 
@@ -584,9 +671,15 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/recording/stop", stop_recording)
     app.router.add_get("/api/recording/status", get_recording_status)
     app.router.add_get("/api/recordings", get_recordings)
+    app.router.add_post("/api/recordings/upload", import_mcap_file)
     app.router.add_get("/api/recordings/{filename}/download", download_recording)
     app.router.add_delete("/api/recordings/{filename}", delete_recording)
     app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
+    app.router.add_post("/api/replay/start", start_replay)
+    app.router.add_post("/api/replay/pause", pause_replay)
+    app.router.add_post("/api/replay/resume", resume_replay)
+    app.router.add_post("/api/replay/stop", stop_replay)
+    app.router.add_get("/api/replay/status", get_replay_status)
     app.router.add_get("/ws", websocket)
     app.router.add_post("/api/webrtc/offer", webrtc_offer)
     app.router.add_post("/offer", webrtc_offer)

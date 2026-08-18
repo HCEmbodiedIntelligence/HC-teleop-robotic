@@ -99,10 +99,42 @@
             <p id="datasetsSummary">正在加载数据集列表…</p>
           </div>
           <div class="dataset-actions">
+            <button id="importMcapBtn">导入 MCAP</button>
+            <input type="file" id="importMcapInput" accept=".mcap" style="display:none;">
             <button id="refreshDatasets">刷新列表</button>
             <button id="batchDeleteDatasets" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
           </div>
         </div>
+
+        <div id="replayControlPanel" class="replay-control-panel hidden">
+          <div class="replay-panel-header">
+            <div class="replay-title-group">
+              <span id="replayStatusBadge" class="recording-badge active"><i></i><span id="replayStatusText">正在重放</span></span>
+              <strong id="replayFileName" style="font-family:monospace;color:var(--cyan);">ros2.mcap</strong>
+            </div>
+            <div class="replay-actions">
+              <button id="pauseResumeReplayBtn" class="primary btn-sm">⏸️ 暂停</button>
+              <button id="stopReplayBtn" class="danger btn-sm">⏹️ 停止</button>
+            </div>
+          </div>
+          <div class="replay-progress-bar-wrap">
+            <div id="replayProgressBar" class="replay-progress-bar" style="width:0%;"></div>
+          </div>
+          <div class="replay-meta-grid">
+            <span>进度: <b id="replayProgressText">0.0%</b> (<span id="replayTimeText">0.0s / 0.0s</span>)</span>
+            <span>消息: <b id="replayMsgText">0 / 0</b></span>
+            <span>倍速:
+              <select id="replaySpeedSelect" style="display:inline-block;width:auto;padding:3px 6px;margin:0;">
+                <option value="0.5">0.5x</option>
+                <option value="1.0" selected>1.0x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2.0">2.0x</option>
+              </select>
+            </span>
+            <label class="toggle" style="margin:0;font-size:11px;"><input type="checkbox" id="replayLoopToggle"><span></span>循环播放</label>
+          </div>
+        </div>
+
         <div class="table-wrap">
           <table>
             <thead>
@@ -209,6 +241,43 @@
         </div>
         <div class="dialog-actions">
           <button type="button" onclick="document.getElementById('datasetDetailDialog').close()">关闭</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="startReplayDialog">
+      <form id="startReplayForm" method="dialog" style="max-width:580px;">
+        <div class="dialog-title">
+          <div>
+            <h2>重放数据集 (Replay MCAP)</h2>
+            <p id="startReplayMeta">选择重放模式驱动仿真或真机运动</p>
+          </div>
+          <button class="dialog-close" type="button" onclick="document.getElementById('startReplayDialog').close()">×</button>
+        </div>
+        <input type="hidden" id="startReplayFilename">
+        <div class="form-grid" style="margin-top:14px;">
+          <label>重放驱动模式
+            <select id="startReplayMode">
+              <option value="direct" selected>🤖 直连驱动（关节反馈 joint_states 自动映射为控制指令 joint_cmd）</option>
+              <option value="raw">📡 原始发布（原样向已录制话题发送数据）</option>
+            </select>
+            <small>直连驱动模式可直接驱动仿真节点或真机机械臂复现录制轨迹</small>
+          </label>
+          <label>播放倍速
+            <select id="startReplaySpeed">
+              <option value="0.5">0.5x (慢速)</option>
+              <option value="1.0" selected>1.0x (正常原速)</option>
+              <option value="1.5">1.5x</option>
+              <option value="2.0">2.0x (快速)</option>
+            </select>
+          </label>
+        </div>
+        <label class="toggle" style="margin-top:8px;"><input type="checkbox" id="startReplayLoop"><span></span>循环播放模式 (结束后自动重新播放)</label>
+        <p class="form-help" style="margin-top:14px;">
+          重放将根据 MCAP 记录的真实时间戳毫秒级精确发布到 ROS 2 总线，您可以随时在顶部控制条暂停或停止。
+        </p>
+        <div class="dialog-actions">
+          <button type="button" onclick="document.getElementById('startReplayDialog').close()">取消</button>
+          <button type="submit" class="primary">▶️ 开始重放</button>
         </div>
       </form>
     </dialog>

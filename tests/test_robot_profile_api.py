@@ -188,6 +188,39 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         del_data = await del_res.json()
         self.assertIn("ds_test.mcap", del_data["deleted"])
 
+    async def test_replay_apis(self):
+        # Create an MCAP file first
+        await self.client.post("/api/recording/start", json={"filename": "replay_test.mcap", "force": True})
+        await self.client.post("/api/recording/stop")
+
+        # Start replay
+        res = await self.client.post(
+            "/api/replay/start",
+            json={"filename": "replay_test.mcap", "speed": 2.0, "loop": False},
+        )
+        self.assertEqual(res.status, 200)
+        data = await res.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["replay"]["filename"], "replay_test.mcap")
+
+        # Check status
+        st_res = await self.client.get("/api/replay/status")
+        self.assertEqual(st_res.status, 200)
+
+        # Pause replay
+        p_res = await self.client.post("/api/replay/pause")
+        self.assertEqual(p_res.status, 200)
+
+        # Resume replay
+        r_res = await self.client.post("/api/replay/resume")
+        self.assertEqual(r_res.status, 200)
+
+        # Stop replay
+        stop_res = await self.client.post("/api/replay/stop")
+        self.assertEqual(stop_res.status, 200)
+        stop_data = await stop_res.json()
+        self.assertEqual(stop_data["replay"]["state"], "idle")
+
 
 if __name__ == "__main__":
     unittest.main()
