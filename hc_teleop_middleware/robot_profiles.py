@@ -17,14 +17,14 @@ import yaml
 
 
 STANDARD_TOPICS = {
-    "joint_state": "/io_teleop/joint_states",
-    "joint_target": "/io_teleop/joint_cmd_arm",
-    "joint_command": "/io_teleop/joint_cmd",
-    "ee_target": "/io_teleop/controller_target_ee_poses",
-    "ee_visual_target": "/io_teleop/target_ee_poses",
-    "ee_actual": "/io_teleop/actual_ee_poses",
-    "solver_state": "/io_teleop/sol_q",
-    "base_move": "/io_teleop/target_base_move",
+    "joint_state": "/hc_teleop/joint_states",
+    "joint_target": "/hc_teleop/joint_cmd_arm",
+    "joint_command": "/hc_teleop/joint_cmd",
+    "ee_target": "/hc_teleop/controller_target_ee_poses",
+    "ee_visual_target": "/hc_teleop/target_ee_poses",
+    "ee_actual": "/hc_teleop/actual_ee_poses",
+    "solver_state": "/hc_teleop/sol_q",
+    "base_move": "/hc_teleop/target_base_move",
 }
 
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")

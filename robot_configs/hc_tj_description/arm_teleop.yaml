@@ -58,19 +58,19 @@ body:
   - leg_2
   - zhi
   torso_link: zhi_Link
-  base_command_topic: /io_teleop/target_base_move
+  base_command_topic: /hc_teleop/target_base_move
   base_command_mode: delta
   stick_x_axis: 3
   stick_y_axis: 2
   stick_deadzone: 0.12
   stick_forward_direction: 1.0
   stick_lateral_direction: 1.0
-  max_linear_velocity: 0.25
-  max_lateral_velocity: 0.2
+  max_linear_velocity: 0.35
+  max_lateral_velocity: 0.25
   yaw_deadzone: 0.2
   yaw_gain: 1.2
   yaw_direction: -1.0
-  max_angular_velocity: 0.6
+  max_angular_velocity: 0.8
   head_height_axis: 2
   head_pitch_position_axis: 1
   height_scale: 0.7
@@ -97,12 +97,12 @@ body:
   ik_max_update: 0.08
 grippers:
   trigger_axis: 0
-  max_velocity: 2.5
+  max_velocity: 3.5
   include_sim_joints: true
   right:
     sim_joint: R_ban
     sim_closed_position: 1.5707
-    finger_topic: /io_teleop/joint_cmd_finger_right
+    finger_topic: /hc_teleop/joint_cmd_finger_right
     finger_joint_names:
     - R_thumb_roll_joint
     - R_thumb_abad_joint
@@ -139,7 +139,7 @@ grippers:
   left:
     sim_joint: L_ban
     sim_closed_position: 1.5707
-    finger_topic: /io_teleop/joint_cmd_finger_left
+    finger_topic: /hc_teleop/joint_cmd_finger_left
     finger_joint_names:
     - L_thumb_roll_joint
     - L_thumb_abad_joint
@@ -178,13 +178,13 @@ control:
   enabled_on_start: true
   rate_hz: 100.0
   vr_data_topic: /vrdata
-  joint_state_topic: /io_teleop/joint_states
-  command_topic: /io_teleop/joint_cmd
-  generic_command_topic: /io_teleop/joint_cmd_arm
-  solver_topic: /io_teleop/sol_q
-  target_pose_topic: /io_teleop/target_ee_poses
-  controller_target_pose_topic: /io_teleop/controller_target_ee_poses
-  actual_pose_topic: /io_teleop/actual_ee_poses
+  joint_state_topic: /hc_teleop/joint_states
+  command_topic: /hc_teleop/joint_cmd
+  generic_command_topic: /hc_teleop/joint_cmd_arm
+  solver_topic: /hc_teleop/sol_q
+  target_pose_topic: /hc_teleop/target_ee_poses
+  controller_target_pose_topic: /hc_teleop/controller_target_ee_poses
+  actual_pose_topic: /hc_teleop/actual_ee_poses
   status_topic: /teleop/arm/status
   safety_stop_topic: /teleop/emergency_stop
   enable_topic: /teleop/arm/enabled
@@ -219,13 +219,13 @@ control:
     - 1.0
     - 0.0
   position_scale: 1.0
-  max_displacement: 0.45
+  max_displacement: 0.55
   orientation_enabled: true
   orientation_weight: 0.35
-  target_position_deadband: 0.002
-  target_orientation_deadband: 0.015
-  target_filter_alpha: 0.85
-  command_joint_deadband: 0.001
+  target_position_deadband: 0.001
+  target_orientation_deadband: 0.008
+  target_filter_alpha: 1.0
+  command_joint_deadband: 0.0005
   ik_iterations: 16
   ik_position_tolerance: 0.01
   ik_orientation_tolerance: 0.06
@@ -246,6 +246,6 @@ control:
   ik_min_progress_absolute: 0.0001
   ik_reseed_escape_progress_ratio: 0.05
   ik_reseed_escape_max_regression: 0.25
-  ik_max_update: 0.08
-  max_joint_velocity: 3.5
-  max_joint_velocity_norm: 3.5
+  ik_max_update: 0.12
+  max_joint_velocity: 4.2
+  max_joint_velocity_norm: 6.0

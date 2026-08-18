@@ -114,6 +114,15 @@ if [[ "${LAUNCH_DRIVER}" == true ]]; then
   fi
 fi
 
+# 2.5 启动硬件与 HC 标准话题实时桥接
+BRIDGE_SCRIPT="${SCRIPT_DIR}/scripts/hc_real_robot_bridge.py"
+if [[ -f "${BRIDGE_SCRIPT}" ]]; then
+  log "启动 HC 真机标准话题桥接 (/io_teleop <=> /hc_teleop)..."
+  setsid /usr/bin/python3 "${BRIDGE_SCRIPT}" &
+  PIDS+=($!)
+  sleep 1
+fi
+
 # 3. 启动 Pinocchio v23 逆运动学求解器
 CONTROLLER_YML="${SCRIPT_DIR}/robot_configs/hc_tj_description/controller_v23.yml"
 V23_SCRIPT="${SCRIPT_DIR}/vendor/io_unicontroller_ros2/control_v23_reconstructed/script/control_v2_3_ros2.py"

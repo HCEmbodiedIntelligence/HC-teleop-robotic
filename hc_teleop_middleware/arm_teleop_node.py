@@ -1451,6 +1451,7 @@ class HcTjArmTeleopNode(Node):
         arm.reference_local_ee = self._relative_pose(
             self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
         )
+        arm.target_local = arm.reference_local_ee
         arm.last_solution = np.asarray(
             [self.joint_state[name] for name in arm.joint_names], dtype=float
         )
@@ -1722,6 +1723,13 @@ class HcTjArmTeleopNode(Node):
                 arm.reference_vr = None
                 arm.reference_local_ee = None
                 arm.target_world = None
+                arm.target_local = self._relative_pose(
+                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                )
+            elif not arms_requested:
+                arm.target_local = self._relative_pose(
+                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                )
         if arms_requested and not arm_was_active and any(
             arm.active for arm in self.arms.values()
         ):
