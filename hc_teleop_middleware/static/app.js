@@ -1132,6 +1132,14 @@ async function init() {
       toast('急停信号已发送');
     }catch(error){toast(error.message,true);}
   };
+  if($('#resumeButton')) {
+    $('#resumeButton').onclick=async()=>{
+      try {
+        await api('/api/safety/resume',{method:'POST',body:JSON.stringify({reason:'dashboard safety resume'})});
+        toast('急停已解除，遥操作已恢复使能（按住离合即可运动）');
+      }catch(error){toast(error.message,true);}
+    };
+  }
   const setTeleop=async enabled=>{
     try {
       await api('/api/ros/publish',{method:'POST',body:JSON.stringify({topic:'/teleop/arm/enabled',type:'std_msgs/msg/Bool',data:{data:enabled}})});

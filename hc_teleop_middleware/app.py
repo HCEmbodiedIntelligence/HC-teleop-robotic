@@ -140,10 +140,16 @@ class MiddlewareRuntime:
             )
 
     def _on_safety_event(self, reason: str) -> None:
-        self._log("warning", reason)
         if self.ros is not None and self.config["safety"].get("enabled", True):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
         self.emit(envelope("safety_stop", "middleware", {"reason": reason}), ["websocket", "udp"])
+
+    def _on_safety_resume(self, reason: str) -> None:
+        if self.ros is not None:
+            stop_topic = self.config["safety"].get("stop_topic", "/teleop/emergency_stop")
+            self.ros.publish(stop_topic, "std_msgs/msg/Bool", {"data": False})
+            self.ros.publish("/teleop/arm/enabled", "std_msgs/msg/Bool", {"data": True})
+        self.emit(envelope("safety_resume", "middleware", {"reason": reason}), ["websocket", "udp"])
 
     def _log(self, level: str, message: str) -> None:
         self.events.append(
@@ -343,6 +349,11 @@ def create_app(store: ConfigStore) -> web.Application:
     async def emergency_stop(request: web.Request) -> web.Response:
         data = await request.json() if request.can_read_body else {}
         runtime._on_safety_event(str(data.get("reason", "dashboard emergency stop")))
+        return web.json_response({"accepted": True}, status=202)
+
+    async def safety_resume(request: web.Request) -> web.Response:
+        data = await request.json() if request.can_read_body else {}
+        runtime._on_safety_resume(str(data.get("reason", "dashboard safety resume")))
         return web.json_response({"accepted": True}, status=202)
 
     async def websocket(request: web.Request) -> web.WebSocketResponse:
@@ -690,6 +701,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/ros/topics", get_topics)
     app.router.add_post("/api/ros/publish", publish)
     app.router.add_post("/api/safety/stop", emergency_stop)
+    app.router.add_post("/api/safety/resume", safety_resume)
     app.router.add_post("/api/recording/precheck", precheck_recording)
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)
