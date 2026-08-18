@@ -1435,7 +1435,21 @@ class HcTjArmTeleopNode(Node):
             float(self.body_config.get("stick_lateral_direction", -1.0)),
         )
         yaw = 0.0
-        if track_head_yaw:
+        stick_deadzone = float(self.body_config["stick_deadzone"])
+        if abs(stick_x) > stick_deadzone:
+            shaped_x = math.copysign(
+                (abs(stick_x) - stick_deadzone) / (1.0 - stick_deadzone), stick_x
+            )
+            yaw = float(
+                np.clip(
+                    shaped_x
+                    * float(self.body_config.get("stick_yaw_direction", -1.0))
+                    * float(self.body_config.get("max_angular_velocity", 0.8)),
+                    -float(self.body_config["max_angular_velocity"]),
+                    float(self.body_config["max_angular_velocity"]),
+                )
+            )
+        elif track_head_yaw:
             assert body.head_pose is not None and body.reference_head is not None
             relative_yaw = self._wrap_angle(
                 mapped_relative_yaw(

@@ -60,11 +60,12 @@ body:
   torso_link: zhi_Link
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity
-  stick_x_axis: 3
-  stick_y_axis: 2
+  stick_x_axis: 2
+  stick_y_axis: 3
   stick_deadzone: 0.08
   stick_forward_direction: 1.0
   stick_lateral_direction: 1.0
+  stick_yaw_direction: -1.0
   max_linear_velocity: 0.35
   max_lateral_velocity: 0.25
   yaw_deadzone: 0.1

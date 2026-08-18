@@ -14,8 +14,8 @@ class ArmTeleopConfigTests(unittest.TestCase):
         )
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-        self.assertEqual(config["body"]["stick_x_axis"], 3)
-        self.assertEqual(config["body"]["stick_y_axis"], 2)
+        self.assertEqual(config["body"]["stick_x_axis"], 2)
+        self.assertEqual(config["body"]["stick_y_axis"], 3)
         self.assertEqual(config["control"]["home_gesture_axis"], 2)
 
 
