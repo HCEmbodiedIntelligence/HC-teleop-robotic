@@ -219,13 +219,13 @@ control:
     - 1.0
     - 0.0
   position_scale: 1.0
-  max_displacement: 0.55
+  max_displacement: 1.2
   orientation_enabled: true
   orientation_weight: 0.35
-  target_position_deadband: 0.001
-  target_orientation_deadband: 0.008
+  target_position_deadband: 0.0
+  target_orientation_deadband: 0.0
   target_filter_alpha: 1.0
-  command_joint_deadband: 0.0005
+  command_joint_deadband: 0.0
   ik_iterations: 16
   ik_position_tolerance: 0.01
   ik_orientation_tolerance: 0.06
@@ -246,6 +246,6 @@ control:
   ik_min_progress_absolute: 0.0001
   ik_reseed_escape_progress_ratio: 0.05
   ik_reseed_escape_max_regression: 0.25
-  ik_max_update: 0.12
-  max_joint_velocity: 4.2
-  max_joint_velocity_norm: 6.0
+  ik_max_update: 0.20
+  max_joint_velocity: 6.28
+  max_joint_velocity_norm: 10.0

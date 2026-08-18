@@ -8,9 +8,9 @@ ros_interface:
     joint_target: /hc_teleop/joint_cmd_arm
     solver_state: /hc_teleop/sol_q
 control:
-  method: control
+  method: retarget
   dt: 0.01
-  damping: 1.0e-05
+  damping: 1.0e-04
   joints_init: []
 model:
   urdf: urdf/hc_tj_robot.urdf
@@ -35,27 +35,27 @@ task:
       - io_teleop_ee_link_right
     - 10.0
     - 3.0
-    - 12.0
+    - 25.0
   - - - L_arm_0_Link
       - io_teleop_ee_link_left
     - 10.0
     - 3.0
-    - 12.0
+    - 25.0
   axis: []
   joint: []
 limit:
   velocity:
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
-  - 240.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
+  - 360.0
