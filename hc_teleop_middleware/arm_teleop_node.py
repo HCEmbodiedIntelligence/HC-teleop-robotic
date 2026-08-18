@@ -1900,7 +1900,7 @@ class HcTjArmTeleopNode(Node):
                 controller_pose.orientation.w,
             ) = controller_local[1]
             controller_message.poses.append(controller_pose)
-        if self.external_ik and bool(self.body_config.get("enabled", True)):
+        if self.external_ik and bool(self.body_config.get("include_in_controller_tasks", False)):
             torso = self.body.target_base or self._relative_pose(
                 self._root_pose(), self._link_pose(self.body.torso_index)
             )

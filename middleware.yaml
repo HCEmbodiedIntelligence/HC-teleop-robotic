@@ -115,7 +115,7 @@ vr:
   data_topic: /vrdata
 safety:
   enabled: true
-  stop_on_startup: true
+  stop_on_startup: false
   stop_topic: /teleop/emergency_stop
 camera:
   enabled: false
