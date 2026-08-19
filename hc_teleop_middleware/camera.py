@@ -253,15 +253,39 @@ class CameraService:
         class LatestFrameTrack(VideoStreamTrack):
             kind = "video"
 
+            def __init__(self):
+                super().__init__()
+                self._fixed_w = None
+                self._fixed_h = None
+
             async def recv(self):
                 pts, time_base = await self.next_timestamp()
                 image = camera.latest()
                 if image is None:
                     image = camera._generate_placeholder()
-                frame = av.VideoFrame.from_ndarray(image, format="bgr24")
-                frame.pts = pts
-                frame.time_base = time_base
-                return frame
+                try:
+                    h, w = image.shape[:2]
+                    if self._fixed_w is None or self._fixed_h is None:
+                        self._fixed_w = w
+                        self._fixed_h = h
+                    elif w != self._fixed_w or h != self._fixed_h:
+                        if cv2 is not None:
+                            image = cv2.resize(image, (self._fixed_w, self._fixed_h))
+                    if not image.flags.c_contiguous:
+                        image = np.ascontiguousarray(image)
+                    frame = av.VideoFrame.from_ndarray(image, format="bgr24")
+                    frame.pts = pts
+                    frame.time_base = time_base
+                    return frame
+                except Exception as exc:
+                    # In case of any encoding exception, return a safe blank frame matching fixed dimensions
+                    target_w = self._fixed_w or 640
+                    target_h = self._fixed_h or 480
+                    blank = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+                    frame = av.VideoFrame.from_ndarray(blank, format="bgr24")
+                    frame.pts = pts
+                    frame.time_base = time_base
+                    return frame
 
         remote = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
         pc = RTCPeerConnection()
