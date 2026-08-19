@@ -39,8 +39,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "camera": {
         "enabled": False,
-        "width": 1280,
-        "height": 720,
+        "source": "ros",
+        "topic": "/hc_teleop/camera_head/color/compressed",
+        "custom_topic": "",
+        "width": 640,
+        "height": 400,
         "fps": 30,
         "codec": "H264",
     },
@@ -159,7 +162,23 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     directory = recording.get("directory")
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
-    recording["enabled"] = bool(recording.get("enabled", True))
+    cam_config = value.get("camera", {})
+    if isinstance(cam_config, dict):
+        cam_config["enabled"] = bool(cam_config.get("enabled", False))
+        cam_config["source"] = str(cam_config.get("source", "ros"))
+        cam_topic = str(cam_config.get("topic", "/hc_teleop/camera_head/color/compressed")).strip()
+        if cam_topic and not cam_topic.startswith("/"):
+            cam_topic = "/" + cam_topic
+        cam_config["topic"] = cam_topic or "/hc_teleop/camera_head/color/compressed"
+        custom_topic = str(cam_config.get("custom_topic", "")).strip()
+        if custom_topic and not custom_topic.startswith("/"):
+            custom_topic = "/" + custom_topic
+        cam_config["custom_topic"] = custom_topic
+        cam_config["width"] = int(cam_config.get("width", 640))
+        cam_config["height"] = int(cam_config.get("height", 400))
+        cam_config["fps"] = int(cam_config.get("fps", 30))
+        cam_config["codec"] = str(cam_config.get("codec", "H264"))
+    value["camera"] = cam_config
     return value
 
 

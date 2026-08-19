@@ -88,6 +88,30 @@ ros:
     outputs:
     - record
     max_hz: 30.0
+  - topic: /io_teleop/camera_head/color
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
+  - topic: /cameras/eye/color
+    type: sensor_msgs/msg/Image
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
+  - topic: /hc_teleop/camera_overhead/color/compressed
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
+  - topic: /cameras/Bfront/color
+    type: sensor_msgs/msg/Image
+    enabled: true
+    outputs:
+    - record
+    max_hz: 30.0
   - topic: /hc_teleop/camera_d405_left/color/compressed
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -118,8 +142,11 @@ safety:
   stop_on_startup: false
   stop_topic: /teleop/emergency_stop
 camera:
-  enabled: false
-  width: 1280
-  height: 720
+  enabled: true
+  source: ros
+  topic: /hc_teleop/camera_head/color/compressed
+  custom_topic: ''
+  width: 640
+  height: 400
   fps: 30
   codec: H264

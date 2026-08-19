@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import rclpy
+from rclpy.executors import ExternalShutdownException
+try:
+    from rclpy._rclpy_pybind11 import RCLError
+except ImportError:
+    RCLError = Exception
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState, CompressedImage, Image
@@ -91,16 +97,125 @@ class HcRealRobotBridge(Node):
         )
 
         # 6. Cameras
+        # 6.1 头部相机 (Head Camera): 优先直接转发 JPEG 压缩流，断开时自动 fallback 压缩 raw 图像
         self.cam_head_pub = self.create_publisher(
             CompressedImage, "/hc_teleop/camera_head/color/compressed", 10
         )
+        self._last_head_compressed = 0.0
+
+        def head_compressed_cb(msg: CompressedImage) -> None:
+            self._last_head_compressed = time.monotonic()
+            self.cam_head_pub.publish(msg)
+
         self.create_subscription(
             CompressedImage,
             "/io_teleop/camera_head/color/compressed",
-            self.cam_head_pub.publish,
+            head_compressed_cb,
             qos_profile_sensor_data,
         )
+        self.create_subscription(
+            CompressedImage,
+            "/io_teleop/camera_head/color",
+            head_compressed_cb,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CompressedImage,
+            "/cameras/eye/color/compressed",
+            head_compressed_cb,
+            qos_profile_sensor_data,
+        )
+        try:
+            import cv2
+            import numpy as np
 
+            def eye_raw_cb(msg: Image) -> None:
+                if time.monotonic() - self._last_head_compressed < 1.0:
+                    return
+                try:
+                    if msg.encoding in ("rgb8", "bgr8", "rgb", "bgr"):
+                        arr = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, -1))
+                        if "rgb" in msg.encoding:
+                            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                        success, encoded = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        if success:
+                            cmsg = CompressedImage()
+                            cmsg.header = msg.header
+                            cmsg.format = "jpeg"
+                            cmsg.data = encoded.tobytes()
+                            self.cam_head_pub.publish(cmsg)
+                except Exception:
+                    pass
+
+            self.create_subscription(
+                Image,
+                "/cameras/eye/color",
+                eye_raw_cb,
+                qos_profile_sensor_data,
+            )
+        except Exception:
+            pass
+
+        # 6.2 头顶/前置俯视相机 (Overhead Camera): 支持 /cameras/Bfront/color/compressed, /cameras/Bfront/color
+        self.cam_overhead_pub = self.create_publisher(
+            CompressedImage, "/hc_teleop/camera_overhead/color/compressed", 10
+        )
+        self._last_overhead_compressed = 0.0
+
+        def overhead_compressed_cb(msg: CompressedImage) -> None:
+            self._last_overhead_compressed = time.monotonic()
+            self.cam_overhead_pub.publish(msg)
+
+        self.create_subscription(
+            CompressedImage,
+            "/cameras/Bfront/color/compressed",
+            overhead_compressed_cb,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CompressedImage,
+            "/io_teleop/camera_overhead/color/compressed",
+            overhead_compressed_cb,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CompressedImage,
+            "/cameras/overhead/color/compressed",
+            overhead_compressed_cb,
+            qos_profile_sensor_data,
+        )
+        try:
+            import cv2
+            import numpy as np
+
+            def bfront_raw_cb(msg: Image) -> None:
+                if time.monotonic() - self._last_overhead_compressed < 1.0:
+                    return
+                try:
+                    if msg.encoding in ("rgb8", "bgr8", "rgb", "bgr"):
+                        arr = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, -1))
+                        if "rgb" in msg.encoding:
+                            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                        success, encoded = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        if success:
+                            cmsg = CompressedImage()
+                            cmsg.header = msg.header
+                            cmsg.format = "jpeg"
+                            cmsg.data = encoded.tobytes()
+                            self.cam_overhead_pub.publish(cmsg)
+                except Exception:
+                    pass
+
+            self.create_subscription(
+                Image,
+                "/cameras/Bfront/color",
+                bfront_raw_cb,
+                qos_profile_sensor_data,
+            )
+        except Exception:
+            pass
+
+        # 6.3 双臂 D405 相机
         self.d405_l_pub = self.create_publisher(
             CompressedImage, "/hc_teleop/camera_d405_left/color/compressed", 10
         )
@@ -120,6 +235,18 @@ class HcRealRobotBridge(Node):
             self.d405_r_pub.publish,
             qos_profile_sensor_data,
         )
+
+        # 6.4 支持环境变量指定的自定义相机话题透传
+        custom_cam_in = os.environ.get("HC_CUSTOM_CAMERA_INPUT", "").strip()
+        custom_cam_out = os.environ.get("HC_CUSTOM_CAMERA_OUTPUT", "/hc_teleop/camera_custom/color/compressed").strip()
+        if custom_cam_in:
+            self.custom_cam_pub = self.create_publisher(CompressedImage, custom_cam_out, 10)
+            self.create_subscription(
+                CompressedImage,
+                custom_cam_in,
+                self.custom_cam_pub.publish,
+                qos_profile_sensor_data,
+            )
 
         # 7. VR Data bridge: /vrdata (JSON) -> /io_teleop/vr_data (io_msgs2/VrData)
         try:
@@ -181,14 +308,23 @@ class HcRealRobotBridge(Node):
 def main() -> None:
     domain_id = int(os.environ.get("ROS_DOMAIN_ID", 13))
     rclpy.init(domain_id=domain_id)
-    node = HcRealRobotBridge()
+    node = None
     try:
+        node = HcRealRobotBridge()
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

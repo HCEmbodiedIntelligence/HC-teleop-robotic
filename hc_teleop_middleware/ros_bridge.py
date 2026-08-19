@@ -32,8 +32,13 @@ DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
     "/io_teleop/joint_cmd_finger_left": {"target_hz": 100.0, "min_hz": 50.0},
     "/io_teleop/joint_cmd_finger_right": {"target_hz": 100.0, "min_hz": 50.0},
     "/io_teleop/hand_joint_states": {"target_hz": 100.0, "min_hz": 30.0},
+    "/hc_teleop/camera_head/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/hc_teleop/camera_overhead/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/hc_teleop/camera_d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/hc_teleop/camera_d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/io_teleop/camera_head/color": {"target_hz": 30.0, "min_hz": 10.0},
     "/io_teleop/camera_head/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/io_teleop/camera_overhead/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/io_teleop/camera_d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/io_teleop/camera_d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/teleop/arm/status": {"target_hz": 10.0, "min_hz": 2.0},
@@ -124,9 +129,15 @@ class TopicHealthTracker:
 class RosBridge:
     """Run rclpy in its own thread and expose thread-safe bridge operations."""
 
-    def __init__(self, config: dict[str, Any], on_event: EventCallback):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        on_event: EventCallback,
+        on_frame: Callable[[str, Any], None] | None = None,
+    ):
         self.config = config
         self.on_event = on_event
+        self.on_frame = on_frame
         self._stop = threading.Event()
         self._commands: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
@@ -209,7 +220,8 @@ class RosBridge:
             domain_id = int(self.config.get("domain_id", int(os.environ.get("ROS_DOMAIN_ID", 13))))
             os.environ["ROS_DOMAIN_ID"] = str(domain_id)
 
-            rclpy.init(args=[], domain_id=domain_id)
+            if not rclpy.ok():
+                rclpy.init(args=[], domain_id=domain_id)
             node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"))
             executor = SingleThreadedExecutor()
             executor.add_node(node)
@@ -248,6 +260,13 @@ class RosBridge:
                 ) -> None:
                     now = time.monotonic()
                     tracker.record_message(now)
+                    if self.on_frame is not None and (
+                        "camera" in topic or "eye" in topic or "color" in topic or "CompressedImage" in msg_type_name
+                    ):
+                        try:
+                            self.on_frame(topic, message)
+                        except Exception:
+                            pass
                     if max_hz and now - last_emit.get(topic, 0.0) < 1.0 / max_hz:
                         return
                     last_emit[topic] = now
@@ -257,10 +276,21 @@ class RosBridge:
                             raw_bytes = bytes(serialize_message(message))
                         except Exception:
                             pass
+                    payload = {}
+                    if "CompressedImage" not in msg_type_name and "Image" not in msg_type_name:
+                        try:
+                            payload = message_to_ordereddict(message)
+                        except Exception:
+                            payload = {}
+                    elif len(outputs) > 1 or "websocket" in outputs:
+                        try:
+                            payload = message_to_ordereddict(message)
+                        except Exception:
+                            payload = {}
                     event = envelope(
                         "ros_message",
                         "ros2",
-                        message_to_ordereddict(message),
+                        payload,
                         topic=topic,
                         msg_type=msg_type_name,
                         _raw=raw_bytes,

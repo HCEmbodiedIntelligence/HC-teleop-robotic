@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import socket
 import time
 from collections import deque
@@ -51,13 +52,29 @@ class MiddlewareRuntime:
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
+        domain_id = int(self.config.get("ros", {}).get("domain_id", 13))
+        os.environ["ROS_DOMAIN_ID"] = str(domain_id)
+        try:
+            import rclpy
+            if not rclpy.ok():
+                rclpy.init(args=[], domain_id=domain_id)
+        except Exception:
+            pass
+
         self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
         self.player = TopicPlayer(self.recorder.directory, lambda: self.ros)
-        self.ros = RosBridge(self.config["ros"], self.emit)
+        self.camera = CameraService(
+            self.config.get("camera", {}),
+            domain_id=domain_id,
+        )
+        self.ros = RosBridge(
+            self.config["ros"],
+            self.emit,
+            on_frame=self.camera.handle_ros_message,
+        )
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_safety_event
         )
-        self.camera = CameraService(self.config["camera"])
         self.ros.start()
         self.vr.start()
         self.camera.start()
@@ -70,12 +87,18 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.player.stop)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
-        if self.ros is not None:
-            await asyncio.to_thread(self.ros.stop)
         if self.camera is not None:
             await self.camera.stop()
+        if self.ros is not None:
+            await asyncio.to_thread(self.ros.stop)
         if self.recorder is not None:
             await asyncio.to_thread(self.recorder.stop)
+        try:
+            import rclpy
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
         self._log("info", "runtime stopped")
 
     async def restart(self, config: dict[str, Any]) -> None:
@@ -538,6 +561,50 @@ def create_app(store: ConfigStore) -> web.Application:
         except (RuntimeError, KeyError, TypeError) as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
+    async def get_camera_status(_request: web.Request) -> web.Response:
+        status = runtime.camera.status() if runtime.camera else {"state": "disabled"}
+        return web.json_response(status)
+
+    async def get_camera_snapshot(_request: web.Request) -> web.Response:
+        if runtime.camera is None:
+            raise web.HTTPServiceUnavailable(text="camera service is unavailable")
+        frame = runtime.camera.latest()
+        if frame is None:
+            raise web.HTTPNotFound(text="no frame available")
+        try:
+            import cv2
+            success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not success:
+                raise RuntimeError("failed to encode frame")
+            return web.Response(body=encoded.tobytes(), content_type="image/jpeg")
+        except Exception as exc:
+            raise web.HTTPInternalServerError(text=str(exc))
+
+    async def get_camera_stream(_request: web.Request) -> web.StreamResponse:
+        if runtime.camera is None:
+            raise web.HTTPServiceUnavailable(text="camera service is unavailable")
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
+        )
+        await response.prepare(_request)
+        try:
+            import cv2
+            while True:
+                frame = runtime.camera.latest()
+                if frame is not None:
+                    success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if success:
+                        data = encoded.tobytes()
+                        await response.write(
+                            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
+                        )
+                await asyncio.sleep(0.033)
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
+        return response
+
     async def precheck_recording(_request: web.Request) -> web.Response:
         subs = store.value.get("ros", {}).get("subscriptions", [])
         recording_topics = [
@@ -902,6 +969,9 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/ws", websocket)
     app.router.add_post("/api/webrtc/offer", webrtc_offer)
     app.router.add_post("/offer", webrtc_offer)
+    app.router.add_get("/api/camera/status", get_camera_status)
+    app.router.add_get("/api/camera/snapshot", get_camera_snapshot)
+    app.router.add_get("/api/camera/stream", get_camera_stream)
     app.router.add_options("/{tail:.*}", options)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)

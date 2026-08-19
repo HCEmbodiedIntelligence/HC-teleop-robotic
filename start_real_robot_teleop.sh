@@ -29,7 +29,12 @@ err() {
   echo -e "\033[1;31m[HC-Teleop ERR]\033[0m $*"
 }
 
+_CLEANED=0
 cleanup() {
+  if [[ "${_CLEANED}" -eq 1 ]]; then
+    return 0
+  fi
+  _CLEANED=1
   if [[ ${#PIDS[@]} -eq 0 ]]; then
     return 0
   fi
@@ -37,14 +42,20 @@ cleanup() {
   for pid in "${PIDS[@]}"; do
     kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
   done
-  sleep 1
+  local deadline=$((SECONDS + 3))
+  for pid in "${PIDS[@]}"; do
+    while kill -0 "${pid}" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do
+      sleep 0.1
+    done
+  done
   for pid in "${PIDS[@]}"; do
     kill -KILL "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
   done
   log "所有进程已安全退出。"
 }
 
-trap cleanup INT TERM EXIT
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 LAUNCH_DRIVER=true
 DRIVER_MODE="all"
@@ -83,6 +94,12 @@ if [[ "${DRIVER_MODE}" == "all" ]] && ! [[ "${DRIVER_EXTRA_ARGS[*]}" =~ "--no-d4
   fi
 fi
 
+# 0. 清理残留后台旧进程（确保相机驱动与求解器干净启动）
+for pat in "camera_driver" "camera_bridge.launch.py" "image_jpeg_compressor" "depth_png_compressor" "camera_calibration_json_bridge" "hc_real_robot_bridge.py" "control_v2_3_ros2.py" "teleop_arm_controller.py" "middleware_server.py"; do
+  pkill -f "${pat}" 2>/dev/null || true
+done
+sleep 0.5
+
 # 1. 环境初始化
 if [[ -f /opt/ros/humble/setup.bash ]]; then
   set +u
@@ -101,11 +118,19 @@ if [[ "${LAUNCH_DRIVER}" == true ]]; then
   if [[ -d "${HC_IO_SUIT_DIR}/src/hc_tj" ]]; then
     if [[ "${DRIVER_MODE}" == "all" && -f "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" ]]; then
       log "启动 hc_io_suit 全功能真机驱动 (${DRIVER_EXTRA_ARGS[*]:-默认全部})..."
-      setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" "${DRIVER_EXTRA_ARGS[@]}" &
+      if [[ ${#DRIVER_EXTRA_ARGS[@]} -gt 0 ]]; then
+        setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" "${DRIVER_EXTRA_ARGS[@]}" &
+      else
+        setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj_all.sh" &
+      fi
       PIDS+=($!)
     elif [[ -f "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" ]]; then
       log "启动 hc_io_suit 双臂驱动..."
-      setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" "${DRIVER_EXTRA_ARGS[@]}" &
+      if [[ ${#DRIVER_EXTRA_ARGS[@]} -gt 0 ]]; then
+        setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" "${DRIVER_EXTRA_ARGS[@]}" &
+      else
+        setsid bash "${HC_IO_SUIT_DIR}/src/hc_tj/run_hc_tj.sh" &
+      fi
       PIDS+=($!)
     fi
     sleep 3
@@ -148,5 +173,4 @@ fi
 
 # 5. 启动 Web 遥操作中间件 & 录制服务
 log "启动 Web 遥操作中间件与录制服务 (Port 7876)..."
-export PYTHONPATH="${SCRIPT_DIR}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 /usr/bin/python3 "${SCRIPT_DIR}/middleware_server.py" --config "${SCRIPT_DIR}/middleware.yaml"
