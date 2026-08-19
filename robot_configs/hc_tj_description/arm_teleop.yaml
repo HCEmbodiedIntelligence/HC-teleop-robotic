@@ -67,18 +67,18 @@ body:
   stick_lateral_direction: -1.0
   max_linear_velocity: 0.35
   max_lateral_velocity: 0.25
-  yaw_deadzone: 0.1
-  yaw_gain: 1.5
+  yaw_deadzone: 0.18
+  yaw_gain: 0.6
   yaw_direction: -1.0
-  max_angular_velocity: 0.8
+  max_angular_velocity: 0.45
   head_height_axis: 2
   head_pitch_position_axis: 1
-  height_scale: 0.7
-  pitch_scale: 1.2
+  height_scale: 0.5
+  pitch_scale: 0.8
   height_direction: -1.0
   pitch_direction: -1.0
   max_height_delta: 0.18
-  max_pitch_delta: 0.4
+  max_pitch_delta: 0.35
   pitch_axis_world:
   - -1.0
   - 0.0
@@ -218,19 +218,19 @@ control:
   - - 0.0
     - 1.0
     - 0.0
-  position_scale: 1.0
-  max_displacement: 1.2
+  position_scale: 0.85
+  max_displacement: 0.9
   orientation_enabled: true
   orientation_weight: 0.35
   target_position_deadband: 0.0
   target_orientation_deadband: 0.0
-  target_filter_alpha: 1.0
+  target_filter_alpha: 0.75
   command_joint_deadband: 0.0
   ik_iterations: 16
   ik_position_tolerance: 0.01
   ik_orientation_tolerance: 0.06
-  ik_damping_min: 0.035
-  ik_damping_max: 0.35
+  ik_damping_min: 0.05
+  ik_damping_max: 0.45
   ik_singularity_threshold: 0.08
   ik_limit_margin: 0.12
   ik_reseed_limit_margin: 0.08
@@ -246,6 +246,6 @@ control:
   ik_min_progress_absolute: 0.0001
   ik_reseed_escape_progress_ratio: 0.05
   ik_reseed_escape_max_regression: 0.25
-  ik_max_update: 0.20
-  max_joint_velocity: 6.28
-  max_joint_velocity_norm: 10.0
+  ik_max_update: 0.08
+  max_joint_velocity: 1.8
+  max_joint_velocity_norm: 3.2

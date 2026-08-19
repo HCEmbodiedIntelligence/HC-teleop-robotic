@@ -1454,17 +1454,20 @@ class HcTjArmTeleopNode(Node):
                     ),
                 )
             )
-            yaw_deadzone = float(self.body_config["yaw_deadzone"])
-            yaw_error = 0.0 if abs(relative_yaw) <= yaw_deadzone else relative_yaw
-            yaw = float(
-                np.clip(
-                    yaw_error
-                    * float(self.body_config.get("yaw_direction", 1.0))
-                    * float(self.body_config["yaw_gain"]),
-                    -float(self.body_config["max_angular_velocity"]),
-                    float(self.body_config["max_angular_velocity"]),
+            yaw_deadzone = float(self.body_config.get("yaw_deadzone", 0.18))
+            abs_yaw = abs(relative_yaw)
+            if abs_yaw > yaw_deadzone:
+                excess = abs_yaw - yaw_deadzone
+                smooth_excess = math.copysign(excess ** 1.15, relative_yaw)
+                yaw = float(
+                    np.clip(
+                        smooth_excess
+                        * float(self.body_config.get("yaw_direction", -1.0))
+                        * float(self.body_config.get("yaw_gain", 0.6)),
+                        -float(self.body_config.get("max_angular_velocity", 0.45)),
+                        float(self.body_config.get("max_angular_velocity", 0.45)),
+                    )
                 )
-            )
         if self.body_config.get("base_command_mode", "delta") == "delta":
             period = 1.0 / float(self.control["rate_hz"])
             yaw, forward, lateral = yaw * period, forward * period, lateral * period

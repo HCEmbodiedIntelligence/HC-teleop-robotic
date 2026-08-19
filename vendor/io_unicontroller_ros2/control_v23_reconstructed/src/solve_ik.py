@@ -108,6 +108,23 @@ def _solve_box_lsq(matrix, target, damping, lower, upper, max_iter=None):
     return np.minimum(np.maximum(velocity, lower), upper)
 
 
+def _compute_adaptive_damping(matrix: np.ndarray, base_damping: float) -> float:
+    base = max(float(base_damping), 1.5e-3)
+    if matrix.shape[0] == 0:
+        return base
+    try:
+        s = np.linalg.svd(matrix, compute_uv=False)
+        s_min = float(np.min(s)) if s.size > 0 else 0.0
+        sigma_thresh = 0.08
+        if s_min < sigma_thresh:
+            ratio = s_min / sigma_thresh
+            adaptive_extra = 0.05 * ((1.0 - ratio) ** 2)
+            return float(base + adaptive_extra)
+    except Exception:
+        pass
+    return base
+
+
 def solve_ik(
     interface, q: np.ndarray, tasks: Sequence, targets, dt: float,
     velocity_limits=None, damping: float = 1e-5,
@@ -119,8 +136,9 @@ def solve_ik(
         velocity = np.zeros(interface.nv_free)
         residual = 0.0
     else:
+        effective_damping = _compute_adaptive_damping(matrix, damping)
         velocity = _solve_box_lsq(
-            matrix, target, damping, lower, upper
+            matrix, target, effective_damping, lower, upper
         )
         residual = float(np.linalg.norm(matrix @ velocity - target))
     tolerance = 1e-9
