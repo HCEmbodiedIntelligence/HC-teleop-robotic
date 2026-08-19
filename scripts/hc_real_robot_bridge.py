@@ -121,6 +121,60 @@ class HcRealRobotBridge(Node):
             qos_profile_sensor_data,
         )
 
+        # 7. VR Data bridge: /vrdata (JSON) -> /io_teleop/vr_data (io_msgs2/VrData)
+        try:
+            from io_msgs2.msg import VrData
+            from std_msgs.msg import String
+            import json
+
+            self.vr_data_pub = self.create_publisher(
+                VrData, "/io_teleop/vr_data", qos_profile_sensor_data
+            )
+
+            def vrdata_callback(msg: String) -> None:
+                try:
+                    payload = json.loads(msg.data)
+                    vr_msg = VrData()
+                    vr_msg.header.stamp = self.get_clock().now().to_msg()
+                    inputs = payload.get("inputs", {})
+                    left_input = inputs.get("left", {})
+                    right_input = inputs.get("right", {})
+                    vr_msg.l_index_axis = float(left_input.get("trigger", 0.0))
+                    vr_msg.r_index_axis = float(right_input.get("trigger", 0.0))
+                    vr_msg.l_index_trigger = 1 if vr_msg.l_index_axis > 0.5 else 0
+                    vr_msg.r_index_trigger = 1 if vr_msg.r_index_axis > 0.5 else 0
+                    vr_msg.l_hand_axis = float(left_input.get("grip", 0.0))
+                    vr_msg.r_hand_axis = float(right_input.get("grip", 0.0))
+                    vr_msg.l_hand_trigger = 1 if vr_msg.l_hand_axis > 0.5 else 0
+                    vr_msg.r_hand_trigger = 1 if vr_msg.r_hand_axis > 0.5 else 0
+                    left_primary = left_input.get("primary", [0.0, 0.0])
+                    right_primary = right_input.get("primary", [0.0, 0.0])
+                    vr_msg.l_thumb_stick_axis_x = float(left_primary[0]) if len(left_primary) > 0 else 0.0
+                    vr_msg.l_thumb_stick_axis_y = float(left_primary[1]) if len(left_primary) > 1 else 0.0
+                    vr_msg.r_thumb_stick_axis_x = float(right_primary[0]) if len(right_primary) > 0 else 0.0
+                    vr_msg.r_thumb_stick_axis_y = float(right_primary[1]) if len(right_primary) > 1 else 0.0
+                    poses = payload.get("poses", {})
+                    for pose_key, pose_target in (("head", vr_msg.head_pose), ("left", vr_msg.left_pose), ("right", vr_msg.right_pose)):
+                        p_data = poses.get(pose_key, {})
+                        pos = p_data.get("position", [0.0, 0.0, 0.0])
+                        ori = p_data.get("orientation", [0.0, 0.0, 0.0, 1.0])
+                        if len(pos) >= 3:
+                            pose_target.position.x = float(pos[0])
+                            pose_target.position.y = float(pos[1])
+                            pose_target.position.z = float(pos[2])
+                        if len(ori) >= 4:
+                            pose_target.orientation.x = float(ori[0])
+                            pose_target.orientation.y = float(ori[1])
+                            pose_target.orientation.z = float(ori[2])
+                            pose_target.orientation.w = float(ori[3])
+                    self.vr_data_pub.publish(vr_msg)
+                except Exception:
+                    pass
+
+            self.create_subscription(String, "/vrdata", vrdata_callback, 10)
+        except ImportError:
+            pass
+
         self.get_logger().info("HC Real Robot Bridge started: /io_teleop <=> /hc_teleop")
 
 
