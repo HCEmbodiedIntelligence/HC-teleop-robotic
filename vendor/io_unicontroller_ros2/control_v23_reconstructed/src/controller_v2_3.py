@@ -124,7 +124,16 @@ class ControllerV23:
         self.q = self.interface.update_named_joints(names, positions)
         if not self.have_feedback:
             self.command_q = self.q.copy()
-        self.have_feedback = True
+            self.have_feedback = True
+        elif self.method == "retarget":
+            # If physical feedback differs significantly from command_q (e.g. during homing, e-stop, or clutch release),
+            # sync command_q to feedback to prevent open-loop drift and singular IK postures.
+            diff = np.linalg.norm(
+                self.interface.free_configuration(self.command_q)
+                - self.interface.free_configuration(self.q)
+            )
+            if diff > 0.15:
+                self.command_q = self.q.copy()
 
     def update_tf_targets(
         self, transforms: Mapping[Tuple[str, str], TargetTransform]

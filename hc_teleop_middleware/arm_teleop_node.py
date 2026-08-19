@@ -626,6 +626,16 @@ class HcTjArmTeleopNode(Node):
                     )
                     step = float(np.clip(target - previous, -max_step, max_step))
                     merged[name] = previous + step
+        else:
+            arms_active = any(self.arms[side].active for side in ("right", "left"))
+            if not arms_active:
+                for arm in self.arms.values():
+                    for name in arm.joint_names:
+                        merged[name] = float(
+                            self.last_command.get(
+                                name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
+                            )
+                        )
         merged.update(self.generic_aux_command)
         output = JointState()
         output.header = message.header
@@ -1471,13 +1481,12 @@ class HcTjArmTeleopNode(Node):
     def _engage_arm(self, arm: ArmRuntime) -> None:
         arm.active = True
         arm.reference_vr = arm.pose
-        if arm.target_local is None:
-            arm.target_local = self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-            )
+        arm.target_local = self._relative_pose(
+            self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+        )
         arm.reference_local_ee = arm.target_local
         arm.last_solution = np.asarray(
-            [self.joint_state[name] for name in arm.joint_names], dtype=float
+            [self.joint_state.get(name, self.initial_joints.get(name, 0.0)) for name in arm.joint_names], dtype=float
         )
         arm.ik_converged = True
         arm.ik_within_tolerance = True
@@ -1676,7 +1685,22 @@ class HcTjArmTeleopNode(Node):
             for name in names
         ) <= float(self.control.get("home_tolerance", 0.08))
         elapsed = self._monotonic() - getattr(self, "homing_start_time", 0.0)
-        return cmd_reached and (feedback_close or elapsed >= 4.0)
+        done = cmd_reached and (feedback_close or elapsed >= 4.0)
+        if done:
+            for arm in self.arms.values():
+                for name in arm.joint_names:
+                    bullet.resetJointState(
+                        self.robot_id,
+                        self.joint_by_name[name],
+                        self.initial_joints[name],
+                        physicsClientId=self.physics_client,
+                    )
+                arm.target_local = self._relative_pose(
+                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                )
+                arm.reference_local_ee = arm.target_local
+                arm.active = False
+        return done
 
     def _publish_generic_grippers(self, now: float) -> None:
         command: dict[str, float] = {}
