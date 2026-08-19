@@ -46,6 +46,8 @@ class MiddlewareRuntime:
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
+        self._last_x_held = False
+        self._last_y_held = False
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -127,6 +129,24 @@ class MiddlewareRuntime:
         if hasattr(packet, "right_input") and packet.right_input is not None:
             if (packet.right_input.pressed_mask & 1) or (packet.right_input.held_mask & 1):
                 self._on_safety_resume("VR controller A button pressed")
+
+        if hasattr(packet, "left_input") and packet.left_input is not None:
+            left_held = int(getattr(packet.left_input, "held_mask", 0))
+            left_pressed = int(getattr(packet.left_input, "pressed_mask", 0))
+
+            # X button on left controller: bit 0 (1 << 0) -> Start recording
+            x_down = bool(left_pressed & 1) or (bool(left_held & 1) and not self._last_x_held)
+            self._last_x_held = bool(left_held & 1)
+
+            # Y button on left controller: bit 1 (1 << 1) -> Stop recording
+            y_down = bool(left_pressed & 2) or (bool(left_held & 2) and not self._last_y_held)
+            self._last_y_held = bool(left_held & 2)
+
+            if x_down:
+                self._handle_vr_record_start()
+            elif y_down:
+                self._handle_vr_record_stop()
+
         if self.ros is None:
             return
         if self.config["vr"].get("publish_to_ros", True):
@@ -140,6 +160,120 @@ class MiddlewareRuntime:
                         separators=(",", ":"),
                     )
                 },
+            )
+
+    def _handle_vr_record_start(self) -> None:
+        if self.recorder is None:
+            return
+        status = self.recorder.status()
+        if status.get("recording", False):
+            self._log("info", "VR requested record start, but already recording")
+            self.emit(
+                envelope(
+                    "recording_status",
+                    "middleware",
+                    {
+                        "recording": True,
+                        "filename": status.get("active_file", ""),
+                        "action": "already_recording",
+                        "message": "Already recording",
+                    },
+                ),
+                ["websocket", "udp"],
+            )
+            return
+        try:
+            filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
+            path = self.recorder.start(filename)
+            self._log("info", f"Recording started by VR X button: {filename}")
+            if self.ros is not None:
+                self.ros.publish(
+                    "/teleop/recording_state",
+                    "std_msgs/msg/String",
+                    {"data": json.dumps({"recording": True, "filename": filename})},
+                )
+            self.emit(
+                envelope(
+                    "recording_started",
+                    "middleware",
+                    {
+                        "recording": True,
+                        "filename": filename,
+                        "path": str(path),
+                        "action": "start",
+                        "message": "Recording started",
+                    },
+                ),
+                ["websocket", "udp"],
+            )
+        except Exception as exc:
+            self._log("error", f"Failed to start recording on VR X button: {exc}")
+            self.emit(
+                envelope(
+                    "recording_error",
+                    "middleware",
+                    {
+                        "recording": False,
+                        "error": str(exc),
+                        "action": "start_failed",
+                    },
+                ),
+                ["websocket", "udp"],
+            )
+
+    def _handle_vr_record_stop(self) -> None:
+        if self.recorder is None:
+            return
+        status = self.recorder.status()
+        if not status.get("recording", False):
+            self._log("info", "VR requested record stop, but not currently recording")
+            self.emit(
+                envelope(
+                    "recording_status",
+                    "middleware",
+                    {
+                        "recording": False,
+                        "action": "not_recording",
+                        "message": "Not recording",
+                    },
+                ),
+                ["websocket", "udp"],
+            )
+            return
+        try:
+            stopped_status = self.recorder.stop()
+            self._log("info", f"Recording stopped by VR Y button: {stopped_status}")
+            if self.ros is not None:
+                self.ros.publish(
+                    "/teleop/recording_state",
+                    "std_msgs/msg/String",
+                    {"data": json.dumps({"recording": False, "status": stopped_status})},
+                )
+            self.emit(
+                envelope(
+                    "recording_stopped",
+                    "middleware",
+                    {
+                        "recording": False,
+                        "status": stopped_status,
+                        "action": "stop",
+                        "message": "Recording stopped",
+                    },
+                ),
+                ["websocket", "udp"],
+            )
+        except Exception as exc:
+            self._log("error", f"Failed to stop recording on VR Y button: {exc}")
+            self.emit(
+                envelope(
+                    "recording_error",
+                    "middleware",
+                    {
+                        "error": str(exc),
+                        "action": "stop_failed",
+                    },
+                ),
+                ["websocket", "udp"],
             )
 
     def _on_safety_event(self, reason: str) -> None:
@@ -515,12 +649,51 @@ def create_app(store: ConfigStore) -> web.Application:
                 }, status=400)
 
         path = await asyncio.to_thread(runtime.recorder.start, filename)
+        if runtime.ros is not None:
+            runtime.ros.publish(
+                "/teleop/recording_state",
+                "std_msgs/msg/String",
+                {"data": json.dumps({"recording": True, "filename": filename})},
+            )
+        runtime.emit(
+            envelope(
+                "recording_started",
+                "middleware",
+                {
+                    "recording": True,
+                    "filename": filename,
+                    "path": str(path),
+                    "action": "start",
+                    "message": "Recording started",
+                },
+            ),
+            ["websocket", "udp"],
+        )
         return web.json_response({"ok": True, "recording": True, "path": path})
 
     async def stop_recording(_request: web.Request) -> web.Response:
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder is not initialized")
         rec_status = await asyncio.to_thread(runtime.recorder.stop)
+        if runtime.ros is not None:
+            runtime.ros.publish(
+                "/teleop/recording_state",
+                "std_msgs/msg/String",
+                {"data": json.dumps({"recording": False, "status": rec_status})},
+            )
+        runtime.emit(
+            envelope(
+                "recording_stopped",
+                "middleware",
+                {
+                    "recording": False,
+                    "status": rec_status,
+                    "action": "stop",
+                    "message": "Recording stopped",
+                },
+            ),
+            ["websocket", "udp"],
+        )
         return web.json_response({"ok": True, "recording": False, "status": rec_status})
 
     async def get_recording_status(_request: web.Request) -> web.Response:
