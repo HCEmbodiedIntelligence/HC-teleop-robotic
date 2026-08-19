@@ -111,7 +111,20 @@ if [[ -f /opt/ros/humble/setup.bash ]]; then
 fi
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-13}"
+export PYTHONUNBUFFERED=1
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+
+# 1.5 创建本次遥操作运行日志目录
+SESSION_ID="$(date +'%Y%m%d_%H%M%S')"
+LOG_DIR="${SCRIPT_DIR}/runtime/teleop_logs/session_${SESSION_ID}"
+mkdir -p "${LOG_DIR}"
+ln -sfn "${LOG_DIR}" "${SCRIPT_DIR}/runtime/teleop_logs/latest"
+log "运行日志已就绪: ${LOG_DIR}"
+log "  - 实时操作流: ${LOG_DIR}/teleop_operations.log"
+log "  - 遥操作控制: ${LOG_DIR}/teleop_controller.log"
+log "  - 逆解求解器: ${LOG_DIR}/v23_solver.log"
+log "  - 话题桥接器: ${LOG_DIR}/bridge.log"
+log "  - 中间件服务: ${LOG_DIR}/middleware.log"
 
 # 2. 检查并启动硬件驱动（可选）
 if [[ "${LAUNCH_DRIVER}" == true ]]; then
@@ -143,7 +156,7 @@ fi
 BRIDGE_SCRIPT="${SCRIPT_DIR}/scripts/hc_real_robot_bridge.py"
 if [[ -f "${BRIDGE_SCRIPT}" ]]; then
   log "启动 HC 真机标准话题桥接 (/io_teleop <=> /hc_teleop)..."
-  setsid /usr/bin/python3 "${BRIDGE_SCRIPT}" &
+  setsid /usr/bin/python3 -u "${BRIDGE_SCRIPT}" > "${LOG_DIR}/bridge.log" 2>&1 &
   PIDS+=($!)
   sleep 1
 fi
@@ -154,7 +167,7 @@ V23_SCRIPT="${SCRIPT_DIR}/vendor/io_unicontroller_ros2/control_v23_reconstructed
 
 if [[ -f "${V23_SCRIPT}" && -f "${CONTROLLER_YML}" ]]; then
   log "启动 Pinocchio v23 逆运动学求解器..."
-  setsid /usr/bin/python3 "${V23_SCRIPT}" "${CONTROLLER_YML}" &
+  setsid /usr/bin/python3 -u "${V23_SCRIPT}" "${CONTROLLER_YML}" > "${LOG_DIR}/v23_solver.log" 2>&1 &
   PIDS+=($!)
   sleep 1
 else
@@ -166,11 +179,19 @@ fi
 ARM_CONFIG="${SCRIPT_DIR}/robot_configs/hc_tj_description/arm_teleop.yaml"
 if [[ -f "${ARM_CONFIG}" ]]; then
   log "启动机械臂遥操作控制器 (backend=v23)..."
-  setsid /usr/bin/python3 "${SCRIPT_DIR}/teleop_arm_controller.py" --config "${ARM_CONFIG}" --backend v23 &
+  setsid /usr/bin/python3 -u "${SCRIPT_DIR}/teleop_arm_controller.py" --config "${ARM_CONFIG}" --backend v23 > "${LOG_DIR}/teleop_controller.log" 2>&1 &
   PIDS+=($!)
   sleep 1
 fi
 
+# 4.5 启动实时遥操作与状态监控记录器
+MONITOR_SCRIPT="${SCRIPT_DIR}/scripts/teleop_session_monitor.py"
+if [[ -f "${MONITOR_SCRIPT}" ]]; then
+  log "启动实时遥操作事件记录器..."
+  setsid /usr/bin/python3 -u "${MONITOR_SCRIPT}" --log-file "${LOG_DIR}/teleop_operations.log" > "${LOG_DIR}/monitor.log" 2>&1 &
+  PIDS+=($!)
+fi
+
 # 5. 启动 Web 遥操作中间件 & 录制服务
 log "启动 Web 遥操作中间件与录制服务 (Port 7876)..."
-/usr/bin/python3 "${SCRIPT_DIR}/middleware_server.py" --config "${SCRIPT_DIR}/middleware.yaml"
+/usr/bin/python3 -u "${SCRIPT_DIR}/middleware_server.py" --config "${SCRIPT_DIR}/middleware.yaml" 2>&1 | tee "${LOG_DIR}/middleware.log"
