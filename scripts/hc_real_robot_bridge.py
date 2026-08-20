@@ -115,6 +115,12 @@ class HcRealRobotBridge(Node):
         )
         self.create_subscription(
             CompressedImage,
+            "/io_teleop/camera_head/color",
+            head_compressed_cb,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CompressedImage,
             "/cameras/eye/color/compressed",
             head_compressed_cb,
             qos_profile_sensor_data,

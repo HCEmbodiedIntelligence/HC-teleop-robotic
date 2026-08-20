@@ -137,6 +137,11 @@ fi
 log "检查并清理旧驱动与残留相机线程..."
 kill_all_lingering_processes true
 
+if which uhubctl >/dev/null 2>&1; then
+  # 软件切断 1-2.2 闪断端口供电，彻底消除对 Berxel/Angstrong 相机驱动的热插拔重置干扰
+  echo 1 | sudo -S uhubctl -l 1-2 -p 2 -a 0 >/dev/null 2>&1 || sudo uhubctl -l 1-2 -p 2 -a 0 >/dev/null 2>&1 || true
+fi
+
 # 1. 环境初始化
 if [[ -f /opt/ros/humble/setup.bash ]]; then
   set +u
