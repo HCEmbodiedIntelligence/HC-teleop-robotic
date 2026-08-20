@@ -302,6 +302,15 @@ class CameraService:
         remote = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
         pc = RTCPeerConnection()
         self._pcs.add(pc)
+
+        @pc.on("iceconnectionstatechange")
+        def on_ice_state():
+            print(f"[WebRTC ICE] State -> {pc.iceConnectionState}", flush=True)
+
+        @pc.on("connectionstatechange")
+        def on_conn_state():
+            print(f"[WebRTC Peer] State -> {pc.connectionState}", flush=True)
+
         sender = pc.addTrack(LatestFrameTrack())
 
         try:
