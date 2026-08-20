@@ -554,12 +554,20 @@ def create_app(store: ConfigStore) -> web.Application:
 
     async def webrtc_offer(request: web.Request) -> web.Response:
         if runtime.camera is None:
+            runtime._log("error", "WebRTC offer received but camera service is unavailable")
             raise web.HTTPServiceUnavailable(text="camera service is unavailable")
+        peer_ip = request.remote or "unknown"
         try:
-            answer = await runtime.camera.offer(await request.json())
+            body = await request.json()
+            runtime._log("info", f"WebRTC offer received from {peer_ip}")
+            answer = await runtime.camera.offer(body)
+            runtime._log("info", f"WebRTC answer generated successfully for {peer_ip}")
             return web.json_response(answer)
-        except (RuntimeError, KeyError, TypeError) as exc:
-            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            runtime._log("error", f"WebRTC offer failed for {peer_ip}: {exc}\n{tb}")
+            raise web.HTTPServiceUnavailable(text=f"WebRTC offer failed: {exc}") from exc
 
     async def get_camera_status(_request: web.Request) -> web.Response:
         status = runtime.camera.status() if runtime.camera else {"state": "disabled"}

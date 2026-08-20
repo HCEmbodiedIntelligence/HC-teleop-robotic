@@ -21,7 +21,7 @@ except ImportError:
     RCLError = Exception
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, CompressedImage, Image
 from std_msgs.msg import Float64MultiArray, String
 
 
@@ -36,6 +36,12 @@ class TeleopSessionMonitor(Node):
         self.last_l_finger = 0.0
         self.last_base_moving = False
         self.last_recording_state = False
+
+        # Camera monitoring
+        self.cam_frames_count = 0
+        self.last_cam_log_time = time.monotonic()
+        self.last_cam_frames_sample = 0
+        self.last_cam_topic = "none"
 
         self.log_entry("SYSTEM", f"=== 遥操作运行与操作监控已启动 (PID={os.getpid()}) ===")
 
@@ -77,11 +83,46 @@ class TeleopSessionMonitor(Node):
             qos_profile_sensor_data,
         )
 
+        # 5. 相机图像流监控
+        self.create_subscription(
+            CompressedImage,
+            "/hc_teleop/camera_head/color/compressed",
+            lambda msg: self.on_cam_frame("/hc_teleop/camera_head/color/compressed"),
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CompressedImage,
+            "/io_teleop/camera_head/color/compressed",
+            lambda msg: self.on_cam_frame("/io_teleop/camera_head/color/compressed"),
+            qos_profile_sensor_data,
+        )
+
+        # 周期性检查相机状态 (每 3 秒)
+        self.create_timer(3.0, self.check_camera_health)
+
     def log_entry(self, category: str, message: str) -> None:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         line = f"[{now_str}] [{category:<8}] {message}\n"
         self.log_file.write(line)
         self.log_file.flush()
+
+    def on_cam_frame(self, topic: str) -> None:
+        self.cam_frames_count += 1
+        self.last_cam_topic = topic
+
+    def check_camera_health(self) -> None:
+        now = time.monotonic()
+        dt = now - self.last_cam_log_time
+        if dt > 0.5:
+            delta_frames = self.cam_frames_count - self.last_cam_frames_sample
+            fps = delta_frames / dt
+            self.last_cam_log_time = now
+            self.last_cam_frames_sample = self.cam_frames_count
+
+            if fps > 0.5:
+                self.log_entry("CAMERA", f"头部相机画面正常: {fps:.1f} FPS (源话题: {self.last_cam_topic}, 累计: {self.cam_frames_count}帧)")
+            else:
+                self.log_entry("CAMERA", f"⚠️ 警告: 未收到头部相机画面 (0.0 FPS, 累计: {self.cam_frames_count}帧)")
 
     def on_arm_status(self, msg: String) -> None:
         try:
