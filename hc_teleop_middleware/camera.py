@@ -299,6 +299,14 @@ class CameraService:
                     frame.time_base = time_base
                     return frame
 
+        # 清理旧连接，避免多会话冲突
+        for old_pc in list(self._pcs):
+            try:
+                await old_pc.close()
+            except Exception:
+                pass
+            self._pcs.discard(old_pc)
+
         remote = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
         pc = RTCPeerConnection()
         self._pcs.add(pc)
