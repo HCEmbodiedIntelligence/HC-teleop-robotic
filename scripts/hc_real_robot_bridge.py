@@ -115,12 +115,6 @@ class HcRealRobotBridge(Node):
         )
         self.create_subscription(
             CompressedImage,
-            "/io_teleop/camera_head/color",
-            head_compressed_cb,
-            qos_profile_sensor_data,
-        )
-        self.create_subscription(
-            CompressedImage,
             "/cameras/eye/color/compressed",
             head_compressed_cb,
             qos_profile_sensor_data,
@@ -130,7 +124,7 @@ class HcRealRobotBridge(Node):
             import numpy as np
 
             def eye_raw_cb(msg: Image) -> None:
-                if time.monotonic() - self._last_head_compressed < 1.0:
+                if time.monotonic() - self._last_head_compressed < 0.5:
                     return
                 try:
                     if msg.encoding in ("rgb8", "bgr8", "rgb", "bgr"):
@@ -147,6 +141,12 @@ class HcRealRobotBridge(Node):
                 except Exception:
                     pass
 
+            self.create_subscription(
+                Image,
+                "/io_teleop/camera_head/color",
+                eye_raw_cb,
+                qos_profile_sensor_data,
+            )
             self.create_subscription(
                 Image,
                 "/cameras/eye/color",

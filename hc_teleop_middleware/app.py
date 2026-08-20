@@ -975,4 +975,5 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_options("/{tail:.*}", options)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
+    app.on_cleanup.append(shutdown)
     return app

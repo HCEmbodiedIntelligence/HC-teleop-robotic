@@ -100,11 +100,23 @@ class CameraService:
             self._set_status(error=f"decode error: {exc}")
 
     async def stop(self) -> None:
-        await asyncio.gather(*(pc.close() for pc in list(self._pcs)), return_exceptions=True)
+        pcs = list(self._pcs)
         self._pcs.clear()
+        for pc in pcs:
+            try:
+                await pc.close()
+            except Exception:
+                pass
         self._stop.set()
-        if self._thread is not None:
-            await asyncio.to_thread(self._thread.join, 3)
+        if self._thread is not None and self._thread.is_alive():
+            await asyncio.to_thread(self._thread.join, 2.0)
+            self._thread = None
+        with self._lock:
+            self._latest = None
+            self._frames_received = 0
+            self._status["state"] = "stopped"
+            self._status["capture_fps"] = 0.0
+            self._status["peers"] = 0
 
     def status(self) -> dict[str, Any]:
         with self._lock:

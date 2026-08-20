@@ -29,29 +29,68 @@ err() {
   echo -e "\033[1;31m[HC-Teleop ERR]\033[0m $*"
 }
 
+ALL_PROCESS_PATTERNS=(
+  "camera_driver"
+  "image_jpeg_compressor"
+  "depth_png_compressor"
+  "camera_calibration_json_bridge"
+  "camera_bridge.launch.py"
+  "run_camera_bridge.sh"
+  "d405_stereo_camera_node"
+  "d405_stereo_camera.launch.py"
+  "run_camera.sh"
+  "hc_tj_marvin_bridge_node"
+  "body_bridge_node"
+  "omnihand_rs485_bridge_node"
+  "run_omnihand_rs485.sh"
+  "run_chassis_bridge.sh"
+  "run_hc_tj_all.sh"
+  "run_hc_tj.sh"
+  "hc_real_robot_bridge.py"
+  "control_v2_3_ros2.py"
+  "teleop_arm_controller.py"
+  "teleop_session_monitor.py"
+  "middleware_server.py"
+)
+
+kill_all_lingering_processes() {
+  local force="${1:-false}"
+  for pat in "${ALL_PROCESS_PATTERNS[@]}"; do
+    pkill -TERM -f "${pat}" 2>/dev/null || true
+  done
+  sleep 0.6
+  for pat in "${ALL_PROCESS_PATTERNS[@]}"; do
+    if pgrep -f "${pat}" >/dev/null 2>&1; then
+      pkill -KILL -f "${pat}" 2>/dev/null || true
+    fi
+  done
+  sleep 0.3
+}
+
 _CLEANED=0
 cleanup() {
   if [[ "${_CLEANED}" -eq 1 ]]; then
     return 0
   fi
   _CLEANED=1
-  if [[ ${#PIDS[@]} -eq 0 ]]; then
-    return 0
-  fi
-  warn "正在关闭所有遥操作进程..."
-  for pid in "${PIDS[@]}"; do
-    kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
-  done
-  local deadline=$((SECONDS + 3))
-  for pid in "${PIDS[@]}"; do
-    while kill -0 "${pid}" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do
-      sleep 0.1
+  warn "正在关闭所有遥操作、硬件驱动与相机进程..."
+  if [[ ${#PIDS[@]} -gt 0 ]]; then
+    for pid in "${PIDS[@]}"; do
+      kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
     done
-  done
-  for pid in "${PIDS[@]}"; do
-    kill -KILL "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
-  done
-  log "所有进程已安全退出。"
+    local deadline=$((SECONDS + 2))
+    for pid in "${PIDS[@]}"; do
+      while kill -0 "${pid}" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do
+        sleep 0.1
+      done
+    done
+    for pid in "${PIDS[@]}"; do
+      kill -KILL "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    done
+  fi
+  # 深度清理所有脱离会话组的孤儿进程与硬件驱动节点
+  kill_all_lingering_processes true
+  log "所有进程与硬件线程已安全彻底退出。"
 }
 
 trap cleanup EXIT
@@ -94,11 +133,9 @@ if [[ "${DRIVER_MODE}" == "all" ]] && ! [[ "${DRIVER_EXTRA_ARGS[*]}" =~ "--no-d4
   fi
 fi
 
-# 0. 清理残留后台旧进程（确保相机驱动与求解器干净启动）
-for pat in "camera_driver" "camera_bridge.launch.py" "image_jpeg_compressor" "depth_png_compressor" "camera_calibration_json_bridge" "hc_real_robot_bridge.py" "control_v2_3_ros2.py" "teleop_arm_controller.py" "middleware_server.py"; do
-  pkill -f "${pat}" 2>/dev/null || true
-done
-sleep 0.5
+# 0. 启动前深度清理残留后台旧进程（确保相机硬件句柄、串口与端口干净释放）
+log "检查并清理旧驱动与残留相机线程..."
+kill_all_lingering_processes true
 
 # 1. 环境初始化
 if [[ -f /opt/ros/humble/setup.bash ]]; then
