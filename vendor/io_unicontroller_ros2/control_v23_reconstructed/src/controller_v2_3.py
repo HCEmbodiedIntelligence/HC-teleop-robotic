@@ -126,13 +126,13 @@ class ControllerV23:
             self.command_q = self.q.copy()
             self.have_feedback = True
         elif self.method == "retarget":
-            # 仅在超大偏差（如刚启动回零、急停复位）时平滑纠偏，正常操控中完全保留 IK 速度积分
+            # 仅在发生急停、断电或大幅度硬复位等超大脱轨偏差（>1.5 rad 范数）时同步，正常操控时绝不截断衰减
             diff = np.linalg.norm(
                 self.interface.free_configuration(self.command_q)
                 - self.interface.free_configuration(self.q)
             )
-            if diff > 0.40:
-                self.command_q = self.command_q + 0.1 * (self.q - self.command_q)
+            if diff > 1.5:
+                self.command_q = self.q.copy()
 
     def update_tf_targets(
         self, transforms: Mapping[Tuple[str, str], TargetTransform]

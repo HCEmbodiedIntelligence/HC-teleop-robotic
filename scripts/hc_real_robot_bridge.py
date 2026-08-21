@@ -179,12 +179,6 @@ class HcRealRobotBridge(Node):
 
             self.create_subscription(
                 Image,
-                "/io_teleop/camera_head/color",
-                eye_raw_cb,
-                qos_profile_sensor_data,
-            )
-            self.create_subscription(
-                Image,
                 "/cameras/eye/color",
                 eye_raw_cb,
                 qos_profile_sensor_data,
