@@ -1782,12 +1782,8 @@ class HcTjArmTeleopNode(Node):
             self.get_logger().info(
                 f"right clutch engaged: {self.backend} controller owns both arms"
             )
-        if not arms_requested and arm_was_active:
-            self.get_logger().info(
-                f"right clutch released: {self.backend} controller holds last EE targets"
-            )
-        if arms_requested:
-            self._publish_generic_grippers(now)
+        # 灵巧手指令始终常驻下发，食指扳机按压即可实时连续开合（无需持续按住 Grip 离合）
+        self._publish_generic_grippers(now)
 
         # Always publish all three finite tasks. The copied solver otherwise sees
         # an uninitialised target at startup and CasADi can produce NaN.
