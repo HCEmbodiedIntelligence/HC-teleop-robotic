@@ -1933,12 +1933,24 @@ class HcTjArmTeleopNode(Node):
                     self._link_pose(self.generic_task_base_indices[side]),
                     target_world,
                 )
+
+            # 方案 4：对距离肩基座大于 0.62m 的目标位姿做连续平滑压缩截断，防止在手臂伸直极限区发散
+            MAX_REACH = 0.62
+            pos = np.array(controller_local[0], dtype=float)
+            dist = float(np.linalg.norm(pos))
+            if dist > MAX_REACH and dist > 1e-6:
+                compressed_dist = MAX_REACH + 0.03 * np.tanh((dist - MAX_REACH) / 0.03)
+                pos = pos * (compressed_dist / dist)
+                controller_pos_tuple = (float(pos[0]), float(pos[1]), float(pos[2]))
+            else:
+                controller_pos_tuple = controller_local[0]
+
             controller_pose = Pose()
             (
                 controller_pose.position.x,
                 controller_pose.position.y,
                 controller_pose.position.z,
-            ) = controller_local[0]
+            ) = controller_pos_tuple
             (
                 controller_pose.orientation.x,
                 controller_pose.orientation.y,

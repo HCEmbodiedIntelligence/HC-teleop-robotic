@@ -43,13 +43,43 @@ class HcRealRobotBridge(Node):
         )
 
         # 2. Joint Command: /hc_teleop/joint_cmd -> /io_teleop/joint_cmd
+        # 方案 2：限制单拍最大位置增量 |Δq_max| <= 0.4° (0.007 rad)，叠加 12Hz 平滑滤波消除抖动
         self.joint_cmd_pub = self.create_publisher(
             JointState, "/io_teleop/joint_cmd", reliable_qos
         )
+        self._last_cmd_pos: dict[str, float] = {}
+        self._filtered_cmd_pos: dict[str, float] = {}
+        self.MAX_DELTA_Q = 0.006981  # 0.4 deg (rad)
+
+        def joint_cmd_cb(msg: JointState) -> None:
+            out_msg = JointState()
+            out_msg.header = msg.header
+            out_msg.name = list(msg.name)
+            out_positions = []
+            alpha = 0.45  # 12Hz 一阶滤波
+            for name, target_pos in zip(msg.name, msg.position):
+                prev = self._last_cmd_pos.get(name, target_pos)
+                delta = target_pos - prev
+                if abs(delta) > self.MAX_DELTA_Q:
+                    delta = math.copysign(self.MAX_DELTA_Q, delta)
+                rate_limited_pos = prev + delta
+                filt_prev = self._filtered_cmd_pos.get(name, rate_limited_pos)
+                filt_pos = filt_prev + alpha * (rate_limited_pos - filt_prev)
+                self._last_cmd_pos[name] = rate_limited_pos
+                self._filtered_cmd_pos[name] = filt_pos
+                out_positions.append(filt_pos)
+
+            out_msg.position = out_positions
+            if msg.velocity:
+                out_msg.velocity = list(msg.velocity)
+            if msg.effort:
+                out_msg.effort = list(msg.effort)
+            self.joint_cmd_pub.publish(out_msg)
+
         self.create_subscription(
             JointState,
             "/hc_teleop/joint_cmd",
-            self.joint_cmd_pub.publish,
+            joint_cmd_cb,
             qos_profile_sensor_data,
         )
 

@@ -35,12 +35,12 @@ task:
       - io_teleop_ee_link_right
     - 10.0
     - 3.0
-    - 25.0
+    - 15.0
   - - - L_arm_0_Link
       - io_teleop_ee_link_left
     - 10.0
     - 3.0
-    - 25.0
+    - 15.0
   axis: []
   joint: []
 limit:

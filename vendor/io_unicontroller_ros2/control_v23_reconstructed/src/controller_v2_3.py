@@ -126,14 +126,9 @@ class ControllerV23:
             self.command_q = self.q.copy()
             self.have_feedback = True
         elif self.method == "retarget":
-            # If physical feedback differs significantly from command_q (e.g. during homing, e-stop, or clutch release),
-            # sync command_q to feedback to prevent open-loop drift and singular IK postures.
-            diff = np.linalg.norm(
-                self.interface.free_configuration(self.command_q)
-                - self.interface.free_configuration(self.q)
-            )
-            if diff > 0.15:
-                self.command_q = self.q.copy()
+            # 连续阻尼平滑同步：防止开环漂移的同时彻底杜绝阶跃硬截断乒乓跳变
+            sync_alpha = 0.05  # 每拍 5% 平滑纠偏
+            self.command_q = self.command_q + sync_alpha * (self.q - self.command_q)
 
     def update_tf_targets(
         self, transforms: Mapping[Tuple[str, str], TargetTransform]
