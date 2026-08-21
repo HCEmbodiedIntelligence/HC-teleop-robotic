@@ -191,7 +191,7 @@ control:
   clutch_axis: 1
   clutch_threshold: 0.55
   home_gesture_axis: 2
-  home_gesture_threshold: 0.8
+  home_gesture_threshold: 0.95
   home_gesture_release_threshold: 0.35
   home_joint_velocity: 0.7
   home_tolerance: 0.015

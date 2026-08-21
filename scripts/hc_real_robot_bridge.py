@@ -96,7 +96,7 @@ class HcRealRobotBridge(Node):
 
         # 4. Grippers: /hc_teleop/joint_cmd_finger_* -> /io_teleop/joint_cmd_finger_*
         self.finger_l_pub = self.create_publisher(
-            JointState, "/io_teleop/joint_cmd_finger_left", reliable_qos
+            JointState, "/io_teleop/joint_cmd_finger_left", qos_profile_sensor_data
         )
         self.create_subscription(
             JointState,
@@ -106,7 +106,7 @@ class HcRealRobotBridge(Node):
         )
 
         self.finger_r_pub = self.create_publisher(
-            JointState, "/io_teleop/joint_cmd_finger_right", reliable_qos
+            JointState, "/io_teleop/joint_cmd_finger_right", qos_profile_sensor_data
         )
         self.create_subscription(
             JointState,

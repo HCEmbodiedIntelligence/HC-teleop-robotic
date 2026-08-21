@@ -1706,10 +1706,7 @@ class HcTjArmTeleopNode(Node):
             self.command_pub.publish(message)
             self.last_command.update(command)
             self._publish_target_poses()
-            self._publish_status(now, feedback_fresh)
-            return
-        if self.home_gesture_latched:
-            self._stop_base_if_pending()
+            self._publish_generic_grippers(now)
             self._publish_status(now, feedback_fresh)
             return
 
