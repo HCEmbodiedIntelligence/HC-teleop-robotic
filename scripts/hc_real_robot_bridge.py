@@ -49,14 +49,14 @@ class HcRealRobotBridge(Node):
         )
         self._last_cmd_pos: dict[str, float] = {}
         self._filtered_cmd_pos: dict[str, float] = {}
-        self.MAX_DELTA_Q = 0.006981  # 0.4 deg (rad)
+        self.MAX_DELTA_Q = 0.025  # ~1.43 deg/拍 @ 100Hz = 143 deg/s (2.5 rad/s) 兼顾灵敏响应与高频突变消除
 
         def joint_cmd_cb(msg: JointState) -> None:
             out_msg = JointState()
             out_msg.header = msg.header
             out_msg.name = list(msg.name)
             out_positions = []
-            alpha = 0.45  # 12Hz 一阶滤波
+            alpha = 0.65  # 15Hz 平滑滤波
             for name, target_pos in zip(msg.name, msg.position):
                 prev = self._last_cmd_pos.get(name, target_pos)
                 delta = target_pos - prev
