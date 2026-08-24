@@ -315,8 +315,16 @@ class MiddlewareRuntime:
     def _on_safety_resume(self, reason: str) -> None:
         if self.ros is not None:
             stop_topic = self.config["safety"].get("stop_topic", "/teleop/emergency_stop")
+            self.ros.set_command_output_enabled(True)
             self.ros.publish(stop_topic, "std_msgs/msg/Bool", {"data": False})
-            self.ros.publish("/teleop/arm/enabled", "std_msgs/msg/Bool", {"data": True})
+            source = self.config.get("ros", {}).get("command_mux", {}).get(
+                "source", "vr"
+            )
+            self.ros.publish(
+                "/teleop/arm/enabled",
+                "std_msgs/msg/Bool",
+                {"data": source == "vr"},
+            )
         self.emit(envelope("safety_resume", "middleware", {"reason": reason}), ["websocket", "udp"])
 
     def _log(self, level: str, message: str) -> None:
@@ -526,9 +534,45 @@ def create_app(store: ConfigStore) -> web.Application:
         return web.json_response({"accepted": True}, status=202)
 
     async def teleop_home(request: web.Request) -> web.Response:
+        source = store.value.get("ros", {}).get("command_mux", {}).get(
+            "source", "vr"
+        )
+        if source != "vr":
+            raise web.HTTPConflict(text="回零仅在 VR/IK 控制源下可用")
         if runtime.ros is not None:
             runtime.ros.publish("/teleop/arm/home", "std_msgs/msg/Bool", {"data": True})
         return web.json_response({"accepted": True}, status=202)
+
+    async def set_control_source(request: web.Request) -> web.Response:
+        data = await request.json()
+        source = str(data.get("source", "")).strip().lower()
+        if source not in {"vr", "exoskeleton"}:
+            raise web.HTTPBadRequest(text="source must be vr or exoskeleton")
+        if runtime.ros is None or runtime.ros.status().get("state") != "running":
+            raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
+
+        proposed = copy.deepcopy(store.value)
+        proposed["ros"]["command_mux"]["source"] = source
+        saved = store.save(proposed)
+        runtime.config = saved
+        accepted = runtime.ros.set_control_source(source)
+        runtime.ros.publish(
+            "/teleop/arm/enabled",
+            "std_msgs/msg/Bool",
+            {"data": source == "vr"},
+        )
+        runtime.emit(
+            envelope(
+                "control_source",
+                "middleware",
+                {"source": source},
+            ),
+            ["websocket"],
+        )
+        return web.json_response(
+            {"accepted": accepted, "source": source},
+            status=202 if accepted else 429,
+        )
 
     async def websocket(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
@@ -974,6 +1018,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/safety/stop", emergency_stop)
     app.router.add_post("/api/safety/resume", safety_resume)
     app.router.add_post("/api/teleop/home", teleop_home)
+    app.router.add_post("/api/teleop/source", set_control_source)
     app.router.add_post("/api/recording/precheck", precheck_recording)
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)

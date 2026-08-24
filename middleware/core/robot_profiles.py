@@ -920,7 +920,7 @@ class RobotProfileManager:
             return {
                 "joint_state": control.get("joint_state_topic", STANDARD_TOPICS["joint_state"]),
                 "joint_target": control.get("generic_command_topic", STANDARD_TOPICS["joint_target"]),
-                "joint_command": control.get("command_topic", STANDARD_TOPICS["joint_command"]),
+                "joint_command": STANDARD_TOPICS["joint_command"],
                 "ee_target": control.get("controller_target_pose_topic", STANDARD_TOPICS["ee_target"]),
                 "ee_visual_target": control.get("target_pose_topic", STANDARD_TOPICS["ee_visual_target"]),
                 "ee_actual": control.get("actual_pose_topic", STANDARD_TOPICS["ee_actual"]),

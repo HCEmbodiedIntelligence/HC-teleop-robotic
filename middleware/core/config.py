@@ -16,6 +16,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "domain_id": 0,
         "node_name": "hc_teleop_middleware",
+        "command_mux": {
+            "enabled": True,
+            "source": "vr",
+            "vr_topic": "/hc_teleop/joint_cmd_vr",
+            "exoskeleton_topic": "/hc_teleop/joint_cmd_exoskeleton",
+            "output_topic": "/hc_teleop/joint_cmd",
+            "control_source_topic": "/hc_teleop/control_source",
+        },
         "subscriptions": [],
         "recording": {
             "directory": "runtime/topic_recordings",
@@ -99,6 +107,29 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("ros.domain_id must be an integer between 0 and 232")
     value["ros"]["domain_id"] = domain_id
 
+    command_mux = value["ros"].get("command_mux")
+    if not isinstance(command_mux, dict):
+        raise ConfigError("ros.command_mux must be an object")
+    source = str(command_mux.get("source", "vr")).strip().lower()
+    if source not in {"vr", "exoskeleton"}:
+        raise ConfigError("ros.command_mux.source must be vr or exoskeleton")
+    command_mux["source"] = source
+    command_mux["enabled"] = bool(command_mux.get("enabled", True))
+    mux_topics = []
+    for key in (
+        "vr_topic",
+        "exoskeleton_topic",
+        "output_topic",
+        "control_source_topic",
+    ):
+        topic = str(command_mux.get(key, "")).strip()
+        if not topic.startswith("/"):
+            raise ConfigError(f"ros.command_mux.{key} must start with /")
+        command_mux[key] = topic
+        mux_topics.append(topic)
+    if len(set(mux_topics)) != len(mux_topics):
+        raise ConfigError("ros.command_mux topics must be different")
+
     _port(value["server"]["port"], "server.port")
     _port(value["vr"]["pose_port"], "vr.pose_port")
     _port(value["vr"]["discovery_port"], "vr.discovery_port")
@@ -146,6 +177,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         max_hz = item.get("max_hz", 0)
         if isinstance(max_hz, bool) or not isinstance(max_hz, (int, float)) or max_hz < 0:
             raise ConfigError(f"ros.subscriptions[{index}].max_hz must be >= 0")
+        event_max_hz = item.get("event_max_hz", 0)
+        if (
+            isinstance(event_max_hz, bool)
+            or not isinstance(event_max_hz, (int, float))
+            or event_max_hz < 0
+        ):
+            raise ConfigError(
+                f"ros.subscriptions[{index}].event_max_hz must be >= 0"
+            )
         normalized.append(
             {
                 "topic": topic,
@@ -153,6 +193,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 "enabled": bool(item.get("enabled", True)),
                 "outputs": outputs,
                 "max_hz": float(max_hz),
+                "event_max_hz": float(event_max_hz),
             }
         )
     value["ros"]["subscriptions"] = normalized

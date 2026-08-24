@@ -182,7 +182,7 @@ control:
   rate_hz: 100.0
   vr_data_topic: /vrdata
   joint_state_topic: /hc_teleop/joint_states
-  command_topic: /hc_teleop/joint_cmd
+  command_topic: /hc_teleop/joint_cmd_vr
   generic_command_topic: /hc_teleop/joint_cmd_arm
   solver_topic: /hc_teleop/sol_q
   solver_reset_topic: /hc_teleop/solver_reset
@@ -205,7 +205,7 @@ control:
   axis_mapping:
   - - 0.0
     - 0.0
-    - -1.0
+    - 1.0
   - - -1.0
     - 0.0
     - 0.0

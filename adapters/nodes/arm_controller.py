@@ -32,10 +32,10 @@ def main() -> None:
         choices=("v23", "generic", "legacy"),
         help="override control.backend from YAML",
     )
-    args = parser.parse_args()
+    args, ros_args = parser.parse_known_args()
     from adapters.core.arm_teleop_node import HcTjArmTeleopNode
 
-    rclpy.init(args=[])
+    rclpy.init(args=ros_args)
     node = None
     try:
         node = HcTjArmTeleopNode(args.config, backend=args.backend)

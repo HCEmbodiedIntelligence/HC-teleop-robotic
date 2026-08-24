@@ -57,6 +57,31 @@ class ProjectLayoutTests(unittest.TestCase):
         simulator = (self.root / "run_simulator.sh").read_text(encoding="utf-8")
         self.assertIn("--sim-only", simulator)
 
+    def test_dashboard_exposes_vr_exoskeleton_command_switch(self):
+        html = (
+            self.root / "middleware" / "core" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        javascript = (
+            self.root / "middleware" / "core" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        config = yaml.safe_load(
+            (self.root / "middleware" / "config.yaml").read_text(encoding="utf-8")
+        )
+
+        self.assertIn("状态监控", html)
+        self.assertIn('id="sourceVr"', html)
+        self.assertIn('id="sourceExoskeleton"', html)
+        self.assertIn('id="jointMonitorRows"', html)
+        self.assertIn("/api/teleop/source", javascript)
+        self.assertEqual(
+            config["ros"]["command_mux"]["output_topic"],
+            "/hc_teleop/joint_cmd",
+        )
+        self.assertEqual(
+            config["ros"]["command_mux"]["control_source_topic"],
+            "/hc_teleop/control_source",
+        )
+
     def test_simulator_updates_actual_flange_markers(self):
         source = (
             self.root / "simulation" / "general_sim_robot_control_node_ros2.py"

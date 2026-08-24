@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import math
 import threading
 import time
 import traceback
@@ -133,6 +134,14 @@ class RosBridge:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._trackers: dict[str, TopicHealthTracker] = {}
+        mux_config = config.get("command_mux", {})
+        self._mux_enabled = bool(mux_config.get("enabled", True))
+        self._command_source = str(mux_config.get("source", "vr"))
+        self._command_output_enabled = True
+        self._mux_received = {"vr": 0, "exoskeleton": 0}
+        self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0}
+        self._mux_forwarded = 0
+        self._mux_rejected = 0
         domain_id = int(config.get("domain_id", 0))
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", True) else "starting",
@@ -163,6 +172,29 @@ class RosBridge:
             result["topic_health"] = {
                 topic: tracker.status(now) for topic, tracker in self._trackers.items()
             }
+            mux_config = self.config.get("command_mux", {})
+            result["command_mux"] = {
+                "enabled": self._mux_enabled,
+                "output_enabled": self._command_output_enabled,
+                "source": self._command_source,
+                "vr_topic": mux_config.get("vr_topic", "/hc_teleop/joint_cmd_vr"),
+                "exoskeleton_topic": mux_config.get(
+                    "exoskeleton_topic", "/hc_teleop/joint_cmd_exoskeleton"
+                ),
+                "output_topic": mux_config.get(
+                    "output_topic", "/hc_teleop/joint_cmd"
+                ),
+                "control_source_topic": mux_config.get(
+                    "control_source_topic", "/hc_teleop/control_source"
+                ),
+                "received": dict(self._mux_received),
+                "last_received_age": {
+                    source: round(now - stamp, 2) if stamp else None
+                    for source, stamp in self._mux_last_received.items()
+                },
+                "forwarded": self._mux_forwarded,
+                "rejected": self._mux_rejected,
+            }
             return result
 
     def get_topic_health(self) -> dict[str, Any]:
@@ -179,7 +211,22 @@ class RosBridge:
         return self._enqueue("publish_raw", (topic, msg_type, raw_data))
 
     def emergency_stop(self, topic: str, reason: str) -> bool:
+        with self._lock:
+            self._command_output_enabled = False
         return self._enqueue("stop", (topic, reason))
+
+    def set_control_source(self, source: str) -> bool:
+        source = str(source).strip().lower()
+        if source not in {"vr", "exoskeleton"}:
+            raise ValueError("control source must be vr or exoskeleton")
+        with self._lock:
+            self._command_source = source
+        return self._enqueue("control_source", source)
+
+    def set_command_output_enabled(self, enabled: bool) -> bool:
+        with self._lock:
+            self._command_output_enabled = bool(enabled)
+        return self._enqueue("command_output", bool(enabled))
 
     def _enqueue(self, command: str, data: Any) -> bool:
         try:
@@ -202,7 +249,13 @@ class RosBridge:
             import os
             import rclpy
             from rclpy.executors import SingleThreadedExecutor
-            from rclpy.qos import qos_profile_sensor_data
+            from rclpy.qos import (
+                DurabilityPolicy,
+                HistoryPolicy,
+                QoSProfile,
+                ReliabilityPolicy,
+                qos_profile_sensor_data,
+            )
             from rosidl_runtime_py.convert import message_to_ordereddict
             from rosidl_runtime_py.set_message import set_message_fields
             from rosidl_runtime_py.utilities import get_message
@@ -221,6 +274,84 @@ class RosBridge:
             trackers: dict[str, TopicHealthTracker] = {}
             last_emit: dict[str, float] = {}
 
+            mux_config = self.config.get("command_mux", {})
+            if self._mux_enabled:
+                from sensor_msgs.msg import JointState
+                from std_msgs.msg import String
+
+                control_source_topic = str(
+                    mux_config.get(
+                        "control_source_topic", "/hc_teleop/control_source"
+                    )
+                )
+                control_source_qos = QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                )
+                control_source_publisher = node.create_publisher(
+                    String, control_source_topic, control_source_qos
+                )
+                publishers[(control_source_topic, "std_msgs/msg/String")] = (
+                    control_source_publisher
+                )
+                control_source_publisher.publish(String(data=self._command_source))
+
+                output_topic = str(
+                    mux_config.get("output_topic", "/hc_teleop/joint_cmd")
+                )
+                output_publisher = self._publisher(
+                    node,
+                    publishers,
+                    output_topic,
+                    "sensor_msgs/msg/JointState",
+                    JointState,
+                )
+
+                for source, topic in (
+                    ("vr", str(mux_config.get("vr_topic", "/hc_teleop/joint_cmd_vr"))),
+                    (
+                        "exoskeleton",
+                        str(
+                            mux_config.get(
+                                "exoskeleton_topic",
+                                "/hc_teleop/joint_cmd_exoskeleton",
+                            )
+                        ),
+                    ),
+                ):
+                    def mux_callback(
+                        message: Any,
+                        *,
+                        source: str = source,
+                    ) -> None:
+                        now = time.monotonic()
+                        valid = (
+                            len(message.name) == len(message.position)
+                            and bool(message.name)
+                            and all(math.isfinite(float(value)) for value in message.position)
+                        )
+                        with self._lock:
+                            self._mux_received[source] += 1
+                            self._mux_last_received[source] = now
+                            selected = self._command_source == source
+                            output_enabled = self._command_output_enabled
+                            if not valid:
+                                self._mux_rejected += 1
+                        if not valid or not selected or not output_enabled:
+                            return
+                        output_publisher.publish(message)
+                        with self._lock:
+                            self._mux_forwarded += 1
+
+                    subscriptions.append(
+                        node.create_subscription(
+                            JointState, topic, mux_callback, qos_profile_sensor_data
+                        )
+                    )
+                    subscription_names.append(topic)
+
             for item in self.config.get("subscriptions", []):
                 if not item.get("enabled", True):
                     continue
@@ -228,6 +359,7 @@ class RosBridge:
                 msg_type_name = item["type"]
                 outputs = list(item.get("outputs", ["websocket"]))
                 max_hz = float(item.get("max_hz", 0))
+                event_max_hz = float(item.get("event_max_hz", max_hz))
                 message_type = get_message(msg_type_name)
                 tracker = TopicHealthTracker(
                     topic,
@@ -244,7 +376,7 @@ class RosBridge:
                     topic: str = topic,
                     msg_type_name: str = msg_type_name,
                     outputs: list[str] = outputs,
-                    max_hz: float = max_hz,
+                    max_hz: float = event_max_hz,
                     tracker: TopicHealthTracker = tracker,
                 ) -> None:
                     now = time.monotonic()
@@ -372,7 +504,32 @@ class RosBridge:
                     )
                     message = Bool(data=True)
                     publisher.publish(message)
+                    with self._lock:
+                        self._command_output_enabled = False
                     node.get_logger().warning(f"Emergency stop: {reason}")
+                elif command == "control_source":
+                    with self._lock:
+                        self._command_source = str(args)
+                    mux_config = self.config.get("command_mux", {})
+                    topic = str(
+                        mux_config.get(
+                            "control_source_topic", "/hc_teleop/control_source"
+                        )
+                    )
+                    from std_msgs.msg import String
+
+                    publisher = self._publisher(
+                        node, publishers, topic, "std_msgs/msg/String", String
+                    )
+                    publisher.publish(String(data=str(args)))
+                    node.get_logger().info(f"Joint command source: {args}")
+                elif command == "command_output":
+                    with self._lock:
+                        self._command_output_enabled = bool(args)
+                    node.get_logger().info(
+                        "Joint command output %s"
+                        % ("enabled" if args else "disabled")
+                    )
             except Exception as exc:
                 self._set_status(error=f"publish failed: {type(exc).__name__}: {exc}")
 

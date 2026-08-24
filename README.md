@@ -15,7 +15,7 @@
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
-真机双臂采用分层结构：本仓库 v23 逆解只生成标准 `/hc_teleop/joint_cmd`；每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。相机与通用话题桥不参与关节伺服下发。
+真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/hc_teleop/joint_cmd_vr`，外骨骼发布 `/hc_teleop/joint_cmd_exoskeleton`；中间件通过可锁存的 `/hc_teleop/control_source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/hc_teleop/joint_cmd`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
 
 原有的 `d435_webrtc_server.py` 和 `udp_receiver_test.py` 保留不变。新服务兼容它们的关键协议：
 
@@ -66,7 +66,7 @@ ROS_DOMAIN_ID=14 ./start_teleop.sh
 
 点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。退出并重新执行 `./start_teleop.sh`；使用仿真时也重新执行 `./run_simulator.sh`，各进程便会共同读取所选配置。也可临时通过 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 覆盖网页选择。
 
-导入接口对齐当前遥操作链路的标准话题：`/hc_teleop/joint_states`、`/hc_teleop/joint_cmd_arm`、`/hc_teleop/joint_cmd`、`/hc_teleop/controller_target_ee_poses`、`/hc_teleop/target_ee_poses`、`/hc_teleop/actual_ee_poses`、`/hc_teleop/sol_q` 和 `/hc_teleop/target_base_move`。网页仅保留配置和运行状态，原“实时事件”页面不再显示。
+导入接口对齐当前遥操作链路的标准话题：`/hc_teleop/joint_states`、`/hc_teleop/joint_cmd_arm`、`/hc_teleop/joint_cmd`、`/hc_teleop/controller_target_ee_poses`、`/hc_teleop/target_ee_poses`、`/hc_teleop/actual_ee_poses`、`/hc_teleop/sol_q` 和 `/hc_teleop/target_base_move`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
 
 ### 话题录制
 
@@ -173,7 +173,7 @@ bash -n start_teleop.sh run_simulator.sh middleware/start.sh adapters/start.sh
 
 VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TELEOP.md)。标准启动分为通用遥操作栈和可替换的仿真后端：
 
-双臂回零：不用按 Grip，同时把左主摇杆向左、右主摇杆向右拨到底一次；回零后先让两个摇杆回中，才能再次触发。回零期间命令合并层会限速拉回 `initial_joints`，避免 7DoF 冗余解只让末端到位却永久卡在 homing；完成后可直接再次按右 Grip 和 Trigger，无需急停重启。
+双臂与腰部回零：不用按 Grip，同时把左主摇杆向左、右主摇杆向右拨到底一次；回零后先让两个摇杆回中，才能再次触发。回零期间命令合并层会将双臂和 `body.waist_joint_names` 中的腰关节限速拉回 `initial_joints`，避免 7DoF 冗余解只让末端到位却永久卡在 homing；完成后可直接再次按右 Grip 和 Trigger，无需急停重启。
 
 ```bash
 ./install.sh --sim
@@ -201,9 +201,9 @@ ROS_DOMAIN_ID=14 ./run_simulator.sh
 
 仿真底盘坐标约定为 `+X` 前进、`+Y` 向左，底盘消息顺序为 `[yaw, forward, lateral]`。PyBullet 窗口需要先点击获得焦点；按住 `Ctrl` 并拖动鼠标左键旋转视角，按住 `Ctrl` 并拖动中键平移视角，滚轮缩放。修改仿真相机或坐标配置后需要退出并重新运行脚本。
 
-按住左手柄中指 Grip 后，左主摇杆 Y 控制底盘前进/后退，X 控制左/右横移。摇杆平移直接使用左手柄 `Joy` 数据，不再依赖头显跟踪是否有效；松开 Grip、输入超时、急停或双臂回零时都会发布零命令。
+按住左手柄中指 Grip 后，左主摇杆 Y 控制底盘前进/后退，X 控制左/右横移。摇杆平移直接使用左手柄 `Joy` 数据，不再依赖头显跟踪是否有效；松开 Grip、输入超时、急停或双臂与腰部回零时都会发布零命令。
 
-机械臂只使用手柄相对位姿增量：OpenXR 手柄 `-Z` 向前对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
+机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
 
 默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `adapters/v23/`，X1 参数位于 `adapters/robots/x1/controller_v23.yml`。
 

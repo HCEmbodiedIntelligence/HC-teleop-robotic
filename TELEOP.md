@@ -84,7 +84,10 @@ HC_ROBOT_NAME=x1 ./run_simulator.sh
 
 输出：
 
-- `/hc_teleop/joint_cmd`
+- `/hc_teleop/joint_cmd_vr`（VR/IK 内部命令源）
+- `/hc_teleop/joint_cmd_exoskeleton`（外骨骼 `sensor_msgs/msg/JointState` 输入）
+- `/hc_teleop/control_source`（当前控制源，`std_msgs/msg/String`，瞬态本地持久化；值为 `vr` 或 `exoskeleton`）
+- `/hc_teleop/joint_cmd`（中间件选择后的唯一标准机器人命令）
 - `/hc_teleop/joint_cmd_arm`（v2.3 或原版 PID 的内部输出，由 VR 适配器合并夹爪）
 - `/hc_teleop/target_base_move`
 - `/hc_teleop/target_ee_poses`

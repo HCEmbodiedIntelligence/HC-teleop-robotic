@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6">
+  <link rel="stylesheet" href="/static/styles.css?v=7">
 </head>
 <body>
   <aside class="sidebar">
     <div class="brand"><span class="brand-mark">HC</span><div>Teleop<small>Middleware</small></div></div>
     <nav>
-      <a href="#overview" data-page="overview">运行概览</a>
+      <a href="#overview" data-page="overview">状态监控</a>
       <a href="#topics" data-page="topics">话题录制</a>
       <a href="#datasets" data-page="datasets">数据集管理</a>
       <a href="#config" data-page="config">系统配置</a>
@@ -20,34 +20,44 @@
 
   <main>
     <header>
-      <div><p class="eyebrow">ROBOT / VR GATEWAY</p><h1 id="pageTitle">运行概览</h1></div>
+      <div><p class="eyebrow">ROBOT CONTROL MONITOR</p><h1 id="pageTitle">状态监控</h1></div>
       <div style="display: flex; gap: 10px; align-items: center;">
-        <button class="secondary" id="homeButton" title="双臂平滑回零至标准初始姿态">双臂回零</button>
+        <button class="secondary" id="homeButton" title="双臂与腰部平滑回零至标准初始姿态">双臂与腰部回零</button>
+        <button id="resumeButton">解除急停</button>
+        <button class="danger" id="stopButton">急停</button>
       </div>
     </header>
 
     <section class="page" id="overview">
       <div class="metrics">
         <article><label>ROS 2</label><strong id="rosState">--</strong><span id="rosMeta">等待数据</span></article>
-        <article><label>VR 链路</label><strong id="vrState">--</strong><span id="vrMeta">等待数据</span></article>
-        <article><label>头顶/头部相机 (VR)</label><strong id="cameraState">--</strong><span id="cameraMeta">等待数据</span></article>
-        <article><label>WebSocket</label><strong id="wsClients">0</strong><span>在线客户端</span></article>
+        <article><label>当前控制源</label><strong id="controlSourceState">--</strong><span id="controlSourceMeta">等待选择器</span></article>
+        <article><label>关节命令</label><strong id="jointCommandState">--</strong><span id="jointCommandMeta">等待 /hc_teleop/joint_cmd</span></article>
+        <article><label>关节反馈</label><strong id="jointFeedbackState">--</strong><span id="jointFeedbackMeta">等待 /hc_teleop/joint_states</span></article>
       </div>
       <div class="grid two">
-        <article class="panel"><div class="panel-title"><h2>VR 跟踪状态</h2><span id="vrPeer" class="tag">未连接</span></div>
-          <div class="tracking">
-            <div><i id="trackHead"></i><span>头显</span></div>
-            <div><i id="trackLeft"></i><span>左手柄</span></div>
-            <div><i id="trackRight"></i><span>右手柄</span></div>
+        <article class="panel source-panel">
+          <div class="panel-title"><div><h2>控制源切换</h2><p>只有选中的来源能够转发到机器人标准关节命令</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
+          <div class="source-switch">
+            <button id="sourceVr" data-source="vr"><strong>VR / IK</strong><small id="vrSourceStatus">未检测</small></button>
+            <button id="sourceExoskeleton" data-source="exoskeleton"><strong>外骨骼</strong><small id="exoSourceStatus">未检测</small></button>
           </div>
-          <dl class="stats"><div><dt>已接收</dt><dd id="vrReceived">0</dd></div><div><dt>丢包</dt><dd id="vrLost">0</dd></div><div><dt>无效</dt><dd id="vrInvalid">0</dd></div><div><dt>已转发</dt><dd id="vrSent">0</dd></div></dl>
+          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/hc_teleop/joint_cmd_vr</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/hc_teleop/joint_cmd_exoskeleton</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/hc_teleop/joint_cmd</code></dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
         </article>
-        <article class="panel controller-panel"><div class="panel-title"><div><h2>VR 手柄输入</h2><p>v2 协议实时状态与离合状态</p></div><span id="vrProtocol" class="tag">协议 --</span></div>
-          <div class="teleop-strip"><div><label>遥操作模式</label><strong id="teleopMode">未连接</strong></div><div><label>控制后端</label><strong id="teleopBackend">--</strong></div><div><label>左离合</label><strong id="teleopLeft">保持</strong></div><div><label>右离合</label><strong id="teleopRight">保持</strong></div><div><label>关节反馈</label><strong id="teleopFeedback">--</strong></div><div class="teleop-actions"><button id="teleopDisable">停用遥操作</button><button class="primary" id="teleopEnable">启用遥操作</button></div></div>
-          <div class="controllers">
-            <div class="controller"><h3>LEFT</h3><p class="held" id="leftHeld">无按键</p><label>Trigger <b id="leftTriggerValue">0.000</b></label><div class="meter"><i id="leftTrigger"></i></div><label>Grip <b id="leftGripValue">0.000</b></label><div class="meter"><i id="leftGrip"></i></div><div class="axes"><span>主摇杆 <b id="leftPrimaryAxis">0.000, 0.000</b></span><span>副摇杆 <b id="leftSecondaryAxis">0.000, 0.000</b></span></div></div>
-            <div class="controller"><h3>RIGHT</h3><p class="held" id="rightHeld">无按键</p><label>Trigger <b id="rightTriggerValue">0.000</b></label><div class="meter"><i id="rightTrigger"></i></div><label>Grip <b id="rightGripValue">0.000</b></label><div class="meter"><i id="rightGrip"></i></div><div class="axes"><span>主摇杆 <b id="rightPrimaryAxis">0.000, 0.000</b></span><span>副摇杆 <b id="rightSecondaryAxis">0.000, 0.000</b></span></div></div>
+        <article class="panel system-panel">
+          <div class="panel-title"><div><h2>链路状态</h2><p>VR、控制器、相机和网页连接状态</p></div><span id="vrPeer" class="tag">VR 未连接</span></div>
+          <div class="health-grid">
+            <div><label>VR UDP</label><strong id="vrState">--</strong><small id="vrMeta">等待数据</small></div>
+            <div><label>控制后端</label><strong id="teleopBackend">--</strong><small id="teleopMode">未连接</small></div>
+            <div><label>相机</label><strong id="cameraState">--</strong><small id="cameraMeta">等待数据</small></div>
+            <div><label>网页连接</label><strong id="wsClients">0</strong><small>WebSocket 客户端</small></div>
           </div>
+          <div class="tracking compact"><div><i id="trackHead"></i><span>头显</span></div><div><i id="trackLeft"></i><span>左手柄</span></div><div><i id="trackRight"></i><span>右手柄</span></div></div>
+          <div class="teleop-state-line"><span>左离合 <b id="teleopLeft">保持</b></span><span>右离合 <b id="teleopRight">保持</b></span><span>控制反馈 <b id="teleopFeedback">--</b></span></div>
+        </article>
+        <article class="panel joint-monitor-panel">
+          <div class="panel-title"><div><h2>关节角监控</h2><p>最终下发命令与机器人反馈，角度单位同时显示 rad / °</p></div><span id="jointMonitorCount" class="tag">0 个关节</span></div>
+          <div class="table-wrap joint-monitor-wrap"><table><thead><tr><th>关节</th><th>命令 rad</th><th>命令 °</th><th>反馈 rad</th><th>反馈 °</th><th>误差 °</th></tr></thead><tbody id="jointMonitorRows"><tr><td colspan="6" class="empty-monitor">等待 JointState 消息…</td></tr></tbody></table></div>
         </article>
       </div>
     </section>
@@ -285,6 +295,6 @@
     </dialog>
     <div id="toast" role="status"></div>
   </main>
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

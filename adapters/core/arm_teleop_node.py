@@ -23,6 +23,7 @@ from .arm_teleop_math import (
     joystick_base_velocity,
     joint_limit_avoidance,
     mapped_relative_yaw,
+    ordered_homing_joint_names,
     orientation_error,
     quaternion_from_axis_angle,
     quaternion_multiply,
@@ -510,15 +511,20 @@ class HcTjArmTeleopNode(Node):
             value = float(self.config["control"].get(key, 0.0))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"control.{key} must be finite and positive")
-        arm_names = [
+        homing_names = [
             name
             for arm_config in self.config["arms"].values()
             for name in arm_config["joint_names"]
+        ] + list(self.config["body"]["waist_joint_names"])
+        missing_home = [
+            name
+            for name in homing_names
+            if name not in self.config["robot"].get("initial_joints", {})
         ]
-        missing_home = [name for name in arm_names if name not in self.config["robot"].get("initial_joints", {})]
         if missing_home:
             raise ValueError(
-                "robot.initial_joints lacks arm home targets: " + ", ".join(missing_home)
+                "robot.initial_joints lacks arm/waist home targets: "
+                + ", ".join(missing_home)
             )
         urdf_path = Path(self.config["robot"]["urdf_path"]).expanduser()
         if not urdf_path.is_absolute():
@@ -776,9 +782,9 @@ class HcTjArmTeleopNode(Node):
         if self.backend in {"generic", "v23"}:
             self._set_generic_home_targets()
         else:
-            self._start_arm_homing()
+            self._start_homing()
         response.success = True
-        response.message = "homing sequence started"
+        response.message = "arms and waist homing sequence started"
         return response
 
     def _home_topic_callback(self, message: Bool):
@@ -788,7 +794,7 @@ class HcTjArmTeleopNode(Node):
             if self.backend in {"generic", "v23"}:
                 self._set_generic_home_targets()
             else:
-                self._start_arm_homing()
+                self._start_homing()
 
     def _reset_reference_service(
         self, _request: Trigger.Request, response: Trigger.Response
@@ -840,20 +846,27 @@ class HcTjArmTeleopNode(Node):
             return True
         return False
 
-    def _start_arm_homing(self) -> None:
-        self._release_all(send_base_zero=True)
-        self.base_zero_pending = False
-        for arm in self.arms.values():
-            for name in arm.joint_names:
-                if name in self.joint_state:
-                    self.last_command[name] = self.joint_state[name]
-        self.homing = True
-        self.get_logger().info(
-            "both sticks outward: homing both arms to initial_joints"
+    def _homing_joint_names(self) -> list[str]:
+        return ordered_homing_joint_names(
+            self.arms["right"].joint_names,
+            self.arms["left"].joint_names,
+            self.body.joint_names,
         )
 
-    def _update_arm_homing(self, command: dict[str, float]) -> None:
-        names = self.arms["right"].joint_names + self.arms["left"].joint_names
+    def _start_homing(self) -> None:
+        self._release_all(send_base_zero=True)
+        self.base_zero_pending = False
+        for name in self._homing_joint_names():
+            if name in self.joint_state:
+                self.last_command[name] = self.joint_state[name]
+        self.homing = True
+        self.homing_start_time = self._monotonic()
+        self.get_logger().info(
+            "both sticks outward: homing both arms and waist to initial_joints"
+        )
+
+    def _update_homing(self, command: dict[str, float]) -> None:
+        names = self._homing_joint_names()
         target = np.asarray([self.initial_joints[name] for name in names], dtype=float)
         previous = np.asarray(
             [self.last_command.get(name, self.joint_state.get(name, self.initial_joints[name])) for name in names],
@@ -865,6 +878,8 @@ class HcTjArmTeleopNode(Node):
         next_values = previous + np.clip(target - previous, -max_step, max_step)
         for name, value in zip(names, next_values):
             command[name] = float(value)
+            if name in self.body.joint_names:
+                self.generic_aux_command[name] = float(value)
 
         feedback_error = max(
             abs(self.joint_state.get(name, self.initial_joints[name]) - self.initial_joints[name]) for name in names
@@ -875,21 +890,31 @@ class HcTjArmTeleopNode(Node):
         if reached and (feedback_close or elapsed >= 4.0):
             for name, value in zip(names, target):
                 command[name] = float(value)
+                if name in self.body.joint_names:
+                    self.generic_aux_command[name] = float(value)
             self.homing = False
+            for name in names:
+                bullet.resetJointState(
+                    self.robot_id,
+                    self.joint_by_name[name],
+                    self.initial_joints[name],
+                    physicsClientId=self.physics_client,
+                )
             for arm in self.arms.values():
-                for name in arm.joint_names:
-                    bullet.resetJointState(
-                        self.robot_id,
-                        self.joint_by_name[name],
-                        self.initial_joints[name],
-                        physicsClientId=self.physics_client,
-                    )
                 arm.target_local = self._relative_pose(
                     self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
                 )
                 arm.reference_local_ee = arm.target_local
                 arm.active = False
-            self.get_logger().info(f"{self.backend} controller arm homing complete")
+            self.body.target_base = self._relative_pose(
+                self._root_pose(), self._link_pose(self.body.torso_index)
+            )
+            self.body.active = False
+            self.body.reference_head = None
+            self.body.reference_torso = None
+            self.get_logger().info(
+                f"{self.backend} controller arms and waist homing complete"
+            )
 
     def _input_fresh(self, arm: ArmRuntime, now: float) -> bool:
         return arm.joy is not None and now - arm.joy_stamp <= float(
@@ -2003,21 +2028,24 @@ class HcTjArmTeleopNode(Node):
             )
 
     def _set_generic_home_targets(self) -> None:
-        """Capture the configured arm home as chest-relative Cartesian tasks."""
+        """Capture the configured arm and waist home as Cartesian tasks."""
         self._release_all(send_base_zero=True)
         self.base_zero_pending = False
+        for name in self._homing_joint_names():
+            bullet.resetJointState(
+                self.robot_id,
+                self.joint_by_name[name],
+                self.initial_joints[name],
+                physicsClientId=self.physics_client,
+            )
         for arm in self.arms.values():
-            for name in arm.joint_names:
-                bullet.resetJointState(
-                    self.robot_id,
-                    self.joint_by_name[name],
-                    self.initial_joints[name],
-                    physicsClientId=self.physics_client,
-                )
             arm.target_local = self._relative_pose(
                 self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
             )
             arm.reference_local_ee = arm.target_local
+        self.body.target_base = self._relative_pose(
+            self._root_pose(), self._link_pose(self.body.torso_index)
+        )
         self._sync_model()
         self.body.active = False
         self.body.reference_head = None
@@ -2028,7 +2056,8 @@ class HcTjArmTeleopNode(Node):
             if name in self.joint_state:
                 self.last_command[name] = float(self.joint_state[name])
         self.get_logger().info(
-            f"homing triggered: {self.backend} controller homing both arms to initial_joints"
+            f"homing triggered: {self.backend} controller homing both arms and waist "
+            "to initial_joints"
         )
     def _publish_generic_grippers(self, now: float) -> None:
         command: dict[str, float] = {}
@@ -2050,7 +2079,7 @@ class HcTjArmTeleopNode(Node):
         if self._home_gesture_triggered(now):
             self._set_generic_home_targets()
         if self.homing:
-            self._update_arm_homing(command)
+            self._update_homing(command)
             command.update(self.generic_aux_command)
             if not self._collision_command_allowed(command, now):
                 self._publish_status(now, feedback_fresh)
@@ -2169,9 +2198,9 @@ class HcTjArmTeleopNode(Node):
             self._publish_status(now, feedback_fresh)
             return
         if self._home_gesture_triggered(now):
-            self._start_arm_homing()
+            self._start_homing()
         if self.homing:
-            self._update_arm_homing(command)
+            self._update_homing(command)
             if not self._collision_command_allowed(command, now):
                 self._publish_status(now, feedback_fresh)
                 return

@@ -9,6 +9,7 @@ from adapters.core.arm_teleop_math import (
     joystick_base_velocity,
     joint_limit_avoidance,
     mapped_relative_yaw,
+    ordered_homing_joint_names,
     orientation_error,
     quaternion_from_axis_angle,
     quaternion_multiply,
@@ -35,15 +36,15 @@ class ArmTeleopMathTests(unittest.TestCase):
         self.assertEqual(result[1], 0.0)
         self.assertLess(result[2], 0.0)
 
-    def test_openxr_negative_z_maps_to_robot_forward(self):
+    def test_controller_positive_z_maps_to_robot_forward(self):
         target, _ = relative_target(
-            [0.1, 0.2, -0.3],
+            [0.1, 0.2, 0.3],
             [0, 0, 0, 1],
             [0, 0, 0],
             [0, 0, 0, 1],
             [1, 2, 3],
             [0, 0, 0, 1],
-            [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
+            [[0, 0, 1], [-1, 0, 0], [0, 1, 0]],
             1.0,
             1.0,
             False,
@@ -112,6 +113,18 @@ class ArmTeleopMathTests(unittest.TestCase):
         self.assertTrue(sticks_outward(-0.9, 0.85, 0.8))
         self.assertFalse(sticks_outward(0.9, -0.85, 0.8))
         self.assertFalse(sticks_outward(-0.7, 0.85, 0.8))
+
+    def test_homing_joint_order_includes_arms_and_waist_once(self):
+        names = ordered_homing_joint_names(
+            ["right_1", "shared"],
+            ["left_1", "shared"],
+            ["leg_1", "leg_2", "zhi"],
+        )
+
+        self.assertEqual(
+            names,
+            ["right_1", "shared", "left_1", "leg_1", "leg_2", "zhi"],
+        )
 
     def test_left_stick_maps_to_forward_and_lateral_base_motion(self):
         self.assertEqual(

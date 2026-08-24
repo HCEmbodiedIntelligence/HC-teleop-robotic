@@ -173,6 +173,13 @@ def sticks_outward(left_x: float, right_x: float, threshold: float) -> bool:
     return left_x <= -threshold and right_x >= threshold
 
 
+def ordered_homing_joint_names(
+    right_arm: Sequence[str], left_arm: Sequence[str], waist: Sequence[str]
+) -> list[str]:
+    """Return the unique arm and waist joints controlled by a homing cycle."""
+    return list(dict.fromkeys([*right_arm, *left_arm, *waist]))
+
+
 def joystick_base_velocity(
     stick_x: float,
     stick_y: float,

@@ -18,6 +18,30 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(value["vr"]["data_topic"], "/vrdata")
         self.assertEqual(value["ros"]["recording"]["directory"], "runtime/topic_recordings")
+        self.assertEqual(value["ros"]["command_mux"]["source"], "vr")
+        self.assertEqual(
+            value["ros"]["command_mux"]["exoskeleton_topic"],
+            "/hc_teleop/joint_cmd_exoskeleton",
+        )
+        self.assertEqual(
+            value["ros"]["command_mux"]["control_source_topic"],
+            "/hc_teleop/control_source",
+        )
+
+    def test_command_mux_requires_distinct_topics_and_known_source(self):
+        with self.assertRaisesRegex(ConfigError, "source must be vr or exoskeleton"):
+            validate_config({"ros": {"command_mux": {"source": "unknown"}}})
+        with self.assertRaisesRegex(ConfigError, "topics must be different"):
+            validate_config(
+                {
+                    "ros": {
+                        "command_mux": {
+                            "vr_topic": "/same",
+                            "exoskeleton_topic": "/same",
+                        }
+                    }
+                }
+            )
 
     def test_legacy_vr_topics_are_removed(self):
         value = validate_config(
@@ -74,6 +98,20 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(depth["enabled"])
         self.assertIn("record", depth["outputs"])
         self.assertEqual(depth["max_hz"], 0.0)
+
+    def test_joint_angles_are_streamed_to_dashboard_without_limiting_recording(self):
+        path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
+        config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        subscriptions = {
+            item["topic"]: item for item in config["ros"]["subscriptions"]
+        }
+
+        for topic in ("/hc_teleop/joint_cmd", "/hc_teleop/joint_states"):
+            item = subscriptions[topic]
+            self.assertIn("websocket", item["outputs"])
+            self.assertIn("record", item["outputs"])
+            self.assertEqual(item["max_hz"], 0.0)
+            self.assertEqual(item["event_max_hz"], 20.0)
 
     def test_default_camera_recording_avoids_raw_and_duplicate_streams(self):
         path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"

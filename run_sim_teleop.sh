@@ -109,7 +109,9 @@ trap cleanup INT TERM EXIT
 SIM_PID=$!
 if [[ "${SIM_ONLY}" == false ]]; then
   /usr/bin/python3 "${SCRIPT_DIR}/teleop_arm_controller.py" \
-    --config "${TELEOP_CONFIG}" --backend "${BACKEND}" &
+    --config "${TELEOP_CONFIG}" --backend "${BACKEND}" \
+    --ros-args \
+    -r /hc_teleop/joint_cmd_vr:=/hc_teleop/joint_cmd &
   TELEOP_PID=$!
 fi
 if [[ "${SIM_ONLY}" == false && ( "${BACKEND}" == "generic" || "${BACKEND}" == "v23" ) ]]; then

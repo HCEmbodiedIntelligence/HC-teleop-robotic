@@ -5,9 +5,10 @@ let profilesData = {active:'', profiles:[], standard_topics:{}};
 let ws = null;
 let pendingVrPose = null;
 let vrPoseFramePending = false;
-const titles = {overview:'运行概览', topics:'话题录制', datasets:'数据集管理', config:'系统配置'};
+const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', config:'系统配置'};
 let discoveredTopics = [];
 let latestTopicHealth = {};
+const jointMonitor = {command:new Map(), feedback:new Map()};
 const standardTopicStandards = {
   joint_state: { target_hz: 100, min_hz: 50 },
   joint_target: { target_hz: 100, min_hz: 50 },
@@ -82,19 +83,103 @@ function route() {
 
 function setState(id, state) {
   const el = $(id);
+  if(!el)return;
   el.textContent = state || '--';
-  el.className = state === 'running' ? 'running' : (state === 'error' ? 'error' : '');
+  el.className = state === 'running' || state === '正常'
+    ? 'running'
+    : (state === 'error' || state === '无数据' ? 'error' : (state === '偏低' ? 'warning' : ''));
+}
+
+function setText(id,value) {
+  const el=$(id);
+  if(el)el.textContent=value;
+}
+
+function messageState(info) {
+  if(!info?.has_data)return ['无数据','0.0 Hz','error'];
+  if(info.state==='low_rate')return ['偏低',`${Number(info.hz||0).toFixed(1)} Hz`,'warning'];
+  return ['正常',`${Number(info.hz||0).toFixed(1)} Hz`,'running'];
+}
+
+function renderCommandMux(ros) {
+  const mux=ros.command_mux||{};
+  const source=mux.source||'vr';
+  const sourceLabel=source==='exoskeleton'?'外骨骼':'VR / IK';
+  setText('#controlSourceState',sourceLabel);
+  setText('#controlSourceMeta',mux.output_enabled===false?'急停门控已关闭':'命令输出已使能');
+  const sourceState=$('#controlSourceState');
+  if(sourceState)sourceState.className=mux.output_enabled===false?'error':'running';
+  for(const button of $$('.source-switch button')) {
+    button.classList.toggle('active',button.dataset.source===source);
+  }
+  if($('#homeButton'))$('#homeButton').disabled=source!=='vr';
+  setText('#vrCommandTopic',mux.vr_topic||'/hc_teleop/joint_cmd_vr');
+  setText('#exoCommandTopic',mux.exoskeleton_topic||'/hc_teleop/joint_cmd_exoskeleton');
+  setText('#outputCommandTopic',mux.output_topic||'/hc_teleop/joint_cmd');
+  setText('#muxForwarded',String(mux.forwarded||0));
+  const sourceStatus=(name,label)=>{
+    const age=mux.last_received_age?.[name];
+    const count=mux.received?.[name]||0;
+    return age!==null&&age!==undefined&&age<=1.8?`${label} · ${count} 帧`:`无数据 · ${count} 帧`;
+  };
+  setText('#vrSourceStatus',sourceStatus('vr','输入正常'));
+  setText('#exoSourceStatus',sourceStatus('exoskeleton','输入正常'));
+  const badge=$('#muxSafetyBadge');
+  if(badge){
+    badge.textContent=mux.output_enabled===false?'急停：禁止转发':`${sourceLabel} 已选中`;
+    badge.className=mux.output_enabled===false?'tag danger-tag':'tag';
+  }
+}
+
+function renderJointMonitor() {
+  const body=$('#jointMonitorRows');
+  if(!body)return;
+  const names=[...new Set([...jointMonitor.command.keys(),...jointMonitor.feedback.keys()])];
+  body.textContent='';
+  if(!names.length){
+    const row=document.createElement('tr'),cell=document.createElement('td');
+    cell.colSpan=6; cell.className='empty-monitor'; cell.textContent='等待 JointState 消息…';
+    row.append(cell); body.append(row); setText('#jointMonitorCount','0 个关节'); return;
+  }
+  const format=value=>Number.isFinite(value)?value.toFixed(4):'--';
+  const degrees=value=>Number.isFinite(value)?(value*180/Math.PI).toFixed(2):'--';
+  for(const name of names){
+    const command=jointMonitor.command.get(name);
+    const feedback=jointMonitor.feedback.get(name);
+    const error=Number.isFinite(command)&&Number.isFinite(feedback)?command-feedback:NaN;
+    const row=document.createElement('tr');
+    for(const value of [name,format(command),degrees(command),format(feedback),degrees(feedback),degrees(error)]){
+      const cell=document.createElement('td'); cell.textContent=value; row.append(cell);
+    }
+    if(Number.isFinite(error)&&Math.abs(error)>0.08)row.className='joint-error';
+    body.append(row);
+  }
+  setText('#jointMonitorCount',`${names.length} 个关节`);
+}
+
+function updateJointMonitor(event,kind) {
+  const names=event.payload?.name||[], positions=event.payload?.position||[];
+  if(!Array.isArray(names)||!Array.isArray(positions)||names.length!==positions.length)return;
+  const target=kind==='command'?jointMonitor.command:jointMonitor.feedback;
+  target.clear();
+  names.forEach((name,index)=>{
+    const value=Number(positions[index]);
+    if(Number.isFinite(value))target.set(String(name),value);
+  });
+  renderJointMonitor();
 }
 
 function renderStatus(data) {
   const ros=data.ros||{}, vr=data.vr||{}, cam=data.camera||{};
   const domain = ros.domain_id ?? config?.ros?.domain_id ?? 0;
-  $('#rosMeta').textContent = `${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`;
+  setState('#rosState',ros.state);
+  setText('#rosMeta',`${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`);
+  renderCommandMux(ros);
   setState('#vrState', vr.state);
-  $('#vrMeta').textContent = vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`;
+  setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
   setState('#cameraState', cam.state);
-  $('#cameraMeta').textContent = cam.error || `${cam.capture_fps||0} FPS · ${cam.peers||0} peers`;
-  $('#wsClients').textContent = data.websocket_clients||0;
+  setText('#cameraMeta',cam.error || `${cam.capture_fps||0} FPS · ${cam.peers||0} peers`);
+  setText('#wsClients',data.websocket_clients||0);
   const recording=data.recording||{};
   const isRecording=Boolean(recording.recording);
   if($('#recordingBadge')) {
@@ -108,19 +193,19 @@ function renderStatus(data) {
       ? `正在录制：已写入 ${recording.messages||0} 条消息到 ${recording.path||''}`
       : `未录制 · 保存目录：${config?.ros?.recording?.directory || 'runtime/topic_recordings'}`;
   }
-  $('#vrPeer').textContent = vr.peer ? `${vr.peer[0]}:${vr.peer[1]}` : '未连接';
+  setText('#vrPeer',vr.peer ? `${vr.peer[0]}:${vr.peer[1]}` : 'VR 未连接');
   for (const name of ['Head','Left','Right']) {
-    $('#track'+name).className = vr.tracking?.[name.toLowerCase()] ? 'online' : 'offline';
+    const indicator=$('#track'+name);
+    if(indicator)indicator.className = vr.tracking?.[name.toLowerCase()] ? 'online' : 'offline';
   }
-  $('#vrReceived').textContent=vr.received||0;
-  $('#vrLost').textContent=vr.lost||0;
-  $('#vrInvalid').textContent=vr.invalid||0;
-  $('#vrSent').textContent=vr.sent||0;
-  $('#vrProtocol').textContent=protocolLabel(vr.protocol_version);
-  renderController('left',vr.inputs?.left||{});
-  renderController('right',vr.inputs?.right||{});
   if (ros.topic_health) {
     latestTopicHealth = ros.topic_health;
+    const commandInfo=messageState(ros.topic_health['/hc_teleop/joint_cmd']);
+    const feedbackInfo=messageState(ros.topic_health['/hc_teleop/joint_states']);
+    setState('#jointCommandState',commandInfo[0]);
+    setText('#jointCommandMeta',commandInfo[1]+' · /hc_teleop/joint_cmd');
+    setState('#jointFeedbackState',feedbackInfo[0]);
+    setText('#jointFeedbackMeta',feedbackInfo[1]+' · /hc_teleop/joint_states');
     updateReadinessBanner();
     if (window.location.hash === '#topics' || (!window.location.hash && $('#topics')?.classList.contains('active'))) {
       renderStandardTopics();
@@ -162,7 +247,7 @@ function renderController(side,input) {
   const clamp=value=>Math.max(0,Math.min(1,Number(value)||0));
   const number=value=>(Number(value)||0).toFixed(3);
   const axis=value=>(value||[0,0]).map(number).join(', ');
-  $(`#${side}Held`).textContent=held.length?held.join(' · '):'无按键';
+  if(!$(`#${side}Held`))return;
   for(const name of ['Trigger','Grip']) {
     const value=clamp(input[name.toLowerCase()]);
     $(`#${side}${name}`).style.width=`${value*100}%`;
@@ -175,11 +260,9 @@ function renderController(side,input) {
 function renderVrPose(pose) {
   const tracking=pose.tracking||{};
   for(const name of ['Head','Left','Right']) {
-    $('#track'+name).className=tracking[name.toLowerCase()]?'online':'offline';
+    const indicator=$('#track'+name);
+    if(indicator)indicator.className=tracking[name.toLowerCase()]?'online':'offline';
   }
-  $('#vrProtocol').textContent=protocolLabel(pose.protocol_version);
-  renderController('left',pose.inputs?.left||{});
-  renderController('right',pose.inputs?.right||{});
 }
 
 function queueVrPose(pose) {
@@ -196,16 +279,16 @@ function queueVrPose(pose) {
 function renderTeleopStatus(event) {
   try {
     const value=JSON.parse(event.payload?.data||'{}');
-    const names={hold:'保持',base_waist:'底盘 + 腰部',arms_grippers:'双臂 + 夹爪',both:'全部并发',homing:'双臂回零'};
+    const names={hold:'保持',base_waist:'底盘 + 腰部',arms_grippers:'双臂 + 夹爪',both:'全部并发',homing:'双臂 + 腰部回零'};
     const external=value.backend==='generic'||value.backend==='v23';
     const solver=value.generic_controller||{};
     const healthy=solver.solver_fresh&&solver.command_fresh;
     const backendLabel=value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
-    $('#teleopMode').textContent=value.enabled?(names[value.mode]||value.mode):'已停用';
-    $('#teleopBackend').textContent=external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel;
-    $('#teleopLeft').textContent=value.left_clutch?'已离合':'保持';
-    $('#teleopRight').textContent=value.right_clutch?'已离合':'保持';
-    $('#teleopFeedback').textContent=value.feedback_fresh?'正常':'超时';
+    setText('#teleopMode',value.enabled?(names[value.mode]||value.mode):'已停用');
+    setText('#teleopBackend',external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel);
+    setText('#teleopLeft',value.left_clutch?'已离合':'保持');
+    setText('#teleopRight',value.right_clutch?'已离合':'保持');
+    setText('#teleopFeedback',value.feedback_fresh?'正常':'超时');
   } catch(_) {}
 }
 
@@ -222,6 +305,9 @@ function connectWebSocket() {
       if(value.kind==='connected')renderStatus(value.payload);
       else if(value.kind==='vr_pose')queueVrPose(value.payload||{});
       else if(value.kind==='ros_message'&&value.topic==='/teleop/arm/status')renderTeleopStatus(value);
+      else if(value.kind==='ros_message'&&value.topic==='/hc_teleop/joint_cmd')updateJointMonitor(value,'command');
+      else if(value.kind==='ros_message'&&value.topic==='/hc_teleop/joint_states')updateJointMonitor(value,'feedback');
+      else if(value.kind==='control_source')api('/api/status').then(renderStatus).catch(()=>{});
     } catch (_) {}
   };
   ws.onclose=()=>{
@@ -1138,7 +1224,7 @@ async function init() {
     $('#resumeButton').onclick=async()=>{
       try {
         await api('/api/safety/resume',{method:'POST',body:JSON.stringify({reason:'dashboard safety resume'})});
-        toast('急停已解除，遥操作已恢复使能');
+        toast('急停已解除，当前控制源的关节命令输出已恢复');
       }catch(error){toast(error.message,true);}
     };
   }
@@ -1146,18 +1232,20 @@ async function init() {
     $('#homeButton').onclick=async()=>{
       try {
         await api('/api/teleop/home',{method:'POST'});
-        toast('双臂开始平滑回零至标准初始姿态...');
+        toast('双臂与腰部开始平滑回零至标准初始姿态...');
       }catch(error){toast(error.message,true);}
     };
   }
-  const setTeleop=async enabled=>{
+  const setControlSource=async source=>{
     try {
-      await api('/api/ros/publish',{method:'POST',body:JSON.stringify({topic:'/teleop/arm/enabled',type:'std_msgs/msg/Bool',data:{data:enabled}})});
-      toast(enabled?'遥操作已使能；按住离合才会运动':'遥操作已停用');
+      const label=source==='exoskeleton'?'外骨骼':'VR / IK';
+      await api('/api/teleop/source',{method:'POST',body:JSON.stringify({source})});
+      renderStatus(await api('/api/status'));
+      toast(`控制源已切换为 ${label}`);
     }catch(error){toast(error.message,true);}
   };
-  $('#teleopEnable').onclick=()=>setTeleop(true);
-  $('#teleopDisable').onclick=()=>setTeleop(false);
+  if($('#sourceVr'))$('#sourceVr').onclick=()=>setControlSource('vr');
+  if($('#sourceExoskeleton'))$('#sourceExoskeleton').onclick=()=>setControlSource('exoskeleton');
   configureProfileDialog();
 }
 
