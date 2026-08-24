@@ -10,8 +10,8 @@ if [[ "${1:-}" == "--camera" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-camera.txt"
 elif [[ "${1:-}" == "--sim" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-sim.txt"
-  CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-/home/maple/miniconda3/envs/hc-teleop-controller}"
-  CONDA_BIN="${CONDA_BIN:-/home/maple/miniconda3/bin/conda}"
+  CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
+  CONDA_BIN="${CONDA_BIN:-${HOME}/miniconda3/bin/conda}"
   if [[ ! -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
     if [[ ! -x "${CONDA_BIN}" ]]; then
       echo "Conda not found: ${CONDA_BIN}" >&2
@@ -26,4 +26,4 @@ else
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements.txt"
 fi
 
-echo "Installed project-local dependencies. Start with: ${SCRIPT_DIR}/run.sh"
+echo "Installed project-local dependencies. Start with: ${SCRIPT_DIR}/start_teleop.sh"

@@ -4,13 +4,42 @@ import unittest
 from pathlib import Path
 
 from mcap.reader import make_reader
-from rclpy.serialization import serialize_message
+from rclpy.serialization import deserialize_message, serialize_message
+from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
-from hc_teleop_middleware.topic_recorder import TopicRecorder
+from middleware.core.topic_recorder import TopicRecorder
 
 
 class TopicRecorderTests(unittest.TestCase):
+    def test_records_16bit_png_depth_as_ros2_cdr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings"}, Path(directory))
+            recorder.start("depth.mcap")
+            depth = CompressedImage(
+                format="16UC1; png",
+                data=b"\x89PNG\r\n\x1a\nsynthetic-depth",
+            )
+            recorder.record(
+                {
+                    "kind": "ros_message",
+                    "topic": "/io_teleop/camera_head/depth",
+                    "msg_type": "sensor_msgs/msg/CompressedImage",
+                    "_raw": bytes(serialize_message(depth)),
+                }
+            )
+            recorder.stop()
+
+            with recorder.path.open("rb") as stream:
+                messages = list(make_reader(stream).iter_messages())
+            self.assertEqual(len(messages), 1)
+            schema, channel, message = messages[0]
+            self.assertEqual(channel.topic, "/io_teleop/camera_head/depth")
+            self.assertEqual(schema.name, "sensor_msgs/msg/CompressedImage")
+            restored = deserialize_message(message.data, CompressedImage)
+            self.assertEqual(restored.format, "16UC1; png")
+            self.assertTrue(bytes(restored.data).startswith(b"\x89PNG"))
+
     def test_records_ros_events_as_mcap(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

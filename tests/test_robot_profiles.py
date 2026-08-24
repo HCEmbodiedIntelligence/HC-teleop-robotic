@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from hc_teleop_middleware.robot_profiles import (
+from middleware.core.robot_profiles import (
     RobotProfileError,
     RobotProfileManager,
     STANDARD_TOPICS,

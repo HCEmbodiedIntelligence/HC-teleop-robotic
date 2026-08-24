@@ -1,0 +1,36 @@
+urdf_path: urdf/hc_tj_robot.urdf
+robot_name: x1
+wo_controller: false
+base_pose:
+  position: [0, 0, 0.07]
+  orientation: [0, 0, 0.707, 0.707]
+sim_camera:
+  distance: 2.2
+  yaw: -130
+  pitch: -25
+  target_position: [0, 0.25, 0.85]
+sim_opengl2: true
+arms:
+  - joint_index: [8, 9, 10, 11, 12, 13, 14]
+    ee_index: 18
+    rest_j_pos: [-1.44, -0.77, 1.44, -1.57, 0.0, 0.0, 0.0]
+  - joint_index: [20, 21, 22, 23, 24, 25, 26]
+    ee_index: 30
+    rest_j_pos: [1.44, -0.77, -1.44, -1.57, 0.0, 0.0, 0.0]
+folding_waist:
+  joint_index: [1, 2, 3]
+  rest_j_pos: [0.5, 1.2, -0.6]
+  rot_offset: [0, 0, 1.57]
+  cmd_ee: 3
+  base: 0
+base_move_scale: [0.1, 0.1, 0.1]
+base_move_filter: [0.2, 0.2, 0.2]
+base_max_acc_per_step: [0.01, 0.01, 0.01]
+base_max_dec_per_step: [0.2, 0.2, 0.2]
+controller_indices:
+  cmd_ee: [18, 30]
+  base: [3, 3]
+vibration_thresholds:
+  ee_dist: [0.1, 0.15]
+arm_pos_scale: 1.0
+ee_wrt_head: true

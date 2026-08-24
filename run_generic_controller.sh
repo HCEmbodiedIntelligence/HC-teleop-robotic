@@ -2,12 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-HC_IO_ROOT="${HC_IO_ROOT:-/home/maple/hc_io_suit}"
-CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-/home/maple/miniconda3/envs/hc-teleop-controller}"
-MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${SCRIPT_DIR}/middleware.yaml}"
+CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
+MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${SCRIPT_DIR}/middleware/config.yaml}"
 ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 "${SCRIPT_DIR}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")}"
 ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 "${SCRIPT_DIR}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")}"
-V23_DIR="${SCRIPT_DIR}/vendor/io_unicontroller_ros2/control_v23_reconstructed"
+V23_DIR="${SCRIPT_DIR}/adapters/v23"
 MODE="${1:---check}"
 
 if [[ ! -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
@@ -15,7 +14,7 @@ if [[ ! -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
   echo "Run: ${SCRIPT_DIR}/install.sh --sim" >&2
   exit 2
 fi
-CONFIG_V23="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}/controller_v23.yml"
+CONFIG_V23="${HC_CONTROLLER_CONFIG:-${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}/controller_v23.yml}"
 if [[ "${MODE}" != "--check" && ! -f "${CONFIG_V23}" ]]; then
   echo "Reconstructed controller YAML not found: ${CONFIG_V23}" >&2
   exit 2
@@ -23,9 +22,6 @@ fi
 
 set +u
 source /opt/ros/humble/setup.bash
-if [[ -f "${HC_IO_ROOT}/install/setup.bash" ]]; then
-  source "${HC_IO_ROOT}/install/setup.bash"
-fi
 set -u
 
 # ROS installs another Pinocchio on PYTHONPATH. The copied solver requires the
@@ -53,4 +49,3 @@ fi
 exec "${CONTROLLER_PREFIX}/bin/python" -u \
   "${V23_DIR}/script/control_v2_3_ros2.py" \
   "${CONFIG_V23}"
-

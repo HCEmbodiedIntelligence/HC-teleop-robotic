@@ -8,14 +8,14 @@ try:
 except ImportError:  # The base ROS Python lacks web dependencies before install.sh.
     aiohttp = None
 
-from hc_teleop_middleware.config import ConfigStore
+from middleware.core.config import ConfigStore
 from tests.test_robot_profiles import URDF, io_yaml
 
 
 @unittest.skipIf(aiohttp is None, "aiohttp is installed by install.sh")
 class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        from hc_teleop_middleware.app import create_app
+        from middleware.core.app import create_app
 
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)

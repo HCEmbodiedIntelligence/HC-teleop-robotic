@@ -9,10 +9,7 @@ import pinocchio as pin
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-SOURCE = (
-    PROJECT
-    / "vendor/io_unicontroller_ros2/control_v23_reconstructed/src"
-)
+SOURCE = PROJECT / "adapters" / "v23" / "src"
 sys.path.insert(0, str(SOURCE))
 
 from controller_v2_3 import ControllerV23, TargetTransform  # noqa: E402
@@ -32,7 +29,7 @@ INITIAL = {
 class V23ReconstructionTests(unittest.TestCase):
     def make_controller(self) -> ControllerV23:
         controller = ControllerV23(
-            PROJECT / "robot_configs/hc_tj_description/controller_v23.yml"
+            PROJECT / "adapters/robots/x1/controller_v23.yml"
         )
         names = controller.free_joint_names
         controller.update_joint_state(names, [INITIAL[name] for name in names])
@@ -115,6 +112,17 @@ class V23ReconstructionTests(unittest.TestCase):
                 self.assertGreaterEqual(gradient[index], -1e-8)
             else:
                 self.assertLessEqual(gradient[index], 1e-8)
+
+    def test_reset_to_feedback_discards_retarget_integrator_state(self):
+        controller = self.make_controller()
+        controller.command_q = controller.interface.integrate_free(
+            controller.q,
+            np.full(controller.interface.nv_free, 0.1),
+            1.0,
+        )
+        self.assertFalse(np.allclose(controller.command_q, controller.q))
+        controller.reset_to_feedback()
+        np.testing.assert_allclose(controller.command_q, controller.q)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hc_teleop_middleware.config import ConfigError, ConfigStore, validate_config
+import yaml
+
+from middleware.core.config import ConfigError, ConfigStore, validate_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -10,7 +12,10 @@ class ConfigTests(unittest.TestCase):
         value = validate_config({"server": {"port": 9000}})
         self.assertEqual(value["server"]["port"], 9000)
         self.assertEqual(value["vr"]["pose_port"], 5005)
-        self.assertEqual(value["robot_profiles"]["active"], "hc_tj_description")
+        self.assertEqual(value["robot_profiles"]["active"], "x1")
+        self.assertEqual(
+            value["robot_profiles"]["root"], "../adapters/robots"
+        )
         self.assertEqual(value["vr"]["data_topic"], "/vrdata")
         self.assertEqual(value["ros"]["recording"]["directory"], "runtime/topic_recordings")
 
@@ -56,6 +61,33 @@ class ConfigTests(unittest.TestCase):
             saved = ConfigStore(store.path).load()
             self.assertTrue(saved["camera"]["enabled"])
             self.assertEqual(saved["ros"]["domain_id"], 15)
+
+    def test_head_depth_is_enabled_for_recording(self):
+        path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
+        config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        subscriptions = {
+            item["topic"]: item for item in config["ros"]["subscriptions"]
+        }
+
+        depth = subscriptions["/hc_teleop/camera_head/depth/compressed"]
+        self.assertEqual(depth["type"], "sensor_msgs/msg/CompressedImage")
+        self.assertTrue(depth["enabled"])
+        self.assertIn("record", depth["outputs"])
+        self.assertEqual(depth["max_hz"], 0.0)
+
+    def test_default_camera_recording_avoids_raw_and_duplicate_streams(self):
+        path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
+        config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        subscriptions = {
+            item["topic"]: item for item in config["ros"]["subscriptions"]
+        }
+
+        self.assertTrue(subscriptions["/hc_teleop/camera_head/color/compressed"]["enabled"])
+        self.assertNotIn("/io_teleop/camera_head/color", subscriptions)
+        self.assertNotIn("/io_teleop/camera_head/depth", subscriptions)
+        self.assertFalse(subscriptions["/cameras/eye/color"]["enabled"])
+        self.assertTrue(subscriptions["/hc_teleop/camera_overhead/color/compressed"]["enabled"])
+        self.assertFalse(subscriptions["/cameras/Bfront/color"]["enabled"])
 
 
 if __name__ == "__main__":

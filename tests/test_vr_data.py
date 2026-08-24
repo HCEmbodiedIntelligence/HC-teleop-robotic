@@ -8,14 +8,14 @@ try:
 except ImportError:
     aiohttp = None
 
-from hc_teleop_middleware.config import validate_config
-from hc_teleop_middleware.protocol import ControllerInput, Pose, PosePacket
+from middleware.core.config import validate_config
+from middleware.core.protocol import ControllerInput, Pose, PosePacket
 
 
 @unittest.skipIf(aiohttp is None, "aiohttp is installed by install.sh")
 class VrDataTests(unittest.TestCase):
     def test_runtime_publishes_one_complete_vrdata_message(self):
-        from hc_teleop_middleware.app import MiddlewareRuntime
+        from middleware.core.app import MiddlewareRuntime
 
         class RosCapture:
             def __init__(self):
@@ -48,7 +48,7 @@ class VrDataTests(unittest.TestCase):
             self.assertEqual(payload["sequence"], 8)
             self.assertEqual(payload["poses"]["right"]["position"], [4.0, 5.0, 6.0])
     def test_vr_xy_buttons_trigger_recording(self):
-        from hc_teleop_middleware.app import MiddlewareRuntime
+        from middleware.core.app import MiddlewareRuntime
 
         class MockRecorder:
             def __init__(self):

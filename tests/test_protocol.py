@@ -2,7 +2,7 @@ import json
 import struct
 import unittest
 
-from hc_teleop_middleware.protocol import (
+from middleware.core.protocol import (
     LEGACY_PACKET_FORMAT,
     LEGACY_PACKET_SIZE,
     PACKET_FORMAT,

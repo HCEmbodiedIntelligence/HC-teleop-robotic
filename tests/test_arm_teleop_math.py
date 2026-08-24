@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from hc_teleop_middleware.arm_teleop_math import (
+from adapters.core.arm_teleop_math import (
     adaptive_damping,
     clamp_step,
     joystick_base_velocity,
@@ -35,15 +35,15 @@ class ArmTeleopMathTests(unittest.TestCase):
         self.assertEqual(result[1], 0.0)
         self.assertLess(result[2], 0.0)
 
-    def test_controller_positive_z_forward_translation_mapping(self):
+    def test_openxr_negative_z_maps_to_robot_forward(self):
         target, _ = relative_target(
-            [0.1, 0.2, 0.3],
+            [0.1, 0.2, -0.3],
             [0, 0, 0, 1],
             [0, 0, 0],
             [0, 0, 0, 1],
             [1, 2, 3],
             [0, 0, 0, 1],
-            [[0, 0, 1], [-1, 0, 0], [0, 1, 0]],
+            [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
             1.0,
             1.0,
             False,

@@ -20,14 +20,14 @@
 - 头显向上/向下：腰部同向抬升伸直/下沉弯曲。
 - 头显前后位置增量：经设备符号补偿后控制同向躯干俯仰。
 - 左右手柄 6D 位姿：对应侧机械臂末端位姿。
-- 手柄位姿只使用相对增量；手柄 `+Z` 向前映射为胸部 `zhi_Link` 的 `+X` 向前，左右臂目标统一在胸部坐标系中解算。
+- 手柄位姿只使用相对增量；OpenXR 手柄 `-Z` 向前映射为胸部 `zhi_Link` 的 `+X` 向前，左右臂目标统一在胸部坐标系中解算。
 - 左右食指 Trigger：对应夹爪从张开到闭合的连续位置。
 - 左手 Grip：底盘/腰部离合；右手 Grip：双臂/夹爪总离合。
 - 双主摇杆同时向外拨到底一次（左摇杆向左、右摇杆向右）：停止当前离合，并由命令合并层限速将双臂关节明确拉回 `robot.initial_joints`。这避免 7DoF 冗余 IK 在末端到位后留下不同关节解而卡住 homing；两个摇杆回中后可直接重新使用右 Grip 和 Trigger。
 
 双臂末端目标带位置/姿态死区和低通滤波，用于抑制静止手柄追踪噪声；v2.3 每周期求解带速度及一步关节位置边界的加权最小二乘，再通过 Pinocchio `integrate()` 生成小步关节命令。
 
-v2.3 的 URDF、任务权重和速度限制来自 `robot_configs/<机器人名>/controller_v23.yml`，关节位置限制来自 URDF。第四个 task 标量目前按 gain 解释；HC-TJ 双臂使用 `3.0`，躯干使用 `1.0`，兼顾手臂响应和身体平稳。逆运动学控制器已完全重构为纯开源 Python 实现（位于 `vendor/io_unicontroller_ros2/control_v23_reconstructed`）。
+v2.3 的 URDF、任务权重和速度限制来自 `adapters/robots/<机器人名>/controller_v23.yml`，关节位置限制来自 URDF。逆运动学控制器位于 `adapters/v23/`。
 
 双臂末端目标统一保存在胸部 `zhi_Link` 坐标系中。腰部运动时，末端目标会随躯干整体运动，不会反向补偿成世界坐标不动。
 
@@ -42,35 +42,35 @@ cd /home/maple/test/HC-teleop-robotic
 ./install.sh --sim
 ```
 
-终端 1 启动 VR 中间件：
+终端 1 启动通用遥操作栈（网页、VR 网关、IK 和遥操作控制）：
 
 ```bash
-./run.sh
+./start_teleop.sh
 ```
 
-终端 2 启动 HC-TJ 图形仿真和遥操作控制：
+终端 2 只启动 HC-TJ 图形仿真后端：
 
 ```bash
-./run_sim_teleop.sh
+./run_simulator.sh
 ```
 
-脚本默认读取 `middleware.yaml` 中 `robot_profiles.active` 指向的网页已选配置。HC 通用格式导入会在 `robot_configs/<配置ID>/` 生成仿真、遥操作和 v2.3 控制器所需文件；网页切换配置后需要退出并重新启动本脚本。临时覆盖示例：
+脚本默认读取 `middleware/config.yaml` 中 `robot_profiles.active` 指向的网页已选配置。HC 通用格式导入会在 `adapters/robots/<配置ID>/` 生成仿真、遥操作和 v2.3 控制器所需文件；网页切换配置后需要退出并重新启动本脚本。临时覆盖示例：
 
 ```bash
-HC_ROBOT_NAME=hc_tj_description ./run_sim_teleop.sh
+HC_ROBOT_NAME=x1 ./run_simulator.sh
 ```
 
 没有图形显示时：
 
 ```bash
-./run_sim_teleop.sh --headless
+./run_simulator.sh --headless
 ```
 
-后端对照：`--v23`（默认重构）、`--generic`（原加密控制器和 PID）、`--legacy`（PyBullet IK）。
+旧的一体化入口 `run_sim_teleop.sh` 仍可用于后端对照：`--v23`（默认重构）、`--generic`（原加密控制器和 PID）、`--legacy`（PyBullet IK）。它会自行启动 IK 和遥操作控制，不要与 `start_teleop.sh` 同时运行。
 
 两边必须使用相同的 `ROS_DOMAIN_ID`。启动后松开两个 Grip；准备好再按对应离合。
 
-`run_sim_teleop.sh` 默认将手柄、目标/实际末端位姿及关节命令/反馈记录到 `runtime/teleop_logs/`。复现抖动后可运行 `analyze_teleop_log.py <CSV日志>` 定位输入、IK 或关节跟踪环节。
+`run_simulator.sh` 默认将手柄、目标/实际末端位姿及关节命令/反馈记录到 `runtime/teleop_logs/`。复现抖动后可运行 `analyze_teleop_log.py <CSV日志>` 定位输入、IK 或关节跟踪环节。
 
 ## ROS 接口
 
@@ -103,7 +103,7 @@ ros2 service call /teleop/arm/reset_reference std_srvs/srv/Trigger '{}'
 
 ## 实机切换前必须修改
 
-当前 `robot_configs/hc_tj_description/arm_teleop.yaml` 是仿真配置。连接 TJ 实机前至少要：
+当前 X1 配置位于 `adapters/robots/x1/arm_teleop.yaml`。连接其他实机时至少要：
 
 1. 将 `control.enabled_on_start` 改为 `false`，由人工服务显式使能。
 2. 将 `body.base_command_mode` 改为 `velocity`。
