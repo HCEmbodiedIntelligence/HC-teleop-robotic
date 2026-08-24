@@ -173,7 +173,7 @@ bash -n start_teleop.sh run_simulator.sh middleware/start.sh adapters/start.sh
 
 VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TELEOP.md)。标准启动分为通用遥操作栈和可替换的仿真后端：
 
-双臂与腰部回零：不用按 Grip，同时把左主摇杆向左、右主摇杆向右拨到底一次；回零后先让两个摇杆回中，才能再次触发。回零期间命令合并层会将双臂和 `body.waist_joint_names` 中的腰关节限速拉回 `initial_joints`，避免 7DoF 冗余解只让末端到位却永久卡在 homing；完成后可直接再次按右 Grip 和 Trigger，无需急停重启。
+双臂与腰部回零：不用按 Grip，同时把左主摇杆向左、右主摇杆向右拨到底一次；回零后先让两个摇杆回中，才能再次触发。回零期间命令合并层会将双臂和 `body.waist_joint_names` 中的腰关节限速拉回 `initial_joints`，避免 7DoF 冗余解只让末端到位却永久卡在 homing。反馈到位后系统会清除旧 IK 积分状态，并等待一帧复位后的新解；此时需要先松开右 Grip，再重新按下才能恢复双臂控制，旧 IK 消息不会重新接管。
 
 ```bash
 ./install.sh --sim

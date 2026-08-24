@@ -13,8 +13,9 @@ from geometry_msgs.msg import PoseArray
 from rclpy.executors import ExternalShutdownException
 from rclpy._rclpy_pybind11 import RCLError
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Header
 from tf2_msgs.msg import TFMessage
 
 HERE = Path(__file__).resolve()
@@ -47,20 +48,35 @@ class ControllerNode(Node):
         super().__init__(str(ros_config.get("node_name", "controller_v2_3")))
         subscriptions = ros_config.get("sub_topic", {})
         publications = ros_config.get("pub_topic", {})
+        latest_reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         self.command_pub = self.create_publisher(
-            JointState, publications["joint_target"], 10
+            JointState, publications["joint_target"], latest_reliable_qos
         )
         self.solver_pub = (
-            self.create_publisher(JointState, publications["solver_state"], 10)
+            self.create_publisher(
+                JointState, publications["solver_state"], latest_reliable_qos
+            )
             if publications.get("solver_state")
             else None
         )
+        self.reset_ack_pub = self.create_publisher(
+            Header,
+            publications.get("reset_ack", "/hc_teleop/solver_reset_ack"),
+            latest_reliable_qos,
+        )
         self.create_subscription(
-            JointState, subscriptions["joint_state"], self._joint_callback, 10
+            JointState,
+            subscriptions["joint_state"],
+            self._joint_callback,
+            latest_reliable_qos,
         )
         if subscriptions.get("reset"):
             self.create_subscription(
-                Bool, subscriptions["reset"], self._reset_callback, 10
+                Bool, subscriptions["reset"], self._reset_callback, latest_reliable_qos
             )
         if subscriptions.get("tf_target"):
             self.create_subscription(
@@ -71,7 +87,10 @@ class ControllerNode(Node):
         ]
         if subscriptions.get("ee_target"):
             self.create_subscription(
-                PoseArray, subscriptions["ee_target"], self._ee_callback, 10
+                PoseArray,
+                subscriptions["ee_target"],
+                self._ee_callback,
+                latest_reliable_qos,
             )
         rate = float(ros_config.get("rate", 400.0))
         if rate <= 0.0:
@@ -79,6 +98,7 @@ class ControllerNode(Node):
         self.timer = self.create_timer(1.0 / rate, self._tick)
         self.failure_count = 0
         self.last_failure_log = 0.0
+        self.reset_pending = False
         self.get_logger().info(
             "reconstructed controller_v2_3 started: "
             f"{len(self.controller.free_joint_names)} free joints, "
@@ -88,15 +108,21 @@ class ControllerNode(Node):
     def _joint_callback(self, message: JointState) -> None:
         try:
             self.controller.update_joint_state(message.name, message.position)
+            if self.reset_pending:
+                self.controller.reset_to_feedback()
+                self.reset_pending = False
+                acknowledgement = Header()
+                acknowledgement.stamp = self.get_clock().now().to_msg()
+                self.reset_ack_pub.publish(acknowledgement)
+                self.get_logger().warning(
+                    "retarget integrator reset to fresh joint feedback"
+                )
         except ValueError as exception:
             self.get_logger().warning(f"ignoring invalid joint feedback: {exception}")
 
     def _reset_callback(self, message: Bool) -> None:
         if message.data:
-            self.controller.reset_to_feedback()
-            self.get_logger().warning(
-                "retarget integrator reset to joint feedback by collision safety"
-            )
+            self.reset_pending = True
 
     def _tf_callback(self, message: TFMessage) -> None:
         targets = {}
@@ -142,6 +168,8 @@ class ControllerNode(Node):
         self.controller.update_tf_targets(targets)
 
     def _tick(self) -> None:
+        if self.reset_pending:
+            return
         try:
             names, positions = self.controller.step()
         except RuntimeError:

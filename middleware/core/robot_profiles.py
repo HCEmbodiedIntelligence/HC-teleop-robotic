@@ -24,6 +24,8 @@ STANDARD_TOPICS = {
     "ee_visual_target": "/hc_teleop/target_ee_poses",
     "ee_actual": "/hc_teleop/actual_ee_poses",
     "solver_state": "/hc_teleop/sol_q",
+    "solver_reset": "/hc_teleop/solver_reset",
+    "solver_reset_ack": "/hc_teleop/solver_reset_ack",
     "base_move": "/hc_teleop/target_base_move",
 }
 
@@ -222,10 +224,12 @@ def _standard_ros_interface(profile_id: str) -> dict[str, Any]:
         "sub_topic": {
             "joint_state": STANDARD_TOPICS["joint_state"],
             "ee_target": STANDARD_TOPICS["ee_target"],
+            "reset": STANDARD_TOPICS["solver_reset"],
         },
         "pub_topic": {
             "joint_target": STANDARD_TOPICS["joint_target"],
             "solver_state": STANDARD_TOPICS["solver_state"],
+            "reset_ack": STANDARD_TOPICS["solver_reset_ack"],
         },
     }
 
@@ -925,6 +929,10 @@ class RobotProfileManager:
                 "ee_visual_target": control.get("target_pose_topic", STANDARD_TOPICS["ee_visual_target"]),
                 "ee_actual": control.get("actual_pose_topic", STANDARD_TOPICS["ee_actual"]),
                 "solver_state": control.get("solver_topic", STANDARD_TOPICS["solver_state"]),
+                "solver_reset": control.get("solver_reset_topic", STANDARD_TOPICS["solver_reset"]),
+                "solver_reset_ack": control.get(
+                    "solver_reset_ack_topic", STANDARD_TOPICS["solver_reset_ack"]
+                ),
                 "base_move": body.get("base_command_topic", STANDARD_TOPICS["base_move"]),
             }
         return dict(STANDARD_TOPICS)

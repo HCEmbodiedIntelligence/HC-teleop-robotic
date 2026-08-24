@@ -12,9 +12,14 @@ import pybullet as bullet
 import yaml
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import JointState, Joy
-from std_msgs.msg import Bool, Float64MultiArray, String
+from std_msgs.msg import Bool, Float64MultiArray, Header, String
 from std_srvs.srv import Trigger
 
 from .arm_teleop_math import (
@@ -37,6 +42,7 @@ from .collision_safety import (
     calibrated_clearance,
     improves_collision_clearance,
 )
+from .solver_rearm import SolverRearmGate
 
 
 @dataclass
@@ -137,6 +143,7 @@ class HcTjArmTeleopNode(Node):
         self.generic_command_stamp = 0.0
         self.generic_command_count = 0
         self.generic_aux_command: dict[str, float] = {}
+        self.solver_rearm = SolverRearmGate()
         self.collision_enabled = bool(
             self.control.get("collision_avoidance_enabled", True)
         )
@@ -254,16 +261,22 @@ class HcTjArmTeleopNode(Node):
                 self.config["grippers"]["left"]["sim_joint"],
             ]
 
+        latest_reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         self.command_pub = self.create_publisher(
-            JointState, self.control["command_topic"], 10
+            JointState, self.control["command_topic"], latest_reliable_qos
         )
         self.solver_reset_pub = self.create_publisher(
             Bool,
             self.control.get("solver_reset_topic", "/hc_teleop/solver_reset"),
-            10,
+            latest_reliable_qos,
         )
+        self.solver_reset_ack_sub = None
         self.target_pub = self.create_publisher(
-            PoseArray, self.control["target_pose_topic"], 10
+            PoseArray, self.control["target_pose_topic"], latest_reliable_qos
         )
         self.controller_target_pub = self.create_publisher(
             PoseArray,
@@ -271,12 +284,12 @@ class HcTjArmTeleopNode(Node):
                 "controller_target_pose_topic",
                 "/hc_teleop/controller_target_ee_poses",
             ),
-            10,
+            latest_reliable_qos,
         )
         self.actual_pub = self.create_publisher(
             PoseArray,
             self.control.get("actual_pose_topic", "/hc_teleop/actual_ee_poses"),
-            10,
+            latest_reliable_qos,
         )
         self.base_pub = self.create_publisher(
             Float64MultiArray, self.body_config["base_command_topic"], 10
@@ -294,14 +307,22 @@ class HcTjArmTeleopNode(Node):
             JointState,
             self.control["joint_state_topic"],
             self._joint_state_callback,
-            10,
+            latest_reliable_qos,
         )
         if self.external_ik:
             self.create_subscription(
                 JointState,
                 self.control.get("solver_topic", "/hc_teleop/sol_q"),
                 self._solver_callback,
-                10,
+                latest_reliable_qos,
+            )
+            self.solver_reset_ack_sub = self.create_subscription(
+                Header,
+                self.control.get(
+                    "solver_reset_ack_topic", "/hc_teleop/solver_reset_ack"
+                ),
+                self._solver_reset_ack_callback,
+                latest_reliable_qos,
             )
             self.create_subscription(
                 JointState,
@@ -309,7 +330,7 @@ class HcTjArmTeleopNode(Node):
                     "generic_command_topic", "/hc_teleop/joint_cmd_arm"
                 ),
                 self._generic_command_callback,
-                10,
+                latest_reliable_qos,
             )
         self.create_subscription(
             Bool,
@@ -702,6 +723,13 @@ class HcTjArmTeleopNode(Node):
         self.joint_state_stamp = self._monotonic()
         if not self.last_command:
             self.last_command = dict(self.joint_state)
+        if self.external_ik and self.solver_rearm.observe_feedback():
+            cutoff_ns = int(self.get_clock().now().nanoseconds)
+            self.solver_reset_pub.publish(Bool(data=True))
+            self.solver_rearm.reset_published(cutoff_ns)
+            self.get_logger().info(
+                "post-home joint feedback received; solver reset requested"
+            )
 
     def _solver_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -710,6 +738,15 @@ class HcTjArmTeleopNode(Node):
             return
         self.solver_stamp = self._monotonic()
         self.solver_message_count += 1
+
+    def _solver_reset_ack_callback(self, message: Header) -> None:
+        stamp_ns = int(message.stamp.sec) * 1_000_000_000 + int(
+            message.stamp.nanosec
+        )
+        if self.solver_rearm.observe_reset_ack(stamp_ns):
+            self.get_logger().info(
+                "solver reset acknowledged; waiting for fresh IK output"
+            )
 
     def _generic_command_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -722,7 +759,15 @@ class HcTjArmTeleopNode(Node):
         self.generic_command_count += 1
         if not self.enabled:
             return
-        if self.homing:
+        if self.homing or self.solver_rearm.blocked:
+            stamp_ns = (
+                int(message.header.stamp.sec) * 1_000_000_000
+                + int(message.header.stamp.nanosec)
+            )
+            if self.solver_rearm.observe_solver_output(stamp_ns):
+                self.get_logger().info(
+                    "fresh post-reset IK output received; release and press right Grip to resume"
+                )
             return
         merged = dict(zip(message.name, (float(value) for value in message.position)))
         arms_active = any(self.arms[side].active for side in ("right", "left"))
@@ -887,7 +932,10 @@ class HcTjArmTeleopNode(Node):
         elapsed = self._monotonic() - getattr(self, "homing_start_time", 0.0)
         reached = np.max(np.abs(next_values - target)) <= float(self.control.get("home_tolerance", 0.08))
         feedback_close = feedback_error <= float(self.control.get("home_tolerance", 0.08))
-        if reached and (feedback_close or elapsed >= 4.0):
+        feedback_requirement_met = feedback_close or (
+            not self.external_ik and elapsed >= 4.0
+        )
+        if reached and feedback_requirement_met:
             for name, value in zip(names, target):
                 command[name] = float(value)
                 if name in self.body.joint_names:
@@ -912,6 +960,8 @@ class HcTjArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
+            if self.external_ik:
+                self.solver_rearm.homing_complete()
             self.get_logger().info(
                 f"{self.backend} controller arms and waist homing complete"
             )
@@ -1095,6 +1145,8 @@ class HcTjArmTeleopNode(Node):
                 arm.active for arm in self.arms.values()
             )
             self.collision_wait_left_release |= self.body.active
+        if self.homing and self.external_ik:
+            self.solver_rearm.homing_complete()
         self.homing = False
         if not escape_mode:
             self._release_all(send_base_zero=False)
@@ -2030,6 +2082,7 @@ class HcTjArmTeleopNode(Node):
     def _set_generic_home_targets(self) -> None:
         """Capture the configured arm and waist home as Cartesian tasks."""
         self._release_all(send_base_zero=True)
+        self.solver_rearm.start_homing()
         self.base_zero_pending = False
         for name in self._homing_joint_names():
             bullet.resetJointState(
@@ -2069,6 +2122,8 @@ class HcTjArmTeleopNode(Node):
         self, now: float, feedback_fresh: bool, command: dict[str, float] | None
     ) -> None:
         if not self.enabled or command is None:
+            if self.homing:
+                self.solver_rearm.homing_complete()
             self.homing = False
             self._release_all(send_base_zero=self.base_zero_pending)
             self.base_zero_pending = False
@@ -2111,6 +2166,13 @@ class HcTjArmTeleopNode(Node):
         arms_requested = right_input_fresh and self._clutch_pressed(
             self.arms["right"]
         )
+        if self.solver_rearm.blocked:
+            if right_input_fresh and self.solver_rearm.observe_clutch(arms_requested):
+                self.get_logger().info(
+                    "right Grip pressed after release; post-home IK control rearmed"
+                )
+            if self.solver_rearm.blocked:
+                arms_requested = False
         base_requested, arms_requested = self._apply_collision_latch(
             base_requested, arms_requested
         )
@@ -2407,6 +2469,7 @@ class HcTjArmTeleopNode(Node):
                 or now - self.generic_command_stamp
                 <= float(self.control["joint_state_timeout"]),
                 "command_messages": self.generic_command_count,
+                "rearm_state": self.solver_rearm.state,
             },
             "stop_reason": self.stop_reason,
             "feedback_fresh": feedback_fresh,
@@ -2435,6 +2498,8 @@ class HcTjArmTeleopNode(Node):
             "mode": (
                 "homing"
                 if self.homing
+                else "ik_rearming"
+                if self.solver_rearm.blocked
                 else "both"
                 if left_clutch and right_clutch
                 else "base_waist"

@@ -8,6 +8,7 @@ ros_interface:
   pub_topic:
     joint_target: /hc_teleop/joint_cmd_arm
     solver_state: /hc_teleop/sol_q
+    reset_ack: /hc_teleop/solver_reset_ack
 control:
   method: retarget
   dt: 0.01

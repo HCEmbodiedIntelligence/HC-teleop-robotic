@@ -39,6 +39,10 @@ class ArmTeleopConfigTests(unittest.TestCase):
         self.assertTrue(control["collision_check_inter_arm"])
         self.assertTrue(control["collision_check_arm_body"])
         self.assertEqual(control["solver_reset_topic"], "/hc_teleop/solver_reset")
+        self.assertEqual(
+            control["solver_reset_ack_topic"],
+            "/hc_teleop/solver_reset_ack",
+        )
 
     def test_right_hand_angles_match_rs485_demo_motor_positions(self):
         right = self.load_config()["grippers"]["right"]

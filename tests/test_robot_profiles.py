@@ -102,6 +102,14 @@ class RobotProfileTests(unittest.TestCase):
                 controller["ros_interface"]["sub_topic"]["joint_state"],
                 STANDARD_TOPICS["joint_state"],
             )
+            self.assertEqual(
+                controller["ros_interface"]["sub_topic"]["reset"],
+                STANDARD_TOPICS["solver_reset"],
+            )
+            self.assertEqual(
+                controller["ros_interface"]["pub_topic"]["reset_ack"],
+                STANDARD_TOPICS["solver_reset_ack"],
+            )
             self.assertEqual(len(controller["task"]["pose"]), 3)
             self.assertEqual(
                 teleop["arms"]["right"]["joint_names"], ["right_joint"]
@@ -164,6 +172,14 @@ class RobotProfileTests(unittest.TestCase):
             self.assertEqual(
                 saved["ros_interface"]["pub_topic"]["joint_target"],
                 STANDARD_TOPICS["joint_target"],
+            )
+            self.assertEqual(
+                saved["ros_interface"]["sub_topic"]["reset"],
+                STANDARD_TOPICS["solver_reset"],
+            )
+            self.assertEqual(
+                saved["ros_interface"]["pub_topic"]["reset_ack"],
+                STANDARD_TOPICS["solver_reset_ack"],
             )
 
     def test_rejects_duplicate_profile_without_overwriting_it(self):

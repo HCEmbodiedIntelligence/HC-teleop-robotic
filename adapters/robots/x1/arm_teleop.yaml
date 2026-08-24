@@ -186,6 +186,7 @@ control:
   generic_command_topic: /hc_teleop/joint_cmd_arm
   solver_topic: /hc_teleop/sol_q
   solver_reset_topic: /hc_teleop/solver_reset
+  solver_reset_ack_topic: /hc_teleop/solver_reset_ack
   target_pose_topic: /hc_teleop/target_ee_poses
   controller_target_pose_topic: /hc_teleop/controller_target_ee_poses
   actual_pose_topic: /hc_teleop/actual_ee_poses
