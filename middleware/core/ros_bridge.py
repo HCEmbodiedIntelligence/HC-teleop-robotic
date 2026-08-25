@@ -125,10 +125,12 @@ class RosBridge:
         config: dict[str, Any],
         on_event: EventCallback,
         on_frame: Callable[[str, Any], None] | None = None,
+        camera_topic: str = "",
     ):
         self.config = config
         self.on_event = on_event
         self.on_frame = on_frame
+        self.camera_topic = str(camera_topic)
         self._stop = threading.Event()
         self._commands: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
@@ -266,6 +268,9 @@ class RosBridge:
             if not rclpy.ok():
                 rclpy.init(args=[], domain_id=domain_id)
             node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"))
+            # Camera decoding is performed by CameraService's latest-frame worker,
+            # so callbacks here are deliberately short. A multi-threaded rclpy
+            # executor adds substantial wait-set and GIL overhead at these rates.
             executor = SingleThreadedExecutor()
             executor.add_node(node)
             publishers: dict[tuple[str, str], Any] = {}
@@ -358,6 +363,17 @@ class RosBridge:
                 topic = item["topic"]
                 msg_type_name = item["type"]
                 outputs = list(item.get("outputs", ["websocket"]))
+                event_outputs = [output for output in outputs if output != "record"]
+                is_webrtc_color = bool(
+                    self.on_frame is not None
+                    and self.camera_topic
+                    and topic == self.camera_topic
+                )
+                # Pure recording topics are owned exclusively by the isolated
+                # raw-CDR process. The main bridge retains only UI/control topics
+                # and the exact Color topic consumed by WebRTC.
+                if not event_outputs and not is_webrtc_color:
+                    continue
                 max_hz = float(item.get("max_hz", 0))
                 event_max_hz = float(item.get("event_max_hz", max_hz))
                 message_type = get_message(msg_type_name)
@@ -376,14 +392,14 @@ class RosBridge:
                     topic: str = topic,
                     msg_type_name: str = msg_type_name,
                     outputs: list[str] = outputs,
+                    event_outputs: list[str] = event_outputs,
+                    is_webrtc_color: bool = is_webrtc_color,
                     max_hz: float = event_max_hz,
                     tracker: TopicHealthTracker = tracker,
                 ) -> None:
                     now = time.monotonic()
                     tracker.record_message(now)
-                    if self.on_frame is not None and (
-                        "camera" in topic or "eye" in topic or "color" in topic or "CompressedImage" in msg_type_name
-                    ):
+                    if self.on_frame is not None and is_webrtc_color:
                         try:
                             self.on_frame(topic, message)
                         except Exception:
@@ -391,7 +407,6 @@ class RosBridge:
                     # ROS recording is handled by RosRecordingExecutor. Keeping
                     # it out of this callback prevents image serialization from
                     # starving dashboard health and WebRTC work.
-                    event_outputs = [output for output in outputs if output != "record"]
                     if not event_outputs:
                         with self._lock:
                             self._status["messages"] += 1

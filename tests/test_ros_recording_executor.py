@@ -44,36 +44,26 @@ class RosRecordingExecutorTests(unittest.TestCase):
         accepted = [gate.allow("/camera", 30.0, now) for now in timestamps]
         self.assertEqual(accepted, [True, False, True, False, True])
 
-    def test_serializes_only_while_recording(self):
+    def test_forwards_raw_cdr_only_while_recording(self):
         recorder = FakeRecorder(active=False)
         executor = RosRecordingExecutor(
             {"enabled": True, "domain_id": 14, "subscriptions": []}, recorder
         )
-        serialized = []
-
-        def serialize(message):
-            serialized.append(message)
-            return b"cdr"
-
         executor._handle_message(
-            object(),
+            b"ignored-cdr",
             topic="/camera",
             msg_type="sensor_msgs/msg/CompressedImage",
             max_hz=0.0,
-            serialize_message=serialize,
         )
-        self.assertEqual(serialized, [])
         self.assertEqual(recorder.events, [])
 
         recorder.active = True
         executor._handle_message(
-            "frame",
+            b"cdr",
             topic="/camera",
             msg_type="sensor_msgs/msg/CompressedImage",
             max_hz=0.0,
-            serialize_message=serialize,
         )
-        self.assertEqual(serialized, ["frame"])
         self.assertEqual(recorder.events[0]["_raw"], b"cdr")
         self.assertEqual(executor.status()["recorded"], 1)
 

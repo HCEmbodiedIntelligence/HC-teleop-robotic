@@ -178,7 +178,10 @@ function renderStatus(data) {
   setState('#vrState', vr.state);
   setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
   setState('#cameraState', cam.state);
-  setText('#cameraMeta',cam.error || `${cam.capture_fps||0} FPS · ${cam.peers||0} peers`);
+  setText(
+    '#cameraMeta',
+    cam.error || `接收 ${cam.capture_fps||0} FPS · WebRTC 发送 ${cam.webrtc_send_fps||0} FPS · ${cam.peers||0} peers`
+  );
   setText('#wsClients',data.websocket_clients||0);
   const recording=data.recording||{};
   const isRecording=Boolean(recording.recording);

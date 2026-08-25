@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import os
 import queue
 import threading
 import time
@@ -17,6 +19,38 @@ _PRIMITIVE_TYPES = {
     "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64",
     "string", "wstring",
 }
+
+
+def _lower_recording_priority() -> None:
+    """Best-effort process priority reduction for recording workers."""
+    try:
+        if os.name == "posix":
+            os.nice(10)
+        elif os.name == "nt":
+            import ctypes
+
+            below_normal_priority_class = 0x00004000
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                below_normal_priority_class,
+            )
+    except Exception:
+        pass
+
+
+def _counter_get(counter: Any) -> int:
+    with counter.get_lock():
+        return int(counter.value)
+
+
+def _counter_set(counter: Any, value: int) -> None:
+    with counter.get_lock():
+        counter.value = int(value)
+
+
+def _counter_add(counter: Any, value: int = 1) -> None:
+    with counter.get_lock():
+        counter.value += int(value)
 
 
 def _get_msg_def(msg_type: str) -> bytes:
@@ -99,6 +133,98 @@ def _get_msg_def(msg_type: str) -> bytes:
         return b""
 
 
+def _mcap_writer_process(
+    path: str,
+    event_queue: Any,
+    messages: Any,
+    error_queue: Any,
+    ready_event: Any,
+) -> None:
+    """Write MCAP in a process isolated from WebRTC and the dashboard."""
+    _lower_recording_priority()
+    schemas: dict[str, int] = {}
+    channels: dict[tuple[str, str], int] = {}
+    try:
+        with Path(path).open("wb") as stream:
+            writer = McapWriter(stream)
+            writer.start(profile="ros2")
+            # Do not report a recording as active until the destination file
+            # has actually been opened and the MCAP header has been written.
+            ready_event.set()
+            try:
+                while True:
+                    event = event_queue.get()
+                    if event is None:
+                        break
+
+                    topic = str(event.get("topic") or "/events")
+                    msg_type = str(
+                        event.get("msg_type") or "std_msgs/msg/String"
+                    )
+                    raw_data = event.get("_raw")
+                    stamp_ns = int(event.get("stamp_ns") or time.time_ns())
+
+                    if isinstance(raw_data, bytes):
+                        if msg_type not in schemas:
+                            schemas[msg_type] = writer.register_schema(
+                                name=msg_type,
+                                encoding=SchemaEncoding.ROS2,
+                                data=_get_msg_def(msg_type),
+                            )
+                        schema_id = schemas[msg_type]
+                        chan_key = (topic, msg_type)
+                        if chan_key not in channels:
+                            channels[chan_key] = writer.register_channel(
+                                topic=topic,
+                                message_encoding=MessageEncoding.CDR,
+                                schema_id=schema_id,
+                            )
+                        writer.add_message(
+                            channel_id=channels[chan_key],
+                            log_time=stamp_ns,
+                            data=raw_data,
+                            publish_time=stamp_ns,
+                        )
+                    else:
+                        payload = event.get("payload")
+                        if payload is None:
+                            payload = event
+                        json_bytes = json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        if "teleop_event" not in schemas:
+                            schemas["teleop_event"] = writer.register_schema(
+                                name="teleop_event",
+                                encoding=SchemaEncoding.JSONSchema,
+                                data=b"",
+                            )
+                        schema_id = schemas["teleop_event"]
+                        chan_key = (topic, "teleop_event")
+                        if chan_key not in channels:
+                            channels[chan_key] = writer.register_channel(
+                                topic=topic,
+                                message_encoding=MessageEncoding.JSON,
+                                schema_id=schema_id,
+                            )
+                        writer.add_message(
+                            channel_id=channels[chan_key],
+                            log_time=stamp_ns,
+                            data=json_bytes,
+                            publish_time=stamp_ns,
+                        )
+                    _counter_add(messages)
+            finally:
+                writer.finish()
+    except Exception as exc:
+        ready_event.set()
+        try:
+            error_queue.put_nowait(f"{type(exc).__name__}: {exc}")
+        except queue.Full:
+            pass
+
+
 def _inspect_mcap_file(path: Path) -> dict[str, Any]:
     try:
         from mcap.reader import make_reader
@@ -152,7 +278,7 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
 
 
 class TopicRecorder:
-    """Non-blocking MCAP recorder for ROS 2 CDR messages and telemetry."""
+    """Process-isolated MCAP recorder for ROS 2 CDR messages and telemetry."""
 
     def __init__(self, config: dict[str, Any], config_dir: Path):
         directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
@@ -160,12 +286,27 @@ class TopicRecorder:
             directory = config_dir / directory
         self.directory = directory.resolve()
         self.path: Path | None = None
-        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=8192)
-        self._thread: threading.Thread | None = None
+        self._mp = mp.get_context("spawn")
+        self._queue = self._mp.Queue(maxsize=8192)
+        self._accepting_event = self._mp.Event()
+        self._messages = self._mp.Value("Q", 0)
+        self._dropped = self._mp.Value("Q", 0)
+        self._error_queue = self._mp.Queue(maxsize=4)
+        self._ready_event = self._mp.Event()
+        self._process: Any = None
         self._lock = threading.Lock()
-        self._accepting = False
-        self._messages = 0
-        self._dropped = 0
+        self._last_error: str | None = None
+
+    def ipc_resources(self) -> tuple[Any, Any, Any]:
+        """Resources inherited by the raw ROS subscription process."""
+        return self._queue, self._accepting_event, self._dropped
+
+    def _drain_queue(self, target: Any) -> None:
+        while True:
+            try:
+                target.get_nowait()
+            except queue.Empty:
+                return
 
     def start(self, filename: str = "") -> str:
         self.stop()
@@ -176,21 +317,45 @@ class TopicRecorder:
             fname += ".mcap"
         self.path = self.directory / fname
         with self._lock:
-            self._messages = 0
-            self._dropped = 0
-            self._queue = queue.Queue(maxsize=8192)
-            self._accepting = True
-        self._thread = threading.Thread(
-            target=self._run, name="topic-recorder", daemon=True
-        )
-        self._thread.start()
+            self._drain_queue(self._queue)
+            self._drain_queue(self._error_queue)
+            self._ready_event.clear()
+            self._last_error = None
+            _counter_set(self._messages, 0)
+            _counter_set(self._dropped, 0)
+            self._process = self._mp.Process(
+                target=_mcap_writer_process,
+                args=(
+                    str(self.path),
+                    self._queue,
+                    self._messages,
+                    self._error_queue,
+                    self._ready_event,
+                ),
+                name="mcap-writer",
+                daemon=True,
+            )
+            self._process.start()
+            if not self._ready_event.wait(timeout=5.0):
+                self._process.terminate()
+                self._process.join(timeout=2.0)
+                self._process = None
+                raise TimeoutError("MCAP writer did not become ready within 5 seconds")
+            if not self._process.is_alive():
+                try:
+                    self._last_error = self._error_queue.get_nowait()
+                except queue.Empty:
+                    self._last_error = "MCAP writer exited during startup"
+                self._process = None
+                raise RuntimeError(self._last_error)
+            self._accepting_event.set()
         return str(self.path)
 
     def stop(self) -> dict[str, Any]:
-        if self._thread is None:
+        process = self._process
+        if process is None:
             return self.status()
-        with self._lock:
-            self._accepting = False
+        self._accepting_event.clear()
         while True:
             try:
                 self._queue.put_nowait(None)
@@ -200,34 +365,47 @@ class TopicRecorder:
                     self._queue.get_nowait()
                 except queue.Empty:
                     continue
-                with self._lock:
-                    self._dropped += 1
-        self._thread.join(timeout=3.0)
-        self._thread = None
+                _counter_add(self._dropped)
+        process.join(timeout=30.0)
+        if process.is_alive():
+            raise TimeoutError("MCAP writer did not finish within 30 seconds")
+        self._process = None
         return self.status()
 
     def is_recording(self) -> bool:
-        with self._lock:
-            return self._accepting and self._thread is not None and self._thread.is_alive()
+        process = self._process
+        return self._accepting_event.is_set() and (
+            process is None or process.is_alive()
+        )
 
     def record(self, event: dict[str, Any]) -> bool:
-        if not self.is_recording():
+        if not self._accepting_event.is_set():
             return False
         try:
             self._queue.put_nowait(event)
             return True
         except queue.Full:
-            with self._lock:
-                self._dropped += 1
+            _counter_add(self._dropped)
             return False
 
     def status(self) -> dict[str, Any]:
+        while True:
+            try:
+                self._last_error = self._error_queue.get_nowait()
+            except queue.Empty:
+                break
+        process = self._process
         with self._lock:
             return {
-                "recording": self._accepting and self._thread is not None and self._thread.is_alive(),
-                "path": str(self.path) if (self.path and self._thread is not None) else (str(self.path) if self.path else ""),
-                "messages": self._messages,
-                "dropped": self._dropped,
+                "recording": self._accepting_event.is_set()
+                and process is not None
+                and process.is_alive(),
+                "path": str(self.path) if self.path else "",
+                "messages": _counter_get(self._messages),
+                "dropped": _counter_get(self._dropped),
+                "writer_pid": process.pid if process is not None else None,
+                "writer_priority": "low",
+                "error": self._last_error,
             }
 
     def list_recordings(self) -> list[dict[str, Any]]:
@@ -235,7 +413,7 @@ class TopicRecorder:
         files = []
         active_path = (
             self.path.resolve()
-            if (self.path and self._thread is not None and self._thread.is_alive())
+            if (self.path and self.is_recording())
             else None
         )
 
@@ -266,7 +444,7 @@ class TopicRecorder:
             meta = _inspect_mcap_file(p) if (p.suffix == ".mcap" and not is_cur) else {
                 "duration_sec": 0.0,
                 "duration_human": "正在写入…" if is_cur else "--",
-                "message_count": self._messages if is_cur else 0,
+                "message_count": _counter_get(self._messages) if is_cur else 0,
                 "topic_count": 0,
                 "channels": [],
                 "avg_rate_hz": 0.0,
@@ -298,86 +476,9 @@ class TopicRecorder:
             raise FileNotFoundError(f"recording not found: {filename}")
         active_path = (
             self.path.resolve()
-            if (self.path and self._thread is not None and self._thread.is_alive())
+            if (self.path and self.is_recording())
             else None
         )
         if active_path is not None and target == active_path:
             raise ValueError(f"cannot delete actively recording file: {filename}")
         target.unlink()
-
-    def _run(self) -> None:
-        assert self.path is not None
-        schemas: dict[str, int] = {}
-        channels: dict[tuple[str, str], int] = {}
-
-        with self.path.open("wb") as stream:
-            writer = McapWriter(stream)
-            writer.start(profile="ros2")
-            try:
-                while True:
-                    try:
-                        event = self._queue.get(timeout=0.5)
-                    except queue.Empty:
-                        continue
-                    if event is None:
-                        break
-
-                    topic = str(event.get("topic") or "/events")
-                    msg_type = str(event.get("msg_type") or "std_msgs/msg/String")
-                    raw_data = event.get("_raw")
-                    stamp_ns = int(event.get("stamp_ns") or time.time_ns())
-
-                    if raw_data is not None and isinstance(raw_data, (bytes, bytearray)):
-                        if msg_type not in schemas:
-                            msg_def = _get_msg_def(msg_type)
-                            schemas[msg_type] = writer.register_schema(
-                                name=msg_type,
-                                encoding=SchemaEncoding.ROS2,
-                                data=msg_def,
-                            )
-                        schema_id = schemas[msg_type]
-                        chan_key = (topic, msg_type)
-                        if chan_key not in channels:
-                            channels[chan_key] = writer.register_channel(
-                                topic=topic,
-                                message_encoding=MessageEncoding.CDR,
-                                schema_id=schema_id,
-                            )
-                        channel_id = channels[chan_key]
-                        writer.add_message(
-                            channel_id=channel_id,
-                            log_time=stamp_ns,
-                            data=bytes(raw_data),
-                            publish_time=stamp_ns,
-                        )
-                    else:
-                        payload = event.get("payload")
-                        if payload is None:
-                            payload = event
-                        json_bytes = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                        if "teleop_event" not in schemas:
-                            schemas["teleop_event"] = writer.register_schema(
-                                name="teleop_event",
-                                encoding=SchemaEncoding.JSONSchema,
-                                data=b"",
-                            )
-                        schema_id = schemas["teleop_event"]
-                        chan_key = (topic, "teleop_event")
-                        if chan_key not in channels:
-                            channels[chan_key] = writer.register_channel(
-                                topic=topic,
-                                message_encoding=MessageEncoding.JSON,
-                                schema_id=schema_id,
-                            )
-                        channel_id = channels[chan_key]
-                        writer.add_message(
-                            channel_id=channel_id,
-                            log_time=stamp_ns,
-                            data=json_bytes,
-                            publish_time=stamp_ns,
-                        )
-
-                    with self._lock:
-                        self._messages += 1
-            finally:
-                writer.finish()

@@ -69,10 +69,18 @@ class MiddlewareRuntime:
             self.config.get("camera", {}),
             domain_id=domain_id,
         )
+        camera_config = self.config.get("camera", {})
+        camera_topic = str(
+            camera_config.get("custom_topic", "")
+            or camera_config.get(
+                "topic", "/hc_teleop/camera_head/color/compressed"
+            )
+        )
         self.ros = RosBridge(
             self.config["ros"],
             self.emit,
             on_frame=self.camera.handle_ros_message,
+            camera_topic=camera_topic,
         )
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.vr = VrGateway(
@@ -332,14 +340,35 @@ class MiddlewareRuntime:
             envelope("log", "middleware", {"level": level, "message": message})
         )
 
+    def topic_health(self) -> dict[str, Any]:
+        recording_health = (
+            self.recording_ros.get_topic_health()
+            if self.recording_ros is not None
+            else {}
+        )
+        bridge_health = (
+            self.ros.get_topic_health() if self.ros is not None else {}
+        )
+        return {**recording_health, **bridge_health}
+
     def status(self) -> dict[str, Any]:
+        recording_executor_status = (
+            self.recording_ros.status()
+            if self.recording_ros
+            else {"state": "stopped", "topic_health": {}}
+        )
+        ros_status = self.ros.status() if self.ros else {"state": "stopped"}
+        ros_status["topic_health"] = {
+            **recording_executor_status.get("topic_health", {}),
+            **ros_status.get("topic_health", {}),
+        }
         return {
             "status": "ok",
             "version": 1,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
-            "ros": self.ros.status() if self.ros else {"state": "stopped"},
-            "recording_executor": self.recording_ros.status() if self.recording_ros else {"state": "stopped"},
+            "ros": ros_status,
+            "recording_executor": recording_executor_status,
             "vr": self.vr.status() if self.vr else {"state": "stopped"},
             "camera": self.camera.status() if self.camera else {"state": "stopped"},
             "recording": self.recorder.status() if self.recorder else {"recording": False, "enabled": False},
@@ -676,7 +705,7 @@ def create_app(store: ConfigStore) -> web.Application:
             item for item in subs
             if item.get("enabled", True) and "record" in item.get("outputs", [])
         ]
-        topic_health = runtime.ros.get_topic_health() if runtime.ros is not None else {}
+        topic_health = runtime.topic_health()
 
         checked = []
         issues = []
@@ -755,7 +784,7 @@ def create_app(store: ConfigStore) -> web.Application:
                     "issues": [{"topic": "none", "reason": "未勾选录制话题"}],
                 }, status=400)
 
-            topic_health = runtime.ros.get_topic_health() if runtime.ros is not None else {}
+            topic_health = runtime.topic_health()
             issues = []
             for item in recording_topics:
                 topic = item["topic"]

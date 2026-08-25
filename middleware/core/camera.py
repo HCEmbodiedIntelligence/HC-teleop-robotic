@@ -32,14 +32,24 @@ class CameraService:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._decode_thread: threading.Thread | None = None
+        self._decode_event = threading.Event()
+        self._encoded_latest: bytes | None = None
         self._pcs: set[Any] = set()
         self._frames_received = 0
+        self._last_fps_calc = time.monotonic()
+        self._fps_counter = 0
+        self._webrtc_last_fps_calc = time.monotonic()
+        self._webrtc_fps_counter = 0
+        self._webrtc_frames_sent = 0
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", False) else "starting",
             "source": config.get("source", "ros"),
             "topic": config.get("topic", "/hc_teleop/camera_head/color/compressed"),
             "custom_topic": config.get("custom_topic", ""),
             "capture_fps": 0.0,
+            "webrtc_send_fps": 0.0,
+            "webrtc_frames_sent": 0,
             "peers": 0,
             "error": None,
         }
@@ -54,6 +64,12 @@ class CameraService:
             )
             self._thread.start()
         else:
+            self._decode_thread = threading.Thread(
+                target=self._decode_loop_ros,
+                name="camera-ros-decode",
+                daemon=True,
+            )
+            self._decode_thread.start()
             self._set_status(state="running", error=None)
 
     def handle_ros_message(self, topic: str, msg: Any) -> None:
@@ -61,16 +77,17 @@ class CameraService:
             return
         try:
             active_topic = self.config.get("custom_topic", "") or self.config.get("topic", "/hc_teleop/camera_head/color/compressed")
-            # If topic doesn't match active_topic, still accept if it is a fallback and we have not received active yet
-            if active_topic and topic != active_topic and not topic.endswith(active_topic.lstrip("/")):
-                if self._frames_received > 0 and self._status.get("topic") == active_topic:
-                    return
+            if active_topic and topic != active_topic and not topic.endswith(
+                active_topic.lstrip("/")
+            ):
+                return
 
             frame = None
             if hasattr(msg, "data") and hasattr(msg, "format"):
-                if np is not None and cv2 is not None:
-                    buf = np.frombuffer(msg.data, dtype=np.uint8)
-                    frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                with self._lock:
+                    self._encoded_latest = bytes(msg.data)
+                self._decode_event.set()
+                return
             elif hasattr(msg, "data") and hasattr(msg, "encoding"):
                 if np is not None and cv2 is not None:
                     if msg.encoding in ("bgr8", "8UC3"):
@@ -83,19 +100,7 @@ class CameraService:
                         frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
 
             if frame is not None:
-                with self._lock:
-                    self._latest = frame
-                    self._frames_received += 1
-                now = time.monotonic()
-                if not hasattr(self, "_last_fps_calc"):
-                    self._last_fps_calc = now
-                    self._fps_counter = 0
-                self._fps_counter += 1
-                if now - self._last_fps_calc >= 1.0:
-                    fps = round(self._fps_counter / (now - self._last_fps_calc), 1)
-                    self._last_fps_calc = now
-                    self._fps_counter = 0
-                    self._set_status(capture_fps=fps, topic=topic, state="running", error=None)
+                self._accept_frame(frame, topic)
         except Exception as exc:
             self._set_status(error=f"decode error: {exc}")
 
@@ -108,6 +113,10 @@ class CameraService:
             except Exception:
                 pass
         self._stop.set()
+        self._decode_event.set()
+        if self._decode_thread is not None and self._decode_thread.is_alive():
+            await asyncio.to_thread(self._decode_thread.join, 2.0)
+            self._decode_thread = None
         if self._thread is not None and self._thread.is_alive():
             await asyncio.to_thread(self._thread.join, 2.0)
             self._thread = None
@@ -116,6 +125,8 @@ class CameraService:
             self._frames_received = 0
             self._status["state"] = "stopped"
             self._status["capture_fps"] = 0.0
+            self._status["webrtc_send_fps"] = 0.0
+            self._status["webrtc_frames_sent"] = 0
             self._status["peers"] = 0
 
     def status(self) -> dict[str, Any]:
@@ -199,6 +210,64 @@ class CameraService:
         with self._lock:
             self._status.update(changes)
 
+    def _accept_frame(self, frame: Any, topic: str) -> None:
+        with self._lock:
+            self._latest = frame
+            self._frames_received += 1
+        now = time.monotonic()
+        self._fps_counter += 1
+        elapsed = now - self._last_fps_calc
+        if elapsed >= 1.0:
+            fps = round(self._fps_counter / elapsed, 1)
+            self._last_fps_calc = now
+            self._fps_counter = 0
+            self._set_status(
+                capture_fps=fps, topic=topic, state="running", error=None
+            )
+
+    def _record_webrtc_frame(self) -> None:
+        """Count frames actually requested by the active WebRTC sender."""
+        now = time.monotonic()
+        with self._lock:
+            self._webrtc_fps_counter += 1
+            self._webrtc_frames_sent += 1
+            elapsed = now - self._webrtc_last_fps_calc
+            if elapsed >= 1.0:
+                self._status["webrtc_send_fps"] = round(
+                    self._webrtc_fps_counter / elapsed, 1
+                )
+                self._status["webrtc_frames_sent"] = self._webrtc_frames_sent
+                self._webrtc_last_fps_calc = now
+                self._webrtc_fps_counter = 0
+
+    def _reset_webrtc_rate(self) -> None:
+        with self._lock:
+            self._webrtc_last_fps_calc = time.monotonic()
+            self._webrtc_fps_counter = 0
+            self._webrtc_frames_sent = 0
+            self._status["webrtc_send_fps"] = 0.0
+            self._status["webrtc_frames_sent"] = 0
+
+    def _decode_loop_ros(self) -> None:
+        active_topic = self.config.get("custom_topic", "") or self.config.get(
+            "topic", "/hc_teleop/camera_head/color/compressed"
+        )
+        while not self._stop.is_set():
+            self._decode_event.wait(0.5)
+            self._decode_event.clear()
+            with self._lock:
+                payload = self._encoded_latest
+                self._encoded_latest = None
+            if not payload or np is None or cv2 is None:
+                continue
+            try:
+                buf = np.frombuffer(payload, dtype=np.uint8)
+                frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self._accept_frame(frame, str(active_topic))
+            except Exception as exc:
+                self._set_status(error=f"decode error: {exc}")
+
 
 
     def _capture_loop_realsense(self) -> None:
@@ -260,6 +329,10 @@ class CameraService:
         except ImportError as exc:
             raise RuntimeError(f"WebRTC dependencies unavailable: {exc}") from exc
 
+        from .fast_h264 import install_fast_h264_encoder
+
+        install_fast_h264_encoder()
+
         camera = self
 
         class LatestFrameTrack(VideoStreamTrack):
@@ -288,6 +361,7 @@ class CameraService:
                     frame = av.VideoFrame.from_ndarray(image, format="bgr24")
                     frame.pts = pts
                     frame.time_base = time_base
+                    camera._record_webrtc_frame()
                     return frame
                 except Exception as exc:
                     # In case of any encoding exception, return a safe blank frame matching fixed dimensions
@@ -297,6 +371,7 @@ class CameraService:
                     frame = av.VideoFrame.from_ndarray(blank, format="bgr24")
                     frame.pts = pts
                     frame.time_base = time_base
+                    camera._record_webrtc_frame()
                     return frame
 
         # 清理旧连接，避免多会话冲突
@@ -310,6 +385,7 @@ class CameraService:
         remote = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
         pc = RTCPeerConnection()
         self._pcs.add(pc)
+        self._reset_webrtc_rate()
 
         @pc.on("iceconnectionstatechange")
         def on_ice_state():
@@ -338,6 +414,8 @@ class CameraService:
             if pc.connectionState in ("failed", "closed"):
                 await pc.close()
                 self._pcs.discard(pc)
+                if not self._pcs:
+                    self._reset_webrtc_rate()
 
         await pc.setRemoteDescription(remote)
         answer = await pc.createAnswer()
