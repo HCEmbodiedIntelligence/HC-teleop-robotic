@@ -38,6 +38,14 @@ class FastH264Encoder(h264.H264Encoder):
                 "level": "31",
                 "preset": "ultrafast",
                 "tune": "zerolatency",
+                # Keep recovery bounded on lossy Wi-Fi.  Short GOPs let a
+                # decoder recover quickly after packet loss, while RTP-sized
+                # slices avoid fragmenting one very large NAL unit across a
+                # long burst of UDP packets.
+                "x264-params": (
+                    "keyint=60:min-keyint=30:scenecut=0:bframes=0:ref=1:"
+                    "sliced-threads=1:slice-max-size=1100"
+                ),
             }
             self.codec.profile = "Baseline"
 
