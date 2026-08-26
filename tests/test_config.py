@@ -127,6 +127,35 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(subscriptions["/hc_teleop/camera_overhead/color/compressed"]["enabled"])
         self.assertFalse(subscriptions["/cameras/Bfront/color"]["enabled"])
 
+    def test_multiple_camera_streams_are_normalized(self):
+        value = validate_config(
+            {
+                "camera": {
+                    "enabled": True,
+                    "streams": [
+                        {"id": "head", "name": "Head", "topic": "camera/head"},
+                        {"id": "left_wrist", "topic": "/camera/left"},
+                    ],
+                }
+            }
+        )
+        streams = value["camera"]["streams"]
+        self.assertEqual([item["id"] for item in streams], ["head", "left_wrist"])
+        self.assertEqual(streams[0]["topic"], "/camera/head")
+        self.assertEqual(streams[1]["name"], "left_wrist")
+
+        with self.assertRaisesRegex(ConfigError, "duplicate camera stream id"):
+            validate_config(
+                {
+                    "camera": {
+                        "streams": [
+                            {"id": "same", "topic": "/one"},
+                            {"id": "same", "topic": "/two"},
+                        ]
+                    }
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

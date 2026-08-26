@@ -50,6 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "source": "ros",
         "topic": "/hc_teleop/camera_head/color/compressed",
         "custom_topic": "",
+        "streams": [],
         "width": 640,
         "height": 400,
         "fps": 30,
@@ -219,6 +220,45 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         cam_config["height"] = int(cam_config.get("height", 400))
         cam_config["fps"] = int(cam_config.get("fps", 30))
         cam_config["codec"] = str(cam_config.get("codec", "H264"))
+        streams = cam_config.get("streams", [])
+        if not isinstance(streams, list):
+            raise ConfigError("camera.streams must be a list")
+        normalized_streams = []
+        stream_ids = set()
+        for index, item in enumerate(streams):
+            if not isinstance(item, dict):
+                raise ConfigError(f"camera.streams[{index}] must be an object")
+            stream_id = str(item.get("id", f"camera_{index + 1}")).strip()
+            if not stream_id or any(
+                not (character.isalnum() or character in "_-")
+                for character in stream_id
+            ):
+                raise ConfigError(
+                    f"camera.streams[{index}].id may only contain letters, numbers, _ and -"
+                )
+            if stream_id in stream_ids:
+                raise ConfigError(f"duplicate camera stream id: {stream_id}")
+            stream_ids.add(stream_id)
+            stream_topic = str(item.get("topic", "")).strip()
+            if stream_topic and not stream_topic.startswith("/"):
+                stream_topic = "/" + stream_topic
+            if not stream_topic:
+                raise ConfigError(f"camera.streams[{index}].topic is required")
+            normalized_streams.append(
+                {
+                    **item,
+                    "id": stream_id,
+                    "name": str(item.get("name", stream_id)).strip() or stream_id,
+                    "topic": stream_topic,
+                    "custom_topic": "",
+                    "enabled": bool(item.get("enabled", True)),
+                    "width": int(item.get("width", cam_config["width"])),
+                    "height": int(item.get("height", cam_config["height"])),
+                    "fps": int(item.get("fps", cam_config["fps"])),
+                    "codec": str(item.get("codec", cam_config["codec"])),
+                }
+            )
+        cam_config["streams"] = normalized_streams
     value["camera"] = cam_config
     return value
 

@@ -126,11 +126,17 @@ class RosBridge:
         on_event: EventCallback,
         on_frame: Callable[[str, Any], None] | None = None,
         camera_topic: str = "",
+        camera_topics: list[str] | None = None,
     ):
         self.config = config
         self.on_event = on_event
         self.on_frame = on_frame
         self.camera_topic = str(camera_topic)
+        self.camera_topics = {
+            str(topic) for topic in (camera_topics or []) if str(topic)
+        }
+        if self.camera_topic:
+            self.camera_topics.add(self.camera_topic)
         self._stop = threading.Event()
         self._commands: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
@@ -366,8 +372,7 @@ class RosBridge:
                 event_outputs = [output for output in outputs if output != "record"]
                 is_webrtc_color = bool(
                     self.on_frame is not None
-                    and self.camera_topic
-                    and topic == self.camera_topic
+                    and topic in self.camera_topics
                 )
                 # Pure recording topics are owned exclusively by the isolated
                 # raw-CDR process. The main bridge retains only UI/control topics

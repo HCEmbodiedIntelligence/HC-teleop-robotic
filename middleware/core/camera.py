@@ -52,6 +52,8 @@ class CameraService:
             "webrtc_frames_sent": 0,
             "peers": 0,
             "error": None,
+            "id": str(config.get("id", "main")),
+            "name": str(config.get("name", "主相机")),
         }
 
     def start(self) -> None:
@@ -84,11 +86,19 @@ class CameraService:
 
             frame = None
             if hasattr(msg, "data") and hasattr(msg, "format"):
+                self._record_capture_frame(topic)
+                # 没有 VR 客户端观看该路画面时，只统计输入帧率，不做 JPEG
+                # 解码。多相机总开关关闭后可立即释放 CPU。
+                if not self._pcs:
+                    return
                 with self._lock:
                     self._encoded_latest = bytes(msg.data)
                 self._decode_event.set()
                 return
             elif hasattr(msg, "data") and hasattr(msg, "encoding"):
+                self._record_capture_frame(topic)
+                if not self._pcs:
+                    return
                 if np is not None and cv2 is not None:
                     if msg.encoding in ("bgr8", "8UC3"):
                         frame = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3)).copy()
@@ -100,7 +110,7 @@ class CameraService:
                         frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
 
             if frame is not None:
-                self._accept_frame(frame, topic)
+                self._accept_frame(frame, topic, count_capture=False)
         except Exception as exc:
             self._set_status(error=f"decode error: {exc}")
 
@@ -133,6 +143,8 @@ class CameraService:
         with self._lock:
             result = dict(self._status)
         result.update(
+            id=str(self.config.get("id", "main")),
+            name=str(self.config.get("name", "主相机")),
             source=self.config.get("source", "ros"),
             topic=self.config.get("topic", "/hc_teleop/camera_head/color/compressed"),
             custom_topic=self.config.get("custom_topic", ""),
@@ -210,20 +222,36 @@ class CameraService:
         with self._lock:
             self._status.update(changes)
 
-    def _accept_frame(self, frame: Any, topic: str) -> None:
-        with self._lock:
-            self._latest = frame
-            self._frames_received += 1
+    def _record_capture_frame(self, topic: str) -> None:
+        """Track source rate without forcing image decode/copy."""
         now = time.monotonic()
-        self._fps_counter += 1
-        elapsed = now - self._last_fps_calc
-        if elapsed >= 1.0:
+        with self._lock:
+            self._frames_received += 1
+            self._fps_counter += 1
+            elapsed = now - self._last_fps_calc
+            if elapsed < 1.0:
+                return
             fps = round(self._fps_counter / elapsed, 1)
             self._last_fps_calc = now
             self._fps_counter = 0
-            self._set_status(
-                capture_fps=fps, topic=topic, state="running", error=None
+            self._status.update(
+                capture_fps=fps,
+                topic=topic,
+                state="running",
+                error=None,
             )
+
+    def _accept_frame(
+        self,
+        frame: Any,
+        topic: str,
+        *,
+        count_capture: bool = True,
+    ) -> None:
+        with self._lock:
+            self._latest = frame
+        if count_capture:
+            self._record_capture_frame(topic)
 
     def _record_webrtc_frame(self) -> None:
         """Count frames actually requested by the active WebRTC sender."""
@@ -264,7 +292,11 @@ class CameraService:
                 buf = np.frombuffer(payload, dtype=np.uint8)
                 frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
                 if frame is not None:
-                    self._accept_frame(frame, str(active_topic))
+                    self._accept_frame(
+                        frame,
+                        str(active_topic),
+                        count_capture=False,
+                    )
             except Exception as exc:
                 self._set_status(error=f"decode error: {exc}")
 

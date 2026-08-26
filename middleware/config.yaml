@@ -188,6 +188,23 @@ camera:
   source: ros
   topic: /hc_teleop/camera_head/color/compressed
   custom_topic: ''
+  streams:
+  - id: head
+    name: 头部相机
+    topic: /hc_teleop/camera_head/color/compressed
+    enabled: true
+  - id: overhead
+    name: 俯视相机
+    topic: /hc_teleop/camera_overhead/color/compressed
+    enabled: true
+  - id: d405_left
+    name: 左腕相机
+    topic: /hc_teleop/camera_d405_left/color/compressed
+    enabled: true
+  - id: d405_right
+    name: 右腕相机
+    topic: /hc_teleop/camera_d405_right/color/compressed
+    enabled: true
   width: 640
   height: 400
   fps: 30

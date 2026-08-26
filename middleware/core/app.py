@@ -42,6 +42,8 @@ class MiddlewareRuntime:
         self.recording_ros: RosRecordingExecutor | None = None
         self.vr: VrGateway | None = None
         self.camera: CameraService | None = None
+        self.cameras: dict[str, CameraService] = {}
+        self._cameras_by_topic: dict[str, list[CameraService]] = {}
         self.recorder: TopicRecorder | None = None
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -65,22 +67,50 @@ class MiddlewareRuntime:
 
         self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
         self.player = TopicPlayer(self.recorder.directory, lambda: self.ros)
-        self.camera = CameraService(
-            self.config.get("camera", {}),
-            domain_id=domain_id,
-        )
         camera_config = self.config.get("camera", {})
-        camera_topic = str(
-            camera_config.get("custom_topic", "")
-            or camera_config.get(
-                "topic", "/hc_teleop/camera_head/color/compressed"
+        base_camera_config = {
+            key: value for key, value in camera_config.items() if key != "streams"
+        }
+        configured_streams = camera_config.get("streams", [])
+        if not configured_streams:
+            configured_streams = [
+                {
+                    "id": "main",
+                    "name": "主相机",
+                    "topic": base_camera_config.get(
+                        "custom_topic", ""
+                    ) or base_camera_config.get(
+                        "topic", "/hc_teleop/camera_head/color/compressed"
+                    ),
+                    "enabled": base_camera_config.get("enabled", False),
+                }
+            ]
+
+        self.cameras = {}
+        self._cameras_by_topic = {}
+        for stream in configured_streams:
+            if not base_camera_config.get("enabled", False) or not stream.get(
+                "enabled", True
+            ):
+                continue
+            stream_config = {**base_camera_config, **stream, "enabled": True}
+            stream_id = str(stream_config.get("id", "main"))
+            service = CameraService(stream_config, domain_id=domain_id)
+            self.cameras[stream_id] = service
+            active_topic = str(
+                stream_config.get("custom_topic", "")
+                or stream_config.get(
+                    "topic", "/hc_teleop/camera_head/color/compressed"
+                )
             )
-        )
+            self._cameras_by_topic.setdefault(active_topic, []).append(service)
+
+        self.camera = next(iter(self.cameras.values()), None)
         self.ros = RosBridge(
             self.config["ros"],
             self.emit,
-            on_frame=self.camera.handle_ros_message,
-            camera_topic=camera_topic,
+            on_frame=self._handle_camera_ros_message,
+            camera_topics=list(self._cameras_by_topic),
         )
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.vr = VrGateway(
@@ -89,7 +119,8 @@ class MiddlewareRuntime:
         self.ros.start()
         self.recording_ros.start()
         self.vr.start()
-        self.camera.start()
+        for camera in self.cameras.values():
+            camera.start()
         self._log("info", "runtime started")
         if self.config["safety"].get("stop_on_startup", True):
             self._on_safety_event("middleware startup")
@@ -99,8 +130,11 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.player.stop)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
-        if self.camera is not None:
-            await self.camera.stop()
+        for camera in self.cameras.values():
+            await camera.stop()
+        self.cameras.clear()
+        self._cameras_by_topic.clear()
+        self.camera = None
         if self.recording_ros is not None:
             await asyncio.to_thread(self.recording_ros.stop)
         if self.ros is not None:
@@ -114,6 +148,10 @@ class MiddlewareRuntime:
         except Exception:
             pass
         self._log("info", "runtime stopped")
+
+    def _handle_camera_ros_message(self, topic: str, message: Any) -> None:
+        for camera in self._cameras_by_topic.get(topic, []):
+            camera.handle_ros_message(topic, message)
 
     async def restart(self, config: dict[str, Any]) -> None:
         async with self._restart_lock:
@@ -362,6 +400,13 @@ class MiddlewareRuntime:
             **recording_executor_status.get("topic_health", {}),
             **ros_status.get("topic_health", {}),
         }
+        camera_streams = [camera.status() for camera in self.cameras.values()]
+        camera_status = (
+            dict(camera_streams[0])
+            if camera_streams
+            else {"state": "stopped"}
+        )
+        camera_status["streams"] = camera_streams
         return {
             "status": "ok",
             "version": 1,
@@ -370,7 +415,7 @@ class MiddlewareRuntime:
             "ros": ros_status,
             "recording_executor": recording_executor_status,
             "vr": self.vr.status() if self.vr else {"state": "stopped"},
-            "camera": self.camera.status() if self.camera else {"state": "stopped"},
+            "camera": camera_status,
             "recording": self.recorder.status() if self.recorder else {"recording": False, "enabled": False},
             "replay": self.player.status() if self.player else {"state": "idle", "is_active": False},
         }
@@ -634,19 +679,27 @@ def create_app(store: ConfigStore) -> web.Application:
             runtime.websockets.discard(ws)
         return ws
 
+    def camera_for_request(request: web.Request) -> tuple[str, CameraService | None]:
+        camera_id = str(request.match_info.get("camera_id", "")).strip()
+        if camera_id:
+            return camera_id, runtime.cameras.get(camera_id)
+        default_id = next(iter(runtime.cameras), "")
+        return default_id, runtime.cameras.get(default_id)
+
     async def webrtc_offer(request: web.Request) -> web.Response:
-        if runtime.camera is None:
+        camera_id, camera = camera_for_request(request)
+        if camera is None:
             runtime._log("error", "WebRTC offer received but camera service is unavailable")
             print("[WebRTC] ERROR: Camera service is unavailable", flush=True)
             raise web.HTTPServiceUnavailable(text="camera service is unavailable")
         peer_ip = request.remote or "unknown"
         try:
             body = await request.json()
-            print(f"[WebRTC] Offer received from {peer_ip}", flush=True)
-            runtime._log("info", f"WebRTC offer received from {peer_ip}")
-            answer = await runtime.camera.offer(body)
-            print(f"[WebRTC] Answer generated successfully for {peer_ip}", flush=True)
-            runtime._log("info", f"WebRTC answer generated successfully for {peer_ip}")
+            print(f"[WebRTC:{camera_id}] Offer received from {peer_ip}", flush=True)
+            runtime._log("info", f"WebRTC {camera_id} offer received from {peer_ip}")
+            answer = await camera.offer(body)
+            print(f"[WebRTC:{camera_id}] Answer generated for {peer_ip}", flush=True)
+            runtime._log("info", f"WebRTC {camera_id} answer generated for {peer_ip}")
             return web.json_response(answer)
         except Exception as exc:
             import traceback
@@ -655,14 +708,23 @@ def create_app(store: ConfigStore) -> web.Application:
             runtime._log("error", f"WebRTC offer failed for {peer_ip}: {exc}\n{tb}")
             raise web.HTTPServiceUnavailable(text=f"WebRTC offer failed: {exc}") from exc
 
-    async def get_camera_status(_request: web.Request) -> web.Response:
-        status = runtime.camera.status() if runtime.camera else {"state": "disabled"}
+    async def get_camera_status(request: web.Request) -> web.Response:
+        camera_id = str(request.match_info.get("camera_id", "")).strip()
+        if camera_id:
+            camera = runtime.cameras.get(camera_id)
+            if camera is None:
+                raise web.HTTPNotFound(text=f"camera stream not found: {camera_id}")
+            return web.json_response(camera.status())
+        streams = [camera.status() for camera in runtime.cameras.values()]
+        status = dict(streams[0]) if streams else {"state": "disabled"}
+        status["streams"] = streams
         return web.json_response(status)
 
-    async def get_camera_snapshot(_request: web.Request) -> web.Response:
-        if runtime.camera is None:
+    async def get_camera_snapshot(request: web.Request) -> web.Response:
+        _camera_id, camera = camera_for_request(request)
+        if camera is None:
             raise web.HTTPServiceUnavailable(text="camera service is unavailable")
-        frame = runtime.camera.latest()
+        frame = camera.latest()
         if frame is None:
             raise web.HTTPNotFound(text="no frame available")
         try:
@@ -675,7 +737,8 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPInternalServerError(text=str(exc))
 
     async def get_camera_stream(_request: web.Request) -> web.StreamResponse:
-        if runtime.camera is None:
+        _camera_id, camera = camera_for_request(_request)
+        if camera is None:
             raise web.HTTPServiceUnavailable(text="camera service is unavailable")
         response = web.StreamResponse(
             status=200,
@@ -686,7 +749,7 @@ def create_app(store: ConfigStore) -> web.Application:
         try:
             import cv2
             while True:
-                frame = runtime.camera.latest()
+                frame = camera.latest()
                 if frame is not None:
                     success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if success:
@@ -1065,10 +1128,15 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/replay/status", get_replay_status)
     app.router.add_get("/ws", websocket)
     app.router.add_post("/api/webrtc/offer", webrtc_offer)
+    app.router.add_post("/api/webrtc/offer/{camera_id}", webrtc_offer)
     app.router.add_post("/offer", webrtc_offer)
+    app.router.add_post("/offer/{camera_id}", webrtc_offer)
     app.router.add_get("/api/camera/status", get_camera_status)
+    app.router.add_get("/api/camera/status/{camera_id}", get_camera_status)
     app.router.add_get("/api/camera/snapshot", get_camera_snapshot)
+    app.router.add_get("/api/camera/snapshot/{camera_id}", get_camera_snapshot)
     app.router.add_get("/api/camera/stream", get_camera_stream)
+    app.router.add_get("/api/camera/stream/{camera_id}", get_camera_stream)
     app.router.add_options("/{tail:.*}", options)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
