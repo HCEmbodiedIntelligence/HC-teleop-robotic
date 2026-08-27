@@ -158,6 +158,7 @@ class CameraService:
 
     def set_frame(self, image: Any) -> None:
         """Manually push a BGR numpy image frame."""
+        image = self._normalize_frame(image)
         with self._lock:
             self._latest = image
             self._frames_received += 1
@@ -248,10 +249,32 @@ class CameraService:
         *,
         count_capture: bool = True,
     ) -> None:
+        frame = self._normalize_frame(frame)
         with self._lock:
             self._latest = frame
         if count_capture:
             self._record_capture_frame(topic)
+
+    def _normalize_frame(self, frame: Any) -> Any:
+        """Make ROS frames match the configured WebRTC encoder dimensions."""
+        if frame is None or cv2 is None:
+            return frame
+        target_w = max(2, int(self.config.get("width", 640) or 640))
+        target_h = max(2, int(self.config.get("height", 400) or 400))
+        # yuv420p requires even dimensions.
+        target_w -= target_w % 2
+        target_h -= target_h % 2
+        height, width = frame.shape[:2]
+        if width != target_w or height != target_h:
+            interpolation = (
+                cv2.INTER_AREA
+                if width > target_w or height > target_h
+                else cv2.INTER_LINEAR
+            )
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=interpolation)
+        if np is not None and not frame.flags.c_contiguous:
+            frame = np.ascontiguousarray(frame)
+        return frame
 
     def _record_webrtc_frame(self) -> None:
         """Count frames actually requested by the active WebRTC sender."""
@@ -381,6 +404,7 @@ class CameraService:
                 if image is None:
                     image = camera._generate_placeholder()
                 try:
+                    image = camera._normalize_frame(image)
                     h, w = image.shape[:2]
                     if self._fixed_w is None or self._fixed_h is None:
                         self._fixed_w = w
@@ -431,11 +455,19 @@ class CameraService:
 
         try:
             transceiver = next(item for item in pc.getTransceivers() if item.sender == sender)
+            requested_codec = str(camera.config.get("codec", "H264")).lower()
+            requested_mime = f"video/{requested_codec}"
             preferred = [
                 codec
                 for codec in RTCRtpSender.getCapabilities("video").codecs
-                if codec.mimeType.lower() in ("video/h264", "video/vp8")
+                if codec.mimeType.lower() == requested_mime
             ]
+            if not preferred:
+                preferred = [
+                    codec
+                    for codec in RTCRtpSender.getCapabilities("video").codecs
+                    if codec.mimeType.lower() in ("video/h264", "video/vp8")
+                ]
             if preferred:
                 transceiver.setCodecPreferences(preferred)
         except Exception:
@@ -453,4 +485,3 @@ class CameraService:
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-

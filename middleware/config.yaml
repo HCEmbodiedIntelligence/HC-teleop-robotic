@@ -3,7 +3,7 @@ server:
   port: 7876
 robot_profiles:
   root: ../adapters/robots
-  active: x1
+  active: openarmx
 ros:
   enabled: true
   domain_id: 14
@@ -193,18 +193,38 @@ camera:
     name: 头部相机
     topic: /hc_teleop/camera_head/color/compressed
     enabled: true
+    custom_topic: ''
+    width: 640
+    height: 400
+    fps: 30
+    codec: H264
   - id: overhead
     name: 俯视相机
     topic: /hc_teleop/camera_overhead/color/compressed
     enabled: true
+    custom_topic: ''
+    width: 640
+    height: 400
+    fps: 30
+    codec: H264
   - id: d405_left
     name: 左腕相机
     topic: /hc_teleop/camera_d405_left/color/compressed
     enabled: true
+    custom_topic: ''
+    width: 640
+    height: 400
+    fps: 30
+    codec: H264
   - id: d405_right
     name: 右腕相机
     topic: /hc_teleop/camera_d405_right/color/compressed
     enabled: true
+    custom_topic: ''
+    width: 640
+    height: 400
+    fps: 30
+    codec: H264
   width: 640
   height: 400
   fps: 30

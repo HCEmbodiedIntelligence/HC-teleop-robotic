@@ -219,7 +219,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         cam_config["width"] = int(cam_config.get("width", 640))
         cam_config["height"] = int(cam_config.get("height", 400))
         cam_config["fps"] = int(cam_config.get("fps", 30))
-        cam_config["codec"] = str(cam_config.get("codec", "H264"))
+        if cam_config["width"] < 2 or cam_config["height"] < 2:
+            raise ConfigError("camera width and height must be at least 2")
+        if cam_config["fps"] < 1 or cam_config["fps"] > 60:
+            raise ConfigError("camera fps must be between 1 and 60")
+        cam_config["codec"] = str(cam_config.get("codec", "H264")).upper()
+        if cam_config["codec"] not in {"H264", "VP8"}:
+            raise ConfigError("camera codec must be H264 or VP8")
         streams = cam_config.get("streams", [])
         if not isinstance(streams, list):
             raise ConfigError("camera.streams must be a list")
@@ -244,6 +250,22 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 stream_topic = "/" + stream_topic
             if not stream_topic:
                 raise ConfigError(f"camera.streams[{index}].topic is required")
+            stream_width = int(item.get("width", cam_config["width"]))
+            stream_height = int(item.get("height", cam_config["height"]))
+            stream_fps = int(item.get("fps", cam_config["fps"]))
+            stream_codec = str(item.get("codec", cam_config["codec"])).upper()
+            if stream_width < 2 or stream_height < 2:
+                raise ConfigError(
+                    f"camera.streams[{index}] width and height must be at least 2"
+                )
+            if stream_fps < 1 or stream_fps > 60:
+                raise ConfigError(
+                    f"camera.streams[{index}] fps must be between 1 and 60"
+                )
+            if stream_codec not in {"H264", "VP8"}:
+                raise ConfigError(
+                    f"camera.streams[{index}] codec must be H264 or VP8"
+                )
             normalized_streams.append(
                 {
                     **item,
@@ -252,10 +274,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                     "topic": stream_topic,
                     "custom_topic": "",
                     "enabled": bool(item.get("enabled", True)),
-                    "width": int(item.get("width", cam_config["width"])),
-                    "height": int(item.get("height", cam_config["height"])),
-                    "fps": int(item.get("fps", cam_config["fps"])),
-                    "codec": str(item.get("codec", cam_config["codec"])),
+                    "width": stream_width,
+                    "height": stream_height,
+                    "fps": stream_fps,
+                    "codec": stream_codec,
                 }
             )
         cam_config["streams"] = normalized_streams

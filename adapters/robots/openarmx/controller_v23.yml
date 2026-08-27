@@ -1,0 +1,64 @@
+ros_interface:
+  node_name: controller_v2_3_openarmx
+  rate: 100
+  sub_topic:
+    joint_state: /hc_teleop/joint_states
+    ee_target: /hc_teleop/controller_target_ee_poses
+    reset: /hc_teleop/solver_reset
+  pub_topic:
+    joint_target: /hc_teleop/joint_cmd_arm
+    solver_state: /hc_teleop/sol_q
+    reset_ack: /hc_teleop/solver_reset_ack
+control:
+  method: retarget
+  dt: 0.01
+  damping: 2.0e-03
+  joints_init: []
+model:
+  urdf: urdf/openarmx_robot.urdf
+  free_joints:
+  - openarmx_right_joint1
+  - openarmx_right_joint2
+  - openarmx_right_joint3
+  - openarmx_right_joint4
+  - openarmx_right_joint5
+  - openarmx_right_joint6
+  - openarmx_right_joint7
+  - openarmx_left_joint1
+  - openarmx_left_joint2
+  - openarmx_left_joint3
+  - openarmx_left_joint4
+  - openarmx_left_joint5
+  - openarmx_left_joint6
+  - openarmx_left_joint7
+task:
+  pose:
+  - - - openarmx_right_link0
+      - openarmx_right_hand_tcp
+    - 10.0
+    - 3.0
+    - 15.0
+  - - - openarmx_left_link0
+      - openarmx_left_hand_tcp
+    - 10.0
+    - 3.0
+    - 15.0
+  axis: []
+  joint: []
+limit:
+  # degrees/s; the hardware adapter applies an additional rad/s rate limit.
+  velocity:
+  - 57.3
+  - 57.3
+  - 68.8
+  - 68.8
+  - 85.9
+  - 85.9
+  - 85.9
+  - 57.3
+  - 57.3
+  - 68.8
+  - 68.8
+  - 85.9
+  - 85.9
+  - 85.9

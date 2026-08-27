@@ -156,6 +156,22 @@ class ConfigTests(unittest.TestCase):
                 }
             )
 
+    def test_invalid_camera_encoder_settings_are_rejected(self):
+        with self.assertRaisesRegex(ConfigError, "camera fps"):
+            validate_config({"camera": {"fps": 0}})
+        with self.assertRaisesRegex(ConfigError, "camera codec"):
+            validate_config({"camera": {"codec": "AV1"}})
+        with self.assertRaisesRegex(ConfigError, r"streams\[0\] width"):
+            validate_config(
+                {
+                    "camera": {
+                        "streams": [
+                            {"id": "head", "topic": "/camera/head", "width": 0}
+                        ]
+                    }
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
