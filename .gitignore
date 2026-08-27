@@ -9,6 +9,10 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+build/
+install/
+log/
+*.egg-info/
 
 # Runtime-generated diagnostics and logs
 runtime/

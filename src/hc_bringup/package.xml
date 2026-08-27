@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hc_bringup</name>
+  <version>0.1.0</version>
+  <description>Profile validation, workspace doctor, and native ROS 2 bringup.</description>
+  <maintainer email="czy33114@gmail.com">HC Teleop Team</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>hc_teleop_core</exec_depend>
+  <exec_depend>hc_vr_gateway</exec_depend>
+  <exec_depend>hc_compat_bridge</exec_depend>
+  <exec_depend>hc_motion</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

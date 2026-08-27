@@ -1,0 +1,17 @@
+string requester_id
+string dataset_name
+string[] topics
+string metadata_json
+builtin_interfaces/Duration max_duration
+---
+Status status
+string dataset_id
+string uri
+uint64 message_count
+uint64 bytes_written
+---
+float32 progress
+builtin_interfaces/Duration elapsed
+uint64 message_count
+uint64 bytes_written
+Status status

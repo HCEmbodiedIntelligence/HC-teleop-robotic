@@ -18,8 +18,12 @@ elif [[ "${1:-}" == "--sim" ]]; then
       exit 2
     fi
     "${CONDA_BIN}" create -y -p "${CONTROLLER_PREFIX}" -c conda-forge \
-      python=3.10 pinocchio=3.7.0 casadi=3.7.0 numpy=2.2 scipy=1.15 pyyaml
+      python=3.10 pinocchio=3.7.0 casadi=3.7.0 numpy=2.2 scipy=1.15 pyyaml pip
+  elif ! "${CONTROLLER_PREFIX}/bin/python" -m pip --version >/dev/null 2>&1; then
+    "${CONDA_BIN}" install -y -p "${CONTROLLER_PREFIX}" -c conda-forge pip
   fi
+  "${CONTROLLER_PREFIX}/bin/python" -m pip install --no-deps \
+    "${SCRIPT_DIR}/adapters/v23"
   HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}" \
     bash "${SCRIPT_DIR}/run_generic_controller.sh" --check
 else

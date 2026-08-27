@@ -1,0 +1,45 @@
+repositories:
+  src/hc_teleop_interfaces:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-teleop-interfaces.git
+    version: 0.1.0
+  src/hc_vr_gateway:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-vr-gateway.git
+    version: 0.1.0
+  src/hc_teleop_core:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-teleop-core.git
+    version: 0.1.0
+  src/hc_motion:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-motion.git
+    version: 0.1.0
+  src/hc_motion_backend_kdl:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-motion-backend-kdl.git
+    version: 0.1.0
+  src/hc_device_sdk:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-device-sdk.git
+    version: 0.1.0
+  src/hc_dataset:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-dataset.git
+    version: 0.1.0
+  src/hc_bringup:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-bringup.git
+    version: 0.1.0
+  src/hc_adapter_openarmx:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-adapter-openarmx.git
+    version: 0.1.0
+  src/hc_robot_openarmx:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-robot-openarmx.git
+    version: 0.1.0
+  src/hc_compat_bridge:
+    type: git
+    url: git@github.com:HCEmbodiedIntelligence/hc-compat-bridge.git
+    version: 0.1.0

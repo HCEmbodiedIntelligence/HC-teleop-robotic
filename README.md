@@ -9,13 +9,13 @@
 | 部分 | 目录 | 职责 | 独立启动 |
 | --- | --- | --- | --- |
 | 中间件 | `middleware/` | `core/` 中的前端、配置导入、VR 网关、录制与回放，以及 `config.yaml` 系统配置 | `./middleware/start.sh` |
-| 通用控制/解算 | `adapters/` | VR 控制、Pinocchio v2.3 逆解，以及 `robots/<机器人ID>/` 中由网页导入的 URDF/mesh/参数 | `./adapters/start.sh` |
+| 通用控制/解算 | `adapters/` | VR 控制、可插拔的 Pinocchio v2.3/Motion Server 解算，以及 `robots/<机器人ID>/` 中由网页导入的 URDF/mesh/参数 | `./adapters/start.sh` |
 
 标准入口 `./start_teleop.sh` 会同时启动上面两部分，不判断也不要求仿真或真机在线。X1 相机、机械臂、底盘、腰部和灵巧手驱动已独立为同级仓库 `HC_X1`。本仓库不再依赖或 source `hc_io_suit`，停止通用入口也不会启动、停止或清理硬件。新机型接入见 [硬件适配项目接入指南](docs/HARDWARE_ADAPTER_GUIDE.md)。
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
-真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/hc_teleop/joint_cmd_vr`，外骨骼发布 `/hc_teleop/joint_cmd_exoskeleton`；中间件通过可锁存的 `/hc_teleop/control_source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/hc_teleop/joint_cmd`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
+真机双臂采用分层结构：本仓库选定的解算插件生成内部 VR 命令 `/hc_teleop/joint_cmd_vr`，外骨骼发布 `/hc_teleop/joint_cmd_exoskeleton`；中间件通过可锁存的 `/hc_teleop/control_source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/hc_teleop/joint_cmd`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
 
 原有的 `d435_webrtc_server.py` 和 `udp_receiver_test.py` 保留不变。新服务兼容它们的关键协议：
 
@@ -51,6 +51,28 @@ ROS_DOMAIN_ID=14 ./start.sh
 # 通用系统：中间件、ZIP/URDF 配置、逆解、控制和录制
 cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./start_teleop.sh
+
+# OpenArmX 可选：复用同级 ../humanoid 的 Motion Server
+ROS_DOMAIN_ID=14 ./start_teleop.sh --solver-backend motion_server
+```
+
+解算插件可在启动时选择，也可用 `HC_SOLVER_BACKEND` 覆盖。默认 `v23`
+保持原有行为；`motion_server` 默认使用与本项目同一父目录下的
+`humanoid/install/setup.bash`。目录布局不同时，可设置
+`HC_HUMANOID_ROOT=/path/to/humanoid`，或直接设置
+`HC_MOTION_SERVER_SETUP=/path/to/install/setup.bash`。
+Motion Server 只输出到 VR 命令入口，最终 `/hc_teleop/joint_cmd` 仍由中间件
+command mux 独占发布，避免切换后出现双发布者。
+
+Motion Server 的固定 ABI 依赖默认放在同级 humanoid 工作空间的
+`.sdk_deps/`；启动脚本会自动加入该目录。构建 Motion Server 时使用：
+
+```bash
+cd ../humanoid
+source /opt/ros/humble/setup.bash
+HUMANOID_MOTION_SDK_DEPS_PREFIX="$PWD/.sdk_deps" colcon build \
+  --packages-up-to humanoid_motion_server \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 ```
 
 `./run.sh`、`./middleware/start.sh` 和 `./adapters/start.sh` 是组件级调试入口；`./start_real_robot_teleop.sh` 仅作为旧名称兼容，实际转发到 `start_teleop.sh`。

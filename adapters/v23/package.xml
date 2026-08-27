@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hc_teleop_v23_solver</name>
+  <version>0.1.0</version>
+  <description>Standalone reconstructed HC Pinocchio V2.3 IK solver.</description>
+  <maintainer email="maple@example.com">maple</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

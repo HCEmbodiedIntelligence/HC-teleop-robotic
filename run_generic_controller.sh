@@ -7,6 +7,7 @@ MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${SCRIPT_DIR}/middleware/config.yaml}
 ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 "${SCRIPT_DIR}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")}"
 ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 "${SCRIPT_DIR}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")}"
 V23_DIR="${SCRIPT_DIR}/adapters/v23"
+V23_INSTALLED_EXECUTABLE="${CONTROLLER_PREFIX}/bin/control_v2_3_ros2.py"
 MODE="${1:---check}"
 
 if [[ ! -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
@@ -46,6 +47,12 @@ PY
   exit 0
 fi
 
+if [[ -x "${V23_INSTALLED_EXECUTABLE}" ]]; then
+  exec "${CONTROLLER_PREFIX}/bin/python" -u \
+    "${V23_INSTALLED_EXECUTABLE}" "${CONFIG_V23}"
+fi
+
+# Compatibility path for an existing controller environment created before
+# the solver became an independently installable ROS/Python package.
 exec "${CONTROLLER_PREFIX}/bin/python" -u \
-  "${V23_DIR}/script/control_v2_3_ros2.py" \
-  "${CONFIG_V23}"
+  "${V23_DIR}/script/control_v2_3_ros2.py" "${CONFIG_V23}"

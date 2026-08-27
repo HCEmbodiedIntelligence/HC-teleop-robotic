@@ -9,6 +9,10 @@ primary_config: controller_v23.yml
 config_files:
 - controller_v23.yml
 - arm_teleop.yaml
+- motion_server/motion_control.yaml
+- motion_server/channels.yaml
+- motion_server/sdk.yaml
+- motion_server/tools.yaml
 link_count: 30
 joint_count: 29
 movable_joint_count: 18

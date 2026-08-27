@@ -1,0 +1,10 @@
+string group_name
+sensor_msgs/JointState target
+MotionOptions options
+---
+Status status
+sensor_msgs/JointState final_joint_state
+---
+float32 progress
+sensor_msgs/JointState actual_joint_state
+Status status

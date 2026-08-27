@@ -4,8 +4,10 @@ set -euo pipefail
 
 COMPONENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${COMPONENT_DIR}/.." && pwd)"
+WORKSPACE_ROOT="$(cd -- "${PROJECT_ROOT}/.." && pwd)"
 MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${PROJECT_ROOT}/middleware/config.yaml}"
 LOG_DIR=""
+SOLVER_OVERRIDE="${HC_SOLVER_BACKEND:-}"
 PIDS=()
 _CLEANED=0
 
@@ -35,9 +37,12 @@ while [[ $# -gt 0 ]]; do
     --config)
       [[ $# -ge 2 ]] || { err "--config 需要 YAML 路径"; exit 2; }
       MIDDLEWARE_CONFIG="$2"; shift 2 ;;
+    --solver-backend)
+      [[ $# -ge 2 ]] || { err "--solver-backend 需要 v23 或 motion_server"; exit 2; }
+      SOLVER_OVERRIDE="$2"; shift 2 ;;
     -h|--help)
-      echo "用法: $0 [--config middleware/config.yaml] [--log-dir DIR]"
-      echo "只启动通用 IK 与遥操作控制；X1 等硬件驱动须由独立适配项目启动。"
+      echo "用法: $0 [--config middleware/config.yaml] [--log-dir DIR] [--solver-backend NAME]"
+      echo "解算后端可选 v23 或 motion_server；硬件驱动须由独立适配项目启动。"
       _CLEANED=1; exit 0 ;;
     *) err "未知参数: $1"; exit 2 ;;
   esac
@@ -69,35 +74,84 @@ V23_SCRIPT="${PROJECT_ROOT}/adapters/v23/script/control_v2_3_ros2.py"
 CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
 CONTROLLER_COMMAND=()
 
-for required in "${V23_SCRIPT}" "${CONTROLLER_YML}" "${ARM_CONFIG}"; do
+for required in "${ARM_CONFIG}"; do
   if [[ ! -f "${required}" ]]; then err "缺少机器人配置或程序: ${required}"; exit 2; fi
 done
+PLUGIN_ARGS=(resolve --config "${ARM_CONFIG}")
+if [[ -n "${SOLVER_OVERRIDE}" ]]; then
+  PLUGIN_ARGS+=(--override "${SOLVER_OVERRIDE}")
+fi
+SOLVER_BACKEND="$(/usr/bin/python3 -m adapters.solver_plugins.cli "${PLUGIN_ARGS[@]}")"
 
-if [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
-  export HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}"
-  "${PROJECT_ROOT}/run_generic_controller.sh" --check
-  CONTROLLER_COMMAND=("${PROJECT_ROOT}/run_generic_controller.sh" v23)
+if [[ "${SOLVER_BACKEND}" == "v23" ]]; then
+  for required in "${V23_SCRIPT}" "${CONTROLLER_YML}"; do
+    if [[ ! -f "${required}" ]]; then err "缺少 V2.3 解算资源: ${required}"; exit 2; fi
+  done
+  if [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
+    export HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}"
+    "${PROJECT_ROOT}/run_generic_controller.sh" --check
+    CONTROLLER_COMMAND=("${PROJECT_ROOT}/run_generic_controller.sh" v23)
+  else
+    if ! /usr/bin/python3 -c 'import numpy, pinocchio, rclpy, yaml' 2>/dev/null; then
+      err "系统 Python 缺少 Pinocchio 控制依赖，且未找到 ${CONTROLLER_PREFIX}"
+      err "请运行 ${PROJECT_ROOT}/install.sh --sim 或设置 HC_CONTROLLER_PREFIX"
+      exit 2
+    fi
+    warn "未找到独立控制器环境，使用系统 ROS 2 Python/Pinocchio"
+    CONTROLLER_COMMAND=(/usr/bin/python3 -u "${V23_SCRIPT}" "${CONTROLLER_YML}")
+  fi
 else
-  if ! /usr/bin/python3 -c 'import numpy, pinocchio, rclpy, yaml' 2>/dev/null; then
-    err "系统 Python 缺少 Pinocchio 控制依赖，且未找到 ${CONTROLLER_PREFIX}"
-    err "请运行 ${PROJECT_ROOT}/install.sh --sim 或设置 HC_CONTROLLER_PREFIX"
+  HUMANOID_ROOT="${HC_HUMANOID_ROOT:-${WORKSPACE_ROOT}/humanoid}"
+  MOTION_SERVER_SETUP="${HC_MOTION_SERVER_SETUP:-${HUMANOID_ROOT}/install/setup.bash}"
+  SDK_DEPS_PREFIX="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-${HUMANOID_ROOT}/.sdk_deps}"
+  if [[ -d "${SDK_DEPS_PREFIX}" ]]; then
+    export HUMANOID_MOTION_SDK_DEPS_PREFIX="${SDK_DEPS_PREFIX}"
+    export LD_LIBRARY_PATH="${SDK_DEPS_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+  mapfile -t MOTION_RESOURCES < <(
+    /usr/bin/python3 -m adapters.solver_plugins.cli motion-resources --config "${ARM_CONFIG}"
+  )
+  if [[ "${#MOTION_RESOURCES[@]}" -ne 5 ]]; then
+    err "Motion Server 资源解析失败: ${ARM_CONFIG}"
     exit 2
   fi
-  warn "未找到独立控制器环境，使用系统 ROS 2 Python/Pinocchio"
-  CONTROLLER_COMMAND=(/usr/bin/python3 -u "${V23_SCRIPT}" "${CONTROLLER_YML}")
+  MOTION_PARAMS="${MOTION_RESOURCES[0]}"
+  MOTION_CHANNELS="${MOTION_RESOURCES[1]}"
+  MOTION_SDK="${MOTION_RESOURCES[2]}"
+  MOTION_TOOLS="${MOTION_RESOURCES[3]}"
+  MOTION_URDF="${MOTION_RESOURCES[4]}"
+  for required in "${MOTION_SERVER_SETUP}" "${MOTION_PARAMS}" "${MOTION_CHANNELS}" \
+    "${MOTION_SDK}" "${MOTION_TOOLS}" "${MOTION_URDF}"; do
+    if [[ ! -f "${required}" ]]; then
+      err "Motion Server 后端缺少资源: ${required}"
+      err "默认同级工作空间: ${HUMANOID_ROOT}"
+      err "先构建该 humanoid 工作空间，或设置 HC_HUMANOID_ROOT/HC_MOTION_SERVER_SETUP"
+      exit 2
+    fi
+  done
+  set +u
+  source "${MOTION_SERVER_SETUP}"
+  set -u
+  CONTROLLER_COMMAND=(ros2 run humanoid_motion_server humanoid_motion_control_node
+    --ros-args --params-file "${MOTION_PARAMS}"
+    -p "channel_config_file:=${MOTION_CHANNELS}"
+    -p "sdk_config_file:=${MOTION_SDK}"
+    -p "tool_config_file:=${MOTION_TOOLS}"
+    -p "urdf_file:=${MOTION_URDF}")
 fi
 
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 log "机器人配置: ${ROBOT_NAME} (${PROFILE_DIR})"
-log "启动 Pinocchio v23 逆解..."
+log "解算插件: ${SOLVER_BACKEND}"
+log "启动 ${SOLVER_BACKEND} 解算进程..."
 setsid "${CONTROLLER_COMMAND[@]}" \
-  >"${LOG_DIR}/v23_solver.log" 2>&1 &
+  >"${LOG_DIR}/${SOLVER_BACKEND}_solver.log" 2>&1 &
 PIDS+=("$!")
 sleep 1
 
 log "启动 VR 到标准机器人接口控制节点..."
 setsid /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py" \
-  --config "${ARM_CONFIG}" --backend v23 \
+  --config "${ARM_CONFIG}" --backend "${SOLVER_BACKEND}" \
   >"${LOG_DIR}/teleop_controller.log" 2>&1 &
 PIDS+=("$!")
 

@@ -1,0 +1,17 @@
+build:
+  base-paths:
+    - src
+  symlink-install: true
+  event-handlers:
+    - console_cohesion+
+  cmake-args:
+    - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    - -DPython3_EXECUTABLE=/usr/bin/python3
+    - -DPYTHON_EXECUTABLE=/usr/bin/python3
+test:
+  base-paths:
+    - src
+  event-handlers:
+    - console_cohesion+
+test-result:
+  verbose: true

@@ -1,0 +1,126 @@
+schema: hc-teleop-profile/v1
+robot_id: x1
+display_name: X1 Humanoid Dual-Arm
+description: Component profile for the X1 humanoid dual-arm robotic platform.
+
+resources:
+  urdf: package://hc_robot_x1/urdf/x1_robot.urdf
+  motion_control: package://hc_robot_x1/config/motion_server/motion_control.yaml
+  motion_channels: package://hc_robot_x1/config/motion_server/channels.yaml
+  motion_sdk: package://hc_robot_x1/config/motion_server/sdk.yaml
+  motion_tools: package://hc_robot_x1/config/motion_server/tools.yaml
+
+components:
+  - id: left_arm
+    kind: arm
+    enabled: true
+    adapter:
+      package: hc_adapter_x1
+      hardware_plugin: hc_adapter_x1/X1System
+    joint_names:
+      - Joint1_L
+      - Joint2_L
+      - Joint3_L
+      - Joint4_L
+      - Joint5_L
+      - Joint6_L
+      - Joint7_L
+    frames:
+      base: L_arm_0_Link
+      tip: io_teleop_ee_link_left
+    command_modes: [servo_j, servo_p, move_j, move_l, move_p]
+
+  - id: right_arm
+    kind: arm
+    enabled: true
+    adapter:
+      package: hc_adapter_x1
+      hardware_plugin: hc_adapter_x1/X1System
+    joint_names:
+      - Joint1_R
+      - Joint2_R
+      - Joint3_R
+      - Joint4_R
+      - Joint5_R
+      - Joint6_R
+      - Joint7_R
+    frames:
+      base: R_arm_0_Link
+      tip: io_teleop_ee_link_right
+    command_modes: [servo_j, servo_p, move_j, move_l, move_p]
+
+  - id: waist
+    kind: waist
+    enabled: true
+    adapter:
+      package: hc_adapter_x1
+      hardware_plugin: hc_adapter_x1/X1System
+    joint_names:
+      - leg_1
+      - leg_2
+      - zhi
+    frames:
+      base: base_link
+      tip: zhi_Link
+
+  - id: left_gripper
+    kind: gripper
+    enabled: true
+    attached_to: left_arm
+    adapter:
+      package: hc_adapter_x1
+      hardware_plugin: hc_adapter_x1/X1System
+    joint_names: [L_ban]
+    frames:
+      base: gongju_L_Link
+      tip: L_ban_Link
+
+  - id: right_gripper
+    kind: gripper
+    enabled: true
+    attached_to: right_arm
+    adapter:
+      package: hc_adapter_x1
+      hardware_plugin: hc_adapter_x1/X1System
+    joint_names: [R_ban]
+    frames:
+      base: gongju_R_Link
+      tip: R_ban_Link
+
+motion:
+  backend_package: hc_motion_backend_robo_manip
+  backend_executable: motion_backend_node
+  compatibility_backend_package: hc_motion_backend_v23
+  feedback_topic: state/joints
+  candidate_topic: control/joint_candidate
+
+teleop:
+  position_scale: 0.85
+  bindings:
+    - {group: left_arm, controller: left}
+    - {group: right_arm, controller: right}
+  clutch_input: grip
+  clutch_threshold: 0.5
+  feedback_timeout_ms: 200
+  command_ttl_ms: 300
+  axis_mapping:
+    - [0.0, 0.0, 1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+  gripper_input: trigger
+
+safety:
+  enabled_on_start: false
+  command_timeout_ms: 300
+  collision_backend: disabled_until_commissioned
+
+recording:
+  preset: teleop_default
+  format: mcap
+
+vr:
+  listen_host: 0.0.0.0
+  pose_port: 5005
+  discovery_port: 5006
+  pose_timeout_ms: 150
+  session_id: pico

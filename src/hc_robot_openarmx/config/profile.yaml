@@ -1,0 +1,112 @@
+schema: hc-teleop-profile/v1
+robot_id: openarmx
+display_name: OpenArmX V10 Bimanual
+description: Component profile migrated from the legacy OpenArmX HC profile.
+
+resources:
+  urdf: package://hc_robot_openarmx/urdf/openarmx_robot.urdf
+  motion_control: package://hc_robot_openarmx/config/motion_server/motion_control.yaml
+  motion_channels: package://hc_robot_openarmx/config/motion_server/channels.yaml
+  motion_sdk: package://hc_robot_openarmx/config/motion_server/sdk.yaml
+  motion_tools: package://hc_robot_openarmx/config/motion_server/tools.yaml
+
+components:
+  - id: left_arm
+    kind: arm
+    enabled: true
+    adapter:
+      package: hc_adapter_openarmx
+      hardware_plugin: hc_adapter_openarmx/OpenArmXSystem
+    joint_names:
+      - openarmx_left_joint1
+      - openarmx_left_joint2
+      - openarmx_left_joint3
+      - openarmx_left_joint4
+      - openarmx_left_joint5
+      - openarmx_left_joint6
+      - openarmx_left_joint7
+    frames:
+      base: openarmx_left_link0
+      tip: openarmx_left_hand_tcp
+    command_modes: [servo_j, servo_p, move_j, move_l, move_p]
+
+  - id: right_arm
+    kind: arm
+    enabled: true
+    adapter:
+      package: hc_adapter_openarmx
+      hardware_plugin: hc_adapter_openarmx/OpenArmXSystem
+    joint_names:
+      - openarmx_right_joint1
+      - openarmx_right_joint2
+      - openarmx_right_joint3
+      - openarmx_right_joint4
+      - openarmx_right_joint5
+      - openarmx_right_joint6
+      - openarmx_right_joint7
+    frames:
+      base: openarmx_right_link0
+      tip: openarmx_right_hand_tcp
+    command_modes: [servo_j, servo_p, move_j, move_l, move_p]
+
+  - id: left_gripper
+    kind: gripper
+    enabled: true
+    attached_to: left_arm
+    adapter:
+      package: hc_adapter_openarmx
+      hardware_plugin: hc_adapter_openarmx/OpenArmXSystem
+    joint_names: [openarmx_left_finger_joint1]
+    frames:
+      base: openarmx_left_hand
+      tip: openarmx_left_right_finger
+
+  - id: right_gripper
+    kind: gripper
+    enabled: true
+    attached_to: right_arm
+    adapter:
+      package: hc_adapter_openarmx
+      hardware_plugin: hc_adapter_openarmx/OpenArmXSystem
+    joint_names: [openarmx_right_finger_joint1]
+    frames:
+      base: openarmx_right_hand
+      tip: openarmx_right_right_finger
+
+motion:
+  backend_package: hc_motion_backend_robo_manip
+  backend_executable: motion_backend_node
+  compatibility_backend_package: hc_motion_backend_v23
+  feedback_topic: state/joints
+  candidate_topic: control/joint_candidate
+
+teleop:
+  position_scale: 0.8
+  bindings:
+    - {group: left_arm, controller: left}
+    - {group: right_arm, controller: right}
+  clutch_input: grip
+  clutch_threshold: 0.5
+  feedback_timeout_ms: 150
+  command_ttl_ms: 100
+  axis_mapping:
+    - [0.0, 0.0, -1.0]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+  gripper_input: trigger
+
+safety:
+  enabled_on_start: false
+  command_timeout_ms: 150
+  collision_backend: disabled_until_commissioned
+
+recording:
+  preset: teleop_default
+  format: mcap
+
+vr:
+  listen_host: 0.0.0.0
+  pose_port: 5005
+  discovery_port: 5006
+  pose_timeout_ms: 150
+  session_id: pico

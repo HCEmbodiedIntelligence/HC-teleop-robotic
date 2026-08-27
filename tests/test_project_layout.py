@@ -18,6 +18,7 @@ class ProjectLayoutTests(unittest.TestCase):
             "adapters/core",
             "adapters/nodes",
             "adapters/v23",
+            "adapters/solver_plugins",
             "adapters/robots/x1",
             "interfaces",
             "simulation",
@@ -46,6 +47,17 @@ class ProjectLayoutTests(unittest.TestCase):
         self.assertNotIn("hc_io_suit", text)
         self.assertNotIn("HC_X1/install", text)
         self.assertNotIn("/io_teleop", text)
+
+    def test_v23_solver_is_an_independent_ros_python_package(self):
+        package_dir = self.root / "adapters" / "v23"
+        manifest = ElementTree.parse(package_dir / "package.xml").getroot()
+        self.assertEqual(manifest.findtext("name"), "hc_teleop_v23_solver")
+        self.assertTrue((package_dir / "setup.py").is_file())
+        self.assertTrue(
+            (package_dir / "resource" / "hc_teleop_v23_solver").is_file()
+        )
+        installer = (self.root / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('"${SCRIPT_DIR}/adapters/v23"', installer)
 
     def test_common_launcher_is_backend_independent(self):
         launcher = (self.root / "start_teleop.sh").read_text(encoding="utf-8")
@@ -93,18 +105,18 @@ class ProjectLayoutTests(unittest.TestCase):
         )
         self.assertIn("self.target_ee_frame_ids = [None] * len(self.arms)", source)
 
-    def test_middleware_selects_x1_from_adapter_robot_store(self):
+    def test_middleware_selects_configured_robot_from_adapter_robot_store(self):
         config_path = self.root / "middleware" / "config.yaml"
         profile_id, manager = load_selection(config_path)
-        self.assertEqual(profile_id, "x1")
         self.assertEqual(manager.root, (self.root / "adapters" / "robots").resolve())
-        self.assertEqual([profile["id"] for profile in manager.list()], ["x1"])
+        profile_ids = [profile["id"] for profile in manager.list()]
+        self.assertIn(profile_id, profile_ids)
+        self.assertIn("x1", profile_ids)
 
         metadata = yaml.safe_load(
-            (manager.root / "x1" / "profile.yaml").read_text(encoding="utf-8")
+            (manager.root / profile_id / "profile.yaml").read_text(encoding="utf-8")
         )
-        self.assertEqual(metadata["id"], "x1")
-        self.assertEqual(metadata["display_name"], "X1")
+        self.assertEqual(metadata["id"], profile_id)
 
     def test_x1_urdf_mesh_references_are_self_contained(self):
         profile = self.root / "adapters" / "robots" / "x1"

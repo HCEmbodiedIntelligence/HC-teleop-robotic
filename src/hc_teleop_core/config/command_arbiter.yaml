@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    enabled_on_start: false
+    publish_rate_hz: 100.0
+    command_timeout_sec: 0.15
+    default_lease_sec: 1.0
+    maximum_lease_sec: 5.0
+    source_priorities:
+      - safety:255
+      - vr:100
+      - exoskeleton:80
+      - replay:10
+    candidate_topic: control/joint_candidate
+    command_topic: control/joint_command
+    safety_topic: safety/state

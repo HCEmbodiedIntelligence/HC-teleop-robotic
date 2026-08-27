@@ -3,9 +3,11 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd -- "${PROJECT_ROOT}/.." && pwd)"
 CONFIG_PATH="${HC_MIDDLEWARE_CONFIG:-${PROJECT_ROOT}/middleware/config.yaml}"
 LOG_DIR=""
 MIDDLEWARE_ARGS=()
+CONTROL_ARGS=()
 PIDS=()
 _CLEANED=0
 
@@ -44,6 +46,11 @@ while [[ $# -gt 0 ]]; do
       LOG_DIR="$2"
       shift 2
       ;;
+    --solver-backend)
+      [[ $# -ge 2 ]] || { err "--solver-backend 需要 v23 或 motion_server"; exit 2; }
+      CONTROL_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     --no-monitor)
       MIDDLEWARE_ARGS+=("$1")
       shift
@@ -59,12 +66,14 @@ while [[ $# -gt 0 ]]; do
 
 一次启动与硬件无关的通用遥操作栈：
   - Dashboard、配置导入、VR UDP 网关和话题录制
-  - Pinocchio v2.3 IK
+  - 可插拔的 Pinocchio v2.3 或 Humanoid Motion Server IK
   - VR 到 /hc_teleop 标准接口的遥操作控制
 
 选项:
   --config YAML   中间件配置文件
   --log-dir DIR   本次会话日志目录
+  --solver-backend NAME
+                  解算后端：v23（默认）或 motion_server
   --no-monitor    不启动操作事件记录器
   --host HOST     Dashboard 监听地址
   --port PORT     Dashboard 监听端口
@@ -106,14 +115,19 @@ if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
   fi
 fi
 export HC_MIDDLEWARE_CONFIG="${CONFIG_PATH}"
+# HC-teleop-robotic and humanoid use one common parent directory.  Export the
+# resolved sibling path so every child process uses the same workspace.
+export HC_HUMANOID_ROOT="${HC_HUMANOID_ROOT:-${WORKSPACE_ROOT}/humanoid}"
 
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 log "配置: ${CONFIG_PATH}"
+log "Humanoid 工作空间: ${HC_HUMANOID_ROOT}"
 log "会话日志: ${LOG_DIR}"
 log "启动通用 IK 与遥操作控制..."
 setsid "${PROJECT_ROOT}/adapters/start.sh" \
   --config "${CONFIG_PATH}" \
-  --log-dir "${LOG_DIR}/control" &
+  --log-dir "${LOG_DIR}/control" \
+  "${CONTROL_ARGS[@]}" &
 CONTROL_PID="$!"
 PIDS+=("${CONTROL_PID}")
 

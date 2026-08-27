@@ -1,0 +1,39 @@
+schema: hc-teleop-workspace/v1
+release: 0.1.0
+ros_distribution: humble
+components:
+  - repository: hc-teleop-interfaces
+    staged_path: src/hc_teleop_interfaces
+    required: true
+  - repository: hc-vr-gateway
+    staged_path: src/hc_vr_gateway
+    required: true
+  - repository: hc-teleop-core
+    staged_path: src/hc_teleop_core
+    required: true
+  - repository: hc-motion
+    staged_path: src/hc_motion
+    required: true
+  - repository: hc-device-sdk
+    staged_path: src/hc_device_sdk
+    required: true
+  - repository: hc-dashboard
+    staged_path: src/hc_dashboard
+    required: false
+  - repository: hc-dataset
+    staged_path: src/hc_dataset
+    required: false
+  - repository: hc-bringup
+    staged_path: src/hc_bringup
+    required: true
+  - repository: hc-robot-openarmx
+    staged_path: src/hc_robot_openarmx
+    required: false
+optional_extensions:
+  - hc-motion-backend-v23
+  - hc-motion-backend-robo-manip
+  - hc-adapter-openarmx
+  - hc-adapter-x1
+notes:
+  - Remote repository URLs are intentionally not invented; add pinned release URLs only after repositories are created.
+  - The default build must remain independent of the private RoboManip ABI dependency set.

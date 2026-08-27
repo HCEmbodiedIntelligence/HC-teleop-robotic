@@ -1,0 +1,8 @@
+<library path="example_arm_driver_plugin">
+  <class
+    name="example_arm_driver/ExampleArmDriver"
+    type="example_arm_driver::ExampleArmDriver"
+    base_class_type="hc_device_sdk::JointDevicePlugin">
+    <description>Example arm compatibility plugin; no vendor SDK belongs in hc_device_sdk.</description>
+  </class>
+</library>

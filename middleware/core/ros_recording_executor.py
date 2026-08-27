@@ -267,15 +267,25 @@ class RosRecordingExecutor:
         self.recorder = recorder
         self.domain_id = int(config.get("domain_id", 13))
         self.subscriptions = recording_subscriptions(config)
+        recording_config = config.get("recording", {})
+        recording_enabled = (
+            bool(recording_config.get("enabled", True))
+            if isinstance(recording_config, dict)
+            else True
+        )
+        self.enabled = bool(config.get("enabled", True)) and recording_enabled
         self._mp = mp.get_context("spawn")
-        self._stop_event = self._mp.Event()
-        self._reset_event = self._mp.Event()
-        self._status_queue = self._mp.Queue(maxsize=4)
+        # Multiprocessing Events/Queues start Python's resource-tracker child.
+        # Allocate them only when recording subscriptions are actually enabled.
+        self._stop_event: Any = None
+        self._reset_event: Any = None
+        self._status_queue: Any = None
         self._process: Any = None
         self._gate = RateGate()
         self._lock = threading.Lock()
         self._status: dict[str, Any] = {
-            "state": "disabled" if not config.get("enabled", True) else "starting",
+            "state": "disabled" if not self.enabled else "starting",
+            "active": False,
             "domain_id": self.domain_id,
             "node_name": f"{config.get('node_name', 'hc_teleop_middleware')}_recorder",
             "subscriptions": [item["topic"] for item in self.subscriptions],
@@ -289,9 +299,34 @@ class RosRecordingExecutor:
             "error": None,
         }
 
-    def start(self) -> None:
-        if not self.config.get("enabled", True) or self._process is not None:
+    def _initialize_ipc(self) -> None:
+        if self._stop_event is not None:
             return
+        self._stop_event = self._mp.Event()
+        self._reset_event = self._mp.Event()
+        self._status_queue = self._mp.Queue(maxsize=4)
+
+    def _close_ipc(self) -> None:
+        status_queue = self._status_queue
+        self._stop_event = None
+        self._reset_event = None
+        self._status_queue = None
+        if status_queue is not None:
+            try:
+                status_queue.close()
+                status_queue.join_thread()
+            except (OSError, ValueError):
+                pass
+
+    def start(self) -> None:
+        if not self.enabled:
+            with self._lock:
+                self._status.update(state="disabled", active=False, pid=None)
+            return
+        self._refresh_status()
+        if self._process is not None:
+            return
+        self._initialize_ipc()
         event_queue, accepting_event, dropped_counter = self.recorder.ipc_resources()
         self._stop_event.clear()
         self._process = self._mp.Process(
@@ -314,34 +349,72 @@ class RosRecordingExecutor:
     def stop(self) -> None:
         process = self._process
         if process is None:
+            self._close_ipc()
+            with self._lock:
+                self._status.update(
+                    state="disabled" if not self.enabled else "stopped",
+                    active=False,
+                    pid=None,
+                )
             return
         self._stop_event.set()
         process.join(timeout=8.0)
         if process.is_alive():
             process.terminate()
             process.join(timeout=2.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2.0)
+        else:
+            # Explicitly collect an already-exited child.  Merely observing
+            # is_alive()/exitcode can otherwise leave a zombie until the parent
+            # middleware process exits or creates another multiprocessing child.
+            process.join(timeout=0.0)
+        if process.is_alive():
+            with self._lock:
+                self._status.update(
+                    state="error",
+                    active=False,
+                    error="recording process could not be stopped",
+                )
+            return
         self._process = None
+        self._close_ipc()
         with self._lock:
-            self._status.update(state="stopped", active=False)
+            self._status.update(
+                state="disabled" if not self.enabled else "stopped",
+                active=False,
+                pid=None,
+            )
 
     def _refresh_status(self) -> None:
         latest = None
-        while True:
-            try:
-                latest = self._status_queue.get_nowait()
-            except queue.Empty:
-                break
+        status_queue = self._status_queue
+        if status_queue is not None:
+            while True:
+                try:
+                    latest = status_queue.get_nowait()
+                except queue.Empty:
+                    break
         if latest is not None:
             with self._lock:
                 self._status.update(latest)
         process = self._process
         if process is not None and not process.is_alive():
+            exitcode = process.exitcode
+            process.join(timeout=0.0)
+            self._process = None
+            self._close_ipc()
             with self._lock:
                 if self._status.get("state") not in {"error", "stopped"}:
                     self._status.update(
                         state="error",
-                        error=f"recording process exited with code {process.exitcode}",
+                        active=False,
+                        pid=None,
+                        error=f"recording process exited with code {exitcode}",
                     )
+                else:
+                    self._status.update(active=False, pid=None)
 
     def status(self) -> dict[str, Any]:
         self._refresh_status()
@@ -355,7 +428,8 @@ class RosRecordingExecutor:
 
     def prepare_recording(self) -> None:
         self._gate.reset()
-        self._reset_event.set()
+        if self._reset_event is not None:
+            self._reset_event.set()
         with self._lock:
             self._status.update(
                 received=0,

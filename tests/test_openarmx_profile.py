@@ -68,6 +68,14 @@ class OpenArmXProfileTests(unittest.TestCase):
             self.assertEqual(imported["free_joint_count"], 14)
             self.assertEqual(imported["arm_count"], 2)
             self.assertTrue(imported["teleop_compatible"])
+            imported_path = Path(temp_dir) / "openarmx_test"
+            imported_teleop = yaml.safe_load(
+                (imported_path / "arm_teleop.yaml").read_text(encoding="utf-8")
+            )
+            self.assertIn("motion_server", imported_teleop)
+            self.assertTrue(
+                (imported_path / "motion_server" / "motion_control.yaml").is_file()
+            )
 
 
 if __name__ == "__main__":

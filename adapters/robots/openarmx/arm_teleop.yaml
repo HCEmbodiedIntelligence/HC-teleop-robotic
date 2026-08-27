@@ -123,7 +123,7 @@ control:
   axis_mapping:
   # Match OpenArmX's calibrated Pico mapping from openarmx_teleop_vr:
   # robot_x=-vr_z, robot_y=-vr_x, robot_z=vr_y.
-  - [0.0, 0.0, 1.0]
+  - [0.0, 0.0, -1.0]
   - [-1.0, 0.0, 0.0]
   - [0.0, 1.0, 0.0]
   head_axis_mapping:
@@ -173,3 +173,19 @@ control:
   ik_max_update: 0.06
   max_joint_velocity: 1.5
   max_joint_velocity_norm: 2.8
+motion_server:
+  # Resources for the optional sibling ../humanoid Motion Server backend.
+  # Its joint output is deliberately the VR mux input, not the final robot topic.
+  motion_params: motion_server/motion_control.yaml
+  channel_config: motion_server/channels.yaml
+  sdk_config: motion_server/sdk.yaml
+  tool_config: motion_server/tools.yaml
+  servo_p:
+    right:
+      topic: /teleop/right_arm/servo_p
+      frame_id: openarmx_right_link0
+      fk_topic: /teleop/right_arm/fk_pose
+    left:
+      topic: /teleop/left_arm/servo_p
+      frame_id: openarmx_left_link0
+      fk_topic: /teleop/left_arm/fk_pose

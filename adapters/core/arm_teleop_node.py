@@ -4,11 +4,11 @@ import json
 import math
 import time
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pybullet as bullet
 import yaml
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.node import Node
@@ -45,6 +45,18 @@ from .collision_safety import (
 from .solver_rearm import SolverRearmGate
 
 
+# PyBullet is a large optional native dependency.  Keep it out of lightweight
+# Motion Server deployments, where FK is supplied by the server itself.
+bullet: Any | None = None
+
+
+def _load_pybullet() -> Any:
+    global bullet
+    if bullet is None:
+        bullet = import_module("pybullet")
+    return bullet
+
+
 @dataclass
 class ArmRuntime:
     name: str
@@ -64,6 +76,8 @@ class ArmRuntime:
     reference_local_ee: tuple[np.ndarray, np.ndarray] | None = None
     target_local: tuple[np.ndarray, np.ndarray] | None = None
     target_world: tuple[np.ndarray, np.ndarray] | None = None
+    actual_local: tuple[np.ndarray, np.ndarray] | None = None
+    actual_stamp: float = 0.0
     last_solution: np.ndarray | None = None
     position_error: float = 0.0
     orientation_error: float = 0.0
@@ -126,9 +140,13 @@ class HcTjArmTeleopNode(Node):
         self.control = self.config["control"]
         self.body_config = self.config["body"]
         self.backend = str(backend or self.control.get("backend", "legacy")).lower()
-        if self.backend not in {"v23", "generic", "legacy"}:
-            raise ValueError("control.backend must be v23, generic or legacy")
-        self.external_ik = self.backend in {"v23", "generic"}
+        if self.backend not in {"v23", "motion_server", "generic", "legacy"}:
+            raise ValueError(
+                "control.backend must be v23, motion_server, generic or legacy"
+            )
+        self.external_ik = self.backend in {"v23", "motion_server", "generic"}
+        self.solver_feedback_backend = self.backend in {"v23", "generic"}
+        self.motion_server_backend = self.backend == "motion_server"
         self.enabled = bool(self.control.get("enabled_on_start", True))
         self.stop_reason = ""
         self.joint_state: dict[str, float] = {}
@@ -168,6 +186,18 @@ class HcTjArmTeleopNode(Node):
         self.collision_escape_epsilon = float(
             self.control.get("collision_escape_epsilon", 1.0e-5)
         )
+        self.local_model_enabled = not (
+            self.motion_server_backend and not self.collision_enabled
+        )
+        if (
+            not self.local_model_enabled
+            and bool(self.body_config.get("enabled", False))
+            and self.body_config.get("waist_joint_names")
+        ):
+            raise ValueError(
+                "model-free motion_server mode requires body.enabled=false; "
+                "waist FK/control must be provided by Motion Server first"
+            )
         self.collision_pairs: list[tuple[int, int]] = []
         self.collision_clearances: dict[tuple[int, int], float] = {}
         self.collision_links: set[int] = set()
@@ -181,74 +211,87 @@ class HcTjArmTeleopNode(Node):
         self.last_collision_log = 0.0
         self.last_collision_reset = 0.0
 
-        self.physics_client = bullet.connect(bullet.DIRECT)
-        if self.physics_client < 0:
-            raise RuntimeError("unable to start the PyBullet IK model")
         robot = self.config["robot"]
         self.initial_joints = {
             name: float(value) for name, value in robot.get("initial_joints", {}).items()
         }
-        urdf_path = Path(robot["urdf_path"]).expanduser()
-        if not urdf_path.is_absolute():
-            urdf_path = self.config_path.parent / urdf_path
-        urdf_path = urdf_path.resolve()
-        self.robot_id = bullet.loadURDF(
-            str(urdf_path),
-            robot["base_position"],
-            robot["base_orientation"],
-            useFixedBase=True,
-            flags=bullet.URDF_USE_INERTIA_FROM_FILE,
-            physicsClientId=self.physics_client,
-        )
+        self.physics_client = -1
+        self.robot_id = -1
         self.joint_by_name: dict[str, int] = {}
         self.link_by_name: dict[str, int] = {}
         self.link_name_by_index: dict[int, str] = {}
         self.parent_by_link: dict[int, int] = {}
         self.dof_by_joint: dict[int, int] = {}
         self.dof_joint_indices: list[int] = []
-        dof = 0
-        base_info = bullet.getBodyInfo(
-            self.robot_id, physicsClientId=self.physics_client
-        )
-        if base_info:
-            base_name = base_info[0].decode()
-            self.link_by_name[base_name] = -1
-            self.link_name_by_index[-1] = base_name
-        for index in range(
-            bullet.getNumJoints(self.robot_id, physicsClientId=self.physics_client)
-        ):
-            info = bullet.getJointInfo(
-                self.robot_id, index, physicsClientId=self.physics_client
+        if self.local_model_enabled:
+            physics = _load_pybullet()
+            self.physics_client = physics.connect(physics.DIRECT)
+            if self.physics_client < 0:
+                raise RuntimeError("unable to start the PyBullet IK model")
+            urdf_path = Path(robot["urdf_path"]).expanduser()
+            if not urdf_path.is_absolute():
+                urdf_path = self.config_path.parent / urdf_path
+            urdf_path = urdf_path.resolve()
+            self.robot_id = physics.loadURDF(
+                str(urdf_path),
+                robot["base_position"],
+                robot["base_orientation"],
+                useFixedBase=True,
+                flags=physics.URDF_USE_INERTIA_FROM_FILE,
+                physicsClientId=self.physics_client,
             )
-            self.joint_by_name[info[1].decode()] = index
-            self.link_by_name[info[12].decode()] = index
-            self.link_name_by_index[index] = info[12].decode()
-            self.parent_by_link[index] = int(info[16])
-            if info[2] != bullet.JOINT_FIXED:
-                self.dof_by_joint[index] = dof
-                self.dof_joint_indices.append(index)
-                dof += 1
-        for name, position in self.initial_joints.items():
-            index = self.joint_by_name.get(name)
-            if index is not None:
-                bullet.resetJointState(
-                    self.robot_id,
-                    index,
-                    position,
-                    physicsClientId=self.physics_client,
+            dof = 0
+            base_info = physics.getBodyInfo(
+                self.robot_id, physicsClientId=self.physics_client
+            )
+            if base_info:
+                base_name = base_info[0].decode()
+                self.link_by_name[base_name] = -1
+                self.link_name_by_index[-1] = base_name
+            for index in range(
+                physics.getNumJoints(
+                    self.robot_id, physicsClientId=self.physics_client
                 )
+            ):
+                info = physics.getJointInfo(
+                    self.robot_id, index, physicsClientId=self.physics_client
+                )
+                self.joint_by_name[info[1].decode()] = index
+                self.link_by_name[info[12].decode()] = index
+                self.link_name_by_index[index] = info[12].decode()
+                self.parent_by_link[index] = int(info[16])
+                if info[2] != physics.JOINT_FIXED:
+                    self.dof_by_joint[index] = dof
+                    self.dof_joint_indices.append(index)
+                    dof += 1
+            for name, position in self.initial_joints.items():
+                index = self.joint_by_name.get(name)
+                if index is not None:
+                    physics.resetJointState(
+                        self.robot_id,
+                        index,
+                        position,
+                        physicsClientId=self.physics_client,
+                    )
 
-        self.arms = {
-            side: self._create_arm(side, arm_config)
-            for side, arm_config in self.config["arms"].items()
-        }
-        self.generic_task_base_indices = {
-            side: self.link_by_name[arm_config["generic_task_base_link"]]
-            for side, arm_config in self.config["arms"].items()
-        }
-        self.body = self._create_body(self.body_config)
-        if self.collision_enabled:
-            self._initialize_collision_safety()
+            self.arms = {
+                side: self._create_arm(side, arm_config)
+                for side, arm_config in self.config["arms"].items()
+            }
+            self.generic_task_base_indices = {
+                side: self.link_by_name[arm_config["generic_task_base_link"]]
+                for side, arm_config in self.config["arms"].items()
+            }
+            self.body = self._create_body(self.body_config)
+            if self.collision_enabled:
+                self._initialize_collision_safety()
+        else:
+            self.arms = {
+                side: self._create_model_free_arm(side, arm_config)
+                for side, arm_config in self.config["arms"].items()
+            }
+            self.generic_task_base_indices = {side: -1 for side in self.arms}
+            self.body = self._create_model_free_body(self.body_config)
         self.zeros = [0.0] * len(self.dof_joint_indices)
         self.controlled_names = (
             self.arms["right"].joint_names
@@ -266,8 +309,14 @@ class HcTjArmTeleopNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        self.command_pub = self.create_publisher(
-            JointState, self.control["command_topic"], latest_reliable_qos
+        # Motion Server owns the VR-source JointState publisher in that mode.
+        # Do not even advertise a second publisher from this process.
+        self.command_pub = (
+            None
+            if self.motion_server_backend
+            else self.create_publisher(
+                JointState, self.control["command_topic"], latest_reliable_qos
+            )
         )
         self.solver_reset_pub = self.create_publisher(
             Bool,
@@ -286,6 +335,36 @@ class HcTjArmTeleopNode(Node):
             ),
             latest_reliable_qos,
         )
+        self.motion_target_adapter = None
+        self.motion_fk_subscriptions = []
+        if self.motion_server_backend:
+            from adapters.solver_plugins.motion_server import (
+                MotionServerTargetAdapter,
+            )
+
+            self.motion_target_adapter = MotionServerTargetAdapter(
+                self, self.config, latest_reliable_qos
+            )
+            servo_channels = self.config["motion_server"]["servo_p"]
+            for side in ("left", "right"):
+                channel = servo_channels[side]
+                fk_topic = str(
+                    channel.get("fk_topic", f"/teleop/{side}_arm/fk_pose")
+                )
+                if not fk_topic.startswith("/"):
+                    raise ValueError(
+                        f"motion_server.servo_p.{side}.fk_topic must start with /"
+                    )
+                self.motion_fk_subscriptions.append(
+                    self.create_subscription(
+                        PoseStamped,
+                        fk_topic,
+                        lambda message, arm=self.arms[side]: self._motion_fk_callback(
+                            arm, message
+                        ),
+                        qos_profile_sensor_data,
+                    )
+                )
         self.actual_pub = self.create_publisher(
             PoseArray,
             self.control.get("actual_pose_topic", "/hc_teleop/actual_ee_poses"),
@@ -309,7 +388,7 @@ class HcTjArmTeleopNode(Node):
             self._joint_state_callback,
             latest_reliable_qos,
         )
-        if self.external_ik:
+        if self.solver_feedback_backend:
             self.create_subscription(
                 JointState,
                 self.control.get("solver_topic", "/hc_teleop/sol_q"),
@@ -330,6 +409,13 @@ class HcTjArmTeleopNode(Node):
                     "generic_command_topic", "/hc_teleop/joint_cmd_arm"
                 ),
                 self._generic_command_callback,
+                latest_reliable_qos,
+            )
+        elif self.motion_server_backend:
+            self.create_subscription(
+                JointState,
+                self.control["command_topic"],
+                self._motion_server_command_callback,
                 latest_reliable_qos,
             )
         self.create_subscription(
@@ -584,6 +670,21 @@ class HcTjArmTeleopNode(Node):
             side, names, indices, dofs, lower, upper, ee_index, base_index
         )
 
+    @staticmethod
+    def _create_model_free_arm(side: str, config: dict[str, Any]) -> ArmRuntime:
+        names = list(config["joint_names"])
+        count = len(names)
+        return ArmRuntime(
+            side,
+            names,
+            [],
+            [],
+            np.full(count, -np.inf),
+            np.full(count, np.inf),
+            -1,
+            -1,
+        )
+
     def _create_body(self, config: dict[str, Any]) -> BodyRuntime:
         names = list(config["waist_joint_names"])
         indices, dofs, lower, upper = self._joint_group(names)
@@ -598,6 +699,19 @@ class HcTjArmTeleopNode(Node):
             lower,
             upper,
             self.link_by_name[config["torso_link"]],
+        )
+
+    @staticmethod
+    def _create_model_free_body(config: dict[str, Any]) -> BodyRuntime:
+        names = list(config["waist_joint_names"])
+        count = len(names)
+        return BodyRuntime(
+            names,
+            [],
+            [],
+            np.full(count, -np.inf),
+            np.full(count, np.inf),
+            -1,
         )
 
     @staticmethod
@@ -629,6 +743,15 @@ class HcTjArmTeleopNode(Node):
         if pose is not None:
             arm.pose = pose
             arm.pose_stamp = self._monotonic()
+
+    def _motion_fk_callback(self, arm: ArmRuntime, message: PoseStamped) -> None:
+        pose = self._read_pose(message)
+        if pose is None:
+            return
+        arm.actual_local = pose
+        arm.actual_stamp = self._monotonic()
+        if not arm.active:
+            arm.target_local = pose
 
     def _head_pose_callback(self, message: PoseStamped) -> None:
         pose = self._read_pose(message)
@@ -723,7 +846,7 @@ class HcTjArmTeleopNode(Node):
         self.joint_state_stamp = self._monotonic()
         if not self.last_command:
             self.last_command = dict(self.joint_state)
-        if self.external_ik and self.solver_rearm.observe_feedback():
+        if self.solver_feedback_backend and self.solver_rearm.observe_feedback():
             cutoff_ns = int(self.get_clock().now().nanoseconds)
             self.solver_reset_pub.publish(Bool(data=True))
             self.solver_rearm.reset_published(cutoff_ns)
@@ -790,6 +913,15 @@ class HcTjArmTeleopNode(Node):
         self.command_pub.publish(output)
         self.last_command.update(merged)
 
+    def _motion_server_command_callback(self, message: JointState) -> None:
+        """Observe Motion Server output for health without republishing it."""
+        if len(message.name) != len(message.position):
+            return
+        if not all(math.isfinite(float(value)) for value in message.position):
+            return
+        self.generic_command_stamp = self._monotonic()
+        self.generic_command_count += 1
+
     def _stop_callback(self, message: Bool) -> None:
         if message.data:
             self.enabled = False
@@ -824,6 +956,13 @@ class HcTjArmTeleopNode(Node):
     def _home_service(self, _request: Trigger.Request, response: Trigger.Response):
         self.enabled = True
         self.stop_reason = ""
+        if self.motion_server_backend:
+            self._release_all(send_base_zero=True)
+            response.success = False
+            response.message = (
+                "motion_server 模式不直接下发关节回零；请使用 Motion Server MoveJ"
+            )
+            return response
         if self.backend in {"generic", "v23"}:
             self._set_generic_home_targets()
         else:
@@ -836,7 +975,12 @@ class HcTjArmTeleopNode(Node):
         if message.data:
             self.enabled = True
             self.stop_reason = ""
-            if self.backend in {"generic", "v23"}:
+            if self.motion_server_backend:
+                self._release_all(send_base_zero=True)
+                self.get_logger().warning(
+                    "ignoring legacy home topic in motion_server mode; use MoveJ"
+                )
+            elif self.backend in {"generic", "v23"}:
                 self._set_generic_home_targets()
             else:
                 self._start_homing()
@@ -960,7 +1104,7 @@ class HcTjArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
-            if self.external_ik:
+            if self.solver_feedback_backend:
                 self.solver_rearm.homing_complete()
             self.get_logger().info(
                 f"{self.backend} controller arms and waist homing complete"
@@ -980,6 +1124,8 @@ class HcTjArmTeleopNode(Node):
         )
 
     def _sync_model(self) -> None:
+        if not self.local_model_enabled:
+            return
         for name, value in self.joint_state.items():
             index = self.joint_by_name.get(name)
             if index is not None and index in self.dof_by_joint:
@@ -1240,6 +1386,8 @@ class HcTjArmTeleopNode(Node):
         return base_requested, arms_requested
 
     def _set_group(self, indices: list[int], values: np.ndarray) -> None:
+        if not self.local_model_enabled:
+            return
         for index, value in zip(indices, values):
             bullet.resetJointState(
                 self.robot_id,
@@ -1249,6 +1397,8 @@ class HcTjArmTeleopNode(Node):
             )
 
     def _link_pose(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+        if not self.local_model_enabled:
+            raise RuntimeError("local FK model is disabled")
         state = bullet.getLinkState(
             self.robot_id,
             index,
@@ -1258,6 +1408,8 @@ class HcTjArmTeleopNode(Node):
         return np.asarray(state[4], dtype=float), np.asarray(state[5], dtype=float)
 
     def _root_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self.local_model_enabled:
+            return np.zeros(3), np.asarray([0.0, 0.0, 0.0, 1.0])
         position, orientation = bullet.getBasePositionAndOrientation(
             self.robot_id, physicsClientId=self.physics_client
         )
@@ -1913,11 +2065,17 @@ class HcTjArmTeleopNode(Node):
             self.base_zero_pending = False
 
     def _engage_arm(self, arm: ArmRuntime) -> None:
+        if self.local_model_enabled:
+            current_local = self._relative_pose(
+                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+            )
+        else:
+            current_local = arm.actual_local
+        if current_local is None:
+            return
         arm.active = True
         arm.reference_vr = arm.pose
-        arm.target_local = self._relative_pose(
-            self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-        )
+        arm.target_local = current_local
         arm.reference_local_ee = arm.target_local
         arm.last_solution = np.asarray(
             [self.joint_state.get(name, self.initial_joints.get(name, 0.0)) for name in arm.joint_names], dtype=float
@@ -2071,13 +2229,22 @@ class HcTjArmTeleopNode(Node):
     def _ensure_generic_targets(self) -> None:
         for arm in self.arms.values():
             if arm.target_local is None:
-                arm.target_local = self._relative_pose(
-                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-                )
+                if self.local_model_enabled:
+                    arm.target_local = self._relative_pose(
+                        self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                    )
+                elif arm.actual_local is not None:
+                    arm.target_local = arm.actual_local
         if self.body.target_base is None:
-            self.body.target_base = self._relative_pose(
-                self._root_pose(), self._link_pose(self.body.torso_index)
-            )
+            if self.local_model_enabled:
+                self.body.target_base = self._relative_pose(
+                    self._root_pose(), self._link_pose(self.body.torso_index)
+                )
+            else:
+                self.body.target_base = (
+                    np.zeros(3),
+                    np.asarray([0.0, 0.0, 0.0, 1.0]),
+                )
 
     def _set_generic_home_targets(self) -> None:
         """Capture the configured arm and waist home as Cartesian tasks."""
@@ -2132,7 +2299,13 @@ class HcTjArmTeleopNode(Node):
 
         self._ensure_generic_targets()
         if self._home_gesture_triggered(now):
-            self._set_generic_home_targets()
+            if self.motion_server_backend:
+                self._release_all(send_base_zero=True)
+                self.get_logger().warning(
+                    "home gesture ignored in motion_server mode; use a configured MoveJ action"
+                )
+            else:
+                self._set_generic_home_targets()
         if self.homing:
             self._update_homing(command)
             command.update(self.generic_aux_command)
@@ -2166,7 +2339,7 @@ class HcTjArmTeleopNode(Node):
         arms_requested = right_input_fresh and self._clutch_pressed(
             self.arms["right"]
         )
-        if self.solver_rearm.blocked:
+        if self.solver_feedback_backend and self.solver_rearm.blocked:
             if right_input_fresh and self.solver_rearm.observe_clutch(arms_requested):
                 self.get_logger().info(
                     "right Grip pressed after release; post-home IK control rearmed"
@@ -2213,10 +2386,16 @@ class HcTjArmTeleopNode(Node):
         for side in ("right", "left"):
             arm = self.arms[side]
             pose_fresh = now - arm.pose_stamp <= float(self.control["pose_timeout"])
-            if arms_requested and pose_fresh:
+            fk_fresh = self.local_model_enabled or (
+                arm.actual_local is not None
+                and now - arm.actual_stamp
+                <= float(self.control["joint_state_timeout"])
+            )
+            if arms_requested and pose_fresh and fk_fresh:
                 if not arm.active:
                     self._engage_arm(arm)
-                self._update_arm_target(arm)
+                if arm.active:
+                    self._update_arm_target(arm)
             elif arm.active:
                 arm.active = False
                 arm.reference_vr = None
@@ -2224,9 +2403,13 @@ class HcTjArmTeleopNode(Node):
                 arm.target_world = None
             elif not arms_requested:
                 if arm.target_local is None:
-                    arm.target_local = self._relative_pose(
-                        self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-                    )
+                    if self.local_model_enabled:
+                        arm.target_local = self._relative_pose(
+                            self._link_pose(arm.base_index),
+                            self._link_pose(arm.ee_index),
+                        )
+                    elif arm.actual_local is not None:
+                        arm.target_local = arm.actual_local
         if arms_requested and not arm_was_active and any(
             arm.active for arm in self.arms.values()
         ):
@@ -2317,8 +2500,9 @@ class HcTjArmTeleopNode(Node):
             if arms_requested and pose_fresh:
                 if not arm.active:
                     self._engage_arm(arm)
-                self._update_arm(arm, command)
-                any_active = True
+                if arm.active:
+                    self._update_arm(arm, command)
+                    any_active = True
             elif arm.active:
                 self._release_arm(arm)
         if arms_requested and not arm_was_active and any(arm.active for arm in self.arms.values()):
@@ -2357,21 +2541,34 @@ class HcTjArmTeleopNode(Node):
         message = PoseArray()
         message.header.stamp = stamp
         base_links = {config["base_link"] for config in self.config["arms"].values()}
-        message.header.frame_id = (
-            next(iter(base_links))
-            if len(base_links) == 1
-            else "hc_tj_arm_bases"
-        )
+        if not self.local_model_enabled:
+            message.header.frame_id = "motion_server_task_bases"
+        else:
+            message.header.frame_id = (
+                next(iter(base_links))
+                if len(base_links) == 1
+                else "hc_tj_arm_bases"
+            )
         controller_message = PoseArray()
         controller_message.header.stamp = stamp
         controller_message.header.frame_id = (
             "generic_task_bases" if self.external_ik else message.header.frame_id
         )
+        motion_targets: dict[str, Pose] = {}
         for side in ("right", "left"):
             arm = self.arms[side]
-            local = arm.target_local or self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-            )
+            local = arm.target_local
+            if local is None and self.local_model_enabled:
+                local = self._relative_pose(
+                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                )
+            if local is None:
+                local = arm.actual_local
+            if local is None:
+                local = (
+                    np.zeros(3),
+                    np.asarray([0.0, 0.0, 0.0, 1.0]),
+                )
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = local[0]
             (
@@ -2382,7 +2579,7 @@ class HcTjArmTeleopNode(Node):
             ) = local[1]
             message.poses.append(pose)
             controller_local = local
-            if self.external_ik:
+            if self.external_ik and self.local_model_enabled:
                 target_world = self._world_pose(
                     self._link_pose(arm.base_index), local
                 )
@@ -2408,10 +2605,19 @@ class HcTjArmTeleopNode(Node):
                 controller_pose.orientation.w,
             ) = controller_local[1]
             controller_message.poses.append(controller_pose)
+            if arm.active:
+                motion_targets[side] = controller_pose
         if self.external_ik and bool(self.body_config.get("include_in_controller_tasks", False)):
-            torso = self.body.target_base or self._relative_pose(
-                self._root_pose(), self._link_pose(self.body.torso_index)
-            )
+            torso = self.body.target_base
+            if torso is None and self.local_model_enabled:
+                torso = self._relative_pose(
+                    self._root_pose(), self._link_pose(self.body.torso_index)
+                )
+            if torso is None:
+                torso = (
+                    np.zeros(3),
+                    np.asarray([0.0, 0.0, 0.0, 1.0]),
+                )
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = torso[0]
             (
@@ -2423,19 +2629,35 @@ class HcTjArmTeleopNode(Node):
             controller_message.poses.append(pose)
         self.target_pub.publish(message)
         self.controller_target_pub.publish(controller_message)
+        if self.motion_target_adapter is not None and motion_targets:
+            self.motion_target_adapter.publish(stamp, motion_targets)
 
     def _publish_actual_poses(self) -> None:
+        if not self.local_model_enabled and any(
+            arm.actual_local is None for arm in self.arms.values()
+        ):
+            return
         message = PoseArray()
         message.header.stamp = self.get_clock().now().to_msg()
         base_links = {config["base_link"] for config in self.config["arms"].values()}
-        message.header.frame_id = (
-            next(iter(base_links)) if len(base_links) == 1 else "hc_tj_arm_bases"
-        )
+        if not self.local_model_enabled:
+            message.header.frame_id = "motion_server_task_bases"
+        else:
+            message.header.frame_id = (
+                next(iter(base_links))
+                if len(base_links) == 1
+                else "hc_tj_arm_bases"
+            )
         for side in ("right", "left"):
             arm = self.arms[side]
-            local = self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-            )
+            if self.local_model_enabled:
+                local = self._relative_pose(
+                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                )
+            else:
+                local = arm.actual_local
+            if local is None:
+                continue
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = local[0]
             (
@@ -2461,7 +2683,7 @@ class HcTjArmTeleopNode(Node):
             "enabled": self.enabled,
             "backend": self.backend,
             "generic_controller": {
-                "solver_fresh": not self.external_ik
+                "solver_fresh": not self.solver_feedback_backend
                 or now - self.solver_stamp
                 <= float(self.control["joint_state_timeout"]),
                 "solver_messages": self.solver_message_count,
@@ -2521,6 +2743,12 @@ class HcTjArmTeleopNode(Node):
                     "active": arm.active,
                     "pose_fresh": now - arm.pose_stamp
                     <= float(self.control["pose_timeout"]),
+                    "fk_fresh": self.local_model_enabled
+                    or (
+                        arm.actual_local is not None
+                        and now - arm.actual_stamp
+                        <= float(self.control["joint_state_timeout"])
+                    ),
                     "position_error": round(arm.position_error, 5),
                     "orientation_error": round(arm.orientation_error, 5),
                     "ik_converged": arm.ik_converged
@@ -2544,6 +2772,10 @@ class HcTjArmTeleopNode(Node):
             self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
         except Exception:
             pass
-        if bullet.isConnected(self.physics_client):
+        if (
+            self.local_model_enabled
+            and bullet is not None
+            and bullet.isConnected(self.physics_client)
+        ):
             bullet.disconnect(self.physics_client)
         return super().destroy_node()

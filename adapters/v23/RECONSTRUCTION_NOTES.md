@@ -15,3 +15,20 @@ Still inferred: the optional fourth task scalar is treated as task gain, the
 exact vendor damping/QP backend is unknown, and `control` uses feedback while
 `retarget` integrates from the previous command. Keep the protected generic
 backend available for runtime A/B comparison.
+# Standalone package
+
+This solver is now installable independently from the teleoperation frontend:
+
+```bash
+python3 -m pip wheel --no-deps ./adapters/v23
+# or install it into the Pinocchio/ROS Python environment
+python3 -m pip install --no-deps ./adapters/v23
+
+# ROS 2 workspace package (keep the Conda Pinocchio environment active)
+colcon build --base-paths ./adapters/v23 --packages-select hc_teleop_v23_solver
+```
+
+The installed `control_v2_3_ros2.py <controller_v23.yml>` command keeps the
+same ROS contract as the source-tree launcher. Pinocchio, CasADi and ROS 2
+Python packages are runtime environment dependencies and are intentionally not
+downloaded from PyPI by this package.

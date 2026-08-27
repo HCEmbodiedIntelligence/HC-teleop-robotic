@@ -29,7 +29,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--backend",
-        choices=("v23", "generic", "legacy"),
+        choices=("v23", "motion_server", "generic", "legacy"),
         help="override control.backend from YAML",
     )
     args, ros_args = parser.parse_known_args()

@@ -85,6 +85,9 @@ fi
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
+if [[ -f "${PROJECT_ROOT}/config/fastdds_udp.xml" && -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+  export FASTRTPS_DEFAULT_PROFILES_FILE="${PROJECT_ROOT}/config/fastdds_udp.xml"
+fi
 if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
   export HC_MIDDLEWARE_DOMAIN_CONFIG="${CONFIG_PATH}"
   export ROS_DOMAIN_ID="$(/usr/bin/python3 -c 'import os, yaml; cfg=yaml.safe_load(open(os.environ["HC_MIDDLEWARE_DOMAIN_CONFIG"])) or {}; print(cfg.get("ros", {}).get("domain_id", 14))')"

@@ -1,0 +1,10 @@
+string requester_id
+string[] component_ids
+float64 velocity_scale
+builtin_interfaces/Duration timeout
+---
+Status status
+---
+float32 progress
+string active_component
+Status status
