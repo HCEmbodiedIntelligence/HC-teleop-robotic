@@ -39,7 +39,3 @@ repositories:
     type: git
     url: git@github.com:HCEmbodiedIntelligence/hc-robot-openarmx.git
     version: 0.1.0
-  src/hc_compat_bridge:
-    type: git
-    url: git@github.com:HCEmbodiedIntelligence/hc-compat-bridge.git
-    version: 0.1.0

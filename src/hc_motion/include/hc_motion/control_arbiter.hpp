@@ -39,7 +39,7 @@ struct ArbitrationResult
   std::vector<std::string> expired_servo_ids;
 };
 
-/// Joint-name conflict arbiter extracted from humanoid_motion_server. Endpoint
+/// Group-aware joint-name conflict arbiter for the HC motion runtime. Endpoint
 /// priorities are configured locally and are never accepted from commands.
 class ControlArbiter
 {

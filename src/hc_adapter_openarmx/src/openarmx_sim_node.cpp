@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "builtin_interfaces/msg/time.hpp"
+#include "geometry_msgs/msg/pose.hpp"
 #include "hc_teleop_interfaces/msg/cartesian_state_array.hpp"
 #include "hc_teleop_interfaces/msg/joint_command.hpp"
 #include "kdl/chainfksolverpos_recursive.hpp"

@@ -1,10 +1,9 @@
 # Decomposed HC Teleop workspace
 
-The new native ROS 2 packages are staged under `src/` while the verified legacy
-stack remains in place. Each top-level package directory is an intended future
-repository boundary recorded in `manifests/components.yaml`. Remote URLs are
-not fabricated: once hosting is assigned, the staged paths can be split with
-history and the manifest replaced by a pinned vcstool `.repos` file.
+The native ROS 2 packages under `src/` are the only runtime in this branch. Each
+package directory is an intended repository boundary recorded in
+`manifests/components.yaml`; no legacy runtime or compatibility bridge is part
+of the build graph.
 
 ## Build
 
@@ -29,10 +28,9 @@ ros2 launch hc_bringup teleop.launch.py \
   profile:=openarmx mode:=compact shadow:=true
 ```
 
-Shadow mode publishes authoritative commands below
-`/robots/openarmx/shadow/control/joint_command`. It does not touch the legacy
-real-robot command topic. Cutover requires `shadow:=false` and is only allowed
-after simulation, watchdog and single-publisher tests pass.
+Shadow mode publishes commands below `/robots/openarmx/shadow/control/joint_command`.
+Cutover requires `shadow:=false` and is only allowed after simulation, watchdog
+and single-publisher tests pass.
 
 ## Invariants
 

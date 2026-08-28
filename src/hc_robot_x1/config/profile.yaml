@@ -5,10 +5,6 @@ description: Component profile for the X1 humanoid dual-arm robotic platform.
 
 resources:
   urdf: package://hc_robot_x1/urdf/x1_robot.urdf
-  motion_control: package://hc_robot_x1/config/motion_server/motion_control.yaml
-  motion_channels: package://hc_robot_x1/config/motion_server/channels.yaml
-  motion_sdk: package://hc_robot_x1/config/motion_server/sdk.yaml
-  motion_tools: package://hc_robot_x1/config/motion_server/tools.yaml
 
 components:
   - id: left_arm
@@ -88,9 +84,8 @@ components:
       tip: R_ban_Link
 
 motion:
-  backend_package: hc_motion_backend_robo_manip
-  backend_executable: motion_backend_node
-  compatibility_backend_package: hc_motion_backend_v23
+  backend_package: hc_motion_backend_kdl
+  backend_executable: kdl_ik_backend_node
   feedback_topic: state/joints
   candidate_topic: control/joint_candidate
 

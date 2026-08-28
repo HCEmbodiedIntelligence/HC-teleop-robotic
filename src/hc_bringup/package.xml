@@ -10,7 +10,8 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>hc_teleop_core</exec_depend>
   <exec_depend>hc_vr_gateway</exec_depend>
-  <exec_depend>hc_compat_bridge</exec_depend>
+  <exec_depend>hc_adapter_openarmx</exec_depend>
+  <exec_depend>hc_adapter_x1</exec_depend>
   <exec_depend>hc_motion</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>

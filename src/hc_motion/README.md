@@ -1,7 +1,6 @@
 # hc_motion
 
-Vendor-neutral motion core extracted from the useful parts of the former
-`humanoid_motion_server`:
+Vendor-neutral motion core for the HC runtime:
 
 - deterministic joint-name conflict arbitration;
 - closed-loop goal completion from measured feedback and backend FK;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <limits>
 #include <sstream>
 #include <unordered_set>

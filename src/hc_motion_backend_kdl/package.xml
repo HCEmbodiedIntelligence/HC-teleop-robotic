@@ -10,6 +10,7 @@
 
   <depend>builtin_interfaces</depend>
   <depend>eigen</depend>
+  <depend>geometry_msgs</depend>
   <depend>hc_teleop_interfaces</depend>
   <depend>kdl_parser</depend>
   <depend>orocos_kdl</depend>

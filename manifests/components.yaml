@@ -30,10 +30,7 @@ components:
     staged_path: src/hc_robot_openarmx
     required: false
 optional_extensions:
-  - hc-motion-backend-v23
   - hc-motion-backend-robo-manip
-  - hc-adapter-openarmx
-  - hc-adapter-x1
 notes:
   - Remote repository URLs are intentionally not invented; add pinned release URLs only after repositories are created.
   - The default build must remain independent of the private RoboManip ABI dependency set.

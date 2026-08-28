@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(hc_teleop_interfaces REQUIRED)
 find_package(kdl_parser REQUIRED)
 find_package(orocos_kdl REQUIRED)
@@ -38,7 +39,7 @@ target_link_libraries(
   orocos-kdl
   urdf::urdf)
 ament_target_dependencies(hc_openarmx_sim_component
-  builtin_interfaces hc_teleop_interfaces rclcpp rclcpp_components sensor_msgs)
+  builtin_interfaces geometry_msgs hc_teleop_interfaces rclcpp rclcpp_components sensor_msgs)
 rclcpp_components_register_node(
   hc_openarmx_sim_component
   PLUGIN "hc_adapter_openarmx::OpenArmXSimNode"

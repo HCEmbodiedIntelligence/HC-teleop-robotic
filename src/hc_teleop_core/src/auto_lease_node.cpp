@@ -1,6 +1,8 @@
 #include "hc_teleop_core/auto_lease_node.hpp"
 
 #include <cmath>
+#include <cstdint>
+#include <string>
 #include <stdexcept>
 #include <utility>
 

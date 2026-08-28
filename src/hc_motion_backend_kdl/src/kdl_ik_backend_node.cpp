@@ -11,6 +11,8 @@
 #include <vector>
 
 #include <Eigen/Dense>
+#include "builtin_interfaces/msg/time.hpp"
+#include "geometry_msgs/msg/pose.hpp"
 #include "hc_teleop_interfaces/msg/cartesian_target_array.hpp"
 #include "hc_teleop_interfaces/msg/joint_command_candidate.hpp"
 #include "kdl/chainfksolverpos_recursive.hpp"
