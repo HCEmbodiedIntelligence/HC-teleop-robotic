@@ -6,6 +6,17 @@ from typing import Sequence
 import numpy as np
 
 
+def binary_trigger_state(trigger: float, threshold: float = 0.5) -> float:
+    """Map a normalized trigger value to an open/closed recording state."""
+    trigger_value = float(trigger)
+    threshold_value = float(threshold)
+    if not math.isfinite(trigger_value) or not math.isfinite(threshold_value):
+        raise ValueError("trigger mapping values must be finite")
+    if not 0.0 <= threshold_value <= 1.0:
+        raise ValueError("trigger threshold must be in [0, 1]")
+    return 1.0 if float(np.clip(trigger_value, 0.0, 1.0)) >= threshold_value else 0.0
+
+
 def normalize_quaternion(value: Sequence[float]) -> np.ndarray:
     quaternion = np.asarray(value, dtype=float)
     norm = float(np.linalg.norm(quaternion))

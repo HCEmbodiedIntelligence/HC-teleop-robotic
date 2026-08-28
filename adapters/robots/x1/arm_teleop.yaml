@@ -53,10 +53,12 @@ arms:
     - Joint6_L
     - Joint7_L
 body:
-  waist_joint_names:
-  - leg_1
-  - leg_2
-  - zhi
+  # waist_joint_names:
+  # - leg_1
+  # - leg_2
+  # - zhi
+  enabled: false
+  waist_joint_names: []
   torso_link: zhi_Link
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity
@@ -97,10 +99,12 @@ body:
   ik_max_update: 0.08
 grippers:
   trigger_axis: 0
+  binary_trigger_threshold: 0.5
   max_velocity: 3.5
   include_sim_joints: true
   right:
     sim_joint: R_ban
+    binary_state_joint: R_ban
     sim_closed_position: 1.5707
     finger_topic: /hc_teleop/joint_cmd_finger_right
     finger_joint_names:
@@ -141,6 +145,7 @@ grippers:
     - 2.2509765625
   left:
     sim_joint: L_ban
+    binary_state_joint: L_ban
     sim_closed_position: 1.5707
     finger_topic: /hc_teleop/joint_cmd_finger_left
     finger_joint_names:

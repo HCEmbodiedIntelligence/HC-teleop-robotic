@@ -24,6 +24,7 @@ from std_srvs.srv import Trigger
 
 from .arm_teleop_math import (
     adaptive_damping,
+    binary_trigger_state,
     clamp_step,
     joystick_base_velocity,
     joint_limit_avoidance,
@@ -2055,6 +2056,19 @@ class HcTjArmTeleopNode(Node):
             opened = np.asarray(cfg["finger_open"], dtype=float)
             closed = np.asarray(cfg["finger_closed"], dtype=float)
             finger.position = list(opened + trigger * (closed - opened))
+            binary_state_joint = cfg.get("binary_state_joint")
+            if binary_state_joint:
+                finger.name.append(str(binary_state_joint))
+                finger.position.append(
+                    binary_trigger_state(
+                        trigger,
+                        float(
+                            self.config["grippers"].get(
+                                "binary_trigger_threshold", 0.5
+                            )
+                        ),
+                    )
+                )
             self.finger_pubs[side].publish(finger)
 
     def _command_seed(self) -> dict[str, float] | None:

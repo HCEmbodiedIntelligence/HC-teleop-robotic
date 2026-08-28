@@ -5,6 +5,7 @@ import numpy as np
 
 from adapters.core.arm_teleop_math import (
     adaptive_damping,
+    binary_trigger_state,
     clamp_step,
     joystick_base_velocity,
     joint_limit_avoidance,
@@ -20,6 +21,12 @@ from adapters.core.arm_teleop_math import (
 
 
 class ArmTeleopMathTests(unittest.TestCase):
+    def test_trigger_state_is_recorded_as_binary_open_or_closed(self):
+        self.assertEqual(binary_trigger_state(0.0), 0.0)
+        self.assertEqual(binary_trigger_state(0.499), 0.0)
+        self.assertEqual(binary_trigger_state(0.5), 1.0)
+        self.assertEqual(binary_trigger_state(1.0), 1.0)
+
     def test_adaptive_damping_increases_near_singularity(self):
         self.assertAlmostEqual(adaptive_damping(0.2, 0.03, 0.3, 0.1), 0.03)
         self.assertAlmostEqual(adaptive_damping(0.0, 0.03, 0.3, 0.1), 0.3)

@@ -3,10 +3,10 @@ server:
   port: 7876
 robot_profiles:
   root: ../adapters/robots
-  active: openarmx
+  active: x1
 ros:
   enabled: true
-  domain_id: 14
+  domain_id: 13
   node_name: hc_teleop_middleware
   command_mux:
     enabled: true
