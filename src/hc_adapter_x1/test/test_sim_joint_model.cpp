@@ -3,6 +3,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include <gtest/gtest.h>
 
@@ -57,6 +58,19 @@ TEST(SimJointModel, RejectsWrongJointOrder)
     "left_arm", {"left_arm_joint_2", "left_arm_joint_1"}, {0.1, 0.2}, now, now + 1s,
     reason));
   EXPECT_EQ(reason, "joint command names do not match the configured group order");
+}
+
+TEST(SimJointModel, UsesNamedInitialPositionsAndClampsThem)
+{
+  const std::unordered_map<std::string, double> initial{
+    {"left_arm_joint_1", 0.75},
+    {"left_arm_joint_2", -5.0},
+  };
+  SimJointModel model({group("left_arm")}, initial);
+  const auto positions = model.groupPositions("left_arm");
+  ASSERT_EQ(positions.size(), 2U);
+  EXPECT_DOUBLE_EQ(positions[0], 0.75);
+  EXPECT_DOUBLE_EQ(positions[1], -2.0);
 }
 
 TEST(SimJointModel, ExpiredCommandStopsFurtherMotion)

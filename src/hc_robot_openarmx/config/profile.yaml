@@ -80,6 +80,8 @@ teleop:
   bindings:
     - {group: left_arm, controller: left}
     - {group: right_arm, controller: right}
+  # Right-hand middle-finger grip is the shared clutch for both arm poses.
+  clutch_controller: right
   clutch_input: grip
   clutch_threshold: 0.5
   feedback_timeout_ms: 150
@@ -89,6 +91,18 @@ teleop:
     - [-1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
   gripper_input: trigger
+  # Right-hand index-finger trigger drives both tools in parallel.
+  tools:
+    - group: left_gripper
+      controller: right
+      joint_names: [openarmx_left_finger_joint1]
+      open: [0.0]
+      closed: [0.044]
+    - group: right_gripper
+      controller: right
+      joint_names: [openarmx_right_finger_joint1]
+      open: [0.0]
+      closed: [0.044]
 
 safety:
   enabled_on_start: false

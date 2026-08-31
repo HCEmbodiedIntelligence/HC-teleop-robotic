@@ -28,7 +28,9 @@ struct JointGroupConfig
 class SimJointModel
 {
 public:
-  explicit SimJointModel(std::vector<JointGroupConfig> groups);
+  explicit SimJointModel(
+    std::vector<JointGroupConfig> groups,
+    const std::unordered_map<std::string, double> & initial_positions = {});
 
   bool acceptCommand(
     const std::string & group_name,

@@ -88,21 +88,87 @@ motion:
   backend_executable: kdl_ik_backend_node
   feedback_topic: state/joints
   candidate_topic: control/joint_candidate
+  # Prevent a delayed Wi-Fi frame or a nearby IK branch from becoming a
+  # one-frame joint jump. Limits apply to KDL candidates before arbitration.
+  servo_velocity_scale: 0.45
+  servo_acceleration_limit: 20.0
+  servo_nominal_rate_hz: 60.0
+  servo_reset_timeout_ms: 250
+  servo_tracking_error_reset: 0.5
+
+# Initial simulation pose copied from HC_X1/src/hc_tj/config/hardware.yaml.
+# Values are radians and are keyed by joint name so the pose is independent of
+# the URDF/component declaration order. Hardware adapters use their own feedback
+# and do not consume this section.
+simulation:
+  # Simulation only: follow servo targets responsively while retaining the
+  # URDF velocity limits. Real hardware ignores this value.
+  max_velocity_scale: 0.8
+  initial_positions:
+    Joint1_L: 1.44
+    Joint2_L: -0.77
+    Joint3_L: -1.44
+    Joint4_L: -1.57
+    Joint5_L: 0.0
+    Joint6_L: 0.0
+    Joint7_L: 0.0
+    Joint1_R: -1.44
+    Joint2_R: -0.77
+    Joint3_R: 1.44
+    Joint4_R: -1.57
+    Joint5_R: 0.0
+    Joint6_R: 0.0
+    Joint7_R: 0.0
+    leg_1: 0.5
+    leg_2: 1.2
+    zhi: -0.6
 
 teleop:
   position_scale: 0.85
   bindings:
-    - {group: left_arm, controller: left}
-    - {group: right_arm, controller: right}
+    - group: left_arm
+      controller: left
+      # L_arm_0_Link is rotated -90 deg about torso X. Convert the shared
+      # robot-body motion basis into this arm's local KDL reference frame.
+      axis_mapping:
+        - [0.0, 0.0, 1.0]
+        - [0.0, -1.0, 0.0]
+        - [-1.0, 0.0, 0.0]
+    - group: right_arm
+      controller: right
+      # R_arm_0_Link is rotated +90 deg about torso X. This complementary
+      # basis makes both hands move in the same torso/world direction.
+      axis_mapping:
+        - [0.0, 0.0, 1.0]
+        - [0.0, 1.0, 0.0]
+        - [1.0, 0.0, 0.0]
+  # Right-hand middle-finger grip is the shared clutch for both arm poses.
+  clutch_controller: right
   clutch_input: grip
   clutch_threshold: 0.5
   feedback_timeout_ms: 200
   command_ttl_ms: 300
+  # Shared PICO-to-X1 body basis. Bindings above additionally convert this
+  # body motion into each mirrored arm base frame.
+  # PICO tracking: +X is left in the received frame and +Z points backward.
+  # X1 uses ROS convention (+X forward, +Y left, +Z up).
   axis_mapping:
     - [0.0, 0.0, 1.0]
-    - [-1.0, 0.0, 0.0]
+    - [1.0, 0.0, 0.0]
     - [0.0, 1.0, 0.0]
   gripper_input: trigger
+  # Right-hand index-finger trigger drives both tools in parallel.
+  tools:
+    - group: left_gripper
+      controller: right
+      joint_names: [L_ban]
+      open: [0.0]
+      closed: [1.5707]
+    - group: right_gripper
+      controller: right
+      joint_names: [R_ban]
+      open: [0.0]
+      closed: [1.5707]
 
 safety:
   enabled_on_start: false
@@ -117,5 +183,7 @@ vr:
   listen_host: 0.0.0.0
   pose_port: 5005
   discovery_port: 5006
-  pose_timeout_ms: 150
+  # Wi-Fi jitter must not churn the controller session. Command validity and
+  # the arbiter watchdog still stop motion after 300 ms without fresh input.
+  pose_timeout_ms: 600
   session_id: pico

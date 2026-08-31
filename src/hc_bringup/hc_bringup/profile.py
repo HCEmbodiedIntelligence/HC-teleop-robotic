@@ -27,6 +27,7 @@ TOP_LEVEL_KEYS = {
     "resources",
     "components",
     "motion",
+    "simulation",
     "teleop",
     "safety",
     "recording",
@@ -95,6 +96,20 @@ def _validate_relative_interface(value: Any, name: str) -> None:
     interface = _nonempty_string(value, name)
     if interface.startswith("/"):
         raise ProfileError(f"{name} must be relative so robot namespaces can be applied")
+
+
+def _validate_axis_mapping(value: Any, name: str) -> None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 3
+        or any(not isinstance(row, list) or len(row) != 3 for row in value)
+        or any(
+            not isinstance(item, (int, float)) or not math.isfinite(float(item))
+            for row in value
+            for item in row
+        )
+    ):
+        raise ProfileError(f"{name} must be a finite 3x3 matrix")
 
 
 def validate_profile(value: Any) -> dict[str, Any]:
@@ -189,7 +204,7 @@ def validate_profile(value: Any) -> dict[str, Any]:
                 )
     profile["components"] = components
 
-    for section in ("motion", "teleop", "safety", "recording", "vr"):
+    for section in ("motion", "simulation", "teleop", "safety", "recording", "vr"):
         profile[section] = dict(_mapping(profile.get(section, {}), section))
 
     teleop = profile["teleop"]
@@ -214,21 +229,58 @@ def validate_profile(value: Any) -> dict[str, Any]:
             raise ProfileError("teleop binding controller must be left or right")
         if group in seen_groups or controller in seen_controllers:
             raise ProfileError("teleop binding groups and controllers must be unique")
+        if binding.get("axis_mapping") is not None:
+            _validate_axis_mapping(
+                binding["axis_mapping"], f"teleop.bindings[{index}].axis_mapping"
+            )
         seen_groups.add(group)
         seen_controllers.add(controller)
+    clutch_controller = teleop.get("clutch_controller", "binding")
+    if clutch_controller not in {"binding", "left", "right"}:
+        raise ProfileError("teleop.clutch_controller must be binding, left, or right")
+    tools = teleop.get("tools", [])
+    if not isinstance(tools, list):
+        raise ProfileError("teleop.tools must be a list")
+    seen_tools: set[str] = set()
+    for index, raw_tool in enumerate(tools):
+        tool = _mapping(raw_tool, f"teleop.tools[{index}]")
+        group = _nonempty_string(tool.get("group"), f"teleop.tools[{index}].group")
+        component = component_by_id.get(group)
+        if (
+            component is None
+            or component["kind"] not in {"gripper", "dexterous_hand"}
+            or not component.get("enabled", True)
+        ):
+            raise ProfileError(f"teleop tool group '{group}' is not an enabled gripper or dexterous hand")
+        if group in seen_tools:
+            raise ProfileError(f"duplicate teleop tool group '{group}'")
+        seen_tools.add(group)
+        controller = _nonempty_string(
+            tool.get("controller", "right"), f"teleop.tools[{index}].controller"
+        )
+        if controller not in {"left", "right"}:
+            raise ProfileError("teleop tool controller must be left or right")
+        joints = _string_list(tool.get("joint_names"), f"teleop.tools[{index}].joint_names")
+        opened = tool.get("open")
+        closed = tool.get("closed")
+        if (
+            not isinstance(opened, list)
+            or not isinstance(closed, list)
+            or len(opened) != len(joints)
+            or len(closed) != len(joints)
+        ):
+            raise ProfileError("teleop tool open/closed positions must match joint_names")
+        for values, name in ((opened, "open"), (closed, "closed")):
+            if any(
+                not isinstance(value, (int, float)) or not math.isfinite(float(value))
+                for value in values
+            ):
+                raise ProfileError(f"teleop.tools[{index}].{name} must contain finite numbers")
+        if set(joints) != set(component["joint_names"]):
+            raise ProfileError(f"teleop tool '{group}' joint_names must match its component")
     mapping = teleop.get("axis_mapping")
     if mapping is not None:
-        if (
-            not isinstance(mapping, list)
-            or len(mapping) != 3
-            or any(not isinstance(row, list) or len(row) != 3 for row in mapping)
-            or any(
-                not isinstance(value, (int, float)) or not math.isfinite(float(value))
-                for row in mapping
-                for value in row
-            )
-        ):
-            raise ProfileError("teleop.axis_mapping must be a finite 3x3 matrix")
+        _validate_axis_mapping(mapping, "teleop.axis_mapping")
     for field in ("position_scale", "clutch_threshold"):
         if field in teleop and (
             not isinstance(teleop[field], (int, float))

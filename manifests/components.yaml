@@ -19,7 +19,7 @@ components:
     required: true
   - repository: hc-dashboard
     staged_path: src/hc_dashboard
-    required: false
+    required: true
   - repository: hc-dataset
     staged_path: src/hc_dataset
     required: false

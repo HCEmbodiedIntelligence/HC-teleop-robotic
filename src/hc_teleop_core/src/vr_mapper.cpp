@@ -104,6 +104,20 @@ double determinant(const Matrix & value)
          value[2] * (value[3] * value[7] - value[4] * value[6]);
 }
 
+void validate_axis_mapping(const Matrix & mapping)
+{
+  const Matrix gram = multiply(mapping, transpose(mapping));
+  for (std::size_t index = 0; index < gram.size(); ++index) {
+    const double expected = index == 0U || index == 4U || index == 8U ? 1.0 : 0.0;
+    if (!std::isfinite(gram[index]) || std::abs(gram[index] - expected) > 1e-6) {
+      throw std::invalid_argument("axis_mapping must be orthonormal");
+    }
+  }
+  if (std::abs(std::abs(determinant(mapping)) - 1.0) > 1e-6) {
+    throw std::invalid_argument("axis_mapping determinant must have magnitude one");
+  }
+}
+
 bool sequence_newer(std::uint32_t sequence, std::uint32_t previous)
 {
   const std::uint32_t difference = sequence - previous;
@@ -131,17 +145,11 @@ VrMapper::VrMapper(MapperConfig config)
       throw std::invalid_argument("VR bindings and frames must be non-empty and unique");
     }
     clutches_.emplace(binding.group_name, ClutchState{});
-  }
-  const Matrix gram = multiply(config_.axis_mapping, transpose(config_.axis_mapping));
-  for (std::size_t index = 0; index < gram.size(); ++index) {
-    const double expected = index == 0U || index == 4U || index == 8U ? 1.0 : 0.0;
-    if (!std::isfinite(gram[index]) || std::abs(gram[index] - expected) > 1e-6) {
-      throw std::invalid_argument("axis_mapping must be orthonormal");
+    if (binding.axis_mapping) {
+      validate_axis_mapping(*binding.axis_mapping);
     }
   }
-  if (std::abs(std::abs(determinant(config_.axis_mapping)) - 1.0) > 1e-6) {
-    throw std::invalid_argument("axis_mapping determinant must have magnitude one");
-  }
+  validate_axis_mapping(config_.axis_mapping);
 }
 
 bool VrMapper::updateFeedback(
@@ -184,11 +192,14 @@ std::vector<MappedTarget> VrMapper::map(const MapperFrame & frame, MapperTime no
   for (const auto & binding : config_.bindings) {
     auto & clutch = clutches_.at(binding.group_name);
     const auto & controller = binding.controller == ControllerSide::kLeft ? frame.left : frame.right;
+    const auto & clutch_controller = config_.clutch_controller ?
+      (*config_.clutch_controller == ControllerSide::kLeft ? frame.left : frame.right) : controller;
     const auto feedback = feedback_.find(binding.group_name);
     const bool feedback_fresh = feedback != feedback_.end() && feedback->second.received_at <= now &&
       now - feedback->second.received_at <= config_.feedback_max_age;
     const bool active = controller.tracked && validPose(controller.pose) &&
-      std::isfinite(controller.grip) && controller.grip >= config_.clutch_threshold &&
+      clutch_controller.tracked && std::isfinite(clutch_controller.grip) &&
+      clutch_controller.grip >= config_.clutch_threshold &&
       feedback_fresh;
     if (!active) {
       clutch = ClutchState{};
@@ -199,8 +210,10 @@ std::vector<MappedTarget> VrMapper::map(const MapperFrame & frame, MapperTime no
       clutch.controller_anchor = controller.pose;
       clutch.robot_anchor = feedback->second.pose;
     }
+    const auto & axis_mapping = binding.axis_mapping ?
+      *binding.axis_mapping : config_.axis_mapping;
     result.push_back({binding.group_name, binding.reference_frame, binding.tip_frame,
-      apply(controller.pose, clutch)});
+      apply(controller.pose, clutch, axis_mapping)});
   }
   return result;
 }
@@ -228,14 +241,16 @@ bool VrMapper::validPose(const MapperPose & pose) const
   return finite && norm > 1e-12;
 }
 
-MapperPose VrMapper::apply(const MapperPose & controller, const ClutchState & clutch) const
+MapperPose VrMapper::apply(
+  const MapperPose & controller, const ClutchState & clutch,
+  const std::array<double, 9> & axis_mapping) const
 {
   MapperPose result = clutch.robot_anchor;
   std::array<double, 3> delta{};
   for (std::size_t index = 0; index < 3U; ++index) {
     delta[index] = controller.position[index] - clutch.controller_anchor.position[index];
   }
-  const auto mapped_delta = multiply(config_.axis_mapping, delta);
+  const auto mapped_delta = multiply(axis_mapping, delta);
   for (std::size_t index = 0; index < 3U; ++index) {
     result.position[index] += config_.position_scale * mapped_delta[index];
   }
@@ -245,7 +260,7 @@ MapperPose VrMapper::apply(const MapperPose & controller, const ClutchState & cl
   const Matrix robot_anchor = quaternion_matrix(clutch.robot_anchor.orientation);
   const Matrix vr_delta = multiply(current, transpose(anchor));
   const Matrix mapped_rotation = multiply(
-    multiply(config_.axis_mapping, vr_delta), transpose(config_.axis_mapping));
+    multiply(axis_mapping, vr_delta), transpose(axis_mapping));
   result.orientation = matrix_quaternion(multiply(mapped_rotation, robot_anchor));
   return result;
 }

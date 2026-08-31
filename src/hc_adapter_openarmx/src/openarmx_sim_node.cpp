@@ -139,9 +139,10 @@ public:
     model_ = std::make_unique<SimJointModel>(std::move(groups));
 
     auto qos = rclcpp::SensorDataQoS().keep_last(1);
+    auto command_qos = rclcpp::SensorDataQoS().keep_last(16);
     command_subscription_ =
       create_subscription<hc_teleop_interfaces::msg::JointCommand>(
-      declare_parameter<std::string>("command_topic", "control/joint_command"), qos,
+      declare_parameter<std::string>("command_topic", "control/joint_command"), command_qos,
       [this](hc_teleop_interfaces::msg::JointCommand::ConstSharedPtr message) {
         onCommand(*message);
       });

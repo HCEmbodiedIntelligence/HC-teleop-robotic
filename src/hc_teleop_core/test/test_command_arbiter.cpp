@@ -108,6 +108,53 @@ TEST(CommandArbiter, KeepsIndependentLatestCommandPerGroup)
   EXPECT_EQ(commands[1].positions[0], -0.3);
 }
 
+TEST(CommandArbiter, SameOwnerRenewalPreservesActiveCommandsAndSequenceHistory)
+{
+  const SteadyTime now{};
+  CommandArbiter arbiter(150ms);
+  arbiter.setEnabled(true, now);
+  const auto initial_lease = arbiter.acquire("vr", "session-a", 10, 1s, now);
+  ASSERT_TRUE(initial_lease.granted);
+  std::string reason;
+  ASSERT_TRUE(arbiter.submit(candidate(now), now, reason)) << reason;
+
+  const auto renewed = arbiter.acquire("vr", "session-a", 10, 1s, now + 50ms);
+  ASSERT_TRUE(renewed.granted);
+  EXPECT_EQ(renewed.reason, "renewed");
+  EXPECT_EQ(renewed.lease_id, initial_lease.lease_id);
+  EXPECT_EQ(renewed.expires_at, now + 1050ms);
+  EXPECT_EQ(arbiter.commands(now + 60ms).size(), 1U);
+  EXPECT_EQ(arbiter.status(now + 60ms).code, SafetyCode::kActive);
+
+  EXPECT_FALSE(arbiter.submit(candidate(now, 1U), now + 60ms, reason));
+  EXPECT_EQ(reason, "candidate sequence is stale or duplicated");
+}
+
+TEST(CommandArbiter, SameSourceSessionRolloverDoesNotWaitForOldLease)
+{
+  const SteadyTime now{};
+  CommandArbiter arbiter(150ms);
+  arbiter.setEnabled(true, now);
+  const auto old_lease = arbiter.acquire("vr", "session-a", 10, 1s, now);
+  ASSERT_TRUE(old_lease.granted);
+  std::string reason;
+  ASSERT_TRUE(arbiter.submit(candidate(now), now, reason)) << reason;
+
+  const auto new_lease = arbiter.acquire("vr", "session-b", 10, 1s, now + 50ms);
+  ASSERT_TRUE(new_lease.granted);
+  EXPECT_NE(new_lease.lease_id, old_lease.lease_id);
+  EXPECT_EQ(arbiter.status(now + 50ms).active_session, "session-b");
+  EXPECT_TRUE(arbiter.commands(now + 50ms).empty());
+
+  auto old_session = candidate(now, 2U);
+  EXPECT_FALSE(arbiter.submit(old_session, now + 51ms, reason));
+  EXPECT_EQ(reason, "candidate does not own the active lease");
+
+  auto new_session = candidate(now, 1U);
+  new_session.session_id = "session-b";
+  EXPECT_TRUE(arbiter.submit(new_session, now + 51ms, reason)) << reason;
+}
+
 TEST(CommandArbiter, ExpiresOneGroupWithoutDroppingFreshGroups)
 {
   const SteadyTime now{};

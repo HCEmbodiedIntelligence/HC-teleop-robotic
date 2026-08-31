@@ -29,13 +29,24 @@ def _arms(profile):
     ]
 
 
-def _group_parameters(arms):
-    parameters = {"group_names": [str(arm["id"]) for arm in arms]}
-    for arm in arms:
-        group = str(arm["id"])
-        parameters[f"{group}.joint_names"] = list(arm["joint_names"])
-        parameters[f"{group}.base_frame"] = str(arm["frames"]["base"])
-        parameters[f"{group}.tip_frame"] = str(arm["frames"]["tip"])
+def _sim_components(profile):
+    """All kinematic joint groups that the simulator must accept commands for."""
+    return [
+        component for component in profile.components
+        if component.get("kind") in {"arm", "gripper", "dexterous_hand", "waist"}
+        and component.get("enabled", True)
+        and component.get("frames", {}).get("base")
+        and component.get("frames", {}).get("tip")
+    ]
+
+
+def _group_parameters(components):
+    parameters = {"group_names": [str(component["id"]) for component in components]}
+    for component in components:
+        group = str(component["id"])
+        parameters[f"{group}.joint_names"] = list(component["joint_names"])
+        parameters[f"{group}.base_frame"] = str(component["frames"]["base"])
+        parameters[f"{group}.tip_frame"] = str(component["frames"]["tip"])
     return parameters
 
 
@@ -89,7 +100,8 @@ def _setup(context: LaunchContext):
     if fastdds_cfg.is_file() and "FASTRTPS_DEFAULT_PROFILES_FILE" not in os.environ:
         os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = str(fastdds_cfg)
 
-    profile = load_profile(resolve_profile(LaunchConfiguration("profile").perform(context)))
+    profile_argument = LaunchConfiguration("profile").perform(context)
+    profile = load_profile(resolve_profile(profile_argument))
     robot_id = LaunchConfiguration("robot_id").perform(context).strip() or profile.robot_id
     namespace = f"robots/{robot_id}"
     mode = LaunchConfiguration("mode").perform(context).strip().lower()
@@ -117,6 +129,16 @@ def _setup(context: LaunchContext):
     start_rsp = _auto_bool(
         LaunchConfiguration("start_robot_state_publisher").perform(context), mode == "sim"
     )
+    start_dashboard = _auto_bool(
+        LaunchConfiguration("start_dashboard").perform(context), True
+    )
+    dashboard_host = LaunchConfiguration("dashboard_host").perform(context).strip()
+    try:
+        dashboard_port = int(LaunchConfiguration("dashboard_port").perform(context))
+    except ValueError as error:
+        raise ValueError("dashboard_port must be an integer") from error
+    if not dashboard_host or not 1 <= dashboard_port <= 65535:
+        raise ValueError("dashboard_host/dashboard_port are invalid")
 
     arms = _arms(profile)
     if not arms:
@@ -127,6 +149,8 @@ def _setup(context: LaunchContext):
     vr = profile.value.get("vr", {})
     safety = profile.value.get("safety", {})
     teleop = profile.value.get("teleop", {})
+    motion = profile.value.get("motion", {})
+    simulation = profile.value.get("simulation", {})
     command_topic = "shadow/control/joint_command" if shadow else "control/joint_command"
 
     gateway_parameters = {
@@ -159,20 +183,43 @@ def _setup(context: LaunchContext):
     axis_mapping = teleop.get(
         "axis_mapping", [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     )
+    binding_axis_mappings = [
+        float(value)
+        for item in bindings
+        for row in item.get("axis_mapping", axis_mapping)
+        for value in row
+    ]
     mapper_parameters = {
         "group_names": [str(item["group"]) for item in bindings],
         "controllers": [str(item["controller"]) for item in bindings],
+        # The mapper's candidate source must match the source that the
+        # auto-lease node acquires.  Profiles may override the default
+        # (currently ``pico``); leaving the mapper's node default at ``vr``
+        # causes every otherwise-valid candidate to be rejected by the arbiter.
+        "source_id": str(vr.get("session_id", "vr")),
         "base_frames": [arm_by_id[str(item["group"])] ["frames"]["base"] for item in bindings],
         "tip_frames": [arm_by_id[str(item["group"])] ["frames"]["tip"] for item in bindings],
         "axis_mapping": [float(value) for row in axis_mapping for value in row],
+        "binding_axis_mappings": binding_axis_mappings,
         "position_scale": float(teleop.get("position_scale", 1.0)),
         "clutch_threshold": float(teleop.get("clutch_threshold", 0.5)),
+        "clutch_controller": str(teleop.get("clutch_controller", "binding")),
         "feedback_timeout_sec": float(teleop.get("feedback_timeout_ms", 200)) / 1000.0,
         "command_ttl_sec": float(teleop.get("command_ttl_ms", 100)) / 1000.0,
         "vr_topic": "input/vr_frame",
         "cartesian_state_topic": "state/cartesian",
         "target_topic": "teleop/cartesian_targets",
+        "candidate_topic": "control/joint_candidate",
     }
+    tools = teleop.get("tools", [])
+    mapper_parameters.update({
+        "tool_group_names": [str(item["group"]) for item in tools],
+        "tool_controllers": [str(item.get("controller", "right")) for item in tools],
+        "tool_joint_counts": [len(item["joint_names"]) for item in tools],
+        "tool_joint_names": [name for item in tools for name in item["joint_names"]],
+        "tool_open_positions": [float(value) for item in tools for value in item["open"]],
+        "tool_closed_positions": [float(value) for item in tools for value in item["closed"]],
+    })
     kdl_parameters = {
         **group_parameters,
         "urdf_path": urdf_path,
@@ -180,16 +227,31 @@ def _setup(context: LaunchContext):
         "joint_state_topic": "state/joints",
         "candidate_topic": "motion/backend/joint_candidate",
         "feedback_timeout_sec": float(teleop.get("feedback_timeout_ms", 200)) / 1000.0,
+        "command_velocity_scale": float(motion.get("servo_velocity_scale", 0.5)),
+        "command_acceleration_limit": float(motion.get("servo_acceleration_limit", 20.0)),
+        "command_nominal_rate_hz": float(motion.get("servo_nominal_rate_hz", 60.0)),
+        "command_reset_timeout_sec": float(motion.get("servo_reset_timeout_ms", 250)) / 1000.0,
+        "command_tracking_error_reset": float(motion.get("servo_tracking_error_reset", 0.5)),
     }
+    sim_group_parameters = _group_parameters(_sim_components(profile))
     sim_parameters = {
-        **group_parameters,
+        **sim_group_parameters,
         "urdf_path": urdf_path,
         "command_topic": command_topic,
         "joint_state_topic": "state/joints",
         "cartesian_state_topic": "state/cartesian",
-        "publish_rate_hz": 100.0,
-        "max_velocity_scale": 0.2,
+        "publish_rate_hz": float(simulation.get("publish_rate_hz", 100.0)),
+        "max_velocity_scale": float(simulation.get("max_velocity_scale", 0.2)),
+        "fallback_max_velocity": float(simulation.get("fallback_max_velocity", 1.0)),
     }
+    initial_positions = simulation.get("initial_positions", {})
+    if not isinstance(initial_positions, dict):
+        raise ValueError("simulation.initial_positions must be a mapping of joint name to radians")
+    # Do not pass empty YAML sequences through launch_ros: Humble converts an
+    # empty list to an empty tuple and rejects it as a scalar parameter.
+    if initial_positions:
+        sim_parameters["initial_joint_names"] = [str(name) for name in initial_positions]
+        sim_parameters["initial_positions"] = [float(value) for value in initial_positions.values()]
     lease_parameters = {
         "enabled": bool(start_lease),
         "source_id": str(vr.get("session_id", "vr")),
@@ -204,6 +266,22 @@ def _setup(context: LaunchContext):
         sim_package, sim_plugin, sim_executable, sim_node_name = _sim_adapter(arms)
 
     actions = []
+    if start_dashboard:
+        actions.append(
+            _node(
+                "hc_dashboard",
+                "dashboard",
+                "dashboard",
+                namespace,
+                {
+                    "robot_id": robot_id,
+                    "profile": profile_argument,
+                    "mode": mode,
+                    "host": dashboard_host,
+                    "port": dashboard_port,
+                },
+            )
+        )
     if start_rsp:
         actions.append(
             Node(
@@ -280,6 +358,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("start_sim_adapter", default_value="auto"),
             DeclareLaunchArgument("start_auto_lease", default_value="auto"),
             DeclareLaunchArgument("start_robot_state_publisher", default_value="auto"),
+            DeclareLaunchArgument("start_dashboard", default_value="true"),
+            DeclareLaunchArgument("dashboard_host", default_value="0.0.0.0"),
+            DeclareLaunchArgument("dashboard_port", default_value="7876"),
             DeclareLaunchArgument("shadow", default_value="auto", description="auto follows mode:=shadow"),
             OpaqueFunction(function=_setup),
         ]

@@ -28,6 +28,10 @@ struct ArmBinding
   ControllerSide controller{ControllerSide::kLeft};
   std::string reference_frame;
   std::string tip_frame;
+  // Optional VR-to-reference-frame basis. When unset, MapperConfig's global
+  // basis is used. Mirrored arm base frames require distinct bases even when
+  // both controllers should move in the same robot-body direction.
+  std::optional<std::array<double, 9>> axis_mapping;
 };
 
 struct MapperConfig
@@ -37,6 +41,9 @@ struct MapperConfig
   double position_scale{1.0};
   double clutch_threshold{0.5};
   std::chrono::milliseconds feedback_max_age{200};
+  // When set, all arm bindings use this controller's grip as the clutch.
+  // An unset value preserves the legacy per-binding behavior.
+  std::optional<ControllerSide> clutch_controller;
 };
 
 struct ControllerFrame
@@ -44,6 +51,7 @@ struct ControllerFrame
   bool tracked{false};
   double grip{0.0};
   MapperPose pose;
+  double trigger{0.0};
 };
 
 struct MapperFrame
@@ -89,7 +97,8 @@ private:
 
   [[nodiscard]] bool validPose(const MapperPose & pose) const;
   [[nodiscard]] MapperPose apply(
-    const MapperPose & controller, const ClutchState & clutch) const;
+    const MapperPose & controller, const ClutchState & clutch,
+    const std::array<double, 9> & axis_mapping) const;
 
   MapperConfig config_;
   std::map<std::string, Feedback> feedback_;

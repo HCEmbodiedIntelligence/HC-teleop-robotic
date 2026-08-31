@@ -79,6 +79,68 @@ TEST(VrMapper, MapsRelativeOrientationThroughConfiguredBasis)
   EXPECT_NEAR(mapped[0].pose.orientation[3], std::sqrt(0.5), 1e-9);
 }
 
+TEST(VrMapper, UsesConfiguredRightGripAsSharedArmClutch)
+{
+  auto config = openarm_config();
+  config.clutch_controller = hc_teleop_core::ControllerSide::kRight;
+  hc_teleop_core::VrMapper mapper(config);
+  const hc_teleop_core::MapperTime now{};
+  std::string reason;
+  ASSERT_TRUE(mapper.updateFeedback("left_arm", pose(0.1, 0.0, 0.0), now, reason));
+  ASSERT_TRUE(mapper.updateFeedback("right_arm", pose(-0.1, 0.0, 0.0), now, reason));
+  hc_teleop_core::MapperFrame frame;
+  frame.session_id = "pico/shared-clutch";
+  frame.sequence = 1U;
+  frame.left = {true, 0.0, pose(0.0, 0.0, 0.0)};
+  frame.right = {true, 0.8, pose(0.0, 0.0, 0.0)};
+  EXPECT_EQ(mapper.map(frame, now).size(), 2U);
+
+  frame.sequence = 2U;
+  frame.right.grip = 0.0;
+  EXPECT_TRUE(mapper.map(frame, now + 1ms).empty());
+}
+
+TEST(VrMapper, AppliesPerBindingBasesForMirroredArmReferenceFrames)
+{
+  auto config = openarm_config();
+  config.clutch_controller = hc_teleop_core::ControllerSide::kRight;
+  config.bindings[0].axis_mapping = std::array<double, 9>{
+    0.0, 0.0, 1.0,
+    -1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0};
+  config.bindings[1].axis_mapping = std::array<double, 9>{
+    0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0,
+    0.0, -1.0, 0.0};
+  hc_teleop_core::VrMapper mapper(config);
+  const hc_teleop_core::MapperTime now{};
+  std::string reason;
+  ASSERT_TRUE(mapper.updateFeedback("left_arm", pose(0.0, 0.0, 0.0), now, reason));
+  ASSERT_TRUE(mapper.updateFeedback("right_arm", pose(0.0, 0.0, 0.0), now, reason));
+
+  hc_teleop_core::MapperFrame frame;
+  frame.session_id = "pico/mirrored";
+  frame.sequence = 1U;
+  frame.left = {true, 0.0, pose(0.0, 0.0, 0.0)};
+  frame.right = {true, 0.8, pose(0.0, 0.0, 0.0)};
+  ASSERT_EQ(mapper.map(frame, now).size(), 2U);
+
+  frame.sequence = 2U;
+  frame.left.pose.position = {0.1, 0.2, 0.3};
+  frame.right.pose.position = {0.1, 0.2, 0.3};
+  const auto mapped = mapper.map(frame, now + 1ms);
+  ASSERT_EQ(mapped.size(), 2U);
+  // Local positions differ because the two bases are +/-90 degrees about X.
+  EXPECT_NEAR(mapped[0].pose.position[0], 0.24, 1e-12);
+  EXPECT_NEAR(mapped[0].pose.position[1], -0.08, 1e-12);
+  EXPECT_NEAR(mapped[0].pose.position[2], 0.16, 1e-12);
+  EXPECT_NEAR(mapped[1].pose.position[0], 0.24, 1e-12);
+  EXPECT_NEAR(mapped[1].pose.position[1], 0.08, 1e-12);
+  EXPECT_NEAR(mapped[1].pose.position[2], -0.16, 1e-12);
+  // Applying each URDF base rotation gives the same torso-frame displacement:
+  // +X=0.24, +Y=0.16, +Z=0.08 for both arms.
+}
+
 TEST(VrMapper, StopsOnStaleFeedbackTrackingLossAndDuplicateSequence)
 {
   hc_teleop_core::VrMapper mapper(openarm_config());
@@ -103,6 +165,18 @@ TEST(VrMapper, RejectsInvalidMappingAndFeedback)
 {
   auto config = openarm_config();
   config.axis_mapping[0] = 2.0;
+  EXPECT_THROW(
+    {
+      const hc_teleop_core::VrMapper invalid_mapper(config);
+      (void)invalid_mapper;
+    },
+    std::invalid_argument);
+
+  config = openarm_config();
+  config.bindings[0].axis_mapping = std::array<double, 9>{
+    2.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0};
   EXPECT_THROW(
     {
       const hc_teleop_core::VrMapper invalid_mapper(config);

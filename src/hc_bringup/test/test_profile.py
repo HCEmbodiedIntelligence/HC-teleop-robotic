@@ -123,3 +123,18 @@ def test_validates_vr_bindings_and_axis_mapping():
     value["teleop"] = {"axis_mapping": [[1, 0], [0, 1]]}
     with pytest.raises(ProfileError, match="3x3"):
         validate_profile(value)
+
+    value = minimal_profile()
+    value["teleop"] = {
+        "bindings": [
+            {
+                "group": "left_arm",
+                "controller": "left",
+                "axis_mapping": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            }
+        ]
+    }
+    assert validate_profile(value)["teleop"]["bindings"][0]["axis_mapping"][0] == [1, 0, 0]
+    value["teleop"]["bindings"][0]["axis_mapping"] = [[1, 0], [0, 1]]
+    with pytest.raises(ProfileError, match=r"bindings\[0\]\.axis_mapping.*3x3"):
+        validate_profile(value)

@@ -75,8 +75,26 @@ AcquireResult CommandArbiter::acquire(
     return result;
   }
   if (leaseActive(now)) {
-    const bool same_owner = lease_->source_id == source_id && lease_->session_id == session_id;
-    if (!same_owner && priority <= lease_->priority) {
+    const bool same_source = lease_->source_id == source_id;
+    const bool same_owner = same_source && lease_->session_id == session_id;
+    if (same_owner) {
+      // A renewal from the current owner must not interrupt the command
+      // stream.  Replacing the lease used to clear latest_by_group_ every
+      // time AutoLease renewed, producing a short hold about every 700 ms.
+      lease_->priority = priority;
+      lease_->expires_at = now + duration;
+      result.granted = true;
+      result.lease_id = lease_->lease_id;
+      result.expires_at = lease_->expires_at;
+      result.reason = "renewed";
+      return result;
+    }
+    // A transport reconnect may create a new session for the same trusted
+    // source.  Waiting for the old lease to expire introduces an avoidable
+    // freeze (up to the full lease duration) after a brief Wi-Fi outage.  A
+    // same-source session rollover replaces the old lease and clears its
+    // commands immediately; unrelated sources still require higher priority.
+    if (!same_source && priority <= lease_->priority) {
       result.reason = "an equal or higher-priority source owns the control lease";
       return result;
     }

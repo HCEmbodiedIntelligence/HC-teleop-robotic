@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>HC Teleop · Operator Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">HC</span>
+      <div><strong>Teleop</strong><small>Operator Console</small></div>
+    </div>
+    <div class="robot-card">
+      <span class="robot-avatar" id="robot-avatar">X1</span>
+      <div><strong id="robot-name">等待运行时</strong><small id="profile-label">—</small></div>
+    </div>
+    <nav aria-label="主导航">
+      <a href="#overview" data-page="overview" class="active"><span class="nav-icon">⌁</span><span>运行总览<small>链路与 VR 输入</small></span></a>
+      <a href="#joints" data-page="joints"><span class="nav-icon">≋</span><span>关节监控<small>命令、反馈与误差</small></span></a>
+      <a href="#diagnostics" data-page="diagnostics"><span class="nav-icon">◇</span><span>链路诊断<small>频率、延迟与数据</small></span></a>
+    </nav>
+    <div class="sidebar-note"><span>COMMAND OWNERSHIP</span><p>最终执行命令只由<br><b>Command Arbiter</b> 发布</p></div>
+    <div class="connection offline" id="socket-state"><i></i><span>正在连接实时状态</span></div>
+  </aside>
+
+  <main class="workspace">
+    <header class="topbar">
+      <div><p class="eyebrow">ROBOT CONTROL MONITOR / <span id="mode-label">RUNTIME</span></p><h1 id="page-title">运行总览</h1></div>
+      <div class="header-actions">
+        <span id="safety-state" class="status-pill unknown"><i></i>UNKNOWN</span>
+        <button id="enable-button" class="primary">启用控制</button>
+        <button id="disable-button">停止控制</button>
+        <button id="reset-button" class="danger">故障复位</button>
+      </div>
+    </header>
+
+    <section class="page" id="overview">
+      <article class="safety-banner panel" id="safety-banner">
+        <div class="safety-symbol">SAFE</div>
+        <div class="safety-copy"><span class="section-label">安全仲裁器</span><strong id="safety-reason">等待安全状态</strong><small id="session-label">尚无控制会话</small></div>
+        <dl class="safety-facts">
+          <div><dt>控制状态</dt><dd id="safety-enabled">关闭</dd></div>
+          <div><dt>故障锁存</dt><dd id="fault-state">正常</dd></div>
+          <div><dt>运行时间</dt><dd id="uptime">0 s</dd></div>
+        </dl>
+      </article>
+
+      <section class="metric-grid" id="metric-grid"></section>
+
+      <section class="overview-grid">
+        <article class="panel pipeline-panel">
+          <div class="panel-title"><div><span class="section-label">CONTROL PIPELINE</span><h2>遥操作控制链路</h2><p>从头显输入到机器人反馈的逐级状态</p></div><span class="panel-badge" id="pipeline-badge">等待数据</span></div>
+          <div class="pipeline" id="pipeline">
+            <div class="pipeline-stage" data-stage="vr"><i>01</i><div><strong>VR Gateway</strong><small>UDP → VrFrame</small></div><b>等待</b></div><span class="pipeline-link"></span>
+            <div class="pipeline-stage" data-stage="mapper"><i>02</i><div><strong>VR Mapper</strong><small>Clutch / Target</small></div><b>等待</b></div><span class="pipeline-link"></span>
+            <div class="pipeline-stage" data-stage="ik"><i>03</i><div><strong>Motion IK</strong><small>Joint Candidate</small></div><b>等待</b></div><span class="pipeline-link"></span>
+            <div class="pipeline-stage" data-stage="arbiter"><i>04</i><div><strong>Arbiter</strong><small>Lease / Watchdog</small></div><b>等待</b></div><span class="pipeline-link"></span>
+            <div class="pipeline-stage" data-stage="robot"><i>05</i><div><strong>Robot</strong><small>Joint Feedback</small></div><b>等待</b></div>
+          </div>
+          <div class="pipeline-foot"><span>输入源 <b id="pipeline-source">—</b></span><span>控制会话 <b id="pipeline-session">—</b></span><span>最终命令组 <b id="pipeline-groups">0</b></span></div>
+        </article>
+
+        <article class="panel vr-panel">
+          <div class="panel-title"><div><span class="section-label">VR INPUT</span><h2>PICO 控制器</h2><p id="vr-source">头显尚未连接</p></div><span class="panel-badge" id="vr-protocol">协议 —</span></div>
+          <div class="tracking-row">
+            <span id="track-head" class="tracking"><i></i>头显<small id="head-confidence">0%</small></span>
+            <span id="track-left" class="tracking"><i></i>左手柄<small id="left-confidence">0%</small></span>
+            <span id="track-right" class="tracking"><i></i>右手柄<small id="right-confidence">0%</small></span>
+          </div>
+          <div class="controller-grid">
+            <div class="controller-card">
+              <div class="controller-heading"><strong>LEFT</strong><span id="left-buttons">无按键</span></div>
+              <label>中指 Grip <b id="left-grip-value">0.000</b></label><div class="meter"><i id="left-grip"></i></div>
+              <label>食指 Trigger <b id="left-trigger-value">0.000</b></label><div class="meter blue"><i id="left-trigger"></i></div>
+              <div class="axis-row"><span>主摇杆 <b id="left-axis">0.000, 0.000</b></span><span>位置 <b id="left-position">—</b></span></div>
+            </div>
+            <div class="controller-card">
+              <div class="controller-heading"><strong>RIGHT</strong><span id="right-buttons">无按键</span></div>
+              <label>中指 Grip <b id="right-grip-value">0.000</b></label><div class="meter"><i id="right-grip"></i></div>
+              <label>食指 Trigger <b id="right-trigger-value">0.000</b></label><div class="meter blue"><i id="right-trigger"></i></div>
+              <div class="axis-row"><span>主摇杆 <b id="right-axis">0.000, 0.000</b></span><span>位置 <b id="right-position">—</b></span></div>
+            </div>
+          </div>
+          <div class="detail-strip"><span>SEQ <b id="vr-sequence">—</b></span><span>LOSS <b id="vr-loss">—</b></span><span>RATE <b id="vr-rate">0.0 Hz</b></span></div>
+        </article>
+
+        <article class="panel command-panel">
+          <div class="panel-title"><div><span class="section-label">AUTHORITATIVE OUTPUT</span><h2>最终执行命令</h2><p>仅显示安全仲裁器实际发布的关节命令</p></div><span class="panel-badge" id="command-count">0 组</span></div>
+          <div id="command-groups" class="command-groups empty-state">尚无最终命令</div>
+        </article>
+      </section>
+    </section>
+
+    <section class="page hidden" id="joints">
+      <article class="panel joint-monitor-panel">
+        <div class="panel-title joint-title"><div><span class="section-label">JOINT MONITOR</span><h2>关节命令与反馈</h2><p>最终命令和仿真/真机反馈对齐，角度同时显示 rad / °</p></div><div class="joint-tools"><input id="joint-filter" type="search" placeholder="筛选关节名称"><span class="panel-badge" id="joint-count">0 个关节</span></div></div>
+        <div class="table-wrap joint-table-wrap"><table class="data-table"><thead><tr><th>关节名称</th><th>命令组</th><th>命令 rad</th><th>命令 °</th><th>反馈 rad</th><th>反馈 °</th><th>误差 °</th></tr></thead><tbody id="joint-rows"><tr><td colspan="7" class="empty-cell">等待 JointState 消息…</td></tr></tbody></table></div>
+      </article>
+    </section>
+
+    <section class="page hidden" id="diagnostics">
+      <section class="diagnostic-grid">
+        <article class="panel stream-panel">
+          <div class="panel-title"><div><span class="section-label">STREAM HEALTH</span><h2>实时数据链路</h2><p>2 秒滑动窗口统计，红色表示消息已超时</p></div></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>数据流</th><th>状态</th><th>频率</th><th>最新消息</th><th>最大间隔</th><th>累计</th></tr></thead><tbody id="stream-rows"></tbody></table></div>
+        </article>
+        <article class="panel runtime-panel">
+          <div class="panel-title"><div><span class="section-label">RUNTIME</span><h2>运行信息</h2><p>当前 Dashboard 连接的机器人命名空间</p></div></div>
+          <dl class="runtime-list"><div><dt>机器人 ID</dt><dd id="runtime-robot">—</dd></div><div><dt>Profile</dt><dd id="runtime-profile">—</dd></div><div><dt>运行模式</dt><dd id="runtime-mode">—</dd></div><div><dt>ROS Namespace</dt><dd id="runtime-namespace">—</dd></div><div><dt>WebSocket</dt><dd id="runtime-websocket">未连接</dd></div><div><dt>数据协议</dt><dd>hc-dashboard/v1</dd></div></dl>
+        </article>
+        <article class="panel target-panel">
+          <div class="panel-title"><div><span class="section-label">CARTESIAN TARGET</span><h2>笛卡尔目标</h2><p>VR Mapper 发往 Motion 后端的强类型目标</p></div><span class="panel-badge" id="target-sequence">SEQ —</span></div>
+          <div id="target-groups" class="target-groups empty-state">尚无笛卡尔目标</div>
+        </article>
+        <article class="panel backend-panel">
+          <div class="panel-title"><div><span class="section-label">MOTION BACKEND</span><h2>IK 候选命令</h2><p>Motion 后端候选值，尚未经过安全仲裁</p></div></div>
+          <div id="backend-groups" class="backend-groups empty-state">尚无 IK 候选命令</div>
+        </article>
+      </section>
+    </section>
+
+    <footer><span>HC Teleop / decomposed runtime</span><span>Dashboard 不拥有执行器命令发布权</span></footer>
+  </main>
+
+  <dialog id="confirm-dialog"><form method="dialog"><div class="dialog-symbol" id="dialog-symbol">!</div><h2 id="dialog-title">确认操作</h2><p id="dialog-message">请确认当前机器人周围安全。</p><div class="dialog-actions"><button value="cancel">取消</button><button value="confirm" id="dialog-confirm" class="primary">确认</button></div></form></dialog>
+  <div id="toast" role="status"></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

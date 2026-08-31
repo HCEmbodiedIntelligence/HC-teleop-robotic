@@ -13,6 +13,7 @@
 #include <Eigen/Dense>
 #include "builtin_interfaces/msg/time.hpp"
 #include "geometry_msgs/msg/pose.hpp"
+#include "hc_motion_backend_kdl/joint_rate_limiter.hpp"
 #include "hc_teleop_interfaces/msg/cartesian_target_array.hpp"
 #include "hc_teleop_interfaces/msg/joint_command_candidate.hpp"
 #include "kdl/chainfksolverpos_recursive.hpp"
@@ -74,6 +75,7 @@ struct GroupSolver
   double damping{0.02};
   double max_step{0.2};
   double orientation_weight{0.5};
+  std::unique_ptr<JointRateLimiter> rate_limiter;
 };
 
 bool solveDLS(
@@ -235,6 +237,26 @@ public:
       positiveFinite(declare_parameter<double>("ik_max_iterations", 50.0),
       "ik_max_iterations"));
     const auto eps = positiveFinite(declare_parameter<double>("ik_eps", 1e-4), "ik_eps");
+    command_velocity_scale_ = positiveFinite(
+      declare_parameter<double>("command_velocity_scale", 0.5), "command_velocity_scale");
+    if (command_velocity_scale_ > 1.0) {
+      throw std::invalid_argument("command_velocity_scale must not exceed one");
+    }
+    command_acceleration_limit_ = positiveFinite(
+      declare_parameter<double>("command_acceleration_limit", 20.0),
+      "command_acceleration_limit");
+    command_nominal_period_ = std::chrono::duration<double>(1.0 / positiveFinite(
+        declare_parameter<double>("command_nominal_rate_hz", 60.0),
+        "command_nominal_rate_hz"));
+    command_reset_timeout_ = std::chrono::duration<double>(positiveFinite(
+        declare_parameter<double>("command_reset_timeout_sec", 0.25),
+        "command_reset_timeout_sec"));
+    command_tracking_error_reset_ = positiveFinite(
+      declare_parameter<double>("command_tracking_error_reset", 0.5),
+      "command_tracking_error_reset");
+    if (command_reset_timeout_ <= command_nominal_period_) {
+      throw std::invalid_argument("command_reset_timeout_sec must exceed one nominal period");
+    }
 
     urdf::Model robot_model;
     if (!robot_model.initFile(urdf_path)) {
@@ -262,7 +284,8 @@ public:
       });
     candidate_publisher_ =
       create_publisher<hc_teleop_interfaces::msg::JointCommandCandidate>(
-      declare_parameter<std::string>("candidate_topic", "motion/backend/joint_candidate"), qos);
+      declare_parameter<std::string>("candidate_topic", "motion/backend/joint_candidate"),
+      rclcpp::SensorDataQoS().keep_last(16));
 
     RCLCPP_INFO(get_logger(), "KDL IK backend ready: groups=%zu urdf=%s",
       solvers_.size(), urdf_path.c_str());
@@ -291,6 +314,8 @@ private:
 
     solver.lower = KDL::JntArray(solver.joint_names.size());
     solver.upper = KDL::JntArray(solver.joint_names.size());
+    std::vector<double> velocity_limits;
+    velocity_limits.reserve(solver.joint_names.size());
     for (std::size_t index = 0; index < solver.joint_names.size(); ++index) {
       const auto joint = robot_model.getJoint(solver.joint_names[index]);
       if (!joint || !joint->limits) {
@@ -298,6 +323,11 @@ private:
       }
       solver.lower(index) = joint->limits->lower;
       solver.upper(index) = joint->limits->upper;
+      if (!std::isfinite(joint->limits->velocity) || joint->limits->velocity <= 0.0) {
+        throw std::invalid_argument("URDF has no positive velocity limit for joint: " +
+                solver.joint_names[index]);
+      }
+      velocity_limits.push_back(joint->limits->velocity);
     }
 
     solver.chain = std::make_shared<KDL::Chain>();
@@ -314,6 +344,9 @@ private:
     solver.jac_solver = std::make_unique<KDL::ChainJntToJacSolver>(*solver.chain);
     solver.max_iterations = max_iterations;
     solver.eps = eps;
+    solver.rate_limiter = std::make_unique<JointRateLimiter>(
+      std::move(velocity_limits), command_velocity_scale_, command_acceleration_limit_,
+      command_nominal_period_, command_reset_timeout_, command_tracking_error_reset_);
     solvers_.emplace(group_name, std::move(solver));
   }
 
@@ -350,7 +383,7 @@ private:
           target.group_name.c_str());
         continue;
       }
-      const auto & solver = solver_it->second;
+      auto & solver = solver_it->second;
       if (target.reference_frame != solver.reference_frame || target.tip_frame != solver.tip_frame) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 2000, "ignored target for %s: frame mismatch",
@@ -364,7 +397,7 @@ private:
   void solveAndPublish(
     const hc_teleop_interfaces::msg::CartesianTargetArray & envelope,
     const hc_teleop_interfaces::msg::CartesianTarget & target,
-    const GroupSolver & solver)
+    GroupSolver & solver)
   {
     if (!finitePose(target.pose)) {
       RCLCPP_WARN_THROTTLE(
@@ -374,6 +407,7 @@ private:
     }
 
     KDL::JntArray seed(solver.joint_names.size());
+    std::vector<double> measured(solver.joint_names.size());
     for (std::size_t index = 0; index < solver.joint_names.size(); ++index) {
       const auto value = current_positions_.find(solver.joint_names[index]);
       if (value == current_positions_.end()) {
@@ -383,6 +417,7 @@ private:
         return;
       }
       seed(index) = std::min(std::max(value->second, solver.lower(index)), solver.upper(index));
+      measured[index] = seed(index);
     }
 
     KDL::Frame desired = frameFromPose(target.pose);
@@ -403,6 +438,13 @@ private:
       return;
     }
 
+    std::vector<double> unconstrained(output.rows());
+    for (std::size_t index = 0; index < unconstrained.size(); ++index) {
+      unconstrained[index] = output(index);
+    }
+    const auto limited = solver.rate_limiter->update(
+      unconstrained, measured, envelope.session_id, std::chrono::steady_clock::now());
+
     hc_teleop_interfaces::msg::JointCommandCandidate candidate;
     candidate.header.stamp = now();
     candidate.source_id = envelope.source_id;
@@ -416,7 +458,7 @@ private:
     candidate.command.name = solver.joint_names;
     candidate.command.position.resize(solver.joint_names.size());
     for (std::size_t index = 0; index < solver.joint_names.size(); ++index) {
-      candidate.command.position[index] = output(index);
+      candidate.command.position[index] = limited[index];
     }
     candidate_publisher_->publish(std::move(candidate));
     ++published_candidates_;
@@ -425,6 +467,11 @@ private:
   std::map<std::string, GroupSolver> solvers_;
   std::unordered_map<std::string, double> current_positions_;
   std::chrono::steady_clock::duration feedback_timeout_{std::chrono::milliseconds(200)};
+  double command_velocity_scale_{0.5};
+  double command_acceleration_limit_{20.0};
+  std::chrono::duration<double> command_nominal_period_{1.0 / 60.0};
+  std::chrono::duration<double> command_reset_timeout_{0.25};
+  double command_tracking_error_reset_{0.5};
   std::chrono::steady_clock::time_point last_feedback_{};
   rclcpp::Subscription<hc_teleop_interfaces::msg::CartesianTargetArray>::SharedPtr
     target_subscription_;

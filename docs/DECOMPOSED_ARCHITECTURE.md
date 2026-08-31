@@ -25,12 +25,27 @@ causes `rosidl`/Empy failures.
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch hc_bringup teleop.launch.py \
-  profile:=openarmx mode:=compact shadow:=true
+  profile:=openarmx mode:=shadow
 ```
 
 Shadow mode publishes commands below `/robots/openarmx/shadow/control/joint_command`.
 Cutover requires `shadow:=false` and is only allowed after simulation, watchdog
 and single-publisher tests pass.
+
+## Operator dashboard
+
+`hc_dashboard` runs outside the real-time component container and starts by
+default with bringup. Open `http://127.0.0.1:7876/dashboard/`. It receives typed
+ROS telemetry over relative topics, exposes a low-rate WebSocket snapshot, and
+only calls the command arbiter's safety services. It cannot publish a joint
+command or a command candidate.
+
+```bash
+./run.sh profile:=x1 mode:=sim
+# Optional overrides:
+./run.sh profile:=x1 mode:=sim dashboard_port:=7877
+./run.sh profile:=x1 mode:=sim start_dashboard:=false
+```
 
 ## Invariants
 

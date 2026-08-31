@@ -378,8 +378,14 @@ private:
 
   void handle_packet(const PosePacket & packet, const sockaddr_in & sender)
   {
-    if (!have_peer_ || !same_endpoint(peer_, sender) || timed_out_) {
+    if (!have_peer_ || !same_endpoint(peer_, sender)) {
       begin_session(sender);
+    } else if (timed_out_) {
+      // A short Wi-Fi interruption is not a new controller session when the
+      // sender endpoint is unchanged.  Keeping the session id preserves the
+      // teleoperation clutch anchor and avoids a lease reacquisition pause.
+      timed_out_ = false;
+      RCLCPP_INFO(get_logger(), "VR session resumed: %s", session_id_.c_str());
     }
     if (!is_sequence_newer(packet.sequence, previous_sequence_)) {
       ++old_packets_;

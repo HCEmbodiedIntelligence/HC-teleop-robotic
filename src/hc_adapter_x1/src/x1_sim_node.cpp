@@ -8,6 +8,8 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -80,6 +82,31 @@ public:
       throw std::invalid_argument("group_names must include at least one arm group");
     }
 
+    const auto initial_joint_names = declare_parameter<std::vector<std::string>>(
+      "initial_joint_names", std::vector<std::string>{});
+    const auto initial_position_values = declare_parameter<std::vector<double>>(
+      "initial_positions", std::vector<double>{});
+    if (initial_joint_names.size() != initial_position_values.size()) {
+      throw std::invalid_argument(
+              "initial_joint_names and initial_positions must have the same length");
+    }
+    std::unordered_map<std::string, double> initial_positions;
+    initial_positions.reserve(initial_joint_names.size());
+    for (std::size_t index = 0; index < initial_joint_names.size(); ++index) {
+      if (initial_joint_names[index].empty() ||
+        !std::isfinite(initial_position_values[index]))
+      {
+        throw std::invalid_argument("initial joint positions must have finite named entries");
+      }
+      if (!initial_positions.emplace(
+          initial_joint_names[index], initial_position_values[index]).second)
+      {
+        throw std::invalid_argument(
+                "initial_joint_names must not contain duplicate names: " +
+                initial_joint_names[index]);
+      }
+    }
+
     const auto velocity_scale = positiveFinite(
       declare_parameter<double>("max_velocity_scale", 0.2), "max_velocity_scale");
     const auto fallback_velocity = positiveFinite(
@@ -134,12 +161,13 @@ public:
     if (!auxiliary.joint_names.empty()) {
       groups.push_back(std::move(auxiliary));
     }
-    model_ = std::make_unique<SimJointModel>(std::move(groups));
+    model_ = std::make_unique<SimJointModel>(std::move(groups), initial_positions);
 
     auto qos = rclcpp::SensorDataQoS().keep_last(1);
+    auto command_qos = rclcpp::SensorDataQoS().keep_last(16);
     command_subscription_ =
       create_subscription<hc_teleop_interfaces::msg::JointCommand>(
-      declare_parameter<std::string>("command_topic", "control/joint_command"), qos,
+      declare_parameter<std::string>("command_topic", "control/joint_command"), command_qos,
       [this](hc_teleop_interfaces::msg::JointCommand::ConstSharedPtr message) {
         onCommand(*message);
       });

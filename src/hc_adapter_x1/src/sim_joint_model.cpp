@@ -8,7 +8,9 @@
 namespace hc_adapter_x1
 {
 
-SimJointModel::SimJointModel(std::vector<JointGroupConfig> groups)
+SimJointModel::SimJointModel(
+  std::vector<JointGroupConfig> groups,
+  const std::unordered_map<std::string, double> & initial_positions)
 {
   if (groups.empty()) {
     throw std::invalid_argument("at least one joint group is required");
@@ -34,9 +36,15 @@ SimJointModel::SimJointModel(std::vector<JointGroupConfig> groups)
       lower_limits_.push_back(state.config.lower_limits[index]);
       upper_limits_.push_back(state.config.upper_limits[index]);
       max_velocity_.push_back(state.config.max_velocity[index]);
-      const auto initial = clamp(0.0, lower_limits_.back(), upper_limits_.back());
-      positions_.push_back(initial);
-      targets_.push_back(initial);
+      double requested_initial = 0.0;
+      const auto initial = initial_positions.find(joint_name);
+      if (initial != initial_positions.end() && std::isfinite(initial->second)) {
+        requested_initial = initial->second;
+      }
+      const auto initial_position = clamp(
+        requested_initial, lower_limits_.back(), upper_limits_.back());
+      positions_.push_back(initial_position);
+      targets_.push_back(initial_position);
       state.indices.push_back(global_index);
     }
     groups_.emplace(state.config.group_name, std::move(state));

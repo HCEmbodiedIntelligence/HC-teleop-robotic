@@ -56,7 +56,10 @@ CommandArbiterNode::CommandArbiterNode(const rclcpp::NodeOptions & options)
     priorities_[item.substr(0, separator)] = static_cast<std::uint8_t>(parsed);
   }
 
-  auto stream_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+  // Joint commands are published as one message per component group.  A
+  // depth-one history lets back-to-back left/right arm and tool messages
+  // overwrite each other before the subscriber can run.
+  auto stream_qos = rclcpp::QoS(rclcpp::KeepLast(16));
   stream_qos.best_effort().durability_volatile();
   auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
   state_qos.reliable().transient_local();

@@ -91,10 +91,12 @@ public:
     }
 
     auto qos = rclcpp::SensorDataQoS().keep_last(1);
+    auto candidate_qos = rclcpp::SensorDataQoS().keep_last(16);
     target_publisher_ =
       node_.create_publisher<hc_teleop_interfaces::msg::CartesianTargetArray>(backend_target, qos);
     candidate_publisher_ =
-      node_.create_publisher<hc_teleop_interfaces::msg::JointCommandCandidate>(candidate_output, qos);
+      node_.create_publisher<hc_teleop_interfaces::msg::JointCommandCandidate>(
+      candidate_output, candidate_qos);
     target_subscription_ = node_.create_subscription<
       hc_teleop_interfaces::msg::CartesianTargetArray>(
       target_input, qos,
@@ -112,7 +114,7 @@ public:
       });
     candidate_subscription_ = node_.create_subscription<
       hc_teleop_interfaces::msg::JointCommandCandidate>(
-      backend_candidate, qos,
+      backend_candidate, candidate_qos,
       [this](hc_teleop_interfaces::msg::JointCommandCandidate::ConstSharedPtr message) {
         const auto ros_now = node_.now();
         const auto steady_now = SteadyClock::now();
