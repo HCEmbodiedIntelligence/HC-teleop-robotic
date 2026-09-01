@@ -11,7 +11,7 @@
 | 中间件 | `middleware/` | `core/` 中的前端、配置导入、VR 网关、录制与回放，以及 `config.yaml` 系统配置 | `./middleware/start.sh` |
 | 通用控制/解算 | `adapters/` | VR 控制、Pinocchio v2.3 逆解，以及 `robots/<机器人ID>/` 中由网页导入的 URDF/mesh/参数 | `./adapters/start.sh` |
 
-标准入口 `./start_teleop.sh` 会同时启动上面两部分，不判断也不要求仿真或真机在线。X1 相机、机械臂、底盘、腰部和灵巧手驱动已独立为同级仓库 `HC_X1`。本仓库不再依赖或 source `hc_io_suit`，停止通用入口也不会启动、停止或清理硬件。新机型接入见 [硬件适配项目接入指南](docs/HARDWARE_ADAPTER_GUIDE.md)。
+真机入口 `./run.sh teleop` 会同时启动上面两部分，不判断也不要求真机在线；仿真入口 `./run.sh sim` 还会启动 PyBullet。X1 相机、机械臂、底盘、腰部和灵巧手驱动已独立为同级仓库 `HC_X1`。本仓库不再依赖或 source `hc_io_suit`，停止通用入口也不会启动、停止或清理硬件。新机型接入见 [硬件适配项目接入指南](docs/HARDWARE_ADAPTER_GUIDE.md)。
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
@@ -30,9 +30,9 @@
 
 ```bash
 cd /home/maple/test/HC-teleop-robotic
-chmod +x install.sh start_teleop.sh
+chmod +x install.sh run.sh
 ./install.sh
-./start_teleop.sh
+./run.sh sim
 ```
 
 然后访问 `http://<机器人IP>:7876/dashboard/#config`。相机不在系统配置页中管理；需要独立启用 WebRTC 服务时安装可选依赖：
@@ -50,10 +50,10 @@ ROS_DOMAIN_ID=14 ./start.sh
 
 # 通用系统：中间件、ZIP/URDF 配置、逆解、控制和录制
 cd ~/HC-teleop-robotic
-ROS_DOMAIN_ID=14 ./start_teleop.sh
+ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
-`./run.sh`、`./middleware/start.sh` 和 `./adapters/start.sh` 是组件级调试入口；`./start_real_robot_teleop.sh` 仅作为旧名称兼容，实际转发到 `start_teleop.sh`。
+根目录只保留 `./run.sh` 作为产品入口：`sim` 启动完整仿真，`teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制。`middleware/start.sh` 和 `adapters/start.sh` 是内部组件入口，不用于正常运行。
 
 ### 网页导入机器人配置
 
@@ -64,7 +64,7 @@ ROS_DOMAIN_ID=14 ./start_teleop.sh
 - HC 通用 `vr_configs.yml`：包含 `urdf_path`、`arms`、`controller_indices`，可选 `folding_waist`。导入器会校验所有 joint/link 索引，并生成标准接口的 `controller_v23.yml`；双臂配置还会生成 `arm_teleop.yaml`。
 - 重构控制器 `controller_v23.yml`：包含 `model.free_joints`、`task` 和 `limit`。导入器会校验 URDF 关节与任务 link，并统一 ROS 话题和 URDF 相对路径。该格式只提供 IK 控制配置，不包含 HC PyBullet 仿真所需的 `vr_configs.yml`。
 
-点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。退出并重新执行 `./start_teleop.sh`；使用仿真时也重新执行 `./run_simulator.sh`，各进程便会共同读取所选配置。也可临时通过 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 覆盖网页选择。
+点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。真机模式退出并重新执行 `./run.sh teleop`；仿真模式重新执行 `./run.sh sim`。机器人型号以 Dashboard/`middleware/config.yaml` 中当前激活的 profile 为准。
 
 导入接口对齐当前遥操作链路的标准话题：`/hc_teleop/joint_states`、`/hc_teleop/joint_cmd_arm`、`/hc_teleop/joint_cmd`、`/hc_teleop/controller_target_ee_poses`、`/hc_teleop/target_ee_poses`、`/hc_teleop/actual_ee_poses`、`/hc_teleop/sol_q` 和 `/hc_teleop/target_base_move`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
 
@@ -95,7 +95,7 @@ adb install -r /media/maple/B81666081665C7C8/Users/maple/HC-Teleop/HC-Teleop.apk
 如果已有工作空间，在运行前先 source 对应的 `install/setup.bash`；启动脚本会自动 source `/opt/ros/humble/setup.bash`。ROS 域仍由标准环境变量控制：
 
 ```bash
-ROS_DOMAIN_ID=12 ./start_teleop.sh
+ROS_DOMAIN_ID=12 ./run.sh teleop
 ```
 
 ## 数据流
@@ -166,28 +166,28 @@ ROS 转发到 VR 的 UDP 消息是 UTF-8 JSON，最大为一个 UDP 数据报。
 ```bash
 /usr/bin/python3 -m unittest discover -s tests -v
 /usr/bin/python3 -m compileall -q middleware adapters
-bash -n start_teleop.sh run_simulator.sh middleware/start.sh adapters/start.sh
+bash -n run.sh middleware/start.sh adapters/start.sh
 ```
 
 ## HC-TJ 机械臂仿真遥操作
 
-VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TELEOP.md)。标准启动分为通用遥操作栈和可替换的仿真后端：
+VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TELEOP.md)。仿真使用一个统一入口；脚本负责让 VR、控制和仿真使用同一个 ROS Domain，并在任一必要组件退出时清理整套进程：
 
 双臂与腰部回零：不用按 Grip，同时把左主摇杆向左、右主摇杆向右拨到底一次；回零后先让两个摇杆回中，才能再次触发。回零期间命令合并层会将双臂和 `body.waist_joint_names` 中的腰关节限速拉回 `initial_joints`，避免 7DoF 冗余解只让末端到位却永久卡在 homing。反馈到位后系统会清除旧 IK 积分状态，并等待一帧复位后的新解；此时需要先松开右 Grip，再重新按下才能恢复双臂控制，旧 IK 消息不会重新接管。
 
 ```bash
 ./install.sh --sim
 
-# 终端 1：中间件 + IK + 遥操作控制，可始终独立运行
-ROS_DOMAIN_ID=14 ./start_teleop.sh
+# 一条命令启动 VR 自动发现、Dashboard、IK/控制和 PyBullet
+./run.sh sim
 
-# 终端 2：只启动 PyBullet 仿真机器人
-ROS_DOMAIN_ID=14 ./run_simulator.sh
+# 无显示器环境
+./run.sh --headless
 ```
 
 `--sim` 会额外创建与开发板一致的 `hc-teleop-controller` Conda 环境
 （Pinocchio 3.7 + CasADi 3.7）。默认启动已完成数值验证的重构 v2.3 后端。
-旧的一体化仿真入口 `./run_sim_teleop.sh` 仍保留用于 A/B 排障；它会自行启动控制节点，不应与 `start_teleop.sh` 同时运行。原加密通用链可用 `./run_sim_teleop.sh --generic`，旧版 PyBullet IK 可用 `./run_sim_teleop.sh --legacy`。
+根目录不再保留旧的分段启动脚本，也不提供单独 PyBullet 产品模式。真机统一使用 `./run.sh teleop` 并在 `HC_X1` 仓库启动硬件；仿真统一使用 `./run.sh sim`。旧 `--robot`、`--generic`、`--legacy` 和 `--sim-only` 选项均已移除。
 
 仿真启动时会自动以 30 Hz 将手柄位姿、目标/实际末端位姿、关节命令/反馈和离合状态写入 `runtime/teleop_logs/`。复现抖动时按住右 Grip 并尽量保持双手静止 5–10 秒，退出仿真后分析对应日志：
 

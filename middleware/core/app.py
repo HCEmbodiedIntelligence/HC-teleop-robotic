@@ -56,7 +56,12 @@ class MiddlewareRuntime:
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
-        domain_id = int(self.config.get("ros", {}).get("domain_id", 13))
+        configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 13))
+        domain_id = int(os.environ.get("ROS_DOMAIN_ID", configured_domain_id))
+        # Keep all contexts created below (bridge, recorder and cameras) on the
+        # launcher's effective domain. Previously only the parent process used
+        # ROS_DOMAIN_ID while child contexts silently returned to config.yaml.
+        self.config.setdefault("ros", {})["domain_id"] = domain_id
         os.environ["ROS_DOMAIN_ID"] = str(domain_id)
         try:
             import rclpy

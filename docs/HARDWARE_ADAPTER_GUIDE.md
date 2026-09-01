@@ -37,7 +37,7 @@ ROS_DOMAIN_ID=14 ./start.sh
 
 # 终端 B：通用中间件、逆解与控制
 cd ~/HC-teleop-robotic
-ROS_DOMAIN_ID=14 ./start_teleop.sh
+ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
 先确认 `ros2 topic hz /hc_teleop/joint_states` 稳定，再连接头显。空闲时 `/hc_teleop/joint_cmd` 不应被多个控制器发布；操作时频率应接近 100 Hz。拔掉 VR 数据或松开离合后，硬件命令必须在约定超时内停止。逐项检查关节方向、零位、限位、回零、底盘轴向、灵巧手开合和相机帧率，最后才进行大范围运动。

@@ -42,35 +42,36 @@ cd /home/maple/test/HC-teleop-robotic
 ./install.sh --sim
 ```
 
-终端 1 启动通用遥操作栈（网页、VR 网关、IK 和遥操作控制）：
+默认一条命令启动网页、VR 自动发现、IK/控制和 HC-TJ 图形仿真：
 
 ```bash
-./start_teleop.sh
-```
-
-终端 2 只启动 HC-TJ 图形仿真后端：
-
-```bash
-./run_simulator.sh
-```
-
-脚本默认读取 `middleware/config.yaml` 中 `robot_profiles.active` 指向的网页已选配置。HC 通用格式导入会在 `adapters/robots/<配置ID>/` 生成仿真、遥操作和 v2.3 控制器所需文件；网页切换配置后需要退出并重新启动本脚本。临时覆盖示例：
-
-```bash
-HC_ROBOT_NAME=x1 ./run_simulator.sh
+./run.sh sim
 ```
 
 没有图形显示时：
 
 ```bash
-./run_simulator.sh --headless
+./run.sh --headless
 ```
 
-旧的一体化入口 `run_sim_teleop.sh` 仍可用于后端对照：`--v23`（默认重构）、`--generic`（原加密控制器和 PID）、`--legacy`（PyBullet IK）。它会自行启动 IK 和遥操作控制，不要与 `start_teleop.sh` 同时运行。
+脚本读取 `middleware/config.yaml` 中 `robot_profiles.active` 指向的 Dashboard 当前配置。HC 通用格式导入会在 `adapters/robots/<配置ID>/` 生成仿真、遥操作和 v2.3 控制器所需文件；网页切换配置后需要退出并重新启动。
+
+连接真机时，本仓库只启动通用遥操作部分，硬件由 `HC_X1` 独立启动：
+
+```bash
+cd /home/maple/test/HC-teleop-robotic
+./run.sh teleop
+
+# 另一个终端
+cd /home/maple/test/HC_X1
+./start.sh
+```
+
+根目录只保留 `run.sh` 产品入口，不提供单独启动 PyBullet 的模式。旧 `--robot/--v23/--generic/--legacy/--sim-only` 重复路径已经移除。
 
 两边必须使用相同的 `ROS_DOMAIN_ID`。启动后松开两个 Grip；准备好再按对应离合。
 
-`run_simulator.sh` 默认将手柄、目标/实际末端位姿及关节命令/反馈记录到 `runtime/teleop_logs/`。复现抖动后可运行 `analyze_teleop_log.py <CSV日志>` 定位输入、IK 或关节跟踪环节。
+完整仿真入口默认将手柄、目标/实际末端位姿及关节命令/反馈记录到 `runtime/teleop_logs/`。复现抖动后可运行 `analyze_teleop_log.py <CSV日志>` 定位输入、IK 或关节跟踪环节。
 
 ## ROS 接口
 

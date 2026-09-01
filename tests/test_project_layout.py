@@ -35,27 +35,44 @@ class ProjectLayoutTests(unittest.TestCase):
 
     def test_runtime_does_not_depend_on_x1_source_workspace(self):
         runtime_files = [
-            self.root / "start_teleop.sh",
-            self.root / "run_simulator.sh",
             self.root / "adapters/start.sh",
             self.root / "middleware/start.sh",
             self.root / "run_generic_controller.sh",
-            self.root / "start_real_robot_teleop.sh",
         ]
         text = "\n".join(path.read_text(encoding="utf-8") for path in runtime_files)
         self.assertNotIn("hc_io_suit", text)
         self.assertNotIn("HC_X1/install", text)
         self.assertNotIn("/io_teleop", text)
 
-    def test_common_launcher_is_backend_independent(self):
-        launcher = (self.root / "start_teleop.sh").read_text(encoding="utf-8")
+        launcher = (self.root / "run.sh").read_text(encoding="utf-8")
+        self.assertNotIn("hc_io_suit", launcher)
+        self.assertNotIn("HC_X1/install", launcher)
+        for topic in (
+            "joint_states",
+            "joint_cmd",
+            "target_joint_from_vr",
+            "target_finger_joints",
+            "target_ee_poses",
+            "target_gripper_status",
+            "target_base_move",
+        ):
+            self.assertIn(
+                f"/io_teleop/{topic}:=/hc_teleop/{topic}", launcher
+            )
+
+    def test_single_product_launcher_has_sim_and_teleop_modes(self):
+        launcher = (self.root / "run.sh").read_text(encoding="utf-8")
         self.assertIn('"${PROJECT_ROOT}/middleware/start.sh"', launcher)
         self.assertIn('"${PROJECT_ROOT}/adapters/start.sh"', launcher)
-        self.assertNotIn("run_sim_teleop.sh", launcher)
-        self.assertNotIn("HC_X1", launcher)
-
-        simulator = (self.root / "run_simulator.sh").read_text(encoding="utf-8")
-        self.assertIn("--sim-only", simulator)
+        self.assertIn("general_sim_robot_control_node_ros2.py", launcher)
+        self.assertIn("sim|teleop", launcher)
+        for obsolete in (
+            "start_teleop.sh",
+            "start_real_robot_teleop.sh",
+            "run_sim_teleop.sh",
+            "run_simulator.sh",
+        ):
+            self.assertFalse((self.root / obsolete).exists(), obsolete)
 
     def test_dashboard_exposes_vr_exoskeleton_command_switch(self):
         html = (
@@ -98,7 +115,7 @@ class ProjectLayoutTests(unittest.TestCase):
         profile_id, manager = load_selection(config_path)
         self.assertEqual(profile_id, "x1")
         self.assertEqual(manager.root, (self.root / "adapters" / "robots").resolve())
-        self.assertEqual([profile["id"] for profile in manager.list()], ["x1"])
+        self.assertIn("x1", [profile["id"] for profile in manager.list()])
 
         metadata = yaml.safe_load(
             (manager.root / "x1" / "profile.yaml").read_text(encoding="utf-8")

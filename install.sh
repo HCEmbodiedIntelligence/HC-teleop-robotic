@@ -26,4 +26,4 @@ else
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements.txt"
 fi
 
-echo "Installed project-local dependencies. Start with: ${SCRIPT_DIR}/start_teleop.sh"
+echo "Installed project-local dependencies. Start with: ${SCRIPT_DIR}/run.sh"
