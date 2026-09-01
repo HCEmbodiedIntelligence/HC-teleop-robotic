@@ -103,6 +103,12 @@
 
     <section class="page hidden" id="diagnostics">
       <section class="diagnostic-grid">
+        <article class="panel chain-diagnostic-panel">
+          <div class="panel-title"><div><span class="section-label">CONTROL TRACE</span><h2>控制链诊断</h2><p>按 Session / Sequence / Group 关联目标、IK、仲裁和反馈</p></div><span class="panel-badge" id="diagnostic-health">等待</span></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>链路阶段</th><th>样本</th><th>最近</th><th>平均</th><th>P95</th><th>最大</th></tr></thead><tbody id="latency-rows"><tr><td colspan="6" class="empty-cell">等待诊断节点…</td></tr></tbody></table></div>
+          <div id="diagnostic-vectors" class="diagnostic-vectors empty-state">等待 IK 跳变量与命令反馈误差…</div>
+          <dl class="runtime-list diagnostic-summary"><div><dt>异常累计</dt><dd id="diagnostic-count">—</dd></div><div><dt>最近异常</dt><dd id="diagnostic-last">—</dd></div><div><dt>诊断日志</dt><dd id="diagnostic-log">—</dd></div></dl>
+        </article>
         <article class="panel stream-panel">
           <div class="panel-title"><div><span class="section-label">STREAM HEALTH</span><h2>实时数据链路</h2><p>2 秒滑动窗口统计，红色表示消息已超时</p></div></div>
           <div class="table-wrap"><table class="data-table"><thead><tr><th>数据流</th><th>状态</th><th>频率</th><th>最新消息</th><th>最大间隔</th><th>累计</th></tr></thead><tbody id="stream-rows"></tbody></table></div>

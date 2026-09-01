@@ -297,6 +297,73 @@ function renderBackend(candidates) {
   });
 }
 
+function renderDiagnostics(diagnostics) {
+  const statuses = diagnostics?.statuses || {};
+  const overview = statuses.control_chain || {};
+  const latency = statuses.latency?.values || {};
+  const badge = $("diagnostic-health");
+  const available = Boolean(diagnostics?.available);
+  const level = Math.max(0, ...Object.values(statuses).map((status) => Number(status.level || 0)));
+  badge.textContent = !available ? "等待" : (level > 0 ? "警告" : "正常");
+  badge.className = `panel-badge ${!available ? "" : (level > 0 ? "warn" : "live")}`;
+  const values = overview.values || {};
+  setText("diagnostic-count", available ? values.anomaly_count ?? 0 : "—");
+  setText("diagnostic-last", values.last_anomaly_code ? `${values.last_anomaly_code} · ${values.last_anomaly_group || "—"} · SEQ ${values.last_anomaly_sequence ?? "—"}` : "无");
+  setText("diagnostic-log", values.log_path || "未启用持久化");
+  const stages = [
+    ["vr_receive_gap", "UDP 网关接收间隔"],
+    ["vr_callback_delay", "网关 → ROS 回调"],
+    ["vr_to_target", "VR → Mapper"],
+    ["target_to_candidate", "Mapper → IK"],
+    ["candidate_to_command", "IK → Arbiter"],
+    ["vr_to_command", "VR → Command"],
+  ];
+  const root = $("latency-rows");
+  const vectors = $("diagnostic-vectors");
+  root.replaceChildren();
+  if (!available) {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td colspan="6" class="empty-cell">等待诊断节点…</td>';
+    root.append(row);
+    vectors.className = "diagnostic-vectors empty-state";
+    vectors.textContent = "等待 IK 跳变量与命令反馈误差…";
+    return;
+  }
+  stages.forEach(([key, label]) => {
+    const row = document.createElement("tr");
+    const fields = [label, latency[`${key}.samples`] || 0, `${number(latency[`${key}.last_ms`] || 0, 2)} ms`, `${number(latency[`${key}.mean_ms`] || 0, 2)} ms`, `${number(latency[`${key}.p95_ms`] || 0, 2)} ms`, `${number(latency[`${key}.max_ms`] || 0, 2)} ms`];
+    fields.forEach((field) => {
+      const cell = document.createElement("td");
+      cell.textContent = field;
+      row.append(cell);
+    });
+    root.append(row);
+  });
+
+  const metrics = Object.entries(latency)
+    .filter(([key]) => key.startsWith("candidate_step_rad.") || key.startsWith("feedback_error_rad."))
+    .sort(([left], [right]) => left.localeCompare(right));
+  vectors.replaceChildren();
+  vectors.className = metrics.length ? "diagnostic-vectors" : "diagnostic-vectors empty-state";
+  if (!metrics.length) {
+    vectors.textContent = "尚无活动手臂的 IK 跳变量与命令反馈误差";
+  } else {
+    metrics.forEach(([key, value]) => {
+      const step = key.startsWith("candidate_step_rad.");
+      const group = key.slice(key.indexOf(".") + 1);
+      const card = document.createElement("div");
+      const title = document.createElement("strong");
+      const kind = document.createElement("span");
+      const reading = document.createElement("code");
+      title.textContent = group;
+      kind.textContent = step ? "IK 单帧跳变" : "命令 → 反馈误差";
+      reading.textContent = `${number(value, 4)} rad / ${number(Number(value) * 180 / Math.PI, 2)}°`;
+      card.append(title, kind, reading);
+      vectors.append(card);
+    });
+  }
+}
+
 function renderSafety(safety) {
   const label = String(safety.label || "UNKNOWN");
   const className = label.toLowerCase();
@@ -334,6 +401,7 @@ function render(snapshot) {
   renderStreams(snapshot.streams || {});
   renderTargets(snapshot.cartesian || {});
   renderBackend(snapshot.backend_candidates || {});
+  renderDiagnostics(snapshot.diagnostics || {});
   renderRuntime(snapshot);
 }
 

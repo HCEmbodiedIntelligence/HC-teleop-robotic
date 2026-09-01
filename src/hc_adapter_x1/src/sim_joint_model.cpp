@@ -10,7 +10,9 @@ namespace hc_adapter_x1
 
 SimJointModel::SimJointModel(
   std::vector<JointGroupConfig> groups,
-  const std::unordered_map<std::string, double> & initial_positions)
+  const std::unordered_map<std::string, double> & initial_positions,
+  const bool instant_position_tracking)
+: instant_position_tracking_(instant_position_tracking)
 {
   if (groups.empty()) {
     throw std::invalid_argument("at least one joint group is required");
@@ -112,6 +114,10 @@ void SimJointModel::step(const double dt_seconds, const SteadyTime now)
   }
 
   for (std::size_t index = 0; index < positions_.size(); ++index) {
+    if (instant_position_tracking_) {
+      positions_[index] = targets_[index];
+      continue;
+    }
     const auto delta = targets_[index] - positions_[index];
     const auto max_step = max_velocity_[index] * dt_seconds;
     if (std::abs(delta) <= max_step) {

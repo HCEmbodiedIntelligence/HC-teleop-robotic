@@ -7,6 +7,7 @@ HC 通用遥操作框架的原生 ROS 2 工作区。当前分支只包含解耦�
 
 ```bash
 cd /home/maple/test/HC-teleop-robotic
+git submodule update --init --recursive
 ./bootstrap_colcon.sh build
 ./run.sh profile:=openarmx mode:=sim
 ```
@@ -35,3 +36,27 @@ hcctl doctor --profile openarmx
 
 所有话题在启动时统一放到 `/robots/<robot_id>/` 命名空间；最终执行命令只允许
 安全仲裁器发布。
+
+## 使用 Humanoid Motion Server
+
+`hc_motion_backend_robo_manip` 使用项目内连接的
+`src/humanoid_motion_server` 的 ServoP、RTC 和实测关节 FK替换 KDL。Motion
+Server 与接口仓以固定提交的 Git submodule 保存，仍保持各自独立历史。后端是
+独立进程，只发布 candidate，不会绕过 HC 安全仲裁器。
+
+首次拉取和构建：
+
+```bash
+# 新 clone 推荐直接使用 git clone --recurse-submodules。
+git submodule update --init --recursive
+
+# 指向 ruckig 0.17.3、toppra 0.6.8 等 ABI 固定依赖的安装前缀。
+# 当前开发机未设置时会兼容检测 /home/maple/test/humanoid/.sdk_deps。
+export HUMANOID_MOTION_SDK_DEPS_PREFIX=/home/maple/test/humanoid/.sdk_deps
+
+./bootstrap_colcon.sh build
+./run.sh profile:=x1 mode:=sim motion_backend:=robo_manip
+```
+
+默认 `motion_backend:=profile` 仍读取机器人 profile；X1 当前默认 KDL，显式传
+`robo_manip` 才切换。运行时不再 source 外部 Humanoid underlay。

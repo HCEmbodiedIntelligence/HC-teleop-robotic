@@ -23,8 +23,8 @@ The operator console is split into three focused views:
 source install/setup.bash
 ros2 run hc_dashboard dashboard --ros-args \
   -r __ns:=/robots/x1 \
-  -p robot_id:=x1 -p profile:=x1 -p mode:=sim -p port:=7876
+  -p robot_id:=x1 -p profile:=x1 -p mode:=sim -p port:=7877
 ```
 
-Open `http://127.0.0.1:7876/dashboard/`. The standard bringup launch starts the
+Open `http://127.0.0.1:7877/dashboard/`. The standard bringup launch starts the
 dashboard by default; pass `start_dashboard:=false` for a control-only launch.

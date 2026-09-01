@@ -5,6 +5,7 @@ description: Component profile for the X1 humanoid dual-arm robotic platform.
 
 resources:
   urdf: package://hc_robot_x1/urdf/x1_robot.urdf
+  robo_manip_sdk: package://hc_robot_x1/config/motion/robo_manip.yaml
 
 components:
   - id: left_arm
@@ -25,6 +26,17 @@ components:
       base: L_arm_0_Link
       tip: io_teleop_ee_link_left
     command_modes: [servo_j, servo_p, move_j, move_l, move_p]
+    # Coordinates are expressed in L_arm_0_Link.  The initial HC_X1 tool pose
+    # is approximately [0.453, 0.195, 0.355] m, inside this conservative shell.
+    # Per-frame limits reject Wi-Fi/VR jumps without slowing normal 60 Hz motion.
+    target_filter:
+      enabled: true
+      workspace_min_m: [-0.05, -0.55, -0.45]
+      workspace_max_m: [0.72, 0.55, 0.72]
+      min_radius_m: 0.15
+      max_radius_m: 0.72
+      max_position_step_m: 0.03
+      max_orientation_step_rad: 0.15
 
   - id: right_arm
     kind: arm
@@ -95,15 +107,50 @@ motion:
   servo_nominal_rate_hz: 60.0
   servo_reset_timeout_ms: 250
   servo_tracking_error_reset: 0.5
+  # Optional RoboManip ServoP/RTC limits. These are SI values at the HC
+  # boundary; the humanoid motion backend performs SDK unit conversion.
+  robo_manip_joint_max_velocity_rad_s: 0.6
+  robo_manip_joint_max_acceleration_rad_s2: 2.4
+  robo_manip_joint_max_jerk_rad_s3: 9.6
+  robo_manip_cartesian_max_linear_velocity_m_s: 0.10
+  robo_manip_cartesian_max_linear_acceleration_m_s2: 0.30
+  robo_manip_cartesian_max_linear_jerk_m_s3: 1.50
+  robo_manip_cartesian_max_angular_velocity_rad_s: 0.5
+  robo_manip_cartesian_max_angular_acceleration_rad_s2: 2.0
+  robo_manip_cartesian_max_angular_jerk_rad_s3: 10.0
+  # A single SDK Tick failure holds the last RTC-approved command. Three
+  # consecutive failures reset the per-arm session from measured feedback.
+  robo_manip_tick_failure_reset_count: 3
+  robo_manip_ik_position_tolerance_m: 0.001
+  robo_manip_ik_orientation_tolerance_rad: 0.015
+  robo_manip_ik_enable_regularization_task: true
+  robo_manip_ik_regularization_task_weight: 0.0005
+  robo_manip_ik_enable_joint_task: true
+  robo_manip_ik_joint_task_weight: 0.001
 
 # Initial simulation pose copied from HC_X1/src/hc_tj/config/hardware.yaml.
 # Values are radians and are keyed by joint name so the pose is independent of
 # the URDF/component declaration order. Hardware adapters use their own feedback
 # and do not consume this section.
 simulation:
-  # Simulation only: follow servo targets responsively while retaining the
-  # URDF velocity limits. Real hardware ignores this value.
+  # Motion backend + final RTC already shape the trajectory. Snap the visual
+  # model to that safe command instead of adding a third smoothing layer.
+  # Real hardware ignores this setting and retains the final SDK RTC.
+  instant_position_tracking: true
   max_velocity_scale: 0.8
+  # Simulation-only RoboManip limits. Normal hand motion can exceed the real
+  # commissioning limit of 0.10 m/s, which otherwise accumulates several
+  # hundred millimetres of apparent lag. Real/shadow modes keep motion.* above.
+  robo_manip_limits:
+    joint_max_velocity_rad_s: 2.2
+    joint_max_acceleration_rad_s2: 15.0
+    joint_max_jerk_rad_s3: 100.0
+    cartesian_max_linear_velocity_m_s: 1.0
+    cartesian_max_linear_acceleration_m_s2: 8.0
+    cartesian_max_linear_jerk_m_s3: 60.0
+    cartesian_max_angular_velocity_rad_s: 2.5
+    cartesian_max_angular_acceleration_rad_s2: 15.0
+    cartesian_max_angular_jerk_rad_s3: 100.0
   initial_positions:
     Joint1_L: 1.44
     Joint2_L: -0.77
@@ -178,6 +225,20 @@ safety:
 recording:
   preset: teleop_default
   format: mcap
+
+diagnostics:
+  vr_receive_gap_warn_ms: 80.0
+  vr_callback_delay_warn_ms: 20.0
+  ik_latency_warn_ms: 20.0
+  arbiter_latency_warn_ms: 20.0
+  joint_step_warn_rad: 0.25
+  missing_candidate_warn_ms: 80.0
+  stream_stale_ms: 350.0
+  trace_retention_ms: 2000.0
+  capture_pre_seconds: 5.0
+  capture_post_seconds: 3.0
+  summary_period_seconds: 5.0
+  capture_cooldown_seconds: 5.0
 
 vr:
   listen_host: 0.0.0.0

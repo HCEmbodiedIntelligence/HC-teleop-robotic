@@ -31,6 +31,7 @@ TOP_LEVEL_KEYS = {
     "teleop",
     "safety",
     "recording",
+    "diagnostics",
     "vr",
 }
 
@@ -173,6 +174,80 @@ def validate_profile(value: Any) -> dict[str, Any]:
                 component.get("command_modes", ["servo_p"]),
                 f"components[{index}].command_modes",
             )
+            if "target_filter" in component:
+                target_filter = dict(
+                    _mapping(
+                        component["target_filter"],
+                        f"components[{index}].target_filter",
+                    )
+                )
+                allowed_filter_fields = {
+                    "enabled",
+                    "workspace_min_m",
+                    "workspace_max_m",
+                    "min_radius_m",
+                    "max_radius_m",
+                    "max_position_step_m",
+                    "max_orientation_step_rad",
+                }
+                unknown_filter_fields = sorted(
+                    set(target_filter) - allowed_filter_fields
+                )
+                if unknown_filter_fields:
+                    raise ProfileError(
+                        f"components[{index}].target_filter has unknown fields: "
+                        + ", ".join(unknown_filter_fields)
+                    )
+                target_filter["enabled"] = bool(target_filter.get("enabled", True))
+                for field in ("workspace_min_m", "workspace_max_m"):
+                    values = target_filter.get(field)
+                    if (
+                        not isinstance(values, list)
+                        or len(values) != 3
+                        or any(
+                            not isinstance(item, (int, float))
+                            or not math.isfinite(float(item))
+                            for item in values
+                        )
+                    ):
+                        raise ProfileError(
+                            f"components[{index}].target_filter.{field} "
+                            "must contain three finite numbers"
+                        )
+                    target_filter[field] = [float(item) for item in values]
+                if any(
+                    lower >= upper
+                    for lower, upper in zip(
+                        target_filter["workspace_min_m"],
+                        target_filter["workspace_max_m"],
+                    )
+                ):
+                    raise ProfileError(
+                        f"components[{index}].target_filter workspace bounds "
+                        "must be increasing"
+                    )
+                for field in (
+                    "min_radius_m",
+                    "max_radius_m",
+                    "max_position_step_m",
+                    "max_orientation_step_rad",
+                ):
+                    field_value = target_filter.get(field)
+                    if (
+                        not isinstance(field_value, (int, float))
+                        or not math.isfinite(float(field_value))
+                        or float(field_value) <= 0.0
+                    ):
+                        raise ProfileError(
+                            f"components[{index}].target_filter.{field} "
+                            "must be positive and finite"
+                        )
+                    target_filter[field] = float(field_value)
+                if target_filter["min_radius_m"] >= target_filter["max_radius_m"]:
+                    raise ProfileError(
+                        f"components[{index}].target_filter radii must be increasing"
+                    )
+                component["target_filter"] = target_filter
         if kind in {"gripper", "dexterous_hand"}:
             _nonempty_string(component.get("attached_to"), f"components[{index}].attached_to")
         if kind == "base":
@@ -204,8 +279,119 @@ def validate_profile(value: Any) -> dict[str, Any]:
                 )
     profile["components"] = components
 
-    for section in ("motion", "simulation", "teleop", "safety", "recording", "vr"):
+    for section in (
+        "motion", "simulation", "teleop", "safety", "recording", "diagnostics", "vr"
+    ):
         profile[section] = dict(_mapping(profile.get(section, {}), section))
+
+    motion = profile["motion"]
+    backend_package = motion.get("backend_package")
+    if backend_package is not None:
+        backend_package = _nonempty_string(backend_package, "motion.backend_package")
+    if backend_package == "hc_motion_backend_robo_manip" and "robo_manip_sdk" not in resources:
+        raise ProfileError(
+            "resources.robo_manip_sdk is required by hc_motion_backend_robo_manip"
+        )
+    for field in (
+        "servo_velocity_scale",
+        "servo_acceleration_limit",
+        "servo_nominal_rate_hz",
+        "servo_reset_timeout_ms",
+        "servo_tracking_error_reset",
+        "robo_manip_joint_max_velocity_rad_s",
+        "robo_manip_joint_max_acceleration_rad_s2",
+        "robo_manip_joint_max_jerk_rad_s3",
+        "robo_manip_cartesian_max_linear_velocity_m_s",
+        "robo_manip_cartesian_max_linear_acceleration_m_s2",
+        "robo_manip_cartesian_max_linear_jerk_m_s3",
+        "robo_manip_cartesian_max_angular_velocity_rad_s",
+        "robo_manip_cartesian_max_angular_acceleration_rad_s2",
+        "robo_manip_cartesian_max_angular_jerk_rad_s3",
+        "robo_manip_ik_position_tolerance_m",
+        "robo_manip_ik_orientation_tolerance_rad",
+        "robo_manip_ik_regularization_task_weight",
+        "robo_manip_ik_joint_task_weight",
+    ):
+        if field in motion and (
+            not isinstance(motion[field], (int, float))
+            or not math.isfinite(float(motion[field]))
+            or float(motion[field]) <= 0.0
+        ):
+            raise ProfileError(f"motion.{field} must be positive and finite")
+    if "robo_manip_tick_failure_reset_count" in motion and (
+        not isinstance(motion["robo_manip_tick_failure_reset_count"], int)
+        or isinstance(motion["robo_manip_tick_failure_reset_count"], bool)
+        or motion["robo_manip_tick_failure_reset_count"] < 2
+    ):
+        raise ProfileError(
+            "motion.robo_manip_tick_failure_reset_count must be an integer >= 2"
+        )
+    for field in (
+        "robo_manip_ik_enable_regularization_task",
+        "robo_manip_ik_enable_joint_task",
+    ):
+        if field in motion and not isinstance(motion[field], bool):
+            raise ProfileError(f"motion.{field} must be boolean")
+
+    simulation = profile["simulation"]
+    if "instant_position_tracking" in simulation and not isinstance(
+        simulation["instant_position_tracking"], bool
+    ):
+        raise ProfileError("simulation.instant_position_tracking must be boolean")
+    simulation_robo_limits = dict(
+        _mapping(simulation.get("robo_manip_limits", {}), "simulation.robo_manip_limits")
+    )
+    allowed_simulation_robo_limits = {
+        "joint_max_velocity_rad_s",
+        "joint_max_acceleration_rad_s2",
+        "joint_max_jerk_rad_s3",
+        "cartesian_max_linear_velocity_m_s",
+        "cartesian_max_linear_acceleration_m_s2",
+        "cartesian_max_linear_jerk_m_s3",
+        "cartesian_max_angular_velocity_rad_s",
+        "cartesian_max_angular_acceleration_rad_s2",
+        "cartesian_max_angular_jerk_rad_s3",
+    }
+    unknown_simulation_robo_limits = sorted(
+        set(simulation_robo_limits) - allowed_simulation_robo_limits
+    )
+    if unknown_simulation_robo_limits:
+        raise ProfileError(
+            "unknown simulation.robo_manip_limits fields: "
+            + ", ".join(unknown_simulation_robo_limits)
+        )
+    for field, value in simulation_robo_limits.items():
+        if (
+            not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise ProfileError(
+                f"simulation.robo_manip_limits.{field} must be positive and finite"
+            )
+    simulation["robo_manip_limits"] = simulation_robo_limits
+
+    diagnostics = profile["diagnostics"]
+    for field in (
+        "vr_receive_gap_warn_ms",
+        "vr_callback_delay_warn_ms",
+        "ik_latency_warn_ms",
+        "arbiter_latency_warn_ms",
+        "joint_step_warn_rad",
+        "missing_candidate_warn_ms",
+        "stream_stale_ms",
+        "trace_retention_ms",
+        "capture_pre_seconds",
+        "capture_post_seconds",
+        "summary_period_seconds",
+        "capture_cooldown_seconds",
+    ):
+        if field in diagnostics and (
+            not isinstance(diagnostics[field], (int, float))
+            or not math.isfinite(float(diagnostics[field]))
+            or float(diagnostics[field]) <= 0.0
+        ):
+            raise ProfileError(f"diagnostics.{field} must be positive and finite")
 
     teleop = profile["teleop"]
     bindings = teleop.get("bindings", [])

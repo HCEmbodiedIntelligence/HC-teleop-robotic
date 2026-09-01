@@ -46,7 +46,7 @@ struct CandidateEnvelope
 };
 
 /// Enforces the process boundary: a backend candidate is accepted only when
-/// it exactly answers a live target previously routed to that backend.
+/// it answers a live routed target and advances its own component group.
 class RouteGuard
 {
 public:
@@ -68,7 +68,8 @@ private:
 
   std::set<std::string> allowed_groups_;
   std::map<std::string, std::uint64_t> last_sequence_;
-  std::map<std::string, Authorization> authorizations_;
+  std::map<std::string, std::map<std::uint64_t, Authorization>> authorizations_;
+  std::map<std::string, std::uint64_t> last_candidate_sequence_;
 };
 
 }  // namespace hc_motion

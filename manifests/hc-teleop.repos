@@ -1,4 +1,12 @@
 repositories:
+  src/humanoid_motion_interfaces:
+    type: git
+    url: https://github.com/HCEmbodiedIntelligence/humanoid_motion_interfaces.git
+    version: 49b6f791dc1d824350def9260d8cb4841c12a5c1
+  src/humanoid_motion_server:
+    type: git
+    url: https://github.com/HCEmbodiedIntelligence/humanoid_motion_server.git
+    version: b5d876bfa76d85a9b6847f64b7c07e71aff3d554
   src/hc_teleop_interfaces:
     type: git
     url: git@github.com:HCEmbodiedIntelligence/hc-teleop-interfaces.git

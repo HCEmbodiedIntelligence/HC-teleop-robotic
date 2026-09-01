@@ -3,6 +3,9 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MOTION_SERVER_SOURCE="${PROJECT_ROOT}/src/humanoid_motion_server"
+MOTION_INTERFACES_SOURCE="${PROJECT_ROOT}/src/humanoid_motion_interfaces"
+MOTION_SERVER_PATCH="${PROJECT_ROOT}/patches/humanoid_motion_server/humble-hpp-fcl-2.4.5.patch"
 
 if [[ ! -f /opt/ros/humble/setup.bash ]]; then
   echo "ROS 2 Humble is not installed at /opt/ros/humble" >&2
@@ -13,11 +16,54 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 
+prepare_motion_server_source() {
+  if [[ -d "${PROJECT_ROOT}/.git" ]]; then
+    git -C "${PROJECT_ROOT}" submodule update --init --recursive -- \
+      src/humanoid_motion_interfaces src/humanoid_motion_server
+  fi
+
+  if [[ ! -f "${MOTION_SERVER_SOURCE}/package.xml" ||
+        ! -f "${MOTION_INTERFACES_SOURCE}/package.xml" ]]; then
+    echo "Motion Server submodules are missing; run git submodule update --init --recursive" >&2
+    exit 2
+  fi
+
+  # The pinned upstream commit requires hpp-fcl 2.4.4, while the qualified
+  # ROS 2 Humble installation provides 2.4.5. Keep this small compatibility
+  # delta in the parent workspace until it is merged upstream.
+  if git -C "${MOTION_SERVER_SOURCE}" apply --check "${MOTION_SERVER_PATCH}" >/dev/null 2>&1; then
+    git -C "${MOTION_SERVER_SOURCE}" apply "${MOTION_SERVER_PATCH}"
+  elif ! git -C "${MOTION_SERVER_SOURCE}" apply --reverse --check \
+      "${MOTION_SERVER_PATCH}" >/dev/null 2>&1; then
+    echo "Motion Server compatibility patch does not match the pinned commit" >&2
+    exit 2
+  fi
+
+  if [[ -z "${HUMANOID_MOTION_SDK_DEPS_PREFIX:-}" ]]; then
+    local project_sdk_deps="${PROJECT_ROOT}/.deps/robo_manip"
+    local legacy_sdk_deps="/home/maple/test/humanoid/.sdk_deps"
+    if [[ -d "${project_sdk_deps}" ]]; then
+      export HUMANOID_MOTION_SDK_DEPS_PREFIX="${project_sdk_deps}"
+    elif [[ -d "${legacy_sdk_deps}" ]]; then
+      export HUMANOID_MOTION_SDK_DEPS_PREFIX="${legacy_sdk_deps}"
+      echo "Using legacy RoboManip dependency prefix: ${legacy_sdk_deps}" >&2
+      echo "Set HUMANOID_MOTION_SDK_DEPS_PREFIX to use another installation." >&2
+    else
+      echo "RoboManip dependencies not found." >&2
+      echo "Set HUMANOID_MOTION_SDK_DEPS_PREFIX to the prefix containing ruckig 0.17.3 and related SDK dependencies." >&2
+      exit 2
+    fi
+  fi
+}
+
+prepare_motion_server_source
+
 export COLCON_DEFAULTS_FILE="${PROJECT_ROOT}/colcon_defaults.yaml"
 
 case "${1:-build}" in
   deps)
-    rosdep install --from-paths "${PROJECT_ROOT}/src" --ignore-src -r -y
+    rosdep install --from-paths "${PROJECT_ROOT}/src" --ignore-src -r -y \
+      --skip-keys "humanoid_driver_runtime teleop_vr_recv"
     ;;
   build)
     colcon --log-base "${PROJECT_ROOT}/log" build --base-paths "${PROJECT_ROOT}/src" \

@@ -60,6 +60,22 @@ TEST(SimJointModel, RejectsWrongJointOrder)
   EXPECT_EQ(reason, "joint command names do not match the configured group order");
 }
 
+TEST(SimJointModel, InstantTrackingDoesNotAddAnotherSmoothingLayer)
+{
+  const SteadyTime now{};
+  SimJointModel model({group("left_arm")}, {}, true);
+  std::string reason;
+  ASSERT_TRUE(model.acceptCommand(
+    "left_arm", {"left_arm_joint_1", "left_arm_joint_2"}, {0.8, -1.5}, now,
+    now + 1s, reason)) << reason;
+
+  model.step(0.001, now + 1ms);
+  const auto positions = model.groupPositions("left_arm");
+  ASSERT_EQ(positions.size(), 2U);
+  EXPECT_DOUBLE_EQ(positions[0], 0.8);
+  EXPECT_DOUBLE_EQ(positions[1], -1.5);
+}
+
 TEST(SimJointModel, UsesNamedInitialPositionsAndClampsThem)
 {
   const std::unordered_map<std::string, double> initial{

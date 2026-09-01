@@ -13,7 +13,11 @@ independent process selected by the robot profile.
 - Long operations use the `MoveJ`, `MoveL`, and `MoveP` actions defined by
   `hc_teleop_interfaces`; ServoJ/P stays on the continuous topic path.
 
-The router correlates every output with an accepted live input. The command
-arbiter remains the only publisher of authoritative `JointCommand` messages.
+The router correlates every output with an accepted live input. It retains all
+unexpired target authorizations and advances candidate sequences independently
+per component group. A delayed right-arm result therefore cannot be invalidated
+only because the left arm already advanced, while duplicate or backwards
+candidates for either arm are still rejected. The command arbiter remains the
+only publisher of authoritative `JointCommand` messages.
 Private RoboManip/Ruckig dependencies belong in
 `hc_motion_backend_robo_manip`, not in this package or the default manifest.

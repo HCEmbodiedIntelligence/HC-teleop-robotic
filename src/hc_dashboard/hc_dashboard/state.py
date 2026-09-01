@@ -91,6 +91,7 @@ class DashboardModel:
         self._cartesian: dict[str, Any] = {"groups": []}
         self._backend: dict[str, dict[str, Any]] = {}
         self._commands: dict[str, dict[str, Any]] = {}
+        self._diagnostics: dict[str, Any] = {"available": False, "statuses": {}}
 
     def observe(self, stream: str, payload: dict[str, Any] | None = None) -> None:
         now = time.monotonic()
@@ -118,6 +119,10 @@ class DashboardModel:
         with self._lock:
             self._safety = copy.deepcopy(payload)
 
+    def set_diagnostics(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._diagnostics = copy.deepcopy(payload)
+
     def snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
@@ -133,5 +138,6 @@ class DashboardModel:
                 "cartesian": copy.deepcopy(self._cartesian),
                 "backend_candidates": copy.deepcopy(self._backend),
                 "commands": copy.deepcopy(self._commands),
+                "diagnostics": copy.deepcopy(self._diagnostics),
                 "streams": streams,
             }

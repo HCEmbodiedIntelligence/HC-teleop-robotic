@@ -78,8 +78,8 @@ bool RouteGuard::route(
 
   last_sequence_[stream] = envelope.sequence;
   for (const auto & target : envelope.targets) {
-    authorizations_[key(envelope.source_id, envelope.session_id, target.group_name)] =
-      Authorization{envelope.sequence, envelope.valid_until};
+    authorizations_[key(envelope.source_id, envelope.session_id, target.group_name)]
+      [envelope.sequence] = Authorization{envelope.sequence, envelope.valid_until};
   }
   reason.clear();
   return true;
@@ -89,18 +89,29 @@ bool RouteGuard::authorize(
   const CandidateEnvelope & envelope, SteadyTime now, std::string & reason)
 {
   prune(now);
-  const auto found = authorizations_.find(
-    key(envelope.source_id, envelope.session_id, envelope.group_name));
-  if (found == authorizations_.end()) {
+  const std::string group_key = key(
+    envelope.source_id, envelope.session_id, envelope.group_name);
+  const auto previous = last_candidate_sequence_.find(group_key);
+  if (previous != last_candidate_sequence_.end() &&
+    !sequenceNewer(envelope.sequence, previous->second))
+  {
+    reason = "backend candidate sequence is stale or duplicated for its group";
+    return false;
+  }
+  const auto group = authorizations_.find(group_key);
+  if (group == authorizations_.end()) {
     reason = "backend candidate has no live routed target";
     return false;
   }
-  if (envelope.sequence != found->second.sequence) {
-    reason = "backend candidate does not answer the latest target sequence";
+  const auto found = group->second.find(envelope.sequence);
+  if (found == group->second.end()) {
+    reason = "backend candidate does not answer a live routed target";
     return false;
   }
   constexpr auto kJitterTolerance = std::chrono::milliseconds(20);
-  if (envelope.valid_until <= now || envelope.valid_until > found->second.valid_until + kJitterTolerance) {
+  if (envelope.valid_until <= now ||
+    envelope.valid_until > found->second.valid_until + kJitterTolerance)
+  {
     reason = "backend candidate validity is expired or exceeds its input target";
     return false;
   }
@@ -129,6 +140,20 @@ bool RouteGuard::authorize(
     reason = "backend candidate arrays are malformed or non-finite";
     return false;
   }
+  last_candidate_sequence_[group_key] = envelope.sequence;
+  auto & pending = group->second;
+  for (auto iterator = pending.begin(); iterator != pending.end();) {
+    if (iterator->first == envelope.sequence ||
+      !sequenceNewer(iterator->first, envelope.sequence))
+    {
+      iterator = pending.erase(iterator);
+    } else {
+      ++iterator;
+    }
+  }
+  if (pending.empty()) {
+    authorizations_.erase(group);
+  }
   reason.clear();
   return true;
 }
@@ -136,7 +161,15 @@ bool RouteGuard::authorize(
 void RouteGuard::prune(SteadyTime now)
 {
   for (auto it = authorizations_.begin(); it != authorizations_.end();) {
-    if (it->second.valid_until <= now) {
+    auto & pending = it->second;
+    for (auto authorization = pending.begin(); authorization != pending.end();) {
+      if (authorization->second.valid_until <= now) {
+        authorization = pending.erase(authorization);
+      } else {
+        ++authorization;
+      }
+    }
+    if (pending.empty()) {
       it = authorizations_.erase(it);
     } else {
       ++it;

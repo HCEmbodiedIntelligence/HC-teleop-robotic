@@ -127,7 +127,9 @@ public:
         candidate_publisher_->publish(*message);
         ++routed_candidates_;
       });
-    RCLCPP_INFO(node_.get_logger(), "Motion router active with strict target/candidate correlation");
+    RCLCPP_INFO(
+      node_.get_logger(),
+      "Motion router active with per-group live target/candidate correlation");
   }
 
   ~Impl()

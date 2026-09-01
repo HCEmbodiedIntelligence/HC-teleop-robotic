@@ -148,9 +148,12 @@ public:
       });
     joint_state_publisher_ = create_publisher<sensor_msgs::msg::JointState>(
       declare_parameter<std::string>("joint_state_topic", "state/joints"), rclcpp::QoS(10));
-    cartesian_publisher_ =
-      create_publisher<hc_teleop_interfaces::msg::CartesianStateArray>(
-      declare_parameter<std::string>("cartesian_state_topic", "state/cartesian"), qos);
+    publish_cartesian_state_ = declare_parameter<bool>("publish_cartesian_state", true);
+    if (publish_cartesian_state_) {
+      cartesian_publisher_ =
+        create_publisher<hc_teleop_interfaces::msg::CartesianStateArray>(
+        declare_parameter<std::string>("cartesian_state_topic", "state/cartesian"), qos);
+    }
 
     const auto publish_rate_hz = positiveFinite(
       declare_parameter<double>("publish_rate_hz", 100.0), "publish_rate_hz");
@@ -160,8 +163,9 @@ public:
     last_update_ = std::chrono::steady_clock::now();
 
     RCLCPP_INFO(
-      get_logger(), "OpenArmX sim adapter ready: groups=%zu joints=%zu urdf=%s",
-      kinematics_.size(), model_->jointNames().size(), urdf_path.c_str());
+      get_logger(), "OpenArmX sim adapter ready: groups=%zu joints=%zu measured_fk=%s urdf=%s",
+      kinematics_.size(), model_->jointNames().size(),
+      publish_cartesian_state_ ? "adapter" : "external", urdf_path.c_str());
   }
 
 private:
@@ -252,7 +256,9 @@ private:
     last_update_ = steady_now;
     model_->step(dt, steady_now);
     publishJointState();
-    publishCartesianState();
+    if (publish_cartesian_state_) {
+      publishCartesianState();
+    }
   }
 
   void publishJointState()
@@ -295,6 +301,7 @@ private:
 
   std::unique_ptr<SimJointModel> model_;
   std::map<std::string, KinematicsGroup> kinematics_;
+  bool publish_cartesian_state_{true};
   rclcpp::Subscription<hc_teleop_interfaces::msg::JointCommand>::SharedPtr command_subscription_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_publisher_;
   rclcpp::Publisher<hc_teleop_interfaces::msg::CartesianStateArray>::SharedPtr cartesian_publisher_;

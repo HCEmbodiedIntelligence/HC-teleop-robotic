@@ -30,7 +30,8 @@ class SimJointModel
 public:
   explicit SimJointModel(
     std::vector<JointGroupConfig> groups,
-    const std::unordered_map<std::string, double> & initial_positions = {});
+    const std::unordered_map<std::string, double> & initial_positions = {},
+    bool instant_position_tracking = false);
 
   bool acceptCommand(
     const std::string & group_name,
@@ -66,6 +67,7 @@ private:
   std::vector<double> max_velocity_;
   std::unordered_map<std::string, std::size_t> joint_index_;
   std::map<std::string, GroupState> groups_;
+  bool instant_position_tracking_{false};
 };
 
 }  // namespace hc_adapter_x1

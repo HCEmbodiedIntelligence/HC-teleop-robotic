@@ -9,6 +9,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>hc_dashboard</exec_depend>
+  <exec_depend>hc_diagnostics</exec_depend>
   <exec_depend>hc_teleop_core</exec_depend>
   <exec_depend>hc_vr_gateway</exec_depend>
   <exec_depend>hc_adapter_openarmx</exec_depend>

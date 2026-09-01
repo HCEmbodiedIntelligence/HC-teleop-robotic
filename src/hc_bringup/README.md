@@ -8,17 +8,23 @@ hcctl doctor --profile openarmx
 ros2 launch hc_bringup teleop.launch.py profile:=openarmx mode:=sim
 ```
 
+The read-only control-chain diagnostics node starts by default. It publishes
+`/robots/<robot_id>/diagnostics/control_chain` and writes periodic summaries
+plus bounded anomaly captures under
+`~/.ros/hc_teleop_diagnostics/<robot_id>/control_chain_*.jsonl`. Disable it
+only when explicitly required with `start_diagnostics:=false`.
+
 The operator dashboard starts as an independent process at
-`http://127.0.0.1:7876/dashboard/`. It observes typed telemetry and may call
+`http://127.0.0.1:7877/dashboard/`. It observes typed telemetry and may call
 the safety enable/reset services; it never publishes an actuator command.
 Use `start_dashboard:=false` to disable it, or set another bind address/port:
 
 ```bash
 ros2 launch hc_bringup teleop.launch.py \
-  profile:=x1 mode:=sim dashboard_host:=0.0.0.0 dashboard_port:=7877
+  profile:=x1 mode:=sim dashboard_host:=0.0.0.0 dashboard_port:=7878
 ```
 
-`mode:=sim` starts the OpenArmX KDL IK backend, rate-limited simulation adapter,
+`mode:=sim` starts the profile-selected motion backend, rate-limited simulation adapter,
 robot state publisher, and the HC command arbiter. Use `mode:=shadow` to keep
 the final command below `shadow/control/joint_command` while comparing with a
 device adapter. Use `mode:=real shadow:=false` only after the device adapter has
@@ -30,3 +36,22 @@ Profiles are strict, versioned and component-based. Resources must be either
 profile-relative or `package://`; absolute paths and directory escape are
 rejected. Topics in profiles must be relative so `/robots/<robot_id>` can be
 applied by launch.
+
+The backend can be selected explicitly with `motion_backend:=kdl`,
+`motion_backend:=robo_manip`, or `motion_backend:=external`. The default
+`motion_backend:=profile` uses `motion.backend_package`. RoboManip is always a
+separate process and its measured FK is the sole `state/cartesian` publisher:
+
+```bash
+./run.sh profile:=x1 mode:=sim motion_backend:=robo_manip
+ros2 topic info -v /robots/x1/state/cartesian
+```
+
+The RoboManip option requires the independently built
+`/home/maple/humanoid/install` underlay. The default KDL build has no private
+SDK dependency.
+
+For responsive simulation without changing real-robot commissioning limits,
+profiles may define `simulation.robo_manip_limits`. The launch file applies
+that mapping only in `mode:=sim`; shadow and real modes always use the
+conservative `motion.robo_manip_*` values.

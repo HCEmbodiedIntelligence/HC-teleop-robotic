@@ -11,12 +11,21 @@ setup(
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml", "README.md"]),
     ],
-    install_requires=["setuptools"],
+    install_requires=[
+        "setuptools",
+        "mcap>=1.4,<2",
+        "mcap-ros2-support>=0.5,<1",
+    ],
     tests_require=["pytest"],
     zip_safe=True,
     maintainer="HC Robotics",
     maintainer_email="robotics@hc.local",
     description="Isolated rosbag2/MCAP dataset recording, catalog and replay.",
     license="Proprietary",
-    entry_points={"console_scripts": ["dataset_node = hc_dataset.node:main"]},
+    entry_points={
+        "console_scripts": [
+            "dataset_node = hc_dataset.node:main",
+            "hc_mcap_reprofile = hc_dataset.reprofile:main",
+        ]
+    },
 )

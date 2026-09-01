@@ -81,4 +81,38 @@ TEST(RouteGuard, ExpiresAuthorization)
   EXPECT_FALSE(guard.authorize(candidate(now), now + 101ms, reason));
 }
 
+TEST(RouteGuard, CorrelatesPendingCandidatesIndependentlyPerArm)
+{
+  hc_motion::RouteGuard guard({"left_arm", "right_arm"});
+  const auto now = hc_motion::SteadyTime{};
+  std::string reason;
+  ASSERT_TRUE(guard.route(
+      {"vr", "session", 4U, now + 100ms, {target("left_arm"), target("right_arm")}},
+      now, reason));
+
+  auto left4 = candidate(now);
+  ASSERT_TRUE(guard.authorize(left4, now, reason)) << reason;
+
+  ASSERT_TRUE(guard.route(
+      {"vr", "session", 5U, now + 120ms, {target("left_arm"), target("right_arm")}},
+      now + 1ms, reason));
+  auto left5 = candidate(now);
+  left5.sequence = 5U;
+  ASSERT_TRUE(guard.authorize(left5, now + 2ms, reason)) << reason;
+
+  // The right-arm result for sequence 4 remains useful and monotonic even
+  // though sequence 5 has already been routed and the left arm advanced.
+  auto right4 = candidate(now);
+  right4.group_name = "right_arm";
+  EXPECT_TRUE(guard.authorize(right4, now + 3ms, reason)) << reason;
+
+  auto right5 = right4;
+  right5.sequence = 5U;
+  EXPECT_TRUE(guard.authorize(right5, now + 4ms, reason)) << reason;
+
+  // A group may never move backwards after a newer candidate was accepted.
+  EXPECT_FALSE(guard.authorize(left4, now + 5ms, reason));
+  EXPECT_EQ(reason, "backend candidate sequence is stale or duplicated for its group");
+}
+
 }  // namespace

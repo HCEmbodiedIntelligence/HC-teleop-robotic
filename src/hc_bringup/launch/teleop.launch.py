@@ -50,6 +50,31 @@ def _group_parameters(components):
     return parameters
 
 
+def _target_filter_parameters(components):
+    parameters = {}
+    for component in components:
+        group = str(component["id"])
+        config = component.get("target_filter")
+        if not config:
+            continue
+        prefix = f"{group}.target_filter"
+        parameters[f"{prefix}.enabled"] = bool(config.get("enabled", True))
+        parameters[f"{prefix}.workspace_min_m"] = [
+            float(value) for value in config["workspace_min_m"]
+        ]
+        parameters[f"{prefix}.workspace_max_m"] = [
+            float(value) for value in config["workspace_max_m"]
+        ]
+        for field in (
+            "min_radius_m",
+            "max_radius_m",
+            "max_position_step_m",
+            "max_orientation_step_rad",
+        ):
+            parameters[f"{prefix}.{field}"] = float(config[field])
+    return parameters
+
+
 def _sim_adapter(arms):
     """Resolve the simulator from the profile's adapter boundary."""
     packages = {str(arm.get("adapter", {}).get("package", "")) for arm in arms}
@@ -71,14 +96,23 @@ def _sim_adapter(arms):
     return package, plugin, executable, name
 
 
-def _component(package: str, plugin: str, name: str, namespace: str, parameters: dict, **kwargs):
+def _component(
+    package: str,
+    plugin: str,
+    name: str,
+    namespace: str,
+    parameters: dict,
+    *,
+    intra_process: bool = True,
+    **kwargs,
+):
     return ComposableNode(
         package=package,
         plugin=plugin,
         name=name,
         namespace=namespace,
         parameters=[parameters],
-        extra_arguments=[{"use_intra_process_comms": True}],
+        extra_arguments=[{"use_intra_process_comms": intra_process}],
         **kwargs,
     )
 
@@ -111,8 +145,26 @@ def _setup(context: LaunchContext):
         raise ValueError("mode must be sim, shadow, or real")
     if composition not in {"compact", "isolated"}:
         raise ValueError("composition must be compact or isolated")
-    if backend not in {"kdl", "external"}:
-        raise ValueError("motion_backend must be kdl or external")
+    if backend not in {"profile", "kdl", "robo_manip", "external"}:
+        raise ValueError("motion_backend must be profile, kdl, robo_manip, or external")
+
+    motion = profile.value.get("motion", {})
+    if backend == "profile":
+        profile_backend = str(
+            motion.get("backend_package", "hc_motion_backend_kdl")
+        ).strip()
+        backend_by_package = {
+            "hc_motion_backend_kdl": "kdl",
+            "hc_motion_backend_robo_manip": "robo_manip",
+        }
+        try:
+            backend = backend_by_package[profile_backend]
+        except KeyError as error:
+            raise ValueError(
+                "profile motion.backend_package must be hc_motion_backend_kdl or "
+                "hc_motion_backend_robo_manip; use motion_backend:=external for an "
+                "out-of-tree backend"
+            ) from error
 
     shadow_arg = LaunchConfiguration("shadow").perform(context).strip().lower()
     shadow = mode == "shadow" if shadow_arg in {"", "auto"} else _truthy(shadow_arg)
@@ -122,8 +174,14 @@ def _setup(context: LaunchContext):
     start_router = _auto_bool(LaunchConfiguration("start_motion_router").perform(context), True)
     start_kdl = _auto_bool(
         LaunchConfiguration("start_kdl_backend").perform(context),
-        mode == "sim" and backend == "kdl",
+        backend == "kdl",
     )
+    start_robo_manip = _auto_bool(
+        LaunchConfiguration("start_robo_manip_backend").perform(context),
+        backend == "robo_manip",
+    )
+    if start_kdl and start_robo_manip:
+        raise ValueError("KDL and RoboManip backends cannot own the same backend topics")
     start_sim = _auto_bool(LaunchConfiguration("start_sim_adapter").perform(context), mode == "sim")
     start_lease = _auto_bool(LaunchConfiguration("start_auto_lease").perform(context), mode == "sim")
     start_rsp = _auto_bool(
@@ -131,6 +189,9 @@ def _setup(context: LaunchContext):
     )
     start_dashboard = _auto_bool(
         LaunchConfiguration("start_dashboard").perform(context), True
+    )
+    start_diagnostics = _auto_bool(
+        LaunchConfiguration("start_diagnostics").perform(context), True
     )
     dashboard_host = LaunchConfiguration("dashboard_host").perform(context).strip()
     try:
@@ -149,9 +210,18 @@ def _setup(context: LaunchContext):
     vr = profile.value.get("vr", {})
     safety = profile.value.get("safety", {})
     teleop = profile.value.get("teleop", {})
-    motion = profile.value.get("motion", {})
     simulation = profile.value.get("simulation", {})
+    diagnostics = profile.value.get("diagnostics", {})
     command_topic = "shadow/control/joint_command" if shadow else "control/joint_command"
+
+    simulation_robo_limits = simulation.get("robo_manip_limits", {})
+    if not isinstance(simulation_robo_limits, dict):
+        raise ValueError("simulation.robo_manip_limits must be a mapping")
+
+    def robo_limit(name: str, default: float) -> float:
+        if mode == "sim" and name in simulation_robo_limits:
+            return float(simulation_robo_limits[name])
+        return float(motion.get(f"robo_manip_{name}", default))
 
     gateway_parameters = {
         "listen_host": str(vr.get("listen_host", "0.0.0.0")),
@@ -233,6 +303,67 @@ def _setup(context: LaunchContext):
         "command_reset_timeout_sec": float(motion.get("servo_reset_timeout_ms", 250)) / 1000.0,
         "command_tracking_error_reset": float(motion.get("servo_tracking_error_reset", 0.5)),
     }
+    robo_manip_parameters = {
+        **group_parameters,
+        **_target_filter_parameters(arms),
+        "urdf_path": urdf_path,
+        "target_topic": "motion/backend/cartesian_targets",
+        "joint_state_topic": "state/joints",
+        "candidate_topic": "motion/backend/joint_candidate",
+        "cartesian_state_topic": "state/cartesian",
+        "publish_fk": True,
+        "feedback_timeout_sec": float(teleop.get("feedback_timeout_ms", 200)) / 1000.0,
+        "session_reset_timeout_sec": float(
+            motion.get("servo_reset_timeout_ms", 250)
+        ) / 1000.0,
+        "nominal_rate_hz": float(motion.get("servo_nominal_rate_hz", 60.0)),
+        "tick_failure_reset_count": int(
+            motion.get("robo_manip_tick_failure_reset_count", 3)
+        ),
+        "ik_position_tolerance_m": float(
+            motion.get("robo_manip_ik_position_tolerance_m", 0.001)
+        ),
+        "ik_orientation_tolerance_rad": float(
+            motion.get("robo_manip_ik_orientation_tolerance_rad", 0.015)
+        ),
+        "ik_enable_regularization_task": bool(
+            motion.get("robo_manip_ik_enable_regularization_task", True)
+        ),
+        "ik_regularization_task_weight": float(
+            motion.get("robo_manip_ik_regularization_task_weight", 0.0005)
+        ),
+        "ik_enable_joint_task": bool(
+            motion.get("robo_manip_ik_enable_joint_task", True)
+        ),
+        "ik_joint_task_weight": float(
+            motion.get("robo_manip_ik_joint_task_weight", 0.001)
+        ),
+        "joint_max_velocity_rad_s": robo_limit("joint_max_velocity_rad_s", 0.6),
+        "joint_max_acceleration_rad_s2": robo_limit("joint_max_acceleration_rad_s2", 2.4),
+        "joint_max_jerk_rad_s3": robo_limit("joint_max_jerk_rad_s3", 9.6),
+        "cartesian_max_linear_velocity_m_s": robo_limit(
+            "cartesian_max_linear_velocity_m_s", 0.1
+        ),
+        "cartesian_max_linear_acceleration_m_s2": robo_limit(
+            "cartesian_max_linear_acceleration_m_s2", 0.3
+        ),
+        "cartesian_max_linear_jerk_m_s3": robo_limit(
+            "cartesian_max_linear_jerk_m_s3", 1.5
+        ),
+        "cartesian_max_angular_velocity_rad_s": robo_limit(
+            "cartesian_max_angular_velocity_rad_s", 0.5
+        ),
+        "cartesian_max_angular_acceleration_rad_s2": robo_limit(
+            "cartesian_max_angular_acceleration_rad_s2", 2.0
+        ),
+        "cartesian_max_angular_jerk_rad_s3": robo_limit(
+            "cartesian_max_angular_jerk_rad_s3", 10.0
+        ),
+    }
+    if start_robo_manip:
+        robo_manip_parameters["sdk_config_path"] = str(
+            profile.resource("robo_manip_sdk")
+        )
     sim_group_parameters = _group_parameters(_sim_components(profile))
     sim_parameters = {
         **sim_group_parameters,
@@ -243,7 +374,18 @@ def _setup(context: LaunchContext):
         "publish_rate_hz": float(simulation.get("publish_rate_hz", 100.0)),
         "max_velocity_scale": float(simulation.get("max_velocity_scale", 0.2)),
         "fallback_max_velocity": float(simulation.get("fallback_max_velocity", 1.0)),
+        # RoboManip owns measured FK when selected.  This guarantees exactly
+        # one state/cartesian publisher and keeps mapper feedback consistent
+        # with the active solver.
+        "publish_cartesian_state": not start_robo_manip,
     }
+    if str(arms[0].get("adapter", {}).get("package", "")) == "hc_adapter_x1":
+        # The selected motion backend already rate-limits and the arbiter still
+        # owns the final command. Avoid a third interpolation layer in the X1
+        # visualization, which otherwise looks like control latency.
+        sim_parameters["instant_position_tracking"] = bool(
+            simulation.get("instant_position_tracking", True)
+        )
     initial_positions = simulation.get("initial_positions", {})
     if not isinstance(initial_positions, dict):
         raise ValueError("simulation.initial_positions must be a mapping of joint name to radians")
@@ -260,6 +402,41 @@ def _setup(context: LaunchContext):
         "acquire_service": "control/acquire",
         "lease_duration_sec": 1.0,
         "renew_margin_sec": 0.35,
+    }
+    diagnostics_log_directory = LaunchConfiguration(
+        "diagnostics_log_directory"
+    ).perform(context).strip()
+    if not diagnostics_log_directory:
+        diagnostics_log_directory = str(
+            Path.home() / ".ros" / "hc_teleop_diagnostics" / robot_id
+        )
+    diagnostics_parameters = {
+        "log_directory": diagnostics_log_directory,
+        "diagnostics_topic": "diagnostics/control_chain",
+        "vr_receive_gap_warn_ms": float(
+            diagnostics.get("vr_receive_gap_warn_ms", 80.0)
+        ),
+        "vr_callback_delay_warn_ms": float(
+            diagnostics.get("vr_callback_delay_warn_ms", 20.0)
+        ),
+        "ik_latency_warn_ms": float(diagnostics.get("ik_latency_warn_ms", 20.0)),
+        "arbiter_latency_warn_ms": float(
+            diagnostics.get("arbiter_latency_warn_ms", 20.0)
+        ),
+        "joint_step_warn_rad": float(diagnostics.get("joint_step_warn_rad", 0.25)),
+        "missing_candidate_warn_ms": float(
+            diagnostics.get("missing_candidate_warn_ms", 80.0)
+        ),
+        "stream_stale_ms": float(diagnostics.get("stream_stale_ms", 350.0)),
+        "trace_retention_ms": float(diagnostics.get("trace_retention_ms", 2000.0)),
+        "capture_pre_seconds": float(diagnostics.get("capture_pre_seconds", 5.0)),
+        "capture_post_seconds": float(diagnostics.get("capture_post_seconds", 3.0)),
+        "summary_period_seconds": float(
+            diagnostics.get("summary_period_seconds", 5.0)
+        ),
+        "capture_cooldown_seconds": float(
+            diagnostics.get("capture_cooldown_seconds", 5.0)
+        ),
     }
     sim_package = sim_plugin = sim_executable = sim_node_name = None
     if start_sim:
@@ -294,6 +471,18 @@ def _setup(context: LaunchContext):
                 output="screen",
             )
         )
+    if start_robo_manip:
+        # The private SDK remains process-isolated from the composable control
+        # runtime so its pinned ABI cannot contaminate the default process.
+        actions.append(
+            _node(
+                "hc_motion_backend_robo_manip",
+                "robo_manip_backend_node",
+                "robo_manip_backend",
+                namespace,
+                robo_manip_parameters,
+            )
+        )
 
     descriptions = []
     if start_vr:
@@ -310,6 +499,13 @@ def _setup(context: LaunchContext):
         descriptions.append(_component("hc_motion_backend_kdl", "hc_motion_backend_kdl::KdlIkBackendNode", "kdl_ik_backend", namespace, kdl_parameters))
     if start_sim:
         descriptions.append(_component(sim_package, sim_plugin, sim_node_name, namespace, sim_parameters))
+    if start_diagnostics:
+        descriptions.append(_component(
+            "hc_diagnostics", "hc_diagnostics::ControlChainNode",
+            "control_chain_diagnostics", namespace, diagnostics_parameters,
+            # Humble rejects transient-local publishers when intra-process is enabled.
+            # Diagnostics stay DDS-backed so a restarted dashboard receives the last state.
+            intra_process=False))
 
     if composition == "compact":
         if descriptions:
@@ -339,6 +535,10 @@ def _setup(context: LaunchContext):
         actions.append(_node("hc_motion_backend_kdl", "kdl_ik_backend_node", "kdl_ik_backend", namespace, kdl_parameters))
     if start_sim:
         actions.append(_node(sim_package, sim_executable, sim_node_name, namespace, sim_parameters))
+    if start_diagnostics:
+        actions.append(_node(
+            "hc_diagnostics", "control_chain_diagnostics_node",
+            "control_chain_diagnostics", namespace, diagnostics_parameters))
     return actions
 
 
@@ -349,18 +549,23 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("robot_id", default_value="", description="Runtime robot id override"),
             DeclareLaunchArgument("mode", default_value="sim", description="sim, shadow, or real"),
             DeclareLaunchArgument("composition", default_value="compact", description="compact or isolated"),
-            DeclareLaunchArgument("motion_backend", default_value="kdl", description="kdl or external"),
+            DeclareLaunchArgument(
+                "motion_backend", default_value="profile",
+                description="profile, kdl, robo_manip, or external"),
             DeclareLaunchArgument("start_vr", default_value="true"),
             DeclareLaunchArgument("start_arbiter", default_value="true"),
             DeclareLaunchArgument("start_vr_mapper", default_value="true"),
             DeclareLaunchArgument("start_motion_router", default_value="true"),
             DeclareLaunchArgument("start_kdl_backend", default_value="auto"),
+            DeclareLaunchArgument("start_robo_manip_backend", default_value="auto"),
             DeclareLaunchArgument("start_sim_adapter", default_value="auto"),
             DeclareLaunchArgument("start_auto_lease", default_value="auto"),
             DeclareLaunchArgument("start_robot_state_publisher", default_value="auto"),
             DeclareLaunchArgument("start_dashboard", default_value="true"),
+            DeclareLaunchArgument("start_diagnostics", default_value="true"),
+            DeclareLaunchArgument("diagnostics_log_directory", default_value=""),
             DeclareLaunchArgument("dashboard_host", default_value="0.0.0.0"),
-            DeclareLaunchArgument("dashboard_port", default_value="7876"),
+            DeclareLaunchArgument("dashboard_port", default_value="7877"),
             DeclareLaunchArgument("shadow", default_value="auto", description="auto follows mode:=shadow"),
             OpaqueFunction(function=_setup),
         ]
