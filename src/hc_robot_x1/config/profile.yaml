@@ -13,7 +13,7 @@ components:
     enabled: true
     adapter:
       package: hc_adapter_x1
-      hardware_plugin: hc_adapter_x1/X1System
+      plugin: hc_adapter_x1::X1HardwareAdapterNode
     joint_names:
       - Joint1_L
       - Joint2_L
@@ -43,7 +43,7 @@ components:
     enabled: true
     adapter:
       package: hc_adapter_x1
-      hardware_plugin: hc_adapter_x1/X1System
+      plugin: hc_adapter_x1::X1HardwareAdapterNode
     joint_names:
       - Joint1_R
       - Joint2_R
@@ -62,7 +62,7 @@ components:
     enabled: true
     adapter:
       package: hc_adapter_x1
-      hardware_plugin: hc_adapter_x1/X1System
+      plugin: hc_adapter_x1::X1HardwareAdapterNode
     joint_names:
       - leg_1
       - leg_2
@@ -77,7 +77,7 @@ components:
     attached_to: left_arm
     adapter:
       package: hc_adapter_x1
-      hardware_plugin: hc_adapter_x1/X1System
+      plugin: hc_adapter_x1::X1HardwareAdapterNode
     joint_names: [L_ban]
     frames:
       base: gongju_L_Link
@@ -89,7 +89,7 @@ components:
     attached_to: right_arm
     adapter:
       package: hc_adapter_x1
-      hardware_plugin: hc_adapter_x1/X1System
+      plugin: hc_adapter_x1::X1HardwareAdapterNode
     joint_names: [R_ban]
     frames:
       base: gongju_R_Link
@@ -239,6 +239,18 @@ diagnostics:
   capture_post_seconds: 3.0
   summary_period_seconds: 5.0
   capture_cooldown_seconds: 5.0
+
+# HC_X1 remains an independently launched hardware/SDK repository.  The
+# adapter in this workspace translates its stable legacy boundary without
+# requiring any HC_X1 source changes.
+hardware:
+  legacy_joint_state_topic: /hc_teleop/joint_states
+  legacy_joint_command_topic: /hc_teleop/joint_cmd
+  legacy_left_finger_topic: /hc_teleop/joint_cmd_finger_left
+  legacy_right_finger_topic: /hc_teleop/joint_cmd_finger_right
+  command_publish_rate_hz: 100.0
+  command_progress_timeout_ms: 150
+  feedback_warn_timeout_ms: 500
 
 vr:
   listen_host: 0.0.0.0

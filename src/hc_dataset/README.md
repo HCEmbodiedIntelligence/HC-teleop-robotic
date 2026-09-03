@@ -21,6 +21,20 @@ unavailable wrench, trigger and vibration samples are explicitly zero-filled.
 Camera calibration, extrinsics and `robot_info` are copied once from the
 reference as static configuration.
 
+Joint payloads are normalized as well as their schemas. `io_teleop/joint_cmd`
+and `io_teleop/joint_states` are rebuilt in the exact joint-name order of the
+reference instead of directly copying a legacy array that merely uses the same
+ROS message type. For the X1 profile this means 14 arm joints followed by
+`leg_1`, `leg_2` and `zhi`; `R_ban/L_ban` remain only in the dedicated finger
+topics. Every output file is rejected if command/state dimensions or names
+differ from the reference, or if a finger command is not binary.
+
+Some arm-only recordings contain no waist samples. In that case the converter
+marks the synthesized names in its JSON report and uses the commissioned X1
+home values `leg_1=0.5`, `leg_2=1.2`, `zhi=-0.6` radians, with zero velocity and
+effort. Override a value explicitly with repeated
+`--missing-joint NAME=RADIANS` options.
+
 ```bash
 hc_mcap_reprofile SOURCE.mcap REFERENCE.mcap OUTPUT.mcap
 ```

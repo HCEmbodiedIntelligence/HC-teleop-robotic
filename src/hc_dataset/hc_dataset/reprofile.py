@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -52,6 +53,22 @@ TARGET_HAND_STATE = "/io_teleop/hand_joint_states"
 TARGET_GRIPPER = "/io_teleop/gripper_state"
 TARGET_LEFT_FINGER = "/io_teleop/joint_cmd_finger_left"
 TARGET_RIGHT_FINGER = "/io_teleop/joint_cmd_finger_right"
+
+# ``joint_cmd`` is deliberately excluded from the otherwise-idempotent direct
+# copy path. Some legacy "converted" recordings used the target topic/schema
+# but still carried a 16-element payload (14 arm joints + R_ban/L_ban). The
+# hc_tj contract is 17 elements (14 arm joints + leg_1/leg_2/zhi), so every
+# command must be decoded and rebuilt against the reference template.
+NORMALIZED_TARGET_TOPICS = frozenset({TARGET_COMMAND, TARGET_JOINT_STATE})
+
+# The 2026-08-31 recordings contain no waist feedback at all. These are the
+# commissioned X1 home values used by HC_X1 and the X1 profile. They are only
+# used for names absent from a source JointState; recorded values always win.
+DEFAULT_MISSING_JOINT_VALUES = {
+    "leg_1": 0.5,
+    "leg_2": 1.2,
+    "zhi": -0.6,
+}
 
 STATIC_REFERENCE_TOPICS = (
     "io_teleop/robot_info",
@@ -329,12 +346,44 @@ def _joint_message(
     return output
 
 
+def _normalized_joint_state(
+    profile: _ReferenceProfile,
+    source: Any,
+    timestamp_ns: int,
+    missing_joint_defaults: Mapping[str, float],
+) -> Any:
+    """Rebuild JointState names and all numeric arrays against the reference."""
+    output = profile.clone_template(TARGET_JOINT_STATE)
+    _set_stamp(output, timestamp_ns)
+    source_positions = _field_map(source)
+    source_velocities = {
+        str(name): float(value)
+        for name, value in zip(source.name, source.velocity)
+    }
+    source_efforts = {
+        str(name): float(value)
+        for name, value in zip(source.name, source.effort)
+    }
+    output.position = [
+        float(source_positions.get(str(name), missing_joint_defaults.get(str(name), 0.0)))
+        for name in output.name
+    ]
+    output.velocity = [
+        float(source_velocities.get(str(name), 0.0)) for name in output.name
+    ]
+    output.effort = [
+        float(source_efforts.get(str(name), 0.0)) for name in output.name
+    ]
+    return output
+
+
 def convert_mcap(
     source_path: Path,
     reference_path: Path,
     output_path: Path,
     *,
     auxiliary_rate_hz: float = 10.0,
+    missing_joint_defaults: Optional[Mapping[str, float]] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
     """Convert one HC recording to the channel contract of ``reference_path``."""
@@ -351,6 +400,13 @@ def convert_mcap(
         raise ReprofileError(f"output already exists (use --overwrite): {output_path}")
     if not auxiliary_rate_hz > 0.0:
         raise ReprofileError("auxiliary_rate_hz must be positive")
+    joint_defaults = dict(DEFAULT_MISSING_JOINT_VALUES)
+    if missing_joint_defaults is not None:
+        joint_defaults.update(
+            {str(name): float(value) for name, value in missing_joint_defaults.items()}
+        )
+    if any(not name or not math.isfinite(value) for name, value in joint_defaults.items()):
+        raise ReprofileError("missing joint defaults must be named floating-point values")
 
     profile = _ReferenceProfile(reference_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,7 +418,7 @@ def convert_mcap(
 
     source_decoder = DecoderFactory()
     decoder_cache: Dict[int, Callable[[bytes], Any]] = {}
-    latest_joint_state: Dict[str, float] = {}
+    latest_joint_state: Dict[str, float] = dict(joint_defaults)
     latest_left_hand: Dict[str, float] = {}
     latest_right_hand: Dict[str, float] = {}
     latest_base = _zero_array(profile, TARGET_BASE)
@@ -371,6 +427,7 @@ def convert_mcap(
     auxiliary_period_ns = int(round(1_000_000_000 / auxiliary_rate_hz))
     next_auxiliary_ns: Optional[int] = None
     source_counts: Dict[str, int] = {}
+    synthesized_state_joints: set[str] = set()
 
     def decode(schema: Optional[Schema], channel: Channel, message: Message) -> Any:
         if schema is None:
@@ -430,10 +487,13 @@ def convert_mcap(
                 if (
                     topic in profile.channels_by_topic
                     and topic not in STATIC_REFERENCE_TOPIC_SET
+                    and topic not in NORMALIZED_TARGET_TOPICS
                 ):
                     target = topic
                 else:
                     target = DIRECT_TOPIC_MAP.get(topic)
+                if target in NORMALIZED_TARGET_TOPICS:
+                    target = None
                 if target is not None:
                     _validate_direct_type(schema, profile.schema_for_topic(target), topic)
                     sink.add(
@@ -466,7 +526,28 @@ def convert_mcap(
 
                 if topic in {"/hc_teleop/joint_states", TARGET_JOINT_STATE}:
                     decoded_state = decode(schema, channel, message)
-                    latest_joint_state = _field_map(decoded_state)
+                    source_state_names = set(str(name) for name in decoded_state.name)
+                    expected_state_names = set(
+                        str(name) for name in profile.templates[TARGET_JOINT_STATE].name
+                    )
+                    synthesized_state_joints.update(
+                        expected_state_names - source_state_names
+                    )
+                    state_time = _stamp_ns(decoded_state, message.log_time)
+                    normalized_state = _normalized_joint_state(
+                        profile,
+                        decoded_state,
+                        state_time,
+                        joint_defaults,
+                    )
+                    latest_joint_state = _field_map(normalized_state)
+                    sink.add(
+                        TARGET_JOINT_STATE,
+                        message.log_time,
+                        profile.encode(TARGET_JOINT_STATE, normalized_state),
+                        publish_time_ns=message.publish_time,
+                        sequence=message.sequence,
+                    )
                     if TARGET_WRENCH not in source_topics:
                         sink.add(
                             TARGET_WRENCH,
@@ -479,7 +560,7 @@ def convert_mcap(
                     if next_auxiliary_ns is None:
                         next_auxiliary_ns = message.log_time
                     if message.log_time >= next_auxiliary_ns:
-                        sample_time = _stamp_ns(decoded_state, message.log_time)
+                        sample_time = state_time
                         trigger = profile.clone_template(TARGET_HAND_TRIGGER)
                         _set_stamp(trigger, sample_time)
                         # The source has no VR trigger channel. Preserve the
@@ -537,8 +618,14 @@ def convert_mcap(
                         while next_auxiliary_ns <= message.log_time:
                             next_auxiliary_ns += auxiliary_period_ns
 
-                if topic == SOURCE_JOINT_COMMAND:
+                if topic in {SOURCE_JOINT_COMMAND, TARGET_COMMAND}:
                     decoded_command = decode(schema, channel, message)
+                    # Start from measured state so missing waist commands hold
+                    # the closest recorded leg_1/leg_2/zhi feedback. Overlay
+                    # the command by name, then _joint_message selects and
+                    # orders exactly the reference's 17 names. Legacy R_ban
+                    # and L_ban entries are intentionally discarded here;
+                    # they belong only to the dedicated finger topics.
                     command_values = dict(latest_joint_state)
                     command_values.update(_field_map(decoded_command))
                     command_time = _stamp_ns(decoded_command, message.log_time)
@@ -574,6 +661,10 @@ def convert_mcap(
             "source_end_time_ns": end_time,
             "source_counts": source_counts,
             "output_counts": sink.counts,
+            "synthesized_joint_defaults": {
+                name: joint_defaults[name]
+                for name in sorted(synthesized_state_joints)
+            },
             "compatibility": validation,
         }
     except Exception:
@@ -603,7 +694,7 @@ def _structure(path: Path) -> Tuple[Any, Dict[str, Tuple[Any, ...]]]:
 
 
 def inspect_compatibility(candidate: Path, reference: Path) -> Dict[str, Any]:
-    """Compare Header, topic, schema and channel metadata with a reference."""
+    """Compare Header, channels and critical per-message payload contracts."""
     candidate_header, candidate_channels = _structure(candidate)
     reference_header, reference_channels = _structure(reference)
     differences = []
@@ -625,6 +716,8 @@ def inspect_compatibility(candidate: Path, reference: Path) -> Dict[str, Any]:
     for topic in sorted(candidate_topics & reference_topics):
         if candidate_channels[topic] != reference_channels[topic]:
             differences.append(f"channel/schema differs: {topic}")
+    payload = _inspect_joint_payloads(candidate, reference)
+    differences.extend(payload["differences"])
     return {
         "compatible": not differences,
         "header": {
@@ -632,6 +725,103 @@ def inspect_compatibility(candidate: Path, reference: Path) -> Dict[str, Any]:
             "library": candidate_header.library,
         },
         "topic_count": len(candidate_channels),
+        "joint_payloads": payload["topics"],
+        "differences": differences,
+    }
+
+
+def _inspect_joint_payloads(candidate: Path, reference: Path) -> Dict[str, Any]:
+    """Validate names/dimensions that ROS schemas alone cannot express."""
+    checked_topics = (
+        TARGET_COMMAND,
+        TARGET_JOINT_STATE,
+        TARGET_LEFT_FINGER,
+        TARGET_RIGHT_FINGER,
+    )
+    reference_profile = _ReferenceProfile(reference)
+    expected_names = {
+        topic: tuple(str(name) for name in reference_profile.templates[topic].name)
+        for topic in checked_topics
+    }
+    expected_dimensions = {
+        topic: (
+            len(reference_profile.templates[topic].name),
+            len(reference_profile.templates[topic].position),
+            len(reference_profile.templates[topic].velocity),
+            len(reference_profile.templates[topic].effort),
+        )
+        for topic in checked_topics
+    }
+    counts = {topic: 0 for topic in checked_topics}
+    observed_dimensions = {topic: set() for topic in checked_topics}
+    bad_names = set()
+    bad_dimensions = set()
+    non_binary_fingers = set()
+    decoder_factory = DecoderFactory()
+    decoders: Dict[int, Callable[[bytes], Any]] = {}
+
+    with candidate.open("rb") as stream:
+        reader = make_reader(stream)
+        for schema, channel, message in reader.iter_messages(log_time_order=True):
+            topic = channel.topic
+            if topic not in expected_names:
+                continue
+            if schema is None:
+                bad_names.add(topic)
+                continue
+            decoder = decoders.get(schema.id)
+            if decoder is None:
+                decoder = decoder_factory.decoder_for(channel.message_encoding, schema)
+                if decoder is None:
+                    bad_names.add(topic)
+                    continue
+                decoders[schema.id] = decoder
+            decoded = decoder(message.data)
+            names = tuple(str(name) for name in decoded.name)
+            positions = tuple(float(value) for value in decoded.position)
+            dimensions = (
+                len(names),
+                len(positions),
+                len(decoded.velocity),
+                len(decoded.effort),
+            )
+            counts[topic] += 1
+            observed_dimensions[topic].add(dimensions)
+            if names != expected_names[topic]:
+                bad_names.add(topic)
+            if dimensions != expected_dimensions[topic]:
+                bad_dimensions.add(topic)
+            if topic in {TARGET_LEFT_FINGER, TARGET_RIGHT_FINGER} and any(
+                value not in {0.0, 1.0} for value in positions
+            ):
+                non_binary_fingers.add(topic)
+
+    differences = []
+    for topic in checked_topics:
+        if counts[topic] == 0:
+            differences.append(f"payload topic has no messages: {topic}")
+        if topic in bad_names:
+            differences.append(
+                f"payload joint names differ from reference: {topic}"
+            )
+        if topic in bad_dimensions:
+            differences.append(
+                f"payload joint array dimensions differ from reference: {topic}"
+            )
+        if topic in non_binary_fingers:
+            differences.append(f"finger payload contains non-binary values: {topic}")
+    return {
+        "topics": {
+            topic: {
+                "messages": counts[topic],
+                "expected_names": list(expected_names[topic]),
+                "expected_dimensions": list(expected_dimensions[topic]),
+                "observed_dimensions": [
+                    list(item) for item in sorted(observed_dimensions[topic])
+                ],
+            }
+            for topic in checked_topics
+        },
         "differences": differences,
     }
 
@@ -655,6 +845,16 @@ def _parser() -> argparse.ArgumentParser:
         help="derived hand/trigger/vibration rate in Hz (default: 10)",
     )
     parser.add_argument(
+        "--missing-joint",
+        action="append",
+        default=[],
+        metavar="NAME=RADIANS",
+        help=(
+            "value used when a source JointState omits a reference joint; may be "
+            "repeated (X1 waist defaults: leg_1=0.5, leg_2=1.2, zhi=-0.6)"
+        ),
+    )
+    parser.add_argument(
         "--overwrite", action="store_true", help="replace an existing output file"
     )
     parser.add_argument(
@@ -666,12 +866,19 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        missing_joint_defaults = {}
+        for item in args.missing_joint:
+            name, separator, raw_value = item.partition("=")
+            if not separator or not name.strip():
+                raise ReprofileError("--missing-joint must use NAME=RADIANS")
+            missing_joint_defaults[name.strip()] = float(raw_value)
         with _materialize_source(args.source) as source_path:
             report = convert_mcap(
                 source_path,
                 args.reference,
                 args.output,
                 auxiliary_rate_hz=args.auxiliary_rate,
+                missing_joint_defaults=missing_joint_defaults,
                 overwrite=args.overwrite,
             )
             report["source"] = args.source

@@ -147,6 +147,25 @@ def test_rejects_non_positive_diagnostics_threshold():
         validate_profile(value)
 
 
+def test_validates_external_hardware_topics_and_watchdog():
+    value = minimal_profile()
+    value["hardware"] = {
+        "legacy_joint_state_topic": "/hc_teleop/joint_states",
+        "legacy_joint_command_topic": "/hc_teleop/joint_cmd",
+        "command_progress_timeout_ms": 150,
+    }
+    assert validate_profile(value)["hardware"]["command_progress_timeout_ms"] == 150
+
+    value["hardware"]["legacy_joint_state_topic"] = "relative/state"
+    with pytest.raises(ProfileError, match="absolute external-driver topic"):
+        validate_profile(value)
+
+    value["hardware"]["legacy_joint_state_topic"] = "/hc_teleop/joint_states"
+    value["hardware"]["command_progress_timeout_ms"] = 0
+    with pytest.raises(ProfileError, match="hardware.command_progress_timeout_ms"):
+        validate_profile(value)
+
+
 def test_validates_optional_robo_manip_backend_contract():
     value = minimal_profile()
     value["motion"] = {"backend_package": "hc_motion_backend_robo_manip"}

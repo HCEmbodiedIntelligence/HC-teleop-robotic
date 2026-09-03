@@ -12,4 +12,16 @@ set +u
 source /opt/ros/humble/setup.bash
 source "${SCRIPT_DIR}/install/setup.bash"
 set -u
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-14}"
+export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
+
+# Record the domain selected by the control stack so helper processes started
+# from another terminal (notably RViz) do not inherit a stale ROS_DOMAIN_ID.
+mkdir -p "${SCRIPT_DIR}/runtime"
+ACTIVE_DOMAIN_FILE="${SCRIPT_DIR}/runtime/active_ros_domain"
+ACTIVE_DOMAIN_TMP="${ACTIVE_DOMAIN_FILE}.$$"
+printf '%s\n' "${ROS_DOMAIN_ID}" > "${ACTIVE_DOMAIN_TMP}"
+mv -f "${ACTIVE_DOMAIN_TMP}" "${ACTIVE_DOMAIN_FILE}"
+
+echo "[HC-Teleop] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 exec ros2 launch hc_bringup teleop.launch.py "$@"

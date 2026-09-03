@@ -3,8 +3,10 @@ from types import SimpleNamespace
 import pytest
 
 from hc_dataset.reprofile import (
+    DEFAULT_MISSING_JOINT_VALUES,
     ReprofileError,
     _field_map,
+    _normalized_joint_state,
     _normal_ros_type,
     _parse_sftp_source,
     _set_stamp,
@@ -38,3 +40,36 @@ def test_parses_sftp_source_without_embedding_password():
     )
     with pytest.raises(ReprofileError, match="do not put"):
         _parse_sftp_source("sftp://niic:secret@192.168.2.33/home/niic/a.mcap")
+
+
+def test_normalizes_four_joint_state_arrays_and_synthesizes_missing_waist():
+    template = SimpleNamespace(
+        header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=0, nanosec=0), frame_id="base_link"
+        ),
+        name=["arm", "leg_1", "leg_2", "zhi"],
+        position=[0.0] * 4,
+        velocity=[0.0] * 4,
+        effort=[0.0] * 4,
+    )
+
+    class Profile:
+        @staticmethod
+        def clone_template(topic):
+            assert topic == "io_teleop/joint_states"
+            return template
+
+    source = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=0, nanosec=0)),
+        name=["arm"],
+        position=[0.25],
+        velocity=[0.5],
+        effort=[0.75],
+    )
+    output = _normalized_joint_state(
+        Profile(), source, 2_000_000_003, DEFAULT_MISSING_JOINT_VALUES
+    )
+    assert output.position == [0.25, 0.5, 1.2, -0.6]
+    assert output.velocity == [0.5, 0.0, 0.0, 0.0]
+    assert output.effort == [0.75, 0.0, 0.0, 0.0]
+    assert (output.header.stamp.sec, output.header.stamp.nanosec) == (2, 3)

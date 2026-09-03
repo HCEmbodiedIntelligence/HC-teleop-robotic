@@ -14,6 +14,8 @@
 #include "builtin_interfaces/msg/time.hpp"
 #include "geometry_msgs/msg/pose.hpp"
 #include "hc_motion_backend_kdl/joint_rate_limiter.hpp"
+#include "hc_teleop_interfaces/msg/cartesian_state.hpp"
+#include "hc_teleop_interfaces/msg/cartesian_state_array.hpp"
 #include "hc_teleop_interfaces/msg/cartesian_target_array.hpp"
 #include "hc_teleop_interfaces/msg/joint_command_candidate.hpp"
 #include "kdl/chainfksolverpos_recursive.hpp"
@@ -287,6 +289,15 @@ public:
       declare_parameter<std::string>("candidate_topic", "motion/backend/joint_candidate"),
       rclcpp::SensorDataQoS().keep_last(16));
 
+    publish_cartesian_state_ = declare_parameter<bool>("publish_cartesian_state", true);
+    if (publish_cartesian_state_) {
+      const auto cartesian_topic = declare_parameter<std::string>(
+        "cartesian_state_topic", "state/cartesian");
+      cartesian_publisher_ =
+        create_publisher<hc_teleop_interfaces::msg::CartesianStateArray>(
+        cartesian_topic, qos);
+    }
+
     RCLCPP_INFO(get_logger(), "KDL IK backend ready: groups=%zu urdf=%s",
       solvers_.size(), urdf_path.c_str());
   }
@@ -359,6 +370,51 @@ private:
       }
     }
     last_feedback_ = std::chrono::steady_clock::now();
+    if (publish_cartesian_state_ && cartesian_publisher_) {
+      publishFk(message.header.stamp);
+    }
+  }
+
+  void publishFk(const builtin_interfaces::msg::Time & stamp)
+  {
+    hc_teleop_interfaces::msg::CartesianStateArray output;
+    output.header.stamp = stamp;
+    output.states.reserve(solvers_.size());
+    for (const auto & [name, solver] : solvers_) {
+      hc_teleop_interfaces::msg::CartesianState state;
+      state.group_name = name;
+      state.reference_frame = solver.reference_frame;
+      state.tip_frame = solver.tip_frame;
+      state.valid = false;
+      const auto n = solver.chain->getNrOfJoints();
+      KDL::JntArray q_kdl(n);
+      bool all_found = true;
+      for (std::size_t i = 0; i < solver.joint_names.size(); ++i) {
+        const auto it = current_positions_.find(solver.joint_names[i]);
+        if (it == current_positions_.end()) {
+          all_found = false;
+          break;
+        }
+        q_kdl(i) = it->second;
+      }
+      if (all_found) {
+        KDL::Frame current;
+        if (solver.fk->JntToCart(q_kdl, current) >= 0) {
+          state.valid = true;
+          double x, y, z, w;
+          current.M.GetQuaternion(x, y, z, w);
+          state.pose.position.x = current.p.x();
+          state.pose.position.y = current.p.y();
+          state.pose.position.z = current.p.z();
+          state.pose.orientation.x = x;
+          state.pose.orientation.y = y;
+          state.pose.orientation.z = z;
+          state.pose.orientation.w = w;
+        }
+      }
+      output.states.push_back(std::move(state));
+    }
+    cartesian_publisher_->publish(std::move(output));
   }
 
   void onTarget(const hc_teleop_interfaces::msg::CartesianTargetArray & message)
@@ -478,6 +534,9 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr state_subscription_;
   rclcpp::Publisher<hc_teleop_interfaces::msg::JointCommandCandidate>::SharedPtr
     candidate_publisher_;
+  bool publish_cartesian_state_{false};
+  rclcpp::Publisher<hc_teleop_interfaces::msg::CartesianStateArray>::SharedPtr
+    cartesian_publisher_;
   std::uint64_t published_candidates_{0U};
 };
 

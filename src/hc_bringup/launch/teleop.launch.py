@@ -96,6 +96,28 @@ def _sim_adapter(arms):
     return package, plugin, executable, name
 
 
+def _hardware_adapter(arms):
+    """Resolve an in-workspace bridge for an independently launched driver stack."""
+    packages = {str(arm.get("adapter", {}).get("package", "")) for arm in arms}
+    if len(packages) != 1:
+        raise ValueError("hardware adaptation requires all arms to use one adapter package")
+    package = packages.pop()
+    known = {
+        "hc_adapter_x1": (
+            "hc_adapter_x1::X1HardwareAdapterNode",
+            "x1_hardware_adapter_node",
+            "x1_hardware_adapter",
+        ),
+    }
+    if package not in known:
+        raise ValueError(
+            f"no in-workspace hardware bridge is registered for '{package}'; "
+            "install its external hc-adapter package or set start_hardware_adapter:=false"
+        )
+    plugin, executable, name = known[package]
+    return package, plugin, executable, name
+
+
 def _component(
     package: str,
     plugin: str,
@@ -183,6 +205,7 @@ def _setup(context: LaunchContext):
     if start_kdl and start_robo_manip:
         raise ValueError("KDL and RoboManip backends cannot own the same backend topics")
     start_sim = _auto_bool(LaunchConfiguration("start_sim_adapter").perform(context), mode == "sim")
+    hardware_argument = LaunchConfiguration("start_hardware_adapter").perform(context)
     start_lease = _auto_bool(LaunchConfiguration("start_auto_lease").perform(context), mode == "sim")
     start_rsp = _auto_bool(
         LaunchConfiguration("start_robot_state_publisher").perform(context), mode == "sim"
@@ -204,6 +227,16 @@ def _setup(context: LaunchContext):
     arms = _arms(profile)
     if not arms:
         raise ValueError("profile must contain at least one enabled arm")
+    arm_adapter_packages = {
+        str(arm.get("adapter", {}).get("package", "")) for arm in arms
+    }
+    has_builtin_hardware_adapter = arm_adapter_packages == {"hc_adapter_x1"}
+    start_hardware = _auto_bool(
+        hardware_argument,
+        mode in {"shadow", "real"} and has_builtin_hardware_adapter,
+    )
+    if start_sim and start_hardware:
+        raise ValueError("simulation and hardware adapters cannot be started together")
     arm_by_id = {str(arm["id"]): arm for arm in arms}
     group_parameters = _group_parameters(arms)
     urdf_path = str(profile.resource("urdf"))
@@ -290,6 +323,85 @@ def _setup(context: LaunchContext):
         "tool_open_positions": [float(value) for item in tools for value in item["open"]],
         "tool_closed_positions": [float(value) for item in tools for value in item["closed"]],
     })
+    enabled_components = [
+        component for component in profile.components if component.get("enabled", True)
+    ]
+    motion_components = [
+        component for component in enabled_components
+        if component.get("kind") in {"arm", "waist"}
+    ]
+    hardware = profile.value.get("hardware", {})
+    controller_arms = {
+        str(binding.get("controller", "")): str(binding.get("group", ""))
+        for binding in bindings
+    }
+
+    def tool_for_controller(controller: str):
+        arm_group = controller_arms.get(controller, "")
+        for tool in tools:
+            component = next(
+                (
+                    item for item in enabled_components
+                    if str(item.get("id", "")) == str(tool.get("group", ""))
+                ),
+                {},
+            )
+            if str(component.get("attached_to", "")) == arm_group:
+                return tool
+        return {}
+
+    left_tool = tool_for_controller("left")
+    right_tool = tool_for_controller("right")
+    hardware_parameters = {
+        "command_output_enabled": mode == "real" and not shadow,
+        "command_topic": command_topic,
+        "safety_topic": "safety/state",
+        "joint_state_topic": "state/joints",
+        "legacy_joint_state_topic": str(
+            hardware.get("legacy_joint_state_topic", "/hc_teleop/joint_states")
+        ),
+        "legacy_joint_command_topic": str(
+            hardware.get("legacy_joint_command_topic", "/hc_teleop/joint_cmd")
+        ),
+        "legacy_left_finger_topic": str(
+            hardware.get(
+                "legacy_left_finger_topic", "/hc_teleop/joint_cmd_finger_left"
+            )
+        ),
+        "legacy_right_finger_topic": str(
+            hardware.get(
+                "legacy_right_finger_topic", "/hc_teleop/joint_cmd_finger_right"
+            )
+        ),
+        "command_publish_rate_hz": float(
+            hardware.get("command_publish_rate_hz", 100.0)
+        ),
+        "command_progress_timeout_sec": float(
+            hardware.get("command_progress_timeout_ms", 150.0)
+        ) / 1000.0,
+        "feedback_warn_timeout_sec": float(
+            hardware.get("feedback_warn_timeout_ms", 500.0)
+        ) / 1000.0,
+        "motion_group_names": [str(item["id"]) for item in motion_components],
+    }
+    for component in motion_components:
+        hardware_parameters[f"{component['id']}.joint_names"] = list(
+            component["joint_names"]
+        )
+    if left_tool:
+        hardware_parameters.update({
+            "left_finger_group": str(left_tool["group"]),
+            "left_finger_input_joint": str(left_tool["joint_names"][0]),
+            "left_finger_open": float(left_tool["open"][0]),
+            "left_finger_closed": float(left_tool["closed"][0]),
+        })
+    if right_tool:
+        hardware_parameters.update({
+            "right_finger_group": str(right_tool["group"]),
+            "right_finger_input_joint": str(right_tool["joint_names"][0]),
+            "right_finger_open": float(right_tool["open"][0]),
+            "right_finger_closed": float(right_tool["closed"][0]),
+        })
     kdl_parameters = {
         **group_parameters,
         "urdf_path": urdf_path,
@@ -302,6 +414,8 @@ def _setup(context: LaunchContext):
         "command_nominal_rate_hz": float(motion.get("servo_nominal_rate_hz", 60.0)),
         "command_reset_timeout_sec": float(motion.get("servo_reset_timeout_ms", 250)) / 1000.0,
         "command_tracking_error_reset": float(motion.get("servo_tracking_error_reset", 0.5)),
+        "cartesian_state_topic": "state/cartesian",
+        "publish_cartesian_state": True,
     }
     robo_manip_parameters = {
         **group_parameters,
@@ -374,10 +488,10 @@ def _setup(context: LaunchContext):
         "publish_rate_hz": float(simulation.get("publish_rate_hz", 100.0)),
         "max_velocity_scale": float(simulation.get("max_velocity_scale", 0.2)),
         "fallback_max_velocity": float(simulation.get("fallback_max_velocity", 1.0)),
-        # RoboManip owns measured FK when selected.  This guarantees exactly
-        # one state/cartesian publisher and keeps mapper feedback consistent
-        # with the active solver.
-        "publish_cartesian_state": not start_robo_manip,
+        # The active motion backend (RoboManip or KDL) owns measured FK.
+        # This guarantees exactly one state/cartesian publisher and keeps
+        # mapper feedback consistent with the active solver.
+        "publish_cartesian_state": not (start_robo_manip or start_kdl),
     }
     if str(arms[0].get("adapter", {}).get("package", "")) == "hc_adapter_x1":
         # The selected motion backend already rate-limits and the arbiter still
@@ -441,6 +555,11 @@ def _setup(context: LaunchContext):
     sim_package = sim_plugin = sim_executable = sim_node_name = None
     if start_sim:
         sim_package, sim_plugin, sim_executable, sim_node_name = _sim_adapter(arms)
+    hardware_package = hardware_plugin = hardware_executable = hardware_node_name = None
+    if start_hardware:
+        hardware_package, hardware_plugin, hardware_executable, hardware_node_name = (
+            _hardware_adapter(arms)
+        )
 
     actions = []
     if start_dashboard:
@@ -499,6 +618,10 @@ def _setup(context: LaunchContext):
         descriptions.append(_component("hc_motion_backend_kdl", "hc_motion_backend_kdl::KdlIkBackendNode", "kdl_ik_backend", namespace, kdl_parameters))
     if start_sim:
         descriptions.append(_component(sim_package, sim_plugin, sim_node_name, namespace, sim_parameters))
+    if start_hardware:
+        descriptions.append(_component(
+            hardware_package, hardware_plugin, hardware_node_name, namespace,
+            hardware_parameters, intra_process=False))
     if start_diagnostics:
         descriptions.append(_component(
             "hc_diagnostics", "hc_diagnostics::ControlChainNode",
@@ -535,6 +658,10 @@ def _setup(context: LaunchContext):
         actions.append(_node("hc_motion_backend_kdl", "kdl_ik_backend_node", "kdl_ik_backend", namespace, kdl_parameters))
     if start_sim:
         actions.append(_node(sim_package, sim_executable, sim_node_name, namespace, sim_parameters))
+    if start_hardware:
+        actions.append(_node(
+            hardware_package, hardware_executable, hardware_node_name, namespace,
+            hardware_parameters))
     if start_diagnostics:
         actions.append(_node(
             "hc_diagnostics", "control_chain_diagnostics_node",
@@ -559,6 +686,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("start_kdl_backend", default_value="auto"),
             DeclareLaunchArgument("start_robo_manip_backend", default_value="auto"),
             DeclareLaunchArgument("start_sim_adapter", default_value="auto"),
+            DeclareLaunchArgument("start_hardware_adapter", default_value="auto"),
             DeclareLaunchArgument("start_auto_lease", default_value="auto"),
             DeclareLaunchArgument("start_robot_state_publisher", default_value="auto"),
             DeclareLaunchArgument("start_dashboard", default_value="true"),

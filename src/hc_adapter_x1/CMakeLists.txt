@@ -44,9 +44,22 @@ rclcpp_components_register_node(
   PLUGIN "hc_adapter_x1::X1SimNode"
   EXECUTABLE x1_sim_node)
 
+add_library(hc_x1_hardware_component SHARED src/x1_hardware_adapter_node.cpp)
+target_include_directories(hc_x1_hardware_component
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_compile_options(hc_x1_hardware_component PRIVATE -Wall -Wextra -Wpedantic)
+ament_target_dependencies(hc_x1_hardware_component
+  builtin_interfaces hc_teleop_interfaces rclcpp rclcpp_components sensor_msgs)
+rclcpp_components_register_node(
+  hc_x1_hardware_component
+  PLUGIN "hc_adapter_x1::X1HardwareAdapterNode"
+  EXECUTABLE x1_hardware_adapter_node)
+
 install(DIRECTORY include/ DESTINATION include)
 install(
-  TARGETS hc_x1_sim_core hc_x1_sim_component
+  TARGETS hc_x1_sim_core hc_x1_sim_component hc_x1_hardware_component
   EXPORT export_hc_adapter_x1
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -62,6 +75,6 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_include_directories(include)
-ament_export_libraries(hc_x1_sim_core hc_x1_sim_component)
+ament_export_libraries(hc_x1_sim_core hc_x1_sim_component hc_x1_hardware_component)
 ament_export_targets(export_hc_adapter_x1)
 ament_package()

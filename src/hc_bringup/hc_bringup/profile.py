@@ -32,6 +32,7 @@ TOP_LEVEL_KEYS = {
     "safety",
     "recording",
     "diagnostics",
+    "hardware",
     "vr",
 }
 
@@ -280,7 +281,8 @@ def validate_profile(value: Any) -> dict[str, Any]:
     profile["components"] = components
 
     for section in (
-        "motion", "simulation", "teleop", "safety", "recording", "diagnostics", "vr"
+        "motion", "simulation", "teleop", "safety", "recording", "diagnostics",
+        "hardware", "vr"
     ):
         profile[section] = dict(_mapping(profile.get(section, {}), section))
 
@@ -392,6 +394,45 @@ def validate_profile(value: Any) -> dict[str, Any]:
             or float(diagnostics[field]) <= 0.0
         ):
             raise ProfileError(f"diagnostics.{field} must be positive and finite")
+
+    hardware = profile["hardware"]
+    allowed_hardware_fields = {
+        "legacy_joint_state_topic",
+        "legacy_joint_command_topic",
+        "legacy_left_finger_topic",
+        "legacy_right_finger_topic",
+        "command_publish_rate_hz",
+        "command_progress_timeout_ms",
+        "feedback_warn_timeout_ms",
+    }
+    unknown_hardware_fields = sorted(set(hardware) - allowed_hardware_fields)
+    if unknown_hardware_fields:
+        raise ProfileError(
+            "unknown hardware fields: " + ", ".join(unknown_hardware_fields)
+        )
+    for field in (
+        "legacy_joint_state_topic",
+        "legacy_joint_command_topic",
+        "legacy_left_finger_topic",
+        "legacy_right_finger_topic",
+    ):
+        if field in hardware:
+            topic = _nonempty_string(hardware[field], f"hardware.{field}")
+            if not topic.startswith("/"):
+                raise ProfileError(
+                    f"hardware.{field} must be an absolute external-driver topic"
+                )
+    for field in (
+        "command_publish_rate_hz",
+        "command_progress_timeout_ms",
+        "feedback_warn_timeout_ms",
+    ):
+        if field in hardware and (
+            not isinstance(hardware[field], (int, float))
+            or not math.isfinite(float(hardware[field]))
+            or float(hardware[field]) <= 0.0
+        ):
+            raise ProfileError(f"hardware.{field} must be positive and finite")
 
     teleop = profile["teleop"]
     bindings = teleop.get("bindings", [])
