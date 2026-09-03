@@ -14,7 +14,7 @@ from rclpy._rclpy_pybind11 import RCLError
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseArray
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Bool, Float64MultiArray
 from std_srvs.srv import Trigger
 import argparse
 
@@ -140,6 +140,12 @@ class SimRobotController(Node, AssembledRobot):
             1,
         )
         
+        self.hardware_ready_pub = self.create_publisher(
+            Bool, f"/io_teleop/hardware_ready", 1
+        )
+        self.hardware_ready = True
+        self.hardware_ready_pub.publish(Bool(data=True))
+
         # Timer for publishing joint states
         self.joint_state_pub_rate = 100
         self.timer = self.create_timer(1.0 / 100, self.update_joint_state)
@@ -153,8 +159,12 @@ class SimRobotController(Node, AssembledRobot):
         print(
             "===========================Reset robot to home request received==========================="
         )
+        self.hardware_ready = False
+        self.hardware_ready_pub.publish(Bool(data=False))
         self.reset_home()
         time.sleep(1)
+        self.hardware_ready = True
+        self.hardware_ready_pub.publish(Bool(data=True))
         response.success = True
         response.message = "Service successfully triggered!"
         return response
@@ -171,6 +181,7 @@ class SimRobotController(Node, AssembledRobot):
             joint_state.name.append(joint_info[1].decode("utf-8"))
             joint_state.position.append(p.getJointState(self.robot_id, i)[0])
         self.joint_state_pub.publish(joint_state)
+        self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
         self.base_frame_ids = debug_draw_pose(
             self.base.pose,
             self.base_frame_ids,

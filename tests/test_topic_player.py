@@ -77,7 +77,11 @@ class TopicPlayerTests(unittest.TestCase):
             time.sleep(0.02)
 
         self.assertEqual(self.player.status()["state"], "completed")
+        self.assertTrue(self.player.status()["requires_reset"])
         self.assertEqual(len(self.published_messages), 10)
+        reset = self.player.acknowledge_reset()
+        self.assertEqual(reset["state"], "idle")
+        self.assertFalse(reset["requires_reset"])
 
     def test_player_topic_remapping(self) -> None:
         # Remap /hc_teleop/joint_states -> /hc_teleop/target_joint
@@ -108,8 +112,9 @@ class TopicPlayerTests(unittest.TestCase):
         self.assertEqual(self.player.resume()["state"], "playing")
         self.assertEqual(self.player.status()["state"], "playing")
 
-        self.assertEqual(self.player.stop()["state"], "idle")
-        self.assertEqual(self.player.status()["state"], "idle")
+        self.assertEqual(self.player.stop()["state"], "stopped")
+        self.assertTrue(self.player.status()["requires_reset"])
+        self.assertEqual(self.player.acknowledge_reset()["state"], "idle")
 
 
 if __name__ == "__main__":

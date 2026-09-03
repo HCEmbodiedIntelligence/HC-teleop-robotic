@@ -15,7 +15,16 @@ ros:
     exoskeleton_topic: /hc_teleop/joint_cmd_exoskeleton
     output_topic: /hc_teleop/joint_cmd
     control_source_topic: /hc_teleop/control_source
+    hardware_ready_topic: /hc_teleop/hardware_ready
   subscriptions:
+  - topic: /hc_teleop/hardware_ready
+    type: std_msgs/msg/Bool
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 100.0
+    event_max_hz: 20.0
   - topic: /teleop/arm/status
     type: std_msgs/msg/String
     enabled: true

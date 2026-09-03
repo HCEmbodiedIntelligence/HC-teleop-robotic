@@ -15,9 +15,15 @@ logger = logging.getLogger("hc_teleop_middleware.player")
 class TopicPlayer:
     """MCAP dataset player for replaying ROS 2 messages to drive simulation or real robot."""
 
-    def __init__(self, directory: Path, ros_bridge_provider: Callable[[], Any]):
+    def __init__(
+        self,
+        directory: Path,
+        ros_bridge_provider: Callable[[], Any],
+        state_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    ):
         self.directory = directory
         self._get_ros = ros_bridge_provider
+        self._state_callback = state_callback
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -36,13 +42,15 @@ class TopicPlayer:
         self._total_messages = 0
         self._progress = 0.0
         self._error: str | None = None
+        self._requires_reset = False
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             is_active = self._thread is not None and self._thread.is_alive()
             return {
-                "state": self._state if is_active else ("completed" if self._state == "completed" else "idle"),
+                "state": self._state,
                 "is_active": is_active,
+                "requires_reset": self._requires_reset,
                 "filename": self._filename,
                 "speed": self._speed,
                 "loop": self._loop,
@@ -55,6 +63,15 @@ class TopicPlayer:
                 "topic_remap": dict(self._topic_remap),
                 "error": self._error,
             }
+
+    def _notify_state(self, event_type: str) -> None:
+        callback = self._state_callback
+        if callback is None:
+            return
+        try:
+            callback(event_type, self.status())
+        except Exception:
+            logger.exception("Replay state callback failed for %s", event_type)
 
     def play(
         self,
@@ -76,6 +93,7 @@ class TopicPlayer:
             self._speed = max(0.1, min(10.0, float(speed)))
             self._loop = bool(loop)
             self._state = "playing"
+            self._requires_reset = False
             self._error = None
             self._current_time_sec = 0.0
             self._current_message_index = 0
@@ -170,32 +188,62 @@ class TopicPlayer:
                 daemon=True,
             )
             self._thread.start()
-            return self.status()
+            status = self.status()
+        self._notify_state("replay_started")
+        return status
 
     def pause(self) -> dict[str, Any]:
+        changed = False
         with self._lock:
             if self._state == "playing":
                 self._pause_event.clear()
                 self._state = "paused"
-            return self.status()
+                changed = True
+            status = self.status()
+        if changed:
+            self._notify_state("replay_paused")
+        return status
 
     def resume(self) -> dict[str, Any]:
+        changed = False
         with self._lock:
             if self._state == "paused":
                 self._pause_event.set()
                 self._state = "playing"
-            return self.status()
+                changed = True
+            status = self.status()
+        if changed:
+            self._notify_state("replay_resumed")
+        return status
 
     def set_speed(self, speed: float) -> dict[str, Any]:
         with self._lock:
             self._speed = max(0.1, min(10.0, float(speed)))
             return self.status()
 
-    def stop(self) -> dict[str, Any]:
+    def stop(self, require_reset: bool = True) -> dict[str, Any]:
         with self._lock:
+            was_active = self._state in {"playing", "paused"}
+            was_waiting_for_reset = self._requires_reset
             self._stop_locked()
-            self._state = "idle"
-            return self.status()
+            needs_reset = was_active or was_waiting_for_reset
+            self._state = "stopped" if needs_reset and require_reset else "idle"
+            self._requires_reset = bool(require_reset and needs_reset)
+            status = self.status()
+        if was_active or was_waiting_for_reset:
+            self._notify_state("replay_stopped")
+        return status
+
+    def acknowledge_reset(self) -> dict[str, Any]:
+        with self._lock:
+            changed = self._requires_reset
+            self._requires_reset = False
+            if self._state in {"completed", "stopped", "error"}:
+                self._state = "idle"
+            status = self.status()
+        if changed:
+            self._notify_state("replay_reset")
+        return status
 
     def _stop_locked(self) -> None:
         self._stop_event.set()
@@ -298,8 +346,13 @@ class TopicPlayer:
                 if not self._stop_event.is_set():
                     self._state = "completed"
                     self._progress = 100.0
+                    self._requires_reset = True
+            if not self._stop_event.is_set():
+                self._notify_state("replay_completed")
         except Exception as exc:
             logger.exception("Playback failed: %s", exc)
             with self._lock:
                 self._state = "error"
                 self._error = str(exc)
+                self._requires_reset = True
+            self._notify_state("replay_error")

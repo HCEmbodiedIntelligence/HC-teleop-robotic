@@ -2,6 +2,7 @@ schema: hc-teleop-hardware-interface/v1
 namespace: /hc_teleop
 default_ros_domain_id: 14
 hardware_publishes:
+  - {topic: /hc_teleop/hardware_ready, type: std_msgs/msg/Bool, required: true, target_hz: 100, min_hz: 10}
   - {topic: /hc_teleop/joint_states, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, min_hz: 50}
   - {topic: /hc_teleop/hand_joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, min_hz: 1}
   - {topic: /hc_teleop/hand_trigger, type: geometry_msgs/msg/PoseArray, required: false, target_hz: 10, min_hz: 1}

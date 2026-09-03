@@ -396,17 +396,65 @@ class TopicRecorder:
                 break
         process = self._process
         with self._lock:
+            active = self._accepting_event.is_set() and process is not None and process.is_alive()
             return {
-                "recording": self._accepting_event.is_set()
-                and process is not None
-                and process.is_alive(),
+                "recording": active,
                 "path": str(self.path) if self.path else "",
+                "active_file": self.path.name if self.path and active else "",
                 "messages": _counter_get(self._messages),
                 "dropped": _counter_get(self._dropped),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",
                 "error": self._last_error,
             }
+
+    def _mark_path(self, recording_path: Path) -> Path:
+        return self.directory / f".{recording_path.name}.mark.json"
+
+    def _read_mark(self, recording_path: Path) -> dict[str, Any]:
+        mark_path = self._mark_path(recording_path)
+        try:
+            value = json.loads(mark_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def mark_current_or_latest(self, source: str = "manual") -> dict[str, Any]:
+        """Mark the active recording, or the latest completed recording."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        active = self.path if self.path and self.is_recording() else None
+        candidates = [
+            path
+            for path in self.directory.iterdir()
+            if path.is_file() and path.suffix in {".mcap", ".jsonl"}
+        ]
+        target = active or (max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None)
+        if target is None:
+            raise FileNotFoundError("no recording is available to mark")
+
+        marked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        result = {
+            "recording": bool(active),
+            "filename": target.name,
+            "path": str(target.resolve()),
+            "marked": True,
+            "marked_at": marked_at,
+            "mark_source": source,
+        }
+        mark_path = self._mark_path(target)
+        mark_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if active is not None:
+            self.record(
+                {
+                    "kind": "recording_marker",
+                    "topic": "/teleop/recording_marker",
+                    "payload": result,
+                }
+            )
+        return result
 
     def list_recordings(self) -> list[dict[str, Any]]:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -449,6 +497,7 @@ class TopicRecorder:
                 "channels": [],
                 "avg_rate_hz": 0.0,
             }
+            mark = self._read_mark(p)
 
             files.append({
                 "filename": p.name,
@@ -465,6 +514,9 @@ class TopicRecorder:
                 "topic_count": meta["topic_count"],
                 "channels": meta["channels"],
                 "avg_rate_hz": meta["avg_rate_hz"],
+                "marked": bool(mark.get("marked", False)),
+                "marked_at": str(mark.get("marked_at", "")),
+                "mark_source": str(mark.get("mark_source", "")),
             })
         files.sort(key=lambda x: x["timestamp"], reverse=True)
         return files
@@ -482,3 +534,7 @@ class TopicRecorder:
         if active_path is not None and target == active_path:
             raise ValueError(f"cannot delete actively recording file: {filename}")
         target.unlink()
+        try:
+            self._mark_path(target).unlink()
+        except FileNotFoundError:
+            pass

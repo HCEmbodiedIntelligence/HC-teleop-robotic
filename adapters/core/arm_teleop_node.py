@@ -145,6 +145,7 @@ class HcTjArmTeleopNode(Node):
         self.generic_command_count = 0
         self.generic_aux_command: dict[str, float] = {}
         self.solver_rearm = SolverRearmGate()
+        self.hardware_ready = False
         self.collision_enabled = bool(
             self.control.get("collision_avoidance_enabled", True)
         )
@@ -344,6 +345,15 @@ class HcTjArmTeleopNode(Node):
             self.control["enable_topic"],
             self._enabled_callback,
             10,
+        )
+        self.hardware_ready_topic = self.control.get(
+            "hardware_ready_topic", "/hc_teleop/hardware_ready"
+        )
+        self.create_subscription(
+            Bool,
+            self.hardware_ready_topic,
+            self._hardware_ready_callback,
+            latest_reliable_qos,
         )
         self.create_subscription(
             String,
@@ -749,6 +759,49 @@ class HcTjArmTeleopNode(Node):
                 "solver reset acknowledged; waiting for fresh IK output"
             )
 
+    def _hardware_ready_callback(self, message: Bool) -> None:
+        ready = bool(message.data)
+        was_ready = self.hardware_ready
+        self.hardware_ready = ready
+
+        if not ready:
+            if any(arm.active for arm in self.arms.values()) or self.body.active:
+                self._release_all(send_base_zero=True)
+            if self.external_ik:
+                self.solver_rearm.start_homing()
+            return
+
+        if ready and not was_ready:
+            self.get_logger().info(
+                "hardware ready confirmed: resetting IK, recapturing pose, and enabling joint output"
+            )
+            # 1. 重新捕获当前姿态并清除旧参考点
+            self._release_all(send_base_zero=True)
+            if self.joint_state:
+                for name in self.controlled_names:
+                    if name in self.joint_state:
+                        self.last_command[name] = float(self.joint_state[name])
+            self._sync_model()
+            self._ensure_generic_targets()
+            for arm in self.arms.values():
+                arm.target_local = self._relative_pose(
+                    self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                )
+                arm.reference_local_ee = arm.target_local
+                arm.reference_vr = None
+
+            # 2. 重置 IK：触发 solver_rearm 与求解器重置
+            if self.external_ik:
+                self.solver_rearm.homing_complete()
+                if self.joint_state:
+                    cutoff_ns = int(self.get_clock().now().nanoseconds)
+                    if self.solver_rearm.observe_feedback():
+                        self.solver_reset_pub.publish(Bool(data=True))
+                        self.solver_rearm.reset_published(cutoff_ns)
+                        self.get_logger().info(
+                            "hardware ready: solver reset published to feedback"
+                        )
+
     def _generic_command_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
             return
@@ -760,12 +813,12 @@ class HcTjArmTeleopNode(Node):
         self.generic_command_count += 1
         if not self.enabled:
             return
-        if self.homing or self.solver_rearm.blocked:
+        if not self.hardware_ready or self.homing or self.solver_rearm.blocked:
             stamp_ns = (
                 int(message.header.stamp.sec) * 1_000_000_000
                 + int(message.header.stamp.nanosec)
             )
-            if self.solver_rearm.observe_solver_output(stamp_ns):
+            if self.hardware_ready and self.solver_rearm.observe_solver_output(stamp_ns):
                 self.get_logger().info(
                     "fresh post-reset IK output received; release and press right Grip to resume"
                 )
@@ -2264,6 +2317,12 @@ class HcTjArmTeleopNode(Node):
         if command is not None:
             self._sync_model()
             self._publish_actual_poses()
+        if not self.hardware_ready:
+            if any(arm.active for arm in self.arms.values()) or self.body.active:
+                self._release_all(send_base_zero=self.base_zero_pending)
+                self.base_zero_pending = False
+            self._publish_status(now, feedback_fresh)
+            return
         if self.external_ik:
             self._generic_control_tick(now, feedback_fresh, command)
             return
@@ -2484,6 +2543,7 @@ class HcTjArmTeleopNode(Node):
                 <= float(self.control["joint_state_timeout"]),
                 "command_messages": self.generic_command_count,
                 "rearm_state": self.solver_rearm.state,
+                "hardware_ready": self.hardware_ready,
             },
             "stop_reason": self.stop_reason,
             "feedback_fresh": feedback_fresh,

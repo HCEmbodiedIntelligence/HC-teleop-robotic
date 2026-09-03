@@ -180,6 +180,7 @@ if [[ "${MODE}" == sim ]]; then
     -r /io_teleop/target_ee_poses:=/hc_teleop/target_ee_poses
     -r /io_teleop/target_gripper_status:=/hc_teleop/target_gripper_status
     -r /io_teleop/target_base_move:=/hc_teleop/target_base_move
+    -r /io_teleop/hardware_ready:=/hc_teleop/hardware_ready
   )
 fi
 

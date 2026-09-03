@@ -53,6 +53,9 @@ class MiddlewareRuntime:
         self._restart_lock = asyncio.Lock()
         self._last_x_held = False
         self._last_y_held = False
+        self._last_a_held = False
+        self._last_both_sticks_held = False
+        self._last_replay_status_sent_at = 0.0
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -71,7 +74,11 @@ class MiddlewareRuntime:
             pass
 
         self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
-        self.player = TopicPlayer(self.recorder.directory, lambda: self.ros)
+        self.player = TopicPlayer(
+            self.recorder.directory,
+            lambda: self.ros,
+            self._on_replay_state,
+        )
         camera_config = self.config.get("camera", {})
         base_camera_config = {
             key: value for key, value in camera_config.items() if key != "streams"
@@ -132,7 +139,7 @@ class MiddlewareRuntime:
 
     async def stop(self) -> None:
         if self.player is not None:
-            await asyncio.to_thread(self.player.stop)
+            await asyncio.to_thread(self.player.stop, False)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
         for camera in self.cameras.values():
@@ -206,14 +213,59 @@ class MiddlewareRuntime:
             self.websockets.discard(ws)
 
     def _on_pose(self, packet: Any) -> None:
-        if hasattr(packet, "right_input") and packet.right_input is not None:
-            if (packet.right_input.pressed_mask & 1) or (packet.right_input.held_mask & 1):
-                self._on_safety_resume("VR controller A button pressed")
+        left_input = getattr(packet, "left_input", None)
+        right_input = getattr(packet, "right_input", None)
 
-        if hasattr(packet, "left_input") and packet.left_input is not None:
-            left_held = int(getattr(packet.left_input, "held_mask", 0))
-            left_pressed = int(getattr(packet.left_input, "pressed_mask", 0))
+        left_held = int(getattr(left_input, "held_mask", 0))
+        left_pressed = int(getattr(left_input, "pressed_mask", 0))
+        right_held = int(getattr(right_input, "held_mask", 0))
+        right_pressed = int(getattr(right_input, "pressed_mask", 0))
 
+        # A resumes command output only once per physical press.  The old
+        # implementation called this for every packet while A was held.
+        a_held = bool(right_held & 1)
+        a_down = bool(right_pressed & 1) or (a_held and not self._last_a_held)
+        self._last_a_held = a_held
+        if a_down:
+            self._on_safety_resume("VR controller A button pressed")
+
+        # Pressing both thumbsticks marks the active recording, or the most
+        # recently completed recording.  Use the combined held edge so the
+        # gesture still works when the two sticks are pressed a few frames apart.
+        stick_bit = 1 << 5
+        both_sticks_held = bool(left_held & stick_bit) and bool(right_held & stick_bit)
+        both_sticks_pressed = bool(left_pressed & stick_bit) and bool(right_pressed & stick_bit)
+        mark_down = both_sticks_pressed or (
+            both_sticks_held and not self._last_both_sticks_held
+        )
+        self._last_both_sticks_held = both_sticks_held
+        if mark_down:
+            self._handle_vr_record_mark()
+
+        # Replay control events use UDP and can be lost.  While replay is
+        # active or waiting for the A-button acknowledgement, periodically
+        # resend a compact snapshot so the headset UI converges reliably.
+        if self.player is not None and self.vr is not None:
+            replay = self.player.status()
+            now = time.monotonic()
+            if (replay.get("is_active") or replay.get("requires_reset")) and (
+                now - self._last_replay_status_sent_at >= 1.0
+            ):
+                replay_message = (
+                    "重放结束；请按 A 恢复遥操作"
+                    if replay.get("requires_reset")
+                    else "正在重放"
+                )
+                self.vr.send_event(
+                    envelope(
+                        "replay_status",
+                        "middleware",
+                        {**replay, "message": replay_message},
+                    )
+                )
+                self._last_replay_status_sent_at = now
+
+        if left_input is not None:
             # X button on left controller: bit 0 (1 << 0) -> Start recording
             x_down = bool(left_pressed & 1) or (bool(left_held & 1) and not self._last_x_held)
             self._last_x_held = bool(left_held & 1)
@@ -358,6 +410,43 @@ class MiddlewareRuntime:
                 ["websocket", "udp"],
             )
 
+    def _handle_vr_record_mark(self) -> None:
+        if self.recorder is None:
+            return
+        try:
+            result = self.recorder.mark_current_or_latest("vr_dual_thumbstick")
+            filename = str(result.get("filename", ""))
+            message = f"已标记录制文件: {filename}"
+            self._log("info", message)
+            if self.ros is not None:
+                self.ros.publish(
+                    "/teleop/recording_state",
+                    "std_msgs/msg/String",
+                    {"data": json.dumps(result, ensure_ascii=False)},
+                )
+            self.emit(
+                envelope(
+                    "recording_marked",
+                    "middleware",
+                    {**result, "action": "mark", "message": message},
+                ),
+                ["websocket", "udp"],
+            )
+        except Exception as exc:
+            self._log("error", f"Failed to mark recording from VR: {exc}")
+            self.emit(
+                envelope(
+                    "recording_mark_error",
+                    "middleware",
+                    {
+                        "action": "mark_failed",
+                        "error": str(exc),
+                        "message": "没有可标记的录制文件",
+                    },
+                ),
+                ["websocket", "udp"],
+            )
+
     def _on_safety_event(self, reason: str) -> None:
         if self.ros is not None and self.config["safety"].get("enabled", True):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
@@ -376,7 +465,27 @@ class MiddlewareRuntime:
                 "std_msgs/msg/Bool",
                 {"data": source == "vr"},
             )
+        if self.player is not None:
+            self.player.acknowledge_reset()
         self.emit(envelope("safety_resume", "middleware", {"reason": reason}), ["websocket", "udp"])
+
+    def _on_replay_state(self, event_type: str, status: dict[str, Any]) -> None:
+        state = str(status.get("state", "idle"))
+        messages = {
+            "replay_started": "正在重放；重放结束后请按 A 恢复遥操作",
+            "replay_paused": "重放已暂停",
+            "replay_resumed": "重放已继续",
+            "replay_stopped": "重放已停止；请按 A 恢复遥操作",
+            "replay_completed": "重放完成；请按 A 恢复遥操作",
+            "replay_error": "重放异常；请按 A 恢复遥操作",
+            "replay_reset": "已恢复实时遥操作",
+        }
+        payload = {
+            **status,
+            "state": state,
+            "message": messages.get(event_type, event_type),
+        }
+        self.emit(envelope(event_type, "middleware", payload), ["websocket", "udp"])
 
     def _log(self, level: str, message: str) -> None:
         self.events.append(

@@ -54,6 +54,7 @@ class VrDataTests(unittest.TestCase):
             def __init__(self):
                 self.started = []
                 self.stopped = 0
+                self.marked = 0
                 self.is_recording = False
 
             def status(self):
@@ -68,6 +69,15 @@ class VrDataTests(unittest.TestCase):
                 self.stopped += 1
                 self.is_recording = False
                 return {"recording": False, "saved_file": "test.mcap"}
+
+            def mark_current_or_latest(self, source="manual"):
+                self.marked += 1
+                return {
+                    "recording": self.is_recording,
+                    "filename": "test.mcap",
+                    "marked": True,
+                    "mark_source": source,
+                }
 
         with tempfile.TemporaryDirectory() as directory:
             runtime = MiddlewareRuntime(validate_config({}), Path(directory))
@@ -105,6 +115,36 @@ class VrDataTests(unittest.TestCase):
             runtime._on_pose(packet_y)
             self.assertEqual(mock_rec.stopped, 1)
             self.assertFalse(mock_rec.is_recording)
+
+            # 3. Both primary thumbsticks (bit 5 = 32) mark once per gesture.
+            packet_mark = PosePacket(
+                protocol_version=2,
+                sequence=3,
+                vr_timestamp=3.0,
+                flags=7,
+                head=packet_y.head,
+                left=packet_y.left,
+                right=packet_y.right,
+                left_input=ControllerInput(held_mask=32),
+                right_input=ControllerInput(held_mask=32),
+            )
+            runtime._on_pose(packet_mark)
+            runtime._on_pose(packet_mark)
+            self.assertEqual(mock_rec.marked, 1)
+
+            runtime._on_pose(PosePacket(
+                protocol_version=2,
+                sequence=4,
+                vr_timestamp=4.0,
+                flags=7,
+                head=packet_y.head,
+                left=packet_y.left,
+                right=packet_y.right,
+                left_input=ControllerInput(),
+                right_input=ControllerInput(),
+            ))
+            runtime._on_pose(packet_mark)
+            self.assertEqual(mock_rec.marked, 2)
 
 
 if __name__ == "__main__":

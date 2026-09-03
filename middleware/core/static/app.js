@@ -217,18 +217,23 @@ function renderStatus(data) {
   }
   const replay = data.replay || {};
   const isReplaying = Boolean(replay.is_active || replay.state === 'playing' || replay.state === 'paused');
+  const replayNeedsReset = Boolean(replay.requires_reset);
   const replayPanel = $('#replayControlPanel');
   if (replayPanel) {
-    if (isReplaying) {
+    if (isReplaying || replayNeedsReset) {
       replayPanel.classList.remove('hidden');
       if ($('#replayStatusBadge')) {
-        $('#replayStatusBadge').className = replay.state === 'paused' ? 'recording-badge' : 'recording-badge active';
-        $('#replayStatusText').textContent = replay.state === 'paused' ? '已暂停' : '正在重放';
+        $('#replayStatusBadge').className = replayNeedsReset ? 'recording-badge' : (replay.state === 'paused' ? 'recording-badge' : 'recording-badge active');
+        $('#replayStatusText').textContent = replayNeedsReset
+          ? (replay.state === 'error' ? '重放异常 · 请按 A 恢复' : '重放结束 · 请按 A 恢复遥操作')
+          : (replay.state === 'paused' ? '已暂停' : '正在重放');
       }
       if ($('#replayFileName')) $('#replayFileName').textContent = replay.filename || '';
       if ($('#pauseResumeReplayBtn')) {
         $('#pauseResumeReplayBtn').textContent = replay.state === 'paused' ? '▶️ 继续' : '⏸️ 暂停';
+        $('#pauseResumeReplayBtn').disabled = replayNeedsReset;
       }
+      if ($('#stopReplayBtn')) $('#stopReplayBtn').disabled = replayNeedsReset;
       if ($('#replayProgressBar')) $('#replayProgressBar').style.width = `${replay.progress || 0}%`;
       if ($('#replayProgressText')) $('#replayProgressText').textContent = `${(replay.progress || 0).toFixed(1)}%`;
       if ($('#replayTimeText')) $('#replayTimeText').textContent = `${(replay.current_time_sec || 0).toFixed(1)}s / ${(replay.duration_sec || 0).toFixed(1)}s`;
@@ -313,6 +318,14 @@ function connectWebSocket() {
       else if(value.kind==='ros_message'&&value.topic==='/hc_teleop/joint_cmd')updateJointMonitor(value,'command');
       else if(value.kind==='ros_message'&&value.topic==='/hc_teleop/joint_states')updateJointMonitor(value,'feedback');
       else if(value.kind==='control_source')api('/api/status').then(renderStatus).catch(()=>{});
+      else if(String(value.kind||'').startsWith('replay_') || value.kind==='safety_resume') {
+        api('/api/status').then(renderStatus).catch(()=>{});
+        if(value.payload?.message) toast(value.payload.message, value.kind==='replay_error');
+      }
+      else if(value.kind==='recording_marked' || value.kind==='recording_mark_error') {
+        if(value.payload?.message) toast(value.payload.message, value.kind==='recording_mark_error');
+        if($('#datasetRows')) loadDatasets().catch(()=>{});
+      }
     } catch (_) {}
   };
   ws.onclose=()=>{
@@ -719,7 +732,7 @@ async function loadDatasets() {
 
       const nameCell = document.createElement('td');
       const nameCode = document.createElement('code');
-      nameCode.textContent = file.filename;
+      nameCode.textContent = `${file.marked ? '★ ' : ''}${file.filename}`;
       nameCell.append(nameCode);
 
       const sizeCell = document.createElement('td');
@@ -749,7 +762,9 @@ async function loadDatasets() {
 
       const statusCell = document.createElement('td');
       if (file.is_current) {
-        statusCell.innerHTML = '<span class="recording-badge active" style="padding:2px 6px;font-size:10px;"><i></i>正在写入</span>';
+        statusCell.innerHTML = `<span class="recording-badge active" style="padding:2px 6px;font-size:10px;"><i></i>${file.marked ? '已标记 · ' : ''}正在写入</span>`;
+      } else if (file.marked) {
+        statusCell.innerHTML = '<span class="tag" style="border-color:#f5a344;color:#f5a344;">★ 已标记</span>';
       } else {
         statusCell.innerHTML = '<span class="tag" style="border-color:#1c664b;color:#55d98b;">就绪</span>';
       }

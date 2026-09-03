@@ -14,6 +14,7 @@ from .protocol import envelope
 EventCallback = Callable[[dict[str, Any], list[str]], None]
 
 DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
+    "/hc_teleop/hardware_ready": {"target_hz": 100.0, "min_hz": 10.0},
     "/hc_teleop/joint_states": {"target_hz": 100.0, "min_hz": 50.0},
     "/hc_teleop/joint_cmd": {"target_hz": 100.0, "min_hz": 50.0},
     "/hc_teleop/joint_cmd_arm": {"target_hz": 100.0, "min_hz": 50.0},
@@ -146,6 +147,7 @@ class RosBridge:
         self._mux_enabled = bool(mux_config.get("enabled", True))
         self._command_source = str(mux_config.get("source", "vr"))
         self._command_output_enabled = True
+        self._hardware_ready = False
         self._mux_received = {"vr": 0, "exoskeleton": 0}
         self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0}
         self._mux_forwarded = 0
@@ -184,6 +186,7 @@ class RosBridge:
             result["command_mux"] = {
                 "enabled": self._mux_enabled,
                 "output_enabled": self._command_output_enabled,
+                "hardware_ready": self._hardware_ready,
                 "source": self._command_source,
                 "vr_topic": mux_config.get("vr_topic", "/hc_teleop/joint_cmd_vr"),
                 "exoskeleton_topic": mux_config.get(
@@ -288,7 +291,24 @@ class RosBridge:
             mux_config = self.config.get("command_mux", {})
             if self._mux_enabled:
                 from sensor_msgs.msg import JointState
-                from std_msgs.msg import String
+                from std_msgs.msg import Bool, String
+
+                hardware_ready_topic = str(
+                    mux_config.get(
+                        "hardware_ready_topic", "/hc_teleop/hardware_ready"
+                    )
+                )
+                def hardware_ready_cb(msg: Any) -> None:
+                    ready = bool(getattr(msg, "data", False))
+                    with self._lock:
+                        self._hardware_ready = ready
+
+                subscriptions.append(
+                    node.create_subscription(
+                        Bool, hardware_ready_topic, hardware_ready_cb, qos_profile_sensor_data
+                    )
+                )
+                subscription_names.append(hardware_ready_topic)
 
                 control_source_topic = str(
                     mux_config.get(
@@ -348,9 +368,10 @@ class RosBridge:
                             self._mux_last_received[source] = now
                             selected = self._command_source == source
                             output_enabled = self._command_output_enabled
+                            hw_ready = self._hardware_ready
                             if not valid:
                                 self._mux_rejected += 1
-                        if not valid or not selected or not output_enabled:
+                        if not valid or not selected or not output_enabled or not hw_ready:
                             return
                         output_publisher.publish(message)
                         with self._lock:

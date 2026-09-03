@@ -106,6 +106,13 @@ class TopicRecorderTests(unittest.TestCase):
             r2_item = next(f for f in files if f["filename"] == "run_2.mcap")
             self.assertTrue(r2_item["is_current"])
 
+            mark = recorder.mark_current_or_latest("test")
+            self.assertEqual(mark["filename"], "run_2.mcap")
+            self.assertTrue(mark["recording"])
+            r2_item = next(f for f in recorder.list_recordings() if f["filename"] == "run_2.mcap")
+            self.assertTrue(r2_item["marked"])
+            self.assertEqual(r2_item["mark_source"], "test")
+
             # Cannot delete active file
             with self.assertRaises(ValueError):
                 recorder.delete_recording("run_2.mcap")
@@ -118,6 +125,7 @@ class TopicRecorderTests(unittest.TestCase):
             recorder.stop()
             recorder.delete_recording("run_2.mcap")
             self.assertEqual(len(recorder.list_recordings()), 0)
+            self.assertFalse((recorder.directory / ".run_2.mcap.mark.json").exists())
 
 
 if __name__ == "__main__":
