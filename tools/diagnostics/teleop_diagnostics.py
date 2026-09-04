@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record synchronized VR, end-effector and arm-joint diagnostics to CSV."""
+"""Runtime tool that records synchronized teleoperation diagnostics to CSV."""
 
 from __future__ import annotations
 

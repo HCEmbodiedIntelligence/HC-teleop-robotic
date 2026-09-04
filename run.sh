@@ -136,10 +136,10 @@ export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONP
 ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-}"
 ROBOT_NAME="${HC_ROBOT_NAME:-}"
 if [[ -z "${ROBOT_CONFIG_ROOT}" ]]; then
-  ROBOT_CONFIG_ROOT="$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")"
+  ROBOT_CONFIG_ROOT="$(/usr/bin/python3 -m middleware.profile_cli root --config "${MIDDLEWARE_CONFIG}")"
 fi
 if [[ -z "${ROBOT_NAME}" ]]; then
-  ROBOT_NAME="$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")"
+  ROBOT_NAME="$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")"
 fi
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
 if [[ -z "${MODE}" ]]; then
@@ -262,9 +262,9 @@ CONTROL_PID=$!
 if [[ "${MODE}" == sim ]]; then
   setsid /usr/bin/python3 "${SIM_ENTRY}" "${SIM_ARGS[@]}" "${SIM_ROS_ARGS[@]}" &
   SIM_PID=$!
-  if [[ "${DIAGNOSTICS}" == true && -f "${PROJECT_ROOT}/teleop_diagnostics.py" ]]; then
+  if [[ "${DIAGNOSTICS}" == true && -f "${PROJECT_ROOT}/tools/diagnostics/teleop_diagnostics.py" ]]; then
     DIAGNOSTICS_LOG="${TELEOP_LOG_PATH:-${LOG_DIR}/teleop_diagnostics.csv}"
-    setsid /usr/bin/python3 "${PROJECT_ROOT}/teleop_diagnostics.py" \
+    setsid /usr/bin/python3 -m tools.diagnostics.teleop_diagnostics \
       --output "${DIAGNOSTICS_LOG}" --rate "${TELEOP_LOG_RATE:-30}" &
     DIAGNOSTICS_PID=$!
     echo "[HC] diagnostics=${DIAGNOSTICS_LOG}"

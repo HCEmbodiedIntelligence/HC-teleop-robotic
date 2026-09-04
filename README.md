@@ -17,7 +17,8 @@
 
 真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/hc_teleop/joint_cmd_vr`，外骨骼发布 `/hc_teleop/joint_cmd_exoskeleton`；中间件通过可锁存的 `/hc_teleop/control_source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/hc_teleop/joint_cmd`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
 
-原有的 `d435_webrtc_server.py` 和 `udp_receiver_test.py` 保留不变。新服务兼容它们的关键协议：
+原有的 `d435_webrtc_server.py` 与手动 UDP 调试工具
+`tools/diagnostics/udp_receiver.py` 仍然保留。新服务兼容它们的关键协议：
 
 - PICO 位姿与手柄输入：UDP `5005`，v2 二进制格式 `<4sBIdB21f3H6f3H6f>`，共 162 字节；同时兼容旧版 v1 位姿包。
 - PICO 发现：向 UDP `5006` 发送 `PICO_DISCOVER_V1`。
@@ -194,7 +195,7 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 仿真启动时会自动以 30 Hz 将手柄位姿、目标/实际末端位姿、关节命令/反馈和离合状态写入 `runtime/teleop_logs/`。复现抖动时按住右 Grip 并尽量保持双手静止 5–10 秒，退出仿真后分析对应日志：
 
 ```bash
-/usr/bin/python3 analyze_teleop_log.py runtime/teleop_logs/teleop_YYYYMMDD_HHMMSS.csv
+/usr/bin/python3 -m tools.diagnostics.analyze_teleop_log runtime/teleop_logs/teleop_YYYYMMDD_HHMMSS.csv
 ```
 
 若日志同时包含主动移动和静止保持，可加 `--start 秒数 --end 秒数` 只分析静止区间。

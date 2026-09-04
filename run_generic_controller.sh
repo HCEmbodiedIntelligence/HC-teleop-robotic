@@ -4,8 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
 MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${SCRIPT_DIR}/middleware/config.yaml}"
-ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 "${SCRIPT_DIR}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")}"
-ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 "${SCRIPT_DIR}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")}"
+export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 -m middleware.profile_cli root --config "${MIDDLEWARE_CONFIG}")}"
+ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")}"
 V23_DIR="${SCRIPT_DIR}/adapters/v23"
 MODE="${1:---check}"
 

@@ -103,7 +103,7 @@ cd /home/maple/test/HC_X1
 
 两边必须使用相同的 `ROS_DOMAIN_ID`。启动后松开两个 Grip；准备好再按对应离合。
 
-完整仿真入口默认将手柄、目标/实际末端位姿及关节命令/反馈记录到 `runtime/teleop_logs/`。复现抖动后可运行 `analyze_teleop_log.py <CSV日志>` 定位输入、IK 或关节跟踪环节。
+完整仿真入口默认将手柄、目标/实际末端位姿及关节命令/反馈记录到 `runtime/teleop_logs/`。复现抖动后可运行 `python3 -m tools.diagnostics.analyze_teleop_log <CSV日志>` 定位输入、IK 或关节跟踪环节。
 
 ## ROS 接口
 

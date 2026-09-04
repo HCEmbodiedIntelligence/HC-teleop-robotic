@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Manually inspect PICO discovery, pose, and controller UDP packets."""
+
 import socket
 import struct
 import time

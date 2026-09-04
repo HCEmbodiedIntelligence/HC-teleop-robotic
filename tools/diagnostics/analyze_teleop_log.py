@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize an HC-TJ teleop diagnostic CSV and identify likely jitter sources."""
+"""Summarize a teleoperation diagnostic CSV and identify likely jitter sources."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Iterable
 
 import numpy as np
 
-from teleop_diagnostics import ARM_JOINTS, POSE_FIELDS, SIDES
+from tools.diagnostics.teleop_diagnostics import ARM_JOINTS, POSE_FIELDS, SIDES
 
 
 def number(row: dict[str, str], field: str) -> float | None:

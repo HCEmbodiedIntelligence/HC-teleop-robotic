@@ -1,6 +1,11 @@
 import unittest
 
-from teleop_diagnostics import ARM_JOINTS, POSE_FIELDS, SIDES, TeleopDiagnosticsNode
+from tools.diagnostics.teleop_diagnostics import (
+    ARM_JOINTS,
+    POSE_FIELDS,
+    SIDES,
+    TeleopDiagnosticsNode,
+)
 
 
 class DiagnosticsTests(unittest.TestCase):

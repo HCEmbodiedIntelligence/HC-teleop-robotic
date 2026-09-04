@@ -58,8 +58,8 @@ export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
 
-ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")}"
-ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")}"
+ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 -m middleware.profile_cli root --config "${MIDDLEWARE_CONFIG}")}"
+ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")}"
 export HC_ROBOT_CONFIG_ROOT="${ROBOT_CONFIG_ROOT}"
 export HC_ROBOT_NAME="${ROBOT_NAME}"
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
