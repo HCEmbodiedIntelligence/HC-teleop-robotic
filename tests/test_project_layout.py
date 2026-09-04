@@ -110,18 +110,16 @@ class ProjectLayoutTests(unittest.TestCase):
         )
         self.assertIn("self.target_ee_frame_ids = [None] * len(self.arms)", source)
 
-    def test_middleware_selects_x1_from_adapter_robot_store(self):
+    def test_middleware_selection_exists_in_adapter_robot_store(self):
         config_path = self.root / "middleware" / "config.yaml"
         profile_id, manager = load_selection(config_path)
-        self.assertEqual(profile_id, "x1")
         self.assertEqual(manager.root, (self.root / "adapters" / "robots").resolve())
-        self.assertIn("x1", [profile["id"] for profile in manager.list()])
+        self.assertIn(profile_id, [profile["id"] for profile in manager.list()])
 
         metadata = yaml.safe_load(
-            (manager.root / "x1" / "profile.yaml").read_text(encoding="utf-8")
+            (manager.root / profile_id / "profile.yaml").read_text(encoding="utf-8")
         )
-        self.assertEqual(metadata["id"], "x1")
-        self.assertEqual(metadata["display_name"], "X1")
+        self.assertEqual(metadata["id"], profile_id)
 
     def test_x1_urdf_mesh_references_are_self_contained(self):
         profile = self.root / "adapters" / "robots" / "x1"

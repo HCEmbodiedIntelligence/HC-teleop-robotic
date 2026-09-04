@@ -11,9 +11,14 @@ _HC_X1 = Path(__file__).resolve().parents[2] / "HC_X1"
 if _HC_X1.is_dir() and str(_HC_X1) not in sys.path:
     sys.path.insert(0, str(_HC_X1))
 
-from hc_x1.command_smoothing import JointTrajectorySmoother, SmoothingLimits
+try:
+    from hc_x1.command_smoothing import JointTrajectorySmoother, SmoothingLimits
+except ImportError:
+    JointTrajectorySmoother = None
+    SmoothingLimits = None
 
 
+@unittest.skipIf(JointTrajectorySmoother is None, "external HC_X1 repository is unavailable")
 class HardwareReadySmootherGateTests(unittest.TestCase):
     """Verify HC_X1 smoother state transitions and target discarding during homing."""
 

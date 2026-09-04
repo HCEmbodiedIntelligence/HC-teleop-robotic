@@ -1,4 +1,7 @@
+# X1 旧版 ControllerV2/PID 配置，仅供兼容与参数对照。
+# 当前产品入口默认启动 controller_v23.yml，不会读取本文件。
 control_ros:
+  # 控制周期和旧控制器使用的 ROS 2 输入/输出话题。
   rate: 100
   joint_target: /hc_teleop/target_joint_from_mocap
   # PID 先输出到内部话题，由 VR 适配器合并夹爪后发布标准 joint_cmd。
@@ -10,6 +13,7 @@ control_ros:
   ee_pose_cmd: /hc_teleop/cmd_ee_poses
 
 model:
+  # 参与旧版求解的自由关节：右臂、左臂各 7 轴，再加 3 个折叠腰关节。
   urdf: urdf/hc_tj_robot.urdf
   free_joints:
     [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R,
@@ -21,14 +25,20 @@ model:
   ee_name: [io_teleop_ee_link_right, io_teleop_ee_link_left, zhi_Link]
 
 controller:
+  # dt 单位为秒；以下数组均按 model.free_joints 或末端任务顺序排列。
   dt: 0.01
+  # 每个末端任务的 [位置 XYZ, 姿态旋转 XYZ] 权重。
   ee_weight:
     [[5, 5, 5, 1, 1, 1], [5, 5, 5, 1, 1, 1], [5, 5, 5, 1, 1, 1]]
+  # 关节姿态代价；非零项用于给冗余关节提供弱偏好。
   j_weight:
     [0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0,
      0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0,
      0.0, 0.0, 0.0]
+  # 关节速度平滑权重，腰部三轴使用更强平滑。
   smooth_weight: [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 20, 20, 20]
+  # 空数组表示不额外配置末端比例增益；关节比例增益按自由关节顺序排列。
   x_p_gain: []
   j_p_gain: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]
+  # 旧版求解器关节速度上限，单位为 degree/s。
   q_dot_limit: [180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 60, 60, 60]

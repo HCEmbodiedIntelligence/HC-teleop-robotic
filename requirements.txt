@@ -1,3 +1,7 @@
 aiohttp>=3.8,<4
 PyYAML>=5.4
 mcap>=1.1,<2
+numpy>=1.24,<2
+# The teleop adapter uses a headless PyBullet shadow model for FK, frame
+# conversion and optional collision checks in both sim and real-robot modes.
+pybullet==3.2.6

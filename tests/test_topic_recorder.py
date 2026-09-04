@@ -70,6 +70,34 @@ class TopicRecorderTests(unittest.TestCase):
                 self.assertEqual(schema.name, "std_msgs/msg/String")
             self.assertEqual(recorder.status()["messages"], 1)
 
+    def test_records_and_lists_robot_profile_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings"}, Path(directory))
+            recorder.start(
+                "openarm_session.mcap",
+                {
+                    "profile_id": "openarmx",
+                    "profile_display_name": "OpenArmX Bimanual",
+                    "robot_name": "openarmx",
+                    "controller_config": "controller_v23.yml",
+                    "free_joints": '["openarmx_right_joint1"]',
+                },
+            )
+            recorder.record({"kind": "event", "data": 1})
+            recorder.stop()
+
+            item = recorder.list_recordings()[0]
+            self.assertEqual(item["profile_id"], "openarmx")
+            self.assertEqual(item["profile_display_name"], "OpenArmX Bimanual")
+            self.assertEqual(item["robot_name"], "openarmx")
+            self.assertEqual(item["free_joints"], ["openarmx_right_joint1"])
+
+            with recorder.path.open("rb") as stream:
+                metadata = list(make_reader(stream).iter_metadata())
+            self.assertEqual(len(metadata), 1)
+            self.assertEqual(metadata[0].name, "hc_teleop.session")
+            self.assertEqual(metadata[0].metadata["profile_id"], "openarmx")
+
     def test_dynamic_start_stop_recording(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

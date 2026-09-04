@@ -161,7 +161,7 @@ def _raw_recording_process(
         from rclpy.qos import qos_profile_sensor_data
         from rosidl_runtime_py.utilities import get_message
 
-        domain_id = int(config.get("domain_id", 13))
+        domain_id = int(config.get("domain_id", 14))
         context = Context()
         rclpy.init(args=[], context=context, domain_id=domain_id)
         node_name = f"{config.get('node_name', 'hc_teleop_middleware')}_recorder"
@@ -265,7 +265,7 @@ class RosRecordingExecutor:
     def __init__(self, config: dict[str, Any], recorder: TopicRecorder):
         self.config = config
         self.recorder = recorder
-        self.domain_id = int(config.get("domain_id", 13))
+        self.domain_id = int(config.get("domain_id", 14))
         self.subscriptions = recording_subscriptions(config)
         self._mp = mp.get_context("spawn")
         self._stop_event = self._mp.Event()

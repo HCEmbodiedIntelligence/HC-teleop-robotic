@@ -72,6 +72,11 @@ CONTROLLER_COMMAND=()
 for required in "${V23_SCRIPT}" "${CONTROLLER_YML}" "${ARM_CONFIG}"; do
   if [[ ! -f "${required}" ]]; then err "缺少机器人配置或程序: ${required}"; exit 2; fi
 done
+if ! /usr/bin/python3 -c 'import numpy, pybullet, rclpy, yaml' 2>/dev/null; then
+  err "系统 Python 缺少遥操作运行依赖（numpy/pybullet/rclpy/yaml）"
+  err "请运行 ${PROJECT_ROOT}/install.sh"
+  exit 2
+fi
 
 if [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
   export HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}"
@@ -80,7 +85,7 @@ if [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
 else
   if ! /usr/bin/python3 -c 'import numpy, pinocchio, rclpy, yaml' 2>/dev/null; then
     err "系统 Python 缺少 Pinocchio 控制依赖，且未找到 ${CONTROLLER_PREFIX}"
-    err "请运行 ${PROJECT_ROOT}/install.sh --sim 或设置 HC_CONTROLLER_PREFIX"
+    err "请运行 ${PROJECT_ROOT}/install.sh 或设置 HC_CONTROLLER_PREFIX"
     exit 2
   fi
   warn "未找到独立控制器环境，使用系统 ROS 2 Python/Pinocchio"

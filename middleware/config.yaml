@@ -6,7 +6,7 @@ robot_profiles:
   active: x1
 ros:
   enabled: true
-  domain_id: 13
+  domain_id: 14
   node_name: hc_teleop_middleware
   command_mux:
     enabled: true
@@ -79,13 +79,6 @@ ros:
     event_max_hz: 0.0
   - topic: /hc_teleop/actual_ee_poses
     type: geometry_msgs/msg/PoseArray
-    enabled: true
-    outputs:
-    - record
-    max_hz: 0.0
-    event_max_hz: 0.0
-  - topic: /hc_teleop/sol_q
-    type: sensor_msgs/msg/JointState
     enabled: true
     outputs:
     - record

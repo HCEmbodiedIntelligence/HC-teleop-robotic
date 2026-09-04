@@ -17,6 +17,7 @@ class ConfigTests(unittest.TestCase):
             value["robot_profiles"]["root"], "../adapters/robots"
         )
         self.assertEqual(value["vr"]["data_topic"], "/vrdata")
+        self.assertEqual(value["ros"]["domain_id"], 14)
         self.assertEqual(value["ros"]["recording"]["directory"], "runtime/topic_recordings")
         self.assertEqual(value["ros"]["command_mux"]["source"], "vr")
         self.assertEqual(

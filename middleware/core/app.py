@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
+import yaml
 
 from .camera import CameraService
 from .config import ConfigError, ConfigStore
+from .profile_api import register_profile_routes
 from .protocol import envelope
-from .robot_profiles import RobotProfileError, RobotProfileManager, STANDARD_TOPICS
+from .robot_profiles import RobotProfileManager
 from .ros_bridge import RosBridge
 from .ros_recording_executor import RosRecordingExecutor
 from .topic_player import TopicPlayer
@@ -56,10 +58,62 @@ class MiddlewareRuntime:
         self._last_a_held = False
         self._last_both_sticks_held = False
         self._last_replay_status_sent_at = 0.0
+        self.session_profile_metadata: dict[str, str] = {}
+
+    def _load_session_profile_metadata(self) -> dict[str, str]:
+        """Describe the Profile actually selected when this runtime starts."""
+        profile_config = self.config.get("robot_profiles", {})
+        profile_id = str(
+            os.environ.get("HC_ROBOT_NAME")
+            or profile_config.get("active", "")
+        ).strip()
+        if not profile_id:
+            return {}
+
+        metadata: dict[str, str] = {
+            "profile_id": profile_id,
+            "profile_display_name": profile_id,
+            "robot_name": profile_id,
+            "controller_config": "",
+            "free_joints": "[]",
+            "ros_domain_id": str(self.config.get("ros", {}).get("domain_id", 14)),
+        }
+        root_value = os.environ.get("HC_ROBOT_CONFIG_ROOT") or profile_config.get(
+            "root", "../adapters/robots"
+        )
+        profile_root = Path(str(root_value)).expanduser()
+        if not profile_root.is_absolute():
+            profile_root = self.config_dir / profile_root
+        profile_dir = (profile_root / profile_id).resolve()
+        try:
+            profile = yaml.safe_load(
+                (profile_dir / "profile.yaml").read_text(encoding="utf-8")
+            ) or {}
+            metadata["profile_display_name"] = str(
+                profile.get("display_name") or profile_id
+            )
+            metadata["robot_name"] = str(profile.get("robot_name") or profile_id)
+            controller_name = str(
+                profile.get("primary_config") or "controller_v23.yml"
+            )
+            metadata["controller_config"] = controller_name
+            controller = yaml.safe_load(
+                (profile_dir / controller_name).read_text(encoding="utf-8")
+            ) or {}
+            free_joints = controller.get("model", {}).get("free_joints", [])
+            if isinstance(free_joints, list):
+                metadata["free_joints"] = json.dumps(
+                    [str(name) for name in free_joints],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+        except (OSError, TypeError, yaml.YAMLError):
+            pass
+        return metadata
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
-        configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 13))
+        configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 14))
         domain_id = int(os.environ.get("ROS_DOMAIN_ID", configured_domain_id))
         # Keep all contexts created below (bridge, recorder and cameras) on the
         # launcher's effective domain. Previously only the parent process used
@@ -73,11 +127,13 @@ class MiddlewareRuntime:
         except Exception:
             pass
 
+        self.session_profile_metadata = self._load_session_profile_metadata()
         self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
         self.player = TopicPlayer(
             self.recorder.directory,
             lambda: self.ros,
             self._on_replay_state,
+            lambda: self.session_profile_metadata.get("profile_id", ""),
         )
         camera_config = self.config.get("camera", {})
         base_camera_config = {
@@ -318,7 +374,7 @@ class MiddlewareRuntime:
             filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
             if self.recording_ros is not None:
                 self.recording_ros.prepare_recording()
-            path = self.recorder.start(filename)
+            path = self.recorder.start(filename, self.session_profile_metadata)
             self._log("info", f"Recording started by VR X button: {filename}")
             if self.ros is not None:
                 self.ros.publish(
@@ -583,118 +639,6 @@ def create_app(store: ConfigStore) -> web.Application:
                 {"ok": True, "config": saved, "server_restart_required": restart_required}
             )
         except (ConfigError, json.JSONDecodeError, TypeError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-
-    async def get_robot_profiles(_request: web.Request) -> web.Response:
-        active = str(store.value["robot_profiles"].get("active", ""))
-        values = profiles.list()
-        active_topics = dict(STANDARD_TOPICS)
-        if active:
-            try:
-                active_topics = profiles.get_profile_topics(active)
-            except Exception:
-                pass
-        for value in values:
-            value["active"] = value["id"] == active
-        return web.json_response(
-            {
-                "active": active,
-                "root": str(profiles.root),
-                "profiles": values,
-                "standard_topics": active_topics,
-            }
-        )
-
-    async def import_robot_profile(request: web.Request) -> web.Response:
-        if not request.content_type.startswith("multipart/"):
-            raise web.HTTPBadRequest(text="multipart form data is required")
-        fields: dict[str, str] = {}
-        uploads: dict[str, tuple[str, bytes]] = {}
-        try:
-            reader = await request.multipart()
-            async for part in reader:
-                if part.name in {"archive", "file", "zip", "urdf", "config"}:
-                    if not part.filename:
-                        raise RobotProfileError(f"{part.name} file is required")
-                    uploads[part.name] = (
-                        part.filename,
-                        await part.read(decode=False),
-                    )
-                elif part.name in {"id", "display_name"}:
-                    fields[part.name] = (await part.text()).strip()
-
-            archive_key = next((k for k in ("archive", "file", "zip") if k in uploads), None)
-            if archive_key:
-                archive_name, archive_payload = uploads[archive_key]
-                profile = await asyncio.to_thread(
-                    profiles.import_archive,
-                    fields.get("id", ""),
-                    fields.get("display_name", ""),
-                    archive_payload,
-                    archive_name,
-                )
-            elif "urdf" in uploads and "config" in uploads:
-                urdf_name, urdf_payload = uploads["urdf"]
-                config_name, config_payload = uploads["config"]
-                profile = await asyncio.to_thread(
-                    profiles.import_profile,
-                    fields.get("id", ""),
-                    fields.get("display_name", ""),
-                    urdf_name,
-                    urdf_payload,
-                    config_name,
-                    config_payload,
-                )
-            else:
-                raise RobotProfileError("robot zip archive is required")
-
-            return web.json_response({"ok": True, "profile": profile}, status=201)
-        except RobotProfileError as exc:
-            if "already exists" in str(exc):
-                raise web.HTTPConflict(text=str(exc)) from exc
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-
-    async def activate_robot_profile(request: web.Request) -> web.Response:
-        profile_id = request.match_info["profile_id"]
-        try:
-            profile = profiles.get(profile_id)
-        except RobotProfileError as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
-        if profile.get("schema") == "invalid":
-            raise web.HTTPBadRequest(text="invalid robot profile cannot be activated")
-        previous = str(store.value["robot_profiles"].get("active", ""))
-        if profile_id != previous:
-            proposed = copy.deepcopy(store.value)
-            proposed["robot_profiles"]["active"] = profile_id
-            saved = store.save(proposed)
-            runtime.config = saved
-            runtime._on_safety_event(
-                f"robot profile changed from {previous or 'none'} to {profile_id}; restart teleop"
-            )
-        return web.json_response(
-            {
-                "ok": True,
-                "active": profile_id,
-                "profile": profile,
-                "restart_simulation_required": profile_id != previous,
-            }
-        )
-
-    async def delete_robot_profile(request: web.Request) -> web.Response:
-        profile_id = request.match_info["profile_id"]
-        try:
-            await asyncio.to_thread(profiles.delete_profile, profile_id)
-            active = str(store.value["robot_profiles"].get("active", ""))
-            cleared = profile_id == active
-            if cleared:
-                proposed = copy.deepcopy(store.value)
-                proposed["robot_profiles"]["active"] = ""
-                saved = store.save(proposed)
-                runtime.config = saved
-            return web.json_response({"ok": True, "deleted": profile_id, "cleared_active": cleared})
-        except RobotProfileError as exc:
-            if "does not exist" in str(exc):
-                raise web.HTTPNotFound(text=str(exc)) from exc
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     async def get_topics(_request: web.Request) -> web.Response:
@@ -988,7 +932,11 @@ def create_app(store: ConfigStore) -> web.Application:
 
         if runtime.recording_ros is not None:
             runtime.recording_ros.prepare_recording()
-        path = await asyncio.to_thread(runtime.recorder.start, filename)
+        path = await asyncio.to_thread(
+            runtime.recorder.start,
+            filename,
+            runtime.session_profile_metadata,
+        )
         if runtime.ros is not None:
             runtime.ros.publish(
                 "/teleop/recording_state",
@@ -1211,14 +1159,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/health", get_status)
     app.router.add_get("/api/config", get_config)
     app.router.add_put("/api/config", put_config)
-    app.router.add_get("/api/robot-profiles", get_robot_profiles)
-    app.router.add_post("/api/robot-profiles/import", import_robot_profile)
-    app.router.add_post(
-        "/api/robot-profiles/{profile_id}/activate", activate_robot_profile
-    )
-    app.router.add_delete(
-        "/api/robot-profiles/{profile_id}", delete_robot_profile
-    )
+    register_profile_routes(app, store, runtime, profiles)
     app.router.add_get("/api/ros/topics", get_topics)
     app.router.add_post("/api/ros/publish", publish)
     app.router.add_post("/api/safety/stop", emergency_stop)

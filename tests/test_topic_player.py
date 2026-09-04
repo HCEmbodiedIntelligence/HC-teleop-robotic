@@ -37,10 +37,15 @@ class TopicPlayerTests(unittest.TestCase):
         self.player.stop()
         self.temp_dir.cleanup()
 
-    def _create_test_mcap(self, path: Path) -> None:
+    def _create_test_mcap(self, path: Path, profile_id: str = "") -> None:
         with path.open("wb") as stream:
             writer = McapWriter(stream)
             writer.start(profile="ros2")
+            if profile_id:
+                writer.add_metadata(
+                    "hc_teleop.session",
+                    {"profile_id": profile_id},
+                )
             schema_data = _get_msg_def("sensor_msgs/msg/JointState")
             schema_id = writer.register_schema(
                 "sensor_msgs/msg/JointState", SchemaEncoding.ROS2, schema_data
@@ -115,6 +120,18 @@ class TopicPlayerTests(unittest.TestCase):
         self.assertEqual(self.player.stop()["state"], "stopped")
         self.assertTrue(self.player.status()["requires_reset"])
         self.assertEqual(self.player.acknowledge_reset()["state"], "idle")
+
+    def test_drive_replay_rejects_different_robot_profile(self) -> None:
+        path = self.dir_path / "x1_recording.mcap"
+        self._create_test_mcap(path, profile_id="x1")
+        player = TopicPlayer(
+            self.dir_path,
+            lambda: self.mock_ros,
+            active_profile_provider=lambda: "openarmx",
+        )
+        with self.assertRaisesRegex(ValueError, "profile mismatch"):
+            player.play(path.name, mode="drive")
+        self.assertEqual(player.status()["state"], "idle")
 
 
 if __name__ == "__main__":

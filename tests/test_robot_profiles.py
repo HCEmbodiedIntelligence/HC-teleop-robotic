@@ -260,6 +260,27 @@ class RobotProfileTests(unittest.TestCase):
             self.assertTrue((profile_path / "controller_v23.yml").is_file())
             self.assertTrue((profile_path / "mesh" / "link.stl").is_file())
 
+    def test_archive_duplicate_respects_overwrite_flag(self):
+        import io
+        import zipfile
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("archive_bot/urdf/robot.urdf", URDF)
+            zf.writestr("archive_bot/vr_configs.yml", io_yaml())
+        payload = zip_buffer.getvalue()
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RobotProfileManager(directory)
+            manager.import_archive("archive_bot", "Archive", payload)
+            with self.assertRaisesRegex(RobotProfileError, "already exists"):
+                manager.import_archive(
+                    "archive_bot", "Archive", payload, overwrite=False
+                )
+            updated = manager.import_archive(
+                "archive_bot", "Archive Updated", payload, overwrite=True
+            )
+            self.assertEqual(updated["display_name"], "Archive Updated")
+
     def test_delete_profile(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = RobotProfileManager(directory)

@@ -1,15 +1,20 @@
+# X1 PyBullet 仿真装配配置。这里的数字是当前 URDF 的 PyBullet 关节/Link 下标，
+# 修改 URDF 拓扑或关节顺序后必须重新核对，不能当作 ROS JointState 数组下标。
 urdf_path: urdf/hc_tj_robot.urdf
 robot_name: x1
-wo_controller: false
+wo_controller: false  # false 表示仿真同时接收外部关节控制命令。
+# 机器人根节点在 PyBullet 世界坐标系中的初始位姿，四元数顺序为 XYZW。
 base_pose:
   position: [0, 0, 0.07]
   orientation: [0, 0, 0.707, 0.707]
 sim_camera:
+  # PyBullet GUI 初始观察相机：距离、偏航角、俯仰角和注视点。
   distance: 2.2
   yaw: -130
   pitch: -25
   target_position: [0, 0.25, 0.85]
-sim_opengl2: true
+sim_opengl2: true  # 使用兼容性更好的 OpenGL2 显示路径。
+# 双臂顺序固定为右、左；rest_j_pos 是仿真复位姿态，单位为 rad。
 arms:
   - joint_index: [8, 9, 10, 11, 12, 13, 14]
     ee_index: 18
@@ -18,19 +23,23 @@ arms:
     ee_index: 30
     rest_j_pos: [1.44, -0.77, -1.44, -1.57, 0.0, 0.0, 0.0]
 folding_waist:
+  # 三个折叠腰关节及其复位姿态；cmd_ee/base 指定腰部任务的末端与参考 Link。
   joint_index: [1, 2, 3]
   rest_j_pos: [0.5, 1.2, -0.6]
   rot_offset: [0, 0, 1.57]
   cmd_ee: 3
   base: 0
+# 底盘 [yaw, forward, lateral] 三通道的缩放、滤波及单步加减速限制。
 base_move_scale: [0.1, 0.1, 0.1]
 base_move_filter: [0.2, 0.2, 0.2]
 base_max_acc_per_step: [0.01, 0.01, 0.01]
 base_max_dec_per_step: [0.2, 0.2, 0.2]
 controller_indices:
+  # 末端目标可视化使用的右/左 TCP Link，以及共同的胸部参考 Link。
   cmd_ee: [18, 30]
   base: [3, 3]
 vibration_thresholds:
+  # 末端误差诊断阈值（米），用于提示跟踪误差而非控制限位。
   ee_dist: [0.1, 0.15]
-arm_pos_scale: 1.0
-ee_wrt_head: true
+arm_pos_scale: 1.0  # 末端位置显示/兼容路径的缩放系数。
+ee_wrt_head: true   # 兼容旧仿真逻辑：末端参考关系包含头部/躯干运动。

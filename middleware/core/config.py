@@ -14,7 +14,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "robot_profiles": {"root": "../adapters/robots", "active": "x1"},
     "ros": {
         "enabled": True,
-        "domain_id": 0,
+        "domain_id": 14,
         "node_name": "hc_teleop_middleware",
         "command_mux": {
             "enabled": True,

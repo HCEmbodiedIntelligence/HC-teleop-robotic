@@ -1,19 +1,23 @@
+# OpenArmX Profile 元数据，由 Dashboard/Profile 管理器用于展示、选择和兼容性检查。
+# 统计字段描述导入时的 V10 URDF，不参与实时控制计算。
 version: 1
-id: openarmx
-display_name: OpenArmX Bimanual
-schema: controller-v23
-managed: true
+id: openarmx                         # Profile 唯一标识，对应目录名。
+display_name: OpenArmX Bimanual      # Dashboard 中显示的名称。
+schema: controller-v23               # 主控制配置采用 ControllerV23 格式。
+managed: true                        # true 表示由 Profile 管理器维护。
 robot_name: openarmx
 urdf: urdf/openarmx_robot.urdf
-primary_config: controller_v23.yml
+primary_config: controller_v23.yml   # 启动控制器时使用的主配置。
+# 此 Profile 随包提供的控制器、VR 适配器和 PyBullet 配置。
 config_files:
 - controller_v23.yml
 - arm_teleop.yaml
-link_count: 30
-joint_count: 29
-movable_joint_count: 18
-free_joint_count: 14
-task_count: 2
-arm_count: 2
-teleop_compatible: true
-warnings: []
+- vr_configs.yml
+link_count: 30                       # URDF Link 数量。
+joint_count: 29                      # URDF Joint 总数（包含固定关节）。
+movable_joint_count: 18              # 14 个臂关节加 4 个夹爪关节。
+free_joint_count: 14                 # ControllerV23 控制的双臂关节数量。
+task_count: 2                        # 左、右手 TCP 各一个完整位姿任务。
+arm_count: 2                         # 双臂 Profile。
+teleop_compatible: true              # 已具备 arm_teleop.yaml，可由遥操作节点使用。
+warnings: []                         # Profile 导入和校验警告。

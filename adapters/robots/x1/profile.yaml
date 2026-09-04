@@ -1,21 +1,24 @@
+# X1 Profile 元数据，由 Dashboard/Profile 管理器用于展示、选择和兼容性检查。
+# 统计字段描述导入时的 URDF，不参与实时控制计算。
 version: 1
-id: x1
-display_name: X1
-schema: controller-v23
-managed: true
+id: x1                         # Profile 唯一标识，对应目录名。
+display_name: X1               # Dashboard 中显示的名称。
+schema: controller-v23         # 主控制配置采用 ControllerV23 格式。
+managed: true                  # true 表示由 Profile 管理器维护。
 imported_at: '2026-08-18T02:37:37.765398+00:00'
 robot_name: hc_tj_robot
 urdf: urdf/hc_tj_robot.urdf
-primary_config: controller_v23.yml
+primary_config: controller_v23.yml  # 启动控制器时使用的主配置。
+# 此 Profile 随包提供的控制器、VR 适配器和 PyBullet 配置。
 config_files:
 - controller_v23.yml
 - arm_teleop.yaml
 - vr_configs.yml
-link_count: 49
-joint_count: 48
-movable_joint_count: 29
-free_joint_count: 17
-task_count: 3
-arm_count: 3
-teleop_compatible: true
-warnings: []
+link_count: 49                 # URDF Link 数量。
+joint_count: 48                # URDF Joint 总数（包含固定关节）。
+movable_joint_count: 29        # URDF 中可运动关节数量。
+free_joint_count: 17           # 控制器选中的自由关节数量。
+task_count: 3                  # 导入时识别出的控制任务数量。
+arm_count: 3                   # 导入器记录的任务臂/末端组数量。
+teleop_compatible: true        # 已具备 arm_teleop.yaml，可由遥操作节点使用。
+warnings: []                   # Profile 导入和校验警告。

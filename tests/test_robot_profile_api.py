@@ -219,7 +219,8 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         stop_res = await self.client.post("/api/replay/stop")
         self.assertEqual(stop_res.status, 200)
         stop_data = await stop_res.json()
-        self.assertEqual(stop_data["replay"]["state"], "idle")
+        self.assertEqual(stop_data["replay"]["state"], "stopped")
+        self.assertTrue(stop_data["replay"]["requires_reset"])
 
 
 if __name__ == "__main__":

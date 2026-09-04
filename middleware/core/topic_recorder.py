@@ -20,6 +20,8 @@ _PRIMITIVE_TYPES = {
     "string", "wstring",
 }
 
+RECORDING_METADATA_NAME = "hc_teleop.session"
+
 
 def _lower_recording_priority() -> None:
     """Best-effort process priority reduction for recording workers."""
@@ -139,6 +141,7 @@ def _mcap_writer_process(
     messages: Any,
     error_queue: Any,
     ready_event: Any,
+    metadata: dict[str, str],
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
     _lower_recording_priority()
@@ -148,6 +151,8 @@ def _mcap_writer_process(
         with Path(path).open("wb") as stream:
             writer = McapWriter(stream)
             writer.start(profile="ros2")
+            if metadata:
+                writer.add_metadata(RECORDING_METADATA_NAME, metadata)
             # Do not report a recording as active until the destination file
             # has actually been opened and the MCAP header has been written.
             ready_event.set()
@@ -225,12 +230,49 @@ def _mcap_writer_process(
             pass
 
 
+def read_recording_metadata(path: Path) -> dict[str, str]:
+    """Read HC Teleop session metadata; legacy/external MCAP files return {}."""
+    try:
+        from mcap.reader import make_reader
+
+        with path.open("rb") as stream:
+            reader = make_reader(stream)
+            for record in reader.iter_metadata():
+                if record.name == RECORDING_METADATA_NAME:
+                    return dict(record.metadata)
+    except Exception:
+        pass
+    return {}
+
+
+def _metadata_fields(metadata: dict[str, str]) -> dict[str, Any]:
+    free_joints: list[str] = []
+    try:
+        decoded = json.loads(metadata.get("free_joints", "[]"))
+        if isinstance(decoded, list):
+            free_joints = [str(value) for value in decoded]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return {
+        "profile_id": str(metadata.get("profile_id", "")),
+        "profile_display_name": str(metadata.get("profile_display_name", "")),
+        "robot_name": str(metadata.get("robot_name", "")),
+        "controller_config": str(metadata.get("controller_config", "")),
+        "free_joints": free_joints,
+    }
+
+
 def _inspect_mcap_file(path: Path) -> dict[str, Any]:
     try:
         from mcap.reader import make_reader
 
         with path.open("rb") as f:
             reader = make_reader(f)
+            session_metadata = {}
+            for record in reader.iter_metadata():
+                if record.name == RECORDING_METADATA_NAME:
+                    session_metadata = dict(record.metadata)
+                    break
             s = reader.get_summary()
             if not s or not s.statistics:
                 return {
@@ -240,6 +282,7 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
                     "topic_count": 0,
                     "channels": [],
                     "avg_rate_hz": 0.0,
+                    **_metadata_fields(session_metadata),
                 }
             start_ns = s.statistics.message_start_time
             end_ns = s.statistics.message_end_time
@@ -265,6 +308,7 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
                 "topic_count": len(channels),
                 "channels": channels,
                 "avg_rate_hz": round(avg_rate, 1),
+                **_metadata_fields(session_metadata),
             }
     except Exception:
         return {
@@ -274,6 +318,7 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
             "topic_count": 0,
             "channels": [],
             "avg_rate_hz": 0.0,
+            **_metadata_fields({}),
         }
 
 
@@ -296,6 +341,7 @@ class TopicRecorder:
         self._process: Any = None
         self._lock = threading.Lock()
         self._last_error: str | None = None
+        self._active_metadata: dict[str, str] = {}
 
     def ipc_resources(self) -> tuple[Any, Any, Any]:
         """Resources inherited by the raw ROS subscription process."""
@@ -308,7 +354,11 @@ class TopicRecorder:
             except queue.Empty:
                 return
 
-    def start(self, filename: str = "") -> str:
+    def start(
+        self,
+        filename: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         self.stop()
         self.directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -316,6 +366,11 @@ class TopicRecorder:
         if not fname.endswith(".mcap"):
             fname += ".mcap"
         self.path = self.directory / fname
+        self._active_metadata = {
+            str(key): str(value)
+            for key, value in (metadata or {}).items()
+            if value is not None
+        }
         with self._lock:
             self._drain_queue(self._queue)
             self._drain_queue(self._error_queue)
@@ -331,6 +386,7 @@ class TopicRecorder:
                     self._messages,
                     self._error_queue,
                     self._ready_event,
+                    self._active_metadata,
                 ),
                 name="mcap-writer",
                 daemon=True,
@@ -496,6 +552,7 @@ class TopicRecorder:
                 "topic_count": 0,
                 "channels": [],
                 "avg_rate_hz": 0.0,
+                **_metadata_fields(self._active_metadata if is_cur else {}),
             }
             mark = self._read_mark(p)
 
@@ -514,6 +571,11 @@ class TopicRecorder:
                 "topic_count": meta["topic_count"],
                 "channels": meta["channels"],
                 "avg_rate_hz": meta["avg_rate_hz"],
+                "profile_id": meta["profile_id"],
+                "profile_display_name": meta["profile_display_name"],
+                "robot_name": meta["robot_name"],
+                "controller_config": meta["controller_config"],
+                "free_joints": meta["free_joints"],
                 "marked": bool(mark.get("marked", False)),
                 "marked_at": str(mark.get("marked_at", "")),
                 "mark_source": str(mark.get("mark_source", "")),

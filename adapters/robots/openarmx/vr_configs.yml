@@ -1,0 +1,50 @@
+# OpenArmX V10 的 PyBullet 仿真装配配置。
+urdf_path: urdf/openarmx_robot.urdf
+robot_name: openarmx
+wo_controller: false       # false 表示仿真同时接收外部关节控制命令。
+joint_index_order: urdf    # 下列下标按 URDF 声明顺序书写，加载时转换为 PyBullet 下标。
+
+# OpenArmX 是固定底座双臂机器人；URDF 含固定 world 根节点，PyBullet 将其固定在此位姿。
+# 四元数顺序为 XYZW。
+base_pose:
+  position: [0.0, 0.0, 0.0]
+  orientation: [0.0, 0.0, 0.0, 1.0]
+
+sim_camera:
+  # PyBullet GUI 初始观察相机：距离、偏航角、俯仰角和注视点。
+  distance: 2.0
+  yaw: 180
+  pitch: -25
+  target_position: [0.0, 0.0, 0.75]
+sim_opengl2: true  # 使用兼容性更好的 OpenGL2 显示路径。
+
+# V10 模型的稳定 URDF 顺序下标，运行时会转换为 PyBullet 遍历下标。
+# 双臂顺序必须与 arm_teleop.yaml/controller_v23.yml 一致：右臂在前，左臂在后；
+# rest_j_pos 为仿真复位姿态，单位为 rad。
+arms:
+  - joint_index: [12, 13, 14, 15, 17, 18, 19]
+    ee_index: 26
+    rest_j_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  - joint_index: [2, 3, 4, 5, 7, 8, 9]
+    ee_index: 22
+    rest_j_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+grippers:
+  # 右、左夹爪各包含两个平移指关节，顺序与双臂一致。
+  - joint_index: [27, 28]
+  - joint_index: [23, 24]
+# OpenArmX 遥操作适配器分别发布左右夹爪命令，仿真器额外订阅这两个话题。
+finger_command_topics:
+  - /hc_teleop/joint_cmd_finger_right
+  - /hc_teleop/joint_cmd_finger_left
+
+# target_ee_poses 使用共同机身 Link 作为参考坐标系。
+controller_indices:
+  cmd_ee: [26, 22]
+  base: [0, 0]
+
+vibration_thresholds:
+  # 末端误差诊断阈值（米），用于提示跟踪误差而非控制限位。
+  ee_dist: [0.1, 0.15]
+arm_pos_scale: 1.0  # 末端位置显示/兼容路径的缩放系数。
+ee_wrt_head: false  # 固定底座，无需让末端参考关系跟随头部运动。

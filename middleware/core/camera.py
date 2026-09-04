@@ -25,7 +25,7 @@ class CameraService:
       4. Dynamic fallback test pattern frame when awaiting video signal
     """
 
-    def __init__(self, config: dict[str, Any], domain_id: int = 13):
+    def __init__(self, config: dict[str, Any], domain_id: int = 14):
         self.config = config
         self.domain_id = int(domain_id)
         self._latest: Any = None

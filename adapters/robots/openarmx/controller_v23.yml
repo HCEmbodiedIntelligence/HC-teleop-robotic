@@ -1,20 +1,29 @@
+# OpenArmX 双臂的 ControllerV23（Pinocchio/CasADi 差分 IK）配置。
+# “v23”是控制算法版本，不是 OpenArmX 的机械结构版本；此处使用 V10 URDF。
 ros_interface:
+  # ROS 2 节点名和求解频率，rate 应与 control.dt 互为倒数。
   node_name: controller_v2_3_openarmx
   rate: 100
   sub_topic:
+    # 关节反馈、双臂末端目标以及积分器复位请求。
     joint_state: /hc_teleop/joint_states
     ee_target: /hc_teleop/controller_target_ee_poses
     reset: /hc_teleop/solver_reset
   pub_topic:
+    # 机械臂求解结果、诊断状态以及复位完成确认。
     joint_target: /hc_teleop/joint_cmd_arm
     solver_state: /hc_teleop/sol_q
     reset_ack: /hc_teleop/solver_reset_ack
 control:
+  # retarget 会连续积分关节目标；dt=0.01 s 对应 100 Hz。
   method: retarget
   dt: 0.01
+  # 阻尼用于抑制奇异位形附近的数值放大。
   damping: 2.0e-03
+  # 留空表示首次收到关节反馈时以实际姿态作为积分初值。
   joints_init: []
 model:
+  # free_joints 顺序必须与 limit.velocity 一一对应：右臂 7 轴在前，左臂 7 轴在后。
   urdf: urdf/openarmx_robot.urdf
   free_joints:
   - openarmx_right_joint1
@@ -32,6 +41,8 @@ model:
   - openarmx_left_joint6
   - openarmx_left_joint7
 task:
+  # pose 单项格式：[[参考坐标系, TCP 坐标系], 位置权重, 姿态权重, 误差增益]。
+  # 两项顺序必须与 /hc_teleop/controller_target_ee_poses 中右、左目标一致。
   pose:
   - - - openarmx_right_link0
       - openarmx_right_hand_tcp
@@ -43,10 +54,10 @@ task:
     - 10.0
     - 3.0
     - 15.0
-  axis: []
-  joint: []
+  axis: []   # 不额外约束某一工具轴方向。
+  joint: []  # 不设置肘部等关节的显式偏好姿态。
 limit:
-  # degrees/s; the hardware adapter applies an additional rad/s rate limit.
+  # 各自由关节最大速度，单位为 degree/s；真机适配器还会执行额外的 rad/s 限速。
   velocity:
   - 57.3
   - 57.3

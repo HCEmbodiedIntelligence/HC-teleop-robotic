@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -44,82 +43,15 @@ from .collision_safety import (
     improves_collision_clearance,
 )
 from .solver_rearm import SolverRearmGate
+from .teleop_state import ArmRuntime, BodyRuntime, IkCandidate
+from .vr_input import decode_vr_frame
 
 
-@dataclass
-class ArmRuntime:
-    name: str
-    joint_names: list[str]
-    joint_indices: list[int]
-    dof_indices: list[int]
-    lower: np.ndarray
-    upper: np.ndarray
-    ee_index: int
-    base_index: int
-    pose: tuple[np.ndarray, np.ndarray] | None = None
-    pose_stamp: float = 0.0
-    joy: Joy | None = None
-    joy_stamp: float = 0.0
-    active: bool = False
-    reference_vr: tuple[np.ndarray, np.ndarray] | None = None
-    reference_local_ee: tuple[np.ndarray, np.ndarray] | None = None
-    target_local: tuple[np.ndarray, np.ndarray] | None = None
-    target_world: tuple[np.ndarray, np.ndarray] | None = None
-    last_solution: np.ndarray | None = None
-    position_error: float = 0.0
-    orientation_error: float = 0.0
-    ik_converged: bool = True
-    ik_within_tolerance: bool = True
-    ik_rejections: int = 0
-    ik_rejection_total: int = 0
-    ik_seed: str = "feedback"
-    ik_damping: float = 0.0
-    last_ik_log: float = 0.0
-    last_ik_attempt: float = 0.0
-    last_reseed_attempt: float = 0.0
-    recovery_solution: np.ndarray | None = None
-    recovery_seed: str = ""
-    reseed_target_position: np.ndarray | None = None
-    reseed_target_orientation: np.ndarray | None = None
-
-
-@dataclass
-class IkCandidate:
-    joints: np.ndarray
-    position_error: float
-    orientation_error: float
-    converged: bool
-    accepted: bool
-    minimum_limit_margin: float
-    damping: float
-    seed_name: str
-    score: float
-
-
-@dataclass
-class BodyRuntime:
-    joint_names: list[str]
-    joint_indices: list[int]
-    dof_indices: list[int]
-    lower: np.ndarray
-    upper: np.ndarray
-    torso_index: int
-    head_pose: tuple[np.ndarray, np.ndarray] | None = None
-    head_stamp: float = 0.0
-    active: bool = False
-    reference_head: tuple[np.ndarray, np.ndarray] | None = None
-    reference_torso: tuple[np.ndarray, np.ndarray] | None = None
-    target_base: tuple[np.ndarray, np.ndarray] | None = None
-    last_solution: np.ndarray | None = None
-    lift_error: float = 0.0
-    pitch_error: float = 0.0
-
-
-class HcTjArmTeleopNode(Node):
-    """HC-TJ simulation teleop using the requested two-clutch state machine."""
+class RobotArmTeleopNode(Node):
+    """Profile-driven bimanual teleop node with a two-clutch state machine."""
 
     def __init__(self, config_path: str, backend: str | None = None):
-        super().__init__("hc_tj_vr_teleop")
+        super().__init__("hc_robot_vr_teleop")
         self.config_path = Path(config_path).expanduser().resolve()
         with self.config_path.open(encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream)
@@ -653,76 +585,23 @@ class HcTjArmTeleopNode(Node):
             arm.joy_stamp = self._monotonic()
 
     def _vr_data_callback(self, message: String) -> None:
-        try:
-            value = json.loads(message.data)
-            if not isinstance(value, dict):
-                return
-            tracking = value.get("tracking", {})
-            poses = value.get("poses", {})
-            inputs = value.get("inputs", {})
-            if not all(isinstance(item, dict) for item in (tracking, poses, inputs)):
-                return
-
-            def pose_message(name: str) -> PoseStamped | None:
-                source = poses.get(name)
-                if not tracking.get(name) or not isinstance(source, dict):
-                    return None
-                position = source.get("position")
-                quaternion = source.get("quaternion")
-                if not isinstance(position, list) or not isinstance(quaternion, list):
-                    return None
-                if len(position) != 3 or len(quaternion) != 4:
-                    return None
-                result = PoseStamped()
-                (
-                    result.pose.position.x,
-                    result.pose.position.y,
-                    result.pose.position.z,
-                ) = [float(item) for item in position]
-                (
-                    result.pose.orientation.x,
-                    result.pose.orientation.y,
-                    result.pose.orientation.z,
-                    result.pose.orientation.w,
-                ) = [float(item) for item in quaternion]
-                return result
-
-            head = pose_message("head")
-            if head is not None:
-                self._head_pose_callback(head)
-            for side in ("left", "right"):
-                pose = pose_message(side)
-                if pose is not None:
-                    self._arm_pose_callback(self.arms[side], pose)
-                source = inputs.get(side)
-                if not isinstance(source, dict):
-                    continue
-                primary = source.get("primary_axis", [0.0, 0.0])
-                secondary = source.get("secondary_axis", [0.0, 0.0])
-                if not isinstance(primary, list) or len(primary) != 2:
-                    continue
-                if not isinstance(secondary, list) or len(secondary) != 2:
-                    continue
-                held_mask = int(source.get("held_mask", 0))
-                pressed_mask = int(source.get("pressed_mask", 0))
-                if side == "right" and ((pressed_mask & 1) or (held_mask & 1)):
-                    if not self.enabled or self.stop_reason:
-                        self.enabled = True
-                        self.stop_reason = ""
-                        self.get_logger().info("VR controller A button pressed: teleop re-enabled")
-                joy = Joy()
-                joy.axes = [
-                    float(source.get("trigger", 0.0)),
-                    float(source.get("grip", 0.0)),
-                    float(primary[0]),
-                    float(primary[1]),
-                    float(secondary[0]),
-                    float(secondary[1]),
-                ]
-                joy.buttons = [int(bool(held_mask & (1 << index))) for index in range(11)]
-                self._joy_callback(self.arms[side], joy)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        frame = decode_vr_frame(message.data)
+        if frame is None:
             return
+        head = frame.poses.get("head")
+        if head is not None:
+            self._head_pose_callback(head)
+        for side in ("left", "right"):
+            pose = frame.poses.get(side)
+            if pose is not None:
+                self._arm_pose_callback(self.arms[side], pose)
+            joy = frame.inputs.get(side)
+            if joy is not None:
+                self._joy_callback(self.arms[side], joy)
+        if frame.resume_requested and (not self.enabled or self.stop_reason):
+            self.enabled = True
+            self.stop_reason = ""
+            self.get_logger().info("VR controller A button pressed: teleop re-enabled")
 
     def _joint_state_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -2621,3 +2500,7 @@ class HcTjArmTeleopNode(Node):
         if bullet.isConnected(self.physics_client):
             bullet.disconnect(self.physics_client)
         return super().destroy_node()
+
+
+# Compatibility alias for downstream imports made before the generic rename.
+HcTjArmTeleopNode = RobotArmTeleopNode

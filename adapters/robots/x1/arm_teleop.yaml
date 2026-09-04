@@ -1,4 +1,7 @@
+# X1 的 VR 遥操作适配配置：描述模型、双臂/腰部/夹爪、输入映射和安全限制。
+# ControllerV23 的任务权重与关节速度上限在 controller_v23.yml 中配置。
 robot:
+  # URDF 路径以及模型根节点在世界坐标系中的位姿；四元数顺序为 XYZW。
   urdf_path: urdf/hc_tj_robot.urdf
   base_position:
   - 0.0
@@ -9,6 +12,7 @@ robot:
   - 0.0
   - 0.70710678
   - 0.70710678
+  # 回零手势使用的目标关节角，单位为 rad；同时作为缺少反馈时的初始参考。
   initial_joints:
     leg_1: 0.5
     leg_2: 1.2
@@ -28,6 +32,8 @@ robot:
     Joint6_L: 0.0
     Joint7_L: 0.0
 arms:
+  # base_link 用于统一显示目标；generic_task_base_link 是 v23 求解器的肩部任务基座；
+  # ee_link 是受控 TCP。关节列表顺序必须与反馈和求解器配置一致。
   right:
     base_link: zhi_Link
     generic_task_base_link: R_arm_0_Link
@@ -53,6 +59,7 @@ arms:
     - Joint6_L
     - Joint7_L
 body:
+  # 当前腰部控制关闭；重新启用时取消下面三个腰关节注释并完成真机标定。
   # waist_joint_names:
   # - leg_1
   # - leg_2
@@ -61,30 +68,37 @@ body:
   waist_joint_names: []
   torso_link: zhi_Link
   base_command_topic: /hc_teleop/target_base_move
-  base_command_mode: velocity
+  base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
+  # Joy.axes 下标：0=Trigger、1=Grip、2/3=主摇杆 X/Y、4/5=副摇杆 X/Y。
   stick_x_axis: 2
   stick_y_axis: 3
+  # 摇杆死区、方向符号和底盘最大线速度（m/s）。
   stick_deadzone: 0.08
   stick_forward_direction: 1.0
   stick_lateral_direction: -1.0
   max_linear_velocity: 0.35
   max_lateral_velocity: 0.25
+  # 头显偏航超过死区后控制底盘角速度（rad/s）。
   yaw_deadzone: 0.18
   yaw_gain: 0.6
   yaw_direction: -1.0
   max_angular_velocity: 0.45
+  # 头显 position=[x,y,z] 的数组下标；这是兼容既有标定的位移控制通道。
   head_height_axis: 2
   head_pitch_position_axis: 1
+  # 头部位移到腰部高度/俯仰的缩放、方向和最大变化量。
   height_scale: 0.5
   pitch_scale: 0.8
   height_direction: -1.0
   pitch_direction: -1.0
   max_height_delta: 0.18
   max_pitch_delta: 0.35
+  # 腰部俯仰在世界坐标系中的旋转轴。
   pitch_axis_world:
   - -1.0
   - 0.0
   - 0.0
+  # 三个腰关节的软件位置上下限，单位为 rad，顺序与 waist_joint_names 一致。
   joint_lower:
   - -0.628319
   - -0.418879
@@ -93,16 +107,20 @@ body:
   - 1.082104
   - 2.356194
   - 1.117011
+  # 腰部最大关节速度及兼容内置 IK 的迭代参数。
   max_joint_velocity: 0.35
   ik_iterations: 10
   ik_damping: 0.05
   ik_max_update: 0.08
 grippers:
+  # Trigger 连续量控制夹爪；axes[0] 是 Trigger，阈值用于生成二值抓握状态。
   trigger_axis: 0
   binary_trigger_threshold: 0.5
   max_velocity: 3.5
+  # true 时把 R_ban/L_ban 仿真夹爪关节合并进最终关节命令。
   include_sim_joints: true
   right:
+    # sim_joint 用于 PyBullet；finger_topic/finger_joint_names 用于真实灵巧手。
     sim_joint: R_ban
     binary_state_joint: R_ban
     sim_closed_position: 1.5707
@@ -144,6 +162,7 @@ grippers:
     - 0.0891015625
     - 2.2509765625
   left:
+    # 左手数组顺序必须与 finger_joint_names 严格一致，角度单位为 rad。
     sim_joint: L_ban
     binary_state_joint: L_ban
     sim_closed_position: 1.5707
@@ -182,9 +201,11 @@ grippers:
     - 0.05
     - 2.5
 control:
+  # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
   backend: v23
   enabled_on_start: true
   rate_hz: 100.0
+  # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
   vr_data_topic: /vrdata
   joint_state_topic: /hc_teleop/joint_states
   command_topic: /hc_teleop/joint_cmd_vr
@@ -198,16 +219,19 @@ control:
   status_topic: /teleop/arm/status
   safety_stop_topic: /teleop/emergency_stop
   enable_topic: /teleop/arm/enabled
+  # Joy.axes[1] 是 Grip 离合；左右主摇杆 X（axes[2]）同时向外触发回零。
   clutch_axis: 1
   clutch_threshold: 0.55
   home_gesture_axis: 2
   home_gesture_threshold: 0.95
   home_gesture_release_threshold: 0.35
+  # 回零速度（rad/s）、到位容差（rad）及输入/反馈超时（秒）。
   home_joint_velocity: 0.7
   home_tolerance: 0.015
   pose_timeout: 0.5
   input_timeout: 0.5
   joint_state_timeout: 0.5
+  # 手柄位移映射矩阵：矩阵三行依次生成机器人 X/Y/Z 位移。
   axis_mapping:
   - - 0.0
     - 0.0
@@ -218,6 +242,7 @@ control:
   - - 0.0
     - 1.0
     - 0.0
+  # 头显方向映射矩阵，主要用于偏航跟随。
   head_axis_mapping:
   - - 0.0
     - 0.0
@@ -228,6 +253,7 @@ control:
   - - 0.0
     - 1.0
     - 0.0
+  # VR 位移缩放、最大末端位移、姿态开关以及目标滤波参数。
   position_scale: 0.85
   max_displacement: 0.9
   orientation_enabled: true
@@ -254,6 +280,8 @@ control:
   collision_latch_until_release: true
   # 已经处于禁区时，允许安全间隙每帧至少增加 0.01 mm 的退出指令。
   collision_escape_epsilon: 0.00001
+  # 下面是适配器内置兼容 IK 的收敛、奇异规避、重播种及单步速度参数；
+  # v23 主求解器的阻尼和任务权重仍以 controller_v23.yml 为准。
   ik_iterations: 16
   ik_position_tolerance: 0.01
   ik_orientation_tolerance: 0.06

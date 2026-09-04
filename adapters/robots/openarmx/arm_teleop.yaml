@@ -1,8 +1,11 @@
+# OpenArmX V10 双臂的 VR 遥操作适配配置。
+# ControllerV23 的任务权重与关节速度上限在 controller_v23.yml 中配置。
 robot:
+  # URDF 路径以及固定底座在世界坐标系中的位姿；四元数顺序为 XYZW。
   urdf_path: urdf/openarmx_robot.urdf
   base_position: [0.0, 0.0, 0.0]
   base_orientation: [0.0, 0.0, 0.0, 1.0]
-  # The OpenArmX controller's zero pose is used only for the explicit home gesture.
+  # OpenArmX 零位只用于显式回零手势，同时作为缺少反馈时的初始参考；单位为 rad。
   initial_joints:
     openarmx_right_joint1: 0.0
     openarmx_right_joint2: 0.0
@@ -19,6 +22,8 @@ robot:
     openarmx_left_joint6: 0.0
     openarmx_left_joint7: 0.0
 arms:
+  # base_link 用于统一显示目标；generic_task_base_link 是 v23 求解器的肩部任务基座；
+  # ee_link 是手部 TCP。关节列表顺序必须与反馈和求解器配置一致。
   right:
     base_link: openarmx_body_link0
     generic_task_base_link: openarmx_right_link0
@@ -44,11 +49,14 @@ arms:
     - openarmx_left_joint6
     - openarmx_left_joint7
 body:
+  # OpenArmX 没有本项目可控的底盘/腰部，因此本段关闭；下面的零值字段只为满足
+  # 通用 Profile 配置契约而保留，目前不会产生运动命令。
   enabled: false
   waist_joint_names: []
   torso_link: openarmx_body_link0
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity
+  # Joy.axes 下标：0=Trigger、1=Grip、2/3=主摇杆 X/Y、4/5=副摇杆 X/Y。
   stick_x_axis: 2
   stick_y_axis: 3
   stick_deadzone: 0.08
@@ -60,6 +68,7 @@ body:
   yaw_gain: 0.0
   yaw_direction: -1.0
   max_angular_velocity: 0.0
+  # 头显 position=[x,y,z] 的数组下标；body.enabled=false 时这两个字段不生效。
   head_height_axis: 2
   head_pitch_position_axis: 1
   height_scale: 0.0
@@ -68,6 +77,7 @@ body:
   pitch_direction: -1.0
   max_height_delta: 0.0
   max_pitch_delta: 0.0
+  # 若未来增加腰部，俯仰将绕世界坐标系 -X 轴；启用前必须重新标定全部参数。
   pitch_axis_world: [-1.0, 0.0, 0.0]
   joint_lower: []
   joint_upper: []
@@ -76,10 +86,13 @@ body:
   ik_damping: 0.05
   ik_max_update: 0.08
 grippers:
+  # Joy.axes[0] 的 Trigger 连续控制夹爪；位置单位为米。
   trigger_axis: 0
   max_velocity: 0.08
+  # false 表示不把仿真夹爪关节混入双臂 joint_cmd，而是走左右独立夹爪话题。
   include_sim_joints: false
   right:
+    # 0.044 m 为张开，0.0 m 为闭合；真机和仿真均使用同名主指关节。
     sim_joint: openarmx_right_finger_joint1
     sim_closed_position: 0.0
     finger_topic: /hc_teleop/joint_cmd_finger_right
@@ -94,9 +107,11 @@ grippers:
     finger_open: [0.044]
     finger_closed: [0.0]
 control:
+  # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
   backend: v23
   enabled_on_start: true
   rate_hz: 100.0
+  # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
   vr_data_topic: /vrdata
   joint_state_topic: /hc_teleop/joint_states
   command_topic: /hc_teleop/joint_cmd_vr
@@ -110,26 +125,30 @@ control:
   status_topic: /teleop/arm/status
   safety_stop_topic: /teleop/emergency_stop
   enable_topic: /teleop/arm/enabled
+  # Joy.axes[1] 是 Grip 离合；左右主摇杆 X（axes[2]）同时向外触发回零。
   clutch_axis: 1
   clutch_threshold: 0.55
   home_gesture_axis: 2
   home_gesture_threshold: 0.95
   home_gesture_release_threshold: 0.35
+  # 回零速度（rad/s）、到位容差（rad）及输入/反馈超时（秒）。
   home_joint_velocity: 0.5
   home_tolerance: 0.015
   pose_timeout: 0.5
   input_timeout: 0.5
   joint_state_timeout: 0.5
+  # OpenArmX 已标定的 Pico 位移映射：robot_x=-vr_z、robot_y=-vr_x、robot_z=vr_y；
+  # 矩阵三行依次生成机器人 X/Y/Z 位移。
   axis_mapping:
-  # Match OpenArmX's calibrated Pico mapping from openarmx_teleop_vr:
-  # robot_x=-vr_z, robot_y=-vr_x, robot_z=vr_y.
-  - [0.0, 0.0, 1.0]
+  - [0.0, 0.0, -1.0]
   - [-1.0, 0.0, 0.0]
   - [0.0, 1.0, 0.0]
+  # 头显方向映射矩阵；当前 body 关闭，保留供通用状态机兼容使用。
   head_axis_mapping:
   - [0.0, 0.0, -1.0]
   - [-1.0, 0.0, 0.0]
   - [0.0, 1.0, 0.0]
+  # VR 位移缩放、最大末端位移、姿态开关以及目标滤波参数。
   position_scale: 0.8
   max_displacement: 0.8
   orientation_enabled: true
@@ -138,9 +157,8 @@ control:
   target_orientation_deadband: 0.0
   target_filter_alpha: 0.75
   command_joint_deadband: 0.0
-  # Leave geometry interception off until the imported mesh collision pairs have
-  # been commissioned on the real mounting geometry. Joint/velocity/timeout and
-  # emergency-stop protection remain active in the hardware adapter.
+  # 导入 Mesh 的碰撞对尚未按真实安装几何完成验收，因此关闭几何碰撞拦截；
+  # 关节限位、速度限位、超时保护和急停仍由控制链路/真机适配器执行。
   collision_avoidance_enabled: false
   collision_min_distance: 0.02
   collision_home_tolerance: 0.008
@@ -150,6 +168,8 @@ control:
   collision_check_arm_body: true
   collision_latch_until_release: true
   collision_escape_epsilon: 0.00001
+  # 下面是适配器内置兼容 IK 的收敛、奇异规避、重播种及单步速度参数；
+  # v23 主求解器的阻尼和任务权重仍以 controller_v23.yml 为准。
   ik_iterations: 16
   ik_position_tolerance: 0.01
   ik_orientation_tolerance: 0.06

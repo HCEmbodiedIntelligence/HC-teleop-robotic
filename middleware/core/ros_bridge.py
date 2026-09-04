@@ -148,6 +148,7 @@ class RosBridge:
         self._command_source = str(mux_config.get("source", "vr"))
         self._command_output_enabled = True
         self._hardware_ready = False
+        self._replay_active = False
         self._mux_received = {"vr": 0, "exoskeleton": 0}
         self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0}
         self._mux_forwarded = 0
@@ -187,6 +188,7 @@ class RosBridge:
                 "enabled": self._mux_enabled,
                 "output_enabled": self._command_output_enabled,
                 "hardware_ready": self._hardware_ready,
+                "replay_active": self._replay_active,
                 "source": self._command_source,
                 "vr_topic": mux_config.get("vr_topic", "/hc_teleop/joint_cmd_vr"),
                 "exoskeleton_topic": mux_config.get(
@@ -216,10 +218,51 @@ class RosBridge:
             }
 
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
+        if self._is_final_joint_command(topic):
+            # Final actuator commands must come through the mux, or through the
+            # explicitly armed replay path below.  The generic HTTP publisher
+            # must never bypass source selection and hardware readiness.
+            return False
         return self._enqueue("publish", (topic, msg_type, data))
 
     def publish_raw(self, topic: str, msg_type: str, raw_data: bytes) -> bool:
+        if self._is_final_joint_command(topic):
+            with self._lock:
+                allowed = (
+                    self._replay_active
+                    and self._command_output_enabled
+                    and self._hardware_ready
+                )
+            if not allowed:
+                return False
+            return self._enqueue("replay_raw", (topic, msg_type, raw_data))
         return self._enqueue("publish_raw", (topic, msg_type, raw_data))
+
+    def begin_replay(self) -> bool:
+        """Exclusively arm replay while retaining the normal safety gates."""
+        with self._lock:
+            if not self.config.get("enabled", True):
+                self._replay_active = True
+                return True
+            if not self._command_output_enabled or not self._hardware_ready:
+                return False
+            self._replay_active = True
+            return True
+
+    def end_replay(self, require_reset: bool = True) -> None:
+        with self._lock:
+            self._replay_active = False
+            if require_reset:
+                # A deliberate dashboard/VR resume is required before any live
+                # source can regain ownership of the actuator topic.
+                self._command_output_enabled = False
+
+    def _is_final_joint_command(self, topic: str) -> bool:
+        mux_config = self.config.get("command_mux", {})
+        return str(topic) in {
+            str(mux_config.get("output_topic", "/hc_teleop/joint_cmd")),
+            "/io_teleop/joint_cmd",
+        }
 
     def emergency_stop(self, topic: str, reason: str) -> bool:
         with self._lock:
@@ -369,9 +412,16 @@ class RosBridge:
                             selected = self._command_source == source
                             output_enabled = self._command_output_enabled
                             hw_ready = self._hardware_ready
+                            replay_active = self._replay_active
                             if not valid:
                                 self._mux_rejected += 1
-                        if not valid or not selected or not output_enabled or not hw_ready:
+                        if (
+                            not valid
+                            or not selected
+                            or not output_enabled
+                            or not hw_ready
+                            or replay_active
+                        ):
                             return
                         output_publisher.publish(message)
                         with self._lock:
@@ -526,8 +576,17 @@ class RosBridge:
                     message = message_type()
                     set_message_fields(message, data)
                     publisher.publish(message)
-                elif command == "publish_raw":
+                elif command in {"publish_raw", "replay_raw"}:
                     topic, msg_type_name, raw_bytes = args
+                    if command == "replay_raw":
+                        with self._lock:
+                            allowed = (
+                                self._replay_active
+                                and self._command_output_enabled
+                                and self._hardware_ready
+                            )
+                        if not allowed:
+                            continue
                     message_type = get_message(msg_type_name)
                     publisher = self._publisher(
                         node, publishers, topic, msg_type_name, message_type

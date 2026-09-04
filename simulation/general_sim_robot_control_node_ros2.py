@@ -114,6 +114,15 @@ class SimRobotController(Node, AssembledRobot):
             self.target_finger_joints_callback,
             1,
         )
+        self.profile_finger_command_subs = [
+            self.create_subscription(
+                JointState,
+                str(topic),
+                self.target_finger_joints_callback,
+                1,
+            )
+            for topic in self.configs.get("finger_command_topics", [])
+        ]
         self.joint_cmd_from_vr_sub = self.create_subscription(
             JointState,
             "/io_teleop/target_joint_from_vr",

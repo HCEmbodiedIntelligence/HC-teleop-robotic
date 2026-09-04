@@ -709,7 +709,7 @@ async function loadDatasets() {
     if (!files.length) {
       const row = document.createElement('tr');
       const cell = document.createElement('td');
-      cell.colSpan = 9;
+      cell.colSpan = 10;
       cell.style.textAlign = 'center';
       cell.style.color = 'var(--muted)';
       cell.style.padding = '24px 0';
@@ -734,6 +734,19 @@ async function loadDatasets() {
       const nameCode = document.createElement('code');
       nameCode.textContent = `${file.marked ? '★ ' : ''}${file.filename}`;
       nameCell.append(nameCode);
+
+      const profileCell = document.createElement('td');
+      const profileTag = document.createElement('span');
+      profileTag.className = 'tag';
+      profileTag.textContent = file.profile_display_name || file.profile_id || '未知（旧数据）';
+      profileTag.title = file.profile_id
+        ? `Profile: ${file.profile_id}${file.robot_name ? ` · Robot: ${file.robot_name}` : ''}`
+        : '该文件没有 HC Teleop Profile metadata';
+      if (!file.profile_id) {
+        profileTag.style.color = 'var(--muted)';
+        profileTag.style.borderColor = 'var(--border)';
+      }
+      profileCell.append(profileTag);
 
       const sizeCell = document.createElement('td');
       sizeCell.style.font = '12px monospace';
@@ -812,7 +825,7 @@ async function loadDatasets() {
       group.append(downloadLink, deleteBtn);
       actionCell.append(group);
 
-      row.append(selectCell, nameCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
+      row.append(selectCell, nameCell, profileCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
       body.append(row);
     }
   } catch (error) {
@@ -825,11 +838,13 @@ function showDatasetDetails(file) {
   const dialog = $('#datasetDetailDialog');
   if (!dialog) return;
   $('#datasetDetailTitle').textContent = file.filename;
-  $('#datasetDetailMeta').textContent = `生成时间: ${file.created_at || file.modified_at} · 文件格式: ${file.format || 'MCAP'}`;
+  const profileLabel = file.profile_display_name || file.profile_id || '未知（旧数据）';
+  $('#datasetDetailMeta').textContent = `机器人: ${profileLabel} · Profile: ${file.profile_id || '--'} · 生成时间: ${file.created_at || file.modified_at} · 文件格式: ${file.format || 'MCAP'}`;
 
   const summary = $('#datasetDetailSummary');
   summary.textContent = '';
   const values = [
+    ['机器人', profileLabel],
     ['文件大小', file.size_human || '--'],
     ['录制时长', file.duration_human || '--'],
     ['总消息数', file.message_count ? `${file.message_count.toLocaleString()} 条` : '--'],
@@ -882,7 +897,8 @@ function openStartReplayDialog(file) {
   const dialog = $('#startReplayDialog');
   if (!dialog) return;
   $('#startReplayFilename').value = file.filename;
-  $('#startReplayMeta').textContent = `数据集：${file.filename} · 时长 ${file.duration_human || '--'} · ${(file.message_count || 0).toLocaleString()} 条消息`;
+  const profileLabel = file.profile_display_name || file.profile_id || '未知（旧数据）';
+  $('#startReplayMeta').textContent = `数据集：${file.filename} · 机器人：${profileLabel} · 时长 ${file.duration_human || '--'} · ${(file.message_count || 0).toLocaleString()} 条消息`;
   dialog.showModal();
 }
 

@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 from mcap.reader import make_reader
 
+from .topic_recorder import read_recording_metadata
+
 
 logger = logging.getLogger("hc_teleop_middleware.player")
 
@@ -20,10 +22,12 @@ class TopicPlayer:
         directory: Path,
         ros_bridge_provider: Callable[[], Any],
         state_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        active_profile_provider: Callable[[], str] | None = None,
     ):
         self.directory = directory
         self._get_ros = ros_bridge_provider
         self._state_callback = state_callback
+        self._get_active_profile = active_profile_provider or (lambda: "")
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -43,6 +47,8 @@ class TopicPlayer:
         self._progress = 0.0
         self._error: str | None = None
         self._requires_reset = False
+        self._replay_interlock_armed = False
+        self._recorded_profile_id = ""
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -62,6 +68,7 @@ class TopicPlayer:
                 "selected_topics": list(self._selected_topics),
                 "topic_remap": dict(self._topic_remap),
                 "error": self._error,
+                "recorded_profile_id": self._recorded_profile_id,
             }
 
     def _notify_state(self, event_type: str) -> None:
@@ -83,13 +90,32 @@ class TopicPlayer:
         topic_remap: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
+            if self._requires_reset:
+                raise RuntimeError("acknowledge replay reset before starting another replay")
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("a replay is already active")
             self._stop_locked()
             filename = Path(filename).name
             target = (self.directory / filename).resolve()
             if not target.is_file() or not target.is_relative_to(self.directory):
                 raise FileNotFoundError(f"MCAP file not found: {filename}")
 
+            recording_metadata = read_recording_metadata(target)
+            recorded_profile = str(recording_metadata.get("profile_id", "")).strip()
+            active_profile = str(self._get_active_profile() or "").strip()
+            if (
+                mode == "drive"
+                and recorded_profile
+                and active_profile
+                and recorded_profile != active_profile
+            ):
+                raise ValueError(
+                    "drive replay profile mismatch: recording="
+                    f"{recorded_profile}, active={active_profile}"
+                )
+
             self._filename = filename
+            self._recorded_profile_id = recorded_profile
             self._speed = max(0.1, min(10.0, float(speed)))
             self._loop = bool(loop)
             self._state = "playing"
@@ -136,7 +162,9 @@ class TopicPlayer:
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/io_teleop/joint_cmd"
                     ]
-                    self._topic_remap = {}
+                    self._topic_remap = {
+                        "/io_teleop/joint_cmd": "/hc_teleop/joint_cmd"
+                    }
                 elif "/hc_teleop/joint_cmd" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
@@ -176,6 +204,13 @@ class TopicPlayer:
 
             # Pause live teleop controller to prevent conflict over /hc_teleop/joint_cmd
             ros = self._get_ros()
+            if ros is not None and hasattr(ros, "begin_replay"):
+                armed = ros.begin_replay()
+                if armed is False:
+                    raise RuntimeError(
+                        "replay requires hardware_ready=true and an enabled command output"
+                    )
+                self._replay_interlock_armed = True
             if ros is not None and hasattr(ros, "publish"):
                 ros.publish("/teleop/arm/enabled", "std_msgs/msg/Bool", {"data": False})
 
@@ -229,6 +264,7 @@ class TopicPlayer:
             needs_reset = was_active or was_waiting_for_reset
             self._state = "stopped" if needs_reset and require_reset else "idle"
             self._requires_reset = bool(require_reset and needs_reset)
+            self._release_replay_interlock(require_reset=self._requires_reset)
             status = self.status()
         if was_active or was_waiting_for_reset:
             self._notify_state("replay_stopped")
@@ -250,6 +286,14 @@ class TopicPlayer:
         self._pause_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread = None
+
+    def _release_replay_interlock(self, *, require_reset: bool) -> None:
+        if not self._replay_interlock_armed:
+            return
+        ros = self._get_ros()
+        if ros is not None and hasattr(ros, "end_replay"):
+            ros.end_replay(require_reset=require_reset)
+        self._replay_interlock_armed = False
 
     def _run(self, target_path: Path) -> None:
         try:
@@ -347,6 +391,7 @@ class TopicPlayer:
                     self._state = "completed"
                     self._progress = 100.0
                     self._requires_reset = True
+                    self._release_replay_interlock(require_reset=True)
             if not self._stop_event.is_set():
                 self._notify_state("replay_completed")
         except Exception as exc:
@@ -355,4 +400,5 @@ class TopicPlayer:
                 self._state = "error"
                 self._error = str(exc)
                 self._requires_reset = True
+                self._release_replay_interlock(require_reset=True)
             self._notify_state("replay_error")

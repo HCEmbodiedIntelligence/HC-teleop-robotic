@@ -22,7 +22,7 @@ def default_teleop_config() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="VR relative-pose teleop for HC-TJ arms")
+    parser = argparse.ArgumentParser(description="Profile-driven VR relative-pose teleop")
     parser.add_argument(
         "--config",
         default=default_teleop_config(),
@@ -33,12 +33,12 @@ def main() -> None:
         help="override control.backend from YAML",
     )
     args, ros_args = parser.parse_known_args()
-    from adapters.core.arm_teleop_node import HcTjArmTeleopNode
+    from adapters.core.arm_teleop_node import RobotArmTeleopNode
 
     rclpy.init(args=ros_args)
     node = None
     try:
-        node = HcTjArmTeleopNode(args.config, backend=args.backend)
+        node = RobotArmTeleopNode(args.config, backend=args.backend)
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass

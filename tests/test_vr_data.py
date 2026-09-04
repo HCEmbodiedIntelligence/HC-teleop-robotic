@@ -60,8 +60,9 @@ class VrDataTests(unittest.TestCase):
             def status(self):
                 return {"recording": self.is_recording, "active_file": "test.mcap" if self.is_recording else ""}
 
-            def start(self, filename=None):
+            def start(self, filename=None, metadata=None):
                 self.started.append(filename)
+                self.metadata = metadata
                 self.is_recording = True
                 return f"/tmp/{filename}"
 

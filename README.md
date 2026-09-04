@@ -53,7 +53,7 @@ cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
-根目录只保留 `./run.sh` 作为产品入口：`sim` 启动完整仿真，`teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制。`middleware/start.sh` 和 `adapters/start.sh` 是内部组件入口，不用于正常运行。
+根目录只保留 `./run.sh` 作为产品入口：`sim` 启动完整仿真，`teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制。省略模式时，带 `vr_configs.yml` 的 Profile 自动进入 `sim`，仅含控制器配置的 Profile 自动进入 `teleop`。X1 和 OpenArmX 均已包含仿真配置。`middleware/start.sh` 和 `adapters/start.sh` 是内部组件入口，不用于正常运行。
 
 ### 网页导入机器人配置
 
@@ -127,7 +127,7 @@ ROS 转发到 VR 的 UDP 消息是 UTF-8 JSON，最大为一个 UDP 数据报。
 
 `/vrdata` 使用 `std_msgs/msg/String`，每条 JSON 同时包含 `tracking`、头显/左右手柄 `poses`、左右手柄 `inputs`、序号和 VR 时间戳。`inputs` 内含 Trigger、Grip、两个摇杆、`held`、`pressed`、`released` 及对应位掩码，因此位姿、连续状态和按键边沿不再拆成多个 ROS 话题。
 
-位姿中断超过 200 ms 或头显跟踪失效时，服务向 `/teleop/emergency_stop` 发布 `std_msgs/msg/Bool(data=true)`。启动和配置热重载也默认急停，可在配置页关闭。
+位姿中断超过 `vr.pose_timeout_ms`（当前配置为 600 ms）、VR 时间戳停止推进或头显跟踪失效时，服务向 `/teleop/emergency_stop` 发布 `std_msgs/msg/Bool(data=true)`。启动和配置热重载是否急停由 `safety.stop_on_startup` 控制。
 
 ## HTTP / WebSocket 接口
 
@@ -159,6 +159,7 @@ ROS 转发到 VR 的 UDP 消息是 UTF-8 JSON，最大为一个 UDP 数据报。
 - Dashboard 当前设计用于可信机器人局域网，没有账号认证。不要直接暴露到公网；生产部署应通过防火墙限制来源，或在前面增加带认证的反向代理。
 - UDP 不保证送达。关节状态等高频实时数据适合 UDP；任务指令和模式切换应使用 WebSocket/ROS service/action，并在应用层确认。
 - 急停话题只是软件联锁，不能替代硬件急停回路。
+- Drive 回放会临时独占最终关节命令通道，并继续受 `hardware_ready` 和命令输出开关约束；结束、停止或异常后必须按 A 或调用安全恢复接口，实时控制源才可重新接管。
 - 网页“保存并应用”会原子写回 `middleware/config.yaml` 并热重载。`server.host`、`server.port` 或 `robot_profiles.root` 改动会保存，但需要重启进程；其余配置立即应用。
 
 ## 验证
@@ -185,8 +186,9 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 ./run.sh --headless
 ```
 
-`--sim` 会额外创建与开发板一致的 `hc-teleop-controller` Conda 环境
-（Pinocchio 3.7 + CasADi 3.7）。默认启动已完成数值验证的重构 v2.3 后端。
+普通 `./install.sh` 已同时安装 PyBullet shadow model 依赖，并创建与开发板一致的
+`hc-teleop-controller` Conda 环境（Pinocchio 3.7 + CasADi 3.7）；`--sim` 作为兼容选项保留。
+默认启动已完成数值验证的重构 v2.3 后端。
 根目录不再保留旧的分段启动脚本，也不提供单独 PyBullet 产品模式。真机统一使用 `./run.sh teleop` 并在 `HC_X1` 仓库启动硬件；仿真统一使用 `./run.sh sim`。旧 `--robot`、`--generic`、`--legacy` 和 `--sim-only` 选项均已移除。
 
 仿真启动时会自动以 30 Hz 将手柄位姿、目标/实际末端位姿、关节命令/反馈和离合状态写入 `runtime/teleop_logs/`。复现抖动时按住右 Grip 并尽量保持双手静止 5–10 秒，退出仿真后分析对应日志：
@@ -205,6 +207,6 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 
 机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
 
-默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `adapters/v23/`，X1 参数位于 `adapters/robots/x1/controller_v23.yml`。
+默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd_vr → Command Mux → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `adapters/v23/`，X1 参数位于 `adapters/robots/x1/controller_v23.yml`。
 
 新机器人优先从网页或 CLI 导入包含 URDF、YAML、Mesh 和 `arm_teleop.yaml` 的 ZIP 压缩包；也可手工在 `adapters/robots/<机器人名>/` 配置这些文件。默认选择来自 `middleware/config.yaml`，`HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 仍可作为启动时覆盖项。

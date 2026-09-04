@@ -25,6 +25,38 @@
 - 左手 Grip：底盘/腰部离合；右手 Grip：双臂/夹爪总离合。
 - 双主摇杆同时向外拨到底一次（左摇杆向左、右摇杆向右）：停止当前离合，并由命令合并层限速将双臂关节明确拉回 `robot.initial_joints`。这避免 7DoF 冗余 IK 在末端到位后留下不同关节解而卡住 homing；两个摇杆回中后可直接重新使用右 Grip 和 Trigger。
 
+### Joy axes 下标契约
+
+PICO 协议 v2 的左右手柄输入会转换成 ROS `sensor_msgs/msg/Joy`。配置中的
+`trigger_axis`、`clutch_axis`、`stick_x_axis`、`stick_y_axis` 和
+`home_gesture_axis` 都是下面这个 `Joy.axes` 数组的下标，不是机器人或头显的
+XYZ 坐标轴：
+
+| 下标 | `Joy.axes` 内容 | PICO v2 原始字段 |
+| ---: | --- | --- |
+| 0 | Trigger | `trigger` |
+| 1 | Grip | `grip` |
+| 2 | 主摇杆 X | `primary_axis[0]` |
+| 3 | 主摇杆 Y | `primary_axis[1]` |
+| 4 | 副摇杆 X | `secondary_axis[0]` |
+| 5 | 副摇杆 Y | `secondary_axis[1]` |
+
+等价的数组排列为：
+
+```text
+Joy.axes = [
+  trigger,
+  grip,
+  primary_axis.x,
+  primary_axis.y,
+  secondary_axis.x,
+  secondary_axis.y,
+]
+```
+
+例如，`stick_x_axis: 2`、`stick_y_axis: 3` 表示底盘使用主摇杆的
+X/Y 分量；`clutch_axis: 1` 表示 Grip 是离合输入。
+
 双臂末端目标带位置/姿态死区和低通滤波，用于抑制静止手柄追踪噪声；v2.3 每周期求解带速度及一步关节位置边界的加权最小二乘，再通过 Pinocchio `integrate()` 生成小步关节命令。
 
 v2.3 的 URDF、任务权重和速度限制来自 `adapters/robots/<机器人名>/controller_v23.yml`，关节位置限制来自 URDF。逆运动学控制器位于 `adapters/v23/`。
@@ -39,7 +71,7 @@ v2.3 的 URDF、任务权重和速度限制来自 `adapters/robots/<机器人名
 
 ```bash
 cd /home/maple/test/HC-teleop-robotic
-./install.sh --sim
+./install.sh
 ```
 
 默认一条命令启动网页、VR 自动发现、IK/控制和 HC-TJ 图形仿真：

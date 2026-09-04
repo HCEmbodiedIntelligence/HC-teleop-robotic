@@ -12,6 +12,7 @@ import os
 import threading
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
+from xml.etree import ElementTree
 
 import numpy as np
 import pybullet as p
@@ -412,6 +413,8 @@ class AssembledRobot:
                 self.joint_limits[index] = (float(info[8]), float(info[9]))
                 self.joint_types[index] = info[2]
 
+        self._resolve_config_indices(robot_urdf_path)
+
         if not use_fixed_base:
             fixed_link = self.configs["fixed_link"]
             if fixed_link not in self.link_name2id_dict:
@@ -433,6 +436,71 @@ class AssembledRobot:
         if debug:
             self._create_debug_parameters()
         return self.robot_id
+
+    def _resolve_config_indices(self, robot_urdf_path: str) -> None:
+        """Translate stable URDF-order indices to PyBullet traversal indices."""
+        order = str(self.configs.get("joint_index_order", "pybullet")).lower()
+        if order == "pybullet":
+            return
+        if order != "urdf":
+            raise ValueError("joint_index_order must be 'pybullet' or 'urdf'")
+
+        document = ElementTree.parse(robot_urdf_path)
+        urdf_joints = document.getroot().findall("joint")
+        index_map: dict[int, int] = {}
+        for index, joint in enumerate(urdf_joints):
+            name = str(joint.get("name", "")).strip()
+            if name not in self.joint_name2id_dict:
+                raise ValueError(
+                    f"URDF joint {name or index} is missing from the PyBullet model"
+                )
+            index_map[index] = self.joint_name2id_dict[name]
+
+        def resolve(value, label: str):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{label} must be an integer")
+            if value == -1:
+                return -1
+            if value not in index_map:
+                raise ValueError(f"{label} references missing URDF joint index {value}")
+            return index_map[value]
+
+        def resolve_list(value, label: str):
+            if not isinstance(value, list):
+                raise ValueError(f"{label} must be an integer list")
+            return [resolve(item, f"{label}[{offset}]") for offset, item in enumerate(value)]
+
+        for group_name in ("arms", "grippers"):
+            for offset, group in enumerate(self.configs.get(group_name, [])):
+                if "joint_index" in group:
+                    group["joint_index"] = resolve_list(
+                        group["joint_index"], f"{group_name}[{offset}].joint_index"
+                    )
+                if "ee_index" in group:
+                    group["ee_index"] = resolve(
+                        group["ee_index"], f"{group_name}[{offset}].ee_index"
+                    )
+
+        for group_name in ("folding_waist", "waist", "dorsal", "head"):
+            group = self.configs.get(group_name)
+            if not isinstance(group, dict):
+                continue
+            if "joint_index" in group:
+                group["joint_index"] = resolve_list(
+                    group["joint_index"], f"{group_name}.joint_index"
+                )
+            for key in ("cmd_ee", "base"):
+                if key in group:
+                    group[key] = resolve(group[key], f"{group_name}.{key}")
+
+        controller = self.configs.get("controller_indices")
+        if isinstance(controller, dict):
+            for key in ("cmd_ee", "base"):
+                if key in controller:
+                    controller[key] = resolve_list(
+                        controller[key], f"controller_indices.{key}"
+                    )
+        self.configs["joint_index_order"] = "pybullet"
 
     def _create_debug_parameters(self) -> None:
         type_names = {

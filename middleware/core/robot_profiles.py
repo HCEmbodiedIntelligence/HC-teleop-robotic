@@ -736,6 +736,7 @@ class RobotProfileManager:
         display_name: str,
         archive_payload: bytes,
         archive_filename: str = "",
+        overwrite: bool = True,
     ) -> dict[str, Any]:
         if not archive_payload or len(archive_payload) > MAX_ARCHIVE_BYTES:
             raise RobotProfileError(
@@ -828,7 +829,12 @@ class RobotProfileManager:
                 chosen_source_config = None
                 for candidate in sorted(
                     yaml_files,
-                    key=lambda p: (0 if p.name in ("controller_v23.yml", "vr_configs.yml") else 1, len(p.parts)),
+                    key=lambda p: (
+                        {"controller_v23.yml": 0, "vr_configs.yml": 1}.get(
+                            p.name, 2
+                        ),
+                        len(p.parts),
+                    ),
                 ):
                     try:
                         loaded = _load_yaml(candidate.read_bytes())
@@ -854,6 +860,20 @@ class RobotProfileManager:
                     )
                     files["controller_v23.yml"] = controller
                     primary_config = "controller_v23.yml"
+                    simulation_file = next(
+                        (f for f in yaml_files if f.name == "vr_configs.yml"), None
+                    )
+                    if simulation_file is not None:
+                        simulation_config = _load_yaml(simulation_file.read_bytes())
+                        io_config, _generated_controller, _generated_teleop, _io_summary = (
+                            _normalize_io(
+                                profile_id,
+                                simulation_config,
+                                model,
+                                rel_urdf_path,
+                            )
+                        )
+                        files["vr_configs.yml"] = io_config
                 elif "urdf_path" in chosen_source_config and "arms" in chosen_source_config:
                     io_config, controller, teleop, summary = _normalize_io(
                         profile_id, chosen_source_config, model, rel_urdf_path

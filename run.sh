@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MODE="sim"
+MODE=""
 MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${PROJECT_ROOT}/middleware/config.yaml}"
 HEADLESS=false
 MONITOR=true
@@ -17,8 +17,11 @@ usage() {
   cat <<EOF
 Usage: $0 [sim|teleop] [options]
 
-  sim       VR discovery + Dashboard + IK/control + PyBullet (default)
+  sim       VR discovery + Dashboard + IK/control + PyBullet
   teleop    VR discovery + Dashboard + IK/control for an external real driver
+
+  With no mode, sim is selected only when the active profile contains
+  vr_configs.yml; otherwise teleop is selected.
 
 Options:
   --headless            Run simulation without the PyBullet GUI (sim only)
@@ -108,10 +111,6 @@ while (($#)); do
   esac
 done
 
-if [[ "${MODE}" == teleop && "${HEADLESS}" == true ]]; then
-  echo "--headless is only valid in sim mode." >&2
-  exit 2
-fi
 [[ -f "${MIDDLEWARE_CONFIG}" ]] || {
   echo "Middleware config not found: ${MIDDLEWARE_CONFIG}" >&2
   exit 2
@@ -123,7 +122,7 @@ if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
 import sys, yaml
 with open(sys.argv[1], encoding="utf-8") as stream:
     config = yaml.safe_load(stream) or {}
-print(config.get("ros", {}).get("domain_id", 0))
+print(config.get("ros", {}).get("domain_id", 14))
 PY
 )"
 fi
@@ -134,10 +133,33 @@ set -u
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 
+ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-}"
+ROBOT_NAME="${HC_ROBOT_NAME:-}"
+if [[ -z "${ROBOT_CONFIG_ROOT}" ]]; then
+  ROBOT_CONFIG_ROOT="$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")"
+fi
+if [[ -z "${ROBOT_NAME}" ]]; then
+  ROBOT_NAME="$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")"
+fi
+PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
+if [[ -z "${MODE}" ]]; then
+  if [[ -f "${PROFILE_DIR}/vr_configs.yml" ]]; then
+    MODE="sim"
+  else
+    MODE="teleop"
+  fi
+  echo "[HC] no mode specified; selected ${MODE} for profile ${ROBOT_NAME}"
+fi
+if [[ "${MODE}" == teleop && "${HEADLESS}" == true ]]; then
+  echo "--headless is only valid in sim mode." >&2
+  exit 2
+fi
+
 if [[ -z "${LOG_DIR}" ]]; then
   LOG_DIR="${PROJECT_ROOT}/runtime/teleop_logs/session_$(date +%Y%m%d_%H%M%S)"
 fi
 mkdir -p "${LOG_DIR}/control" "${LOG_DIR}/middleware"
+chmod 700 "${LOG_DIR}" "${LOG_DIR}/control" "${LOG_DIR}/middleware"
 ln -sfn "${LOG_DIR}" "${PROJECT_ROOT}/runtime/teleop_logs/latest"
 
 MIDDLEWARE_ARGS=(
@@ -152,13 +174,10 @@ SIM_ENTRY=""
 SIM_ARGS=()
 SIM_ROS_ARGS=()
 if [[ "${MODE}" == sim ]]; then
-  ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" root --config "${MIDDLEWARE_CONFIG}")}"
-  ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 "${PROJECT_ROOT}/robot_profile_cli.py" active --config "${MIDDLEWARE_CONFIG}")}"
-  PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
   SIM_ENTRY="${PROJECT_ROOT}/simulation/general_sim_robot_control_node_ros2.py"
 
   [[ -d "${PROJECT_ROOT}/.deps/pybullet-3.2.6.dist-info" ]] || {
-    echo "Simulation dependencies not found. Run ${PROJECT_ROOT}/install.sh --sim first." >&2
+    echo "Simulation dependencies not found. Run ${PROJECT_ROOT}/install.sh first." >&2
     exit 2
   }
   [[ -f "${SIM_ENTRY}" ]] || { echo "Bundled simulator not found: ${SIM_ENTRY}" >&2; exit 2; }
