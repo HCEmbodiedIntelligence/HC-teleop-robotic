@@ -320,13 +320,13 @@ def validate_profile(value: Any) -> dict[str, Any]:
             or float(motion[field]) <= 0.0
         ):
             raise ProfileError(f"motion.{field} must be positive and finite")
-    if "robo_manip_tick_failure_reset_count" in motion and (
-        not isinstance(motion["robo_manip_tick_failure_reset_count"], int)
-        or isinstance(motion["robo_manip_tick_failure_reset_count"], bool)
-        or motion["robo_manip_tick_failure_reset_count"] < 2
+    if "robo_manip_servo_lease_ms" in motion and (
+        not isinstance(motion["robo_manip_servo_lease_ms"], int)
+        or isinstance(motion["robo_manip_servo_lease_ms"], bool)
+        or motion["robo_manip_servo_lease_ms"] < 1
     ):
         raise ProfileError(
-            "motion.robo_manip_tick_failure_reset_count must be an integer >= 2"
+            "motion.robo_manip_servo_lease_ms must be an integer >= 1"
         )
     for field in (
         "robo_manip_ik_enable_regularization_task",

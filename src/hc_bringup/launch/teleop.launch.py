@@ -427,13 +427,8 @@ def _setup(context: LaunchContext):
         "cartesian_state_topic": "state/cartesian",
         "publish_fk": True,
         "feedback_timeout_sec": float(teleop.get("feedback_timeout_ms", 200)) / 1000.0,
-        "session_reset_timeout_sec": float(
-            motion.get("servo_reset_timeout_ms", 250)
-        ) / 1000.0,
+        "servo_lease_ms": int(motion.get("robo_manip_servo_lease_ms", 100)),
         "nominal_rate_hz": float(motion.get("servo_nominal_rate_hz", 60.0)),
-        "tick_failure_reset_count": int(
-            motion.get("robo_manip_tick_failure_reset_count", 3)
-        ),
         "ik_position_tolerance_m": float(
             motion.get("robo_manip_ik_position_tolerance_m", 0.001)
         ),

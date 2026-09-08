@@ -35,4 +35,12 @@ install(TARGETS robo_manip_backend_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_feedback_cache test/test_feedback_cache.cpp)
+  target_include_directories(test_feedback_cache PRIVATE src)
+  target_link_libraries(test_feedback_cache humanoid_motion_server::humanoid_motion_runtime)
+  ament_target_dependencies(test_feedback_cache sensor_msgs)
+endif()
+
 ament_package()

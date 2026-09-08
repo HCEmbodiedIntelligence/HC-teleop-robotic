@@ -5,6 +5,7 @@ description: Component profile migrated from the legacy OpenArmX HC profile.
 
 resources:
   urdf: package://hc_robot_openarmx/urdf/openarmx_robot.urdf
+  robo_manip_sdk: package://hc_robot_openarmx/config/motion/robo_manip.yaml
 
 components:
   - id: left_arm
@@ -70,8 +71,8 @@ components:
       tip: openarmx_right_right_finger
 
 motion:
-  backend_package: hc_motion_backend_kdl
-  backend_executable: kdl_ik_backend_node
+  backend_package: hc_motion_backend_robo_manip
+  backend_executable: robo_manip_backend_node
   feedback_topic: state/joints
   candidate_topic: control/joint_candidate
 

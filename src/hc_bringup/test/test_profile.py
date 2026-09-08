@@ -186,7 +186,7 @@ def test_validates_optional_robo_manip_backend_contract():
 def test_validates_robo_manip_fault_tolerance_and_ik_tuning():
     value = minimal_profile()
     value["motion"] = {
-        "robo_manip_tick_failure_reset_count": 3,
+        "robo_manip_servo_lease_ms": 3,
         "robo_manip_ik_orientation_tolerance_rad": 0.015,
         "robo_manip_ik_enable_regularization_task": True,
         "robo_manip_ik_regularization_task_weight": 0.0005,
@@ -194,11 +194,11 @@ def test_validates_robo_manip_fault_tolerance_and_ik_tuning():
         "robo_manip_ik_joint_task_weight": 0.001,
     }
     assert validate_profile(value)["motion"][
-        "robo_manip_tick_failure_reset_count"
+        "robo_manip_servo_lease_ms"
     ] == 3
 
-    value["motion"]["robo_manip_tick_failure_reset_count"] = 1
-    with pytest.raises(ProfileError, match="integer >= 2"):
+    value["motion"]["robo_manip_servo_lease_ms"] = 0
+    with pytest.raises(ProfileError, match="integer >= 1"):
         validate_profile(value)
 
 

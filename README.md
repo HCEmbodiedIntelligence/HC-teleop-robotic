@@ -51,7 +51,8 @@ hcctl doctor --profile openarmx
 ## 使用 Humanoid Motion Server
 
 `hc_motion_backend_robo_manip` 使用项目内连接的
-`src/humanoid_motion_server` 的 ServoP、RTC 和实测关节 FK替换 KDL。Motion
+`src/humanoid_motion_server` 的完整 `CommandPipeline`，统一执行 ServoP 会话、
+反馈超时、Servo 租约、关节限位检查和最终 RTC，并提供实测关节 FK。Motion
 Server 与接口仓以固定提交的 Git submodule 保存，仍保持各自独立历史。后端是
 独立进程，只发布 candidate，不会绕过 HC 安全仲裁器。
 
@@ -66,11 +67,12 @@ git submodule update --init --recursive
 export HUMANOID_MOTION_SDK_DEPS_PREFIX=/home/maple/test/humanoid/.sdk_deps
 
 ./bootstrap_colcon.sh build
-./run.sh profile:=x1 mode:=sim motion_backend:=robo_manip
+./run.sh profile:=x1 mode:=sim
 ```
 
-默认 `motion_backend:=profile` 仍读取机器人 profile；X1 当前默认 KDL，显式传
-`robo_manip` 才切换。运行时不再 source 外部 Humanoid underlay。
+默认 `motion_backend:=profile` 读取机器人 profile；X1 和 OpenArmX 当前均默认
+使用 `robo_manip`，无需显式指定。需要切换到 KDL 时传入 `motion_backend:=kdl`。
+运行时仅 source ROS 2 和本工作区的安装环境，不再 source 外部 Humanoid underlay。
 
 ## X1 真机
 

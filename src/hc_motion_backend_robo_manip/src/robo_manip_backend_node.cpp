@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -27,10 +28,12 @@
 #include "hc_teleop_interfaces/msg/joint_command_candidate.hpp"
 #include "humanoid_motion_server/kinematics/kinematics.hpp"
 #include "humanoid_motion_server/motion/sdk_motion_backend.hpp"
+#include "humanoid_motion_server/motion/command_pipeline.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "urdf/model.h"
 #include "yaml-cpp/yaml.h"
+#include "feedback_cache.hpp"
 
 namespace hc_motion_backend_robo_manip
 {
@@ -38,7 +41,7 @@ namespace
 {
 
 using Backend = humanoid_motion_server::motion::ISdkMotionBackend;
-using DynamicTarget = humanoid_motion_server::motion::DynamicTarget;
+namespace motion = humanoid_motion_server::motion;
 using ForwardKinematicsRequest = humanoid_motion_server::motion::ForwardKinematicsRequest;
 using JointCommand = humanoid_motion_server::motion::JointCommand;
 using JointFeedback = humanoid_motion_server::motion::JointFeedback;
@@ -254,12 +257,13 @@ struct Group
   std::string input_session_id;
   std::string sdk_session_id;
   std::optional<std::uint64_t> last_published_sequence;
-  std::optional<JointCommand> last_safe_candidate;
+  std::unique_ptr<motion::CommandPipeline> pipeline;
+  std::optional<hc_teleop_interfaces::msg::CartesianTargetArray> envelope;
   std::optional<Pose> last_accepted_target;
   TargetFilterConfig target_filter;
-  std::size_t consecutive_tick_failures{0U};
+
   SteadyTime last_target_at{};
-  SteadyTime last_step_at{};
+
 };
 
 }  // namespace
@@ -281,16 +285,10 @@ public:
     feedback_timeout_ = std::chrono::duration_cast<SteadyClock::duration>(
       std::chrono::duration<double>(positiveFinite(
         declare_parameter<double>("feedback_timeout_sec", 0.2), "feedback_timeout_sec")));
-    session_reset_timeout_ = std::chrono::duration_cast<SteadyClock::duration>(
-      std::chrono::duration<double>(positiveFinite(
-        declare_parameter<double>("session_reset_timeout_sec", 0.25),
-        "session_reset_timeout_sec")));
-    const auto tick_failure_reset_count = declare_parameter<int>(
-      "tick_failure_reset_count", 3);
-    if (tick_failure_reset_count < 2) {
-      throw std::invalid_argument("tick_failure_reset_count must be at least 2");
+    servo_lease_ = std::chrono::milliseconds(declare_parameter<int>("servo_lease_ms", 100));
+    if (servo_lease_.count() <= 0) {
+      throw std::invalid_argument("servo_lease_ms must be positive");
     }
-    tick_failure_reset_count_ = static_cast<std::size_t>(tick_failure_reset_count);
     publish_fk_ = declare_parameter<bool>("publish_fk", true);
 
     ik_tuning_.position_tolerance_mm = positiveFinite(
@@ -365,6 +363,17 @@ public:
     }
     backend_ = std::move(factory.backend);
 
+    std::set<std::string> controlled_joints;
+    for (auto & entry : groups_) {
+      auto & group = entry.second;
+      for (const auto & name : group.joint_names) {
+        if (!controlled_joints.insert(name).second) {
+          throw std::invalid_argument("HC Servo groups must not overlap: " + name);
+        }
+      }
+      configurePipeline(group);
+    }
+
     auto stream_qos = rclcpp::SensorDataQoS().keep_last(1);
     target_subscription_ = create_subscription<
       hc_teleop_interfaces::msg::CartesianTargetArray>(
@@ -395,12 +404,12 @@ public:
       get_logger(),
       "RoboManip backend ready: groups=%zu nominal_rate=%.1fHz measured_fk=%s "
       "limits[joint=%.2frad/s cart=%.2fm/s] ik[orientation=%.3frad "
-      "regularization=%s joint_task=%s] tick_reset=%zu sdk=%s",
+      "regularization=%s joint_task=%s] pipeline_servo_lease_ms=%ld sdk=%s",
       groups_.size(), 1.0 / nominal_period_sec_, publish_fk_ ? "on" : "off",
       joint_max_velocity_, cartesian_max_linear_velocity_,
       ik_tuning_.orientation_tolerance_rad,
       ik_tuning_.enable_regularization_task ? "on" : "off",
-      ik_tuning_.enable_joint_task ? "on" : "off", tick_failure_reset_count_,
+      ik_tuning_.enable_joint_task ? "on" : "off", static_cast<long>(servo_lease_.count()),
       sdk_config_path.c_str());
   }
 
@@ -502,13 +511,7 @@ private:
 
   void onFeedback(const sensor_msgs::msg::JointState & message)
   {
-    const auto count = std::min(message.name.size(), message.position.size());
-    for (std::size_t index = 0; index < count; ++index) {
-      if (!message.name[index].empty() && std::isfinite(message.position[index])) {
-        positions_[message.name[index]] = message.position[index];
-      }
-    }
-    last_feedback_at_ = SteadyClock::now();
+    if (!feedback_cache_.update(message, SteadyClock::now())) {return;}
     if (publish_fk_) {
       publishFk();
     }
@@ -516,17 +519,7 @@ private:
 
   bool feedbackFor(const Group & group, JointFeedback & output) const
   {
-    output.joint_names = group.joint_names;
-    output.positions_rad.reserve(group.joint_names.size());
-    for (const auto & name : group.joint_names) {
-      const auto found = positions_.find(name);
-      if (found == positions_.end()) {
-        return false;
-      }
-      output.positions_rad.push_back(found->second);
-    }
-    output.received_at = last_feedback_at_;
-    return true;
+    return feedback_cache_.select(group.joint_names, output);
   }
 
   MotionLimits limits(const std::size_t joint_count) const
@@ -686,16 +679,8 @@ private:
       }
     }
 
-    const auto steady_now = SteadyClock::now();
-    if (steady_now - last_feedback_at_ > feedback_timeout_) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "ignored RoboManip target: measured joint feedback is stale");
-      return;
-    }
-
     for (const auto & entry : targets) {
-      solveAndPublish(message, *entry.second, groups_.at(entry.first), steady_now);
+      solveAndPublish(message, *entry.second, groups_.at(entry.first), SteadyClock::now());
     }
   }
 
@@ -704,6 +689,10 @@ private:
     const hc_teleop_interfaces::msg::CartesianTarget & target,
     Group & group, const SteadyTime steady_now)
   {
+    if (timeNanoseconds(envelope.valid_until) <= now().nanoseconds()) {
+      stop(group);
+      return;
+    }
     if (group.last_published_sequence && group.source_id == envelope.source_id &&
       group.input_session_id == envelope.session_id &&
       *group.last_published_sequence == envelope.sequence)
@@ -746,102 +735,62 @@ private:
       }
     }
 
+    if (group.active && steady_now - group.last_target_at >= servo_lease_) {
+      group.pipeline->tick(feedback, steady_now);
+      stop(group);
+    }
     const bool identity_changed = group.source_id != envelope.source_id ||
       group.input_session_id != envelope.session_id;
-    const bool timed_out = group.active &&
-      steady_now - group.last_target_at > session_reset_timeout_;
-    if (identity_changed || timed_out) {
+    if (identity_changed) {
       stop(group);
     }
-
+    group.source_id = envelope.source_id;
+    group.input_session_id = envelope.session_id;
+    group.sdk_session_id = "servo:" + group.name;
     bool target_limited = false;
     desired = filterTarget(desired, group, feedback, target_limited);
-    if (target_limited) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "limited %s Cartesian target to configured workspace/step envelope",
-        group.name.c_str());
-    }
-
-    if (!group.active || identity_changed || timed_out) {
-      group.source_id = envelope.source_id;
-      group.input_session_id = envelope.session_id;
-      group.sdk_session_id =
-        envelope.source_id + ":" + envelope.session_id + ":" + group.name;
-      const auto reset = backend_->resetFinalJointTarget(group.name, feedback);
-      if (!reset.ok()) {
-        reportFailure(group, "RTC reset", reset.message);
-        return;
-      }
-      ServoPRequest request;
-      request.request_id = group.sdk_session_id;
-      request.group_name = group.name;
-      request.base_link = group.base_frame;
-      request.link_name = group.tip_frame;
-      request.target = desired;
-      request.limits = limits(group.joint_names.size());
-      const auto started = backend_->startSession(
-        group.sdk_session_id, request, feedback, nominal_period_sec_);
-      if (!started.ok()) {
-        reportFailure(group, "session start", started.message);
-        return;
-      }
-      group.active = true;
-      group.last_published_sequence.reset();
-      group.last_step_at = steady_now;
-    }
-
-    double period_sec = nominal_period_sec_;
-    if (group.last_step_at.time_since_epoch().count() != 0) {
-      period_sec = std::chrono::duration<double>(steady_now - group.last_step_at).count();
-      period_sec = std::clamp(period_sec, nominal_period_sec_ * 0.25, 0.05);
-    }
-    group.last_target_at = steady_now;
-    group.last_step_at = steady_now;
-
-    DynamicTarget dynamic_target{desired};
-    auto tick = backend_->tickSession(group.sdk_session_id, &dynamic_target, period_sec);
-    if (!tick.status.ok()) {
-      ++group.consecutive_tick_failures;
-      const bool can_hold = group.last_safe_candidate &&
-        group.consecutive_tick_failures < tick_failure_reset_count_;
-      if (can_hold) {
-        // Publish first: the supplementary diagnostic IK may take tens of
-        // milliseconds and must not delay the safe hold command.
-        publishCandidate(envelope, group, *group.last_safe_candidate, true);
-      }
-      if (group.consecutive_tick_failures == 1U ||
-        group.consecutive_tick_failures >= tick_failure_reset_count_)
-      {
-        reportTickFailure(group, tick.status, desired, feedback);
-      }
-      if (can_hold) {
-        return;
-      }
-      if (group.consecutive_tick_failures >= tick_failure_reset_count_) {
-        RCLCPP_ERROR(
-          get_logger(),
-          "RoboManip ServoP session reset for %s after %zu consecutive Tick failures",
-          group.name.c_str(), group.consecutive_tick_failures);
-        stop(group);
-      }
+    ServoPRequest request;
+    request.group_name = group.name;
+    request.base_link = group.base_frame;
+    request.link_name = group.tip_frame;
+    request.target = desired;
+    request.limits = limits(group.joint_names.size());
+    const auto submitted = group.pipeline->updateServo(group.name, request, steady_now);
+    if (!submitted.status.ok()) {
+      RCLCPP_WARN(get_logger(), "ServoP rejected for %s: %s",
+        group.name.c_str(), submitted.status.message.c_str());
       return;
     }
-    group.consecutive_tick_failures = 0U;
-    auto final = backend_->updateFinalJointTarget(group.name, tick.candidate, period_sec);
-    if (!final.status.ok() || !final.candidate.passed_final_sdk_rtc) {
-      reportFailure(group, "final RTC", final.status.message);
+    group.active = true;
+    group.last_target_at = steady_now;
+    group.envelope = envelope;
+    group.last_accepted_target = desired;
+    const auto result = group.pipeline->tick(feedback, steady_now);
+    // Never advance to a later target from an output that missed its HC deadline.
+    if (timeNanoseconds(envelope.valid_until) <= now().nanoseconds() ||
+      SteadyClock::now() - feedback.received_at >= feedback_timeout_) {
       stop(group);
       return;
     }
-    group.last_safe_candidate = final.candidate;
-    group.last_accepted_target = desired;
-    publishCandidate(envelope, group, final.candidate, false);
+    for (const auto & command : result.commands) {
+      publishCandidate(envelope, group, command);
+    }
+    // A canceled old HC identity and its replacement share the configured
+    // endpoint ID. Only the last event describes the replacement's state.
+    if (!result.events.empty()) {
+      const auto & event = result.events.back();
+      if (event.state == motion::SessionState::ABORTED ||
+        event.state == motion::SessionState::CANCELED) {
+        RCLCPP_WARN(get_logger(), "ServoP ended for %s: %s",
+          group.name.c_str(), event.status.message.c_str());
+        stop(group);
+      }
+    }
   }
 
   void publishCandidate(
     const hc_teleop_interfaces::msg::CartesianTargetArray & envelope,
-    Group & group, const JointCommand & command, const bool holding)
+    Group & group, const JointCommand & command)
   {
     hc_teleop_interfaces::msg::JointCommandCandidate output;
     output.header.stamp = now();
@@ -855,103 +804,63 @@ private:
     output.command.header = output.header;
     output.command.name = command.joint_names;
     output.command.position = command.positions_rad;
-    if (holding) {
-      // A held command represents a stationary, previously RTC-approved pose;
-      // stale non-zero velocities must not leak into the new envelope.
-      output.command.velocity.assign(command.joint_names.size(), 0.0);
-    } else {
-      output.command.velocity = command.velocities_rad_s;
-    }
+    output.command.velocity = command.velocities_rad_s;
     candidate_publisher_->publish(std::move(output));
     group.last_published_sequence = envelope.sequence;
   }
 
-  std::string diagnoseIkFailure(
-    const Group & group, const Pose & desired, const JointFeedback & feedback) const
+  void configurePipeline(Group & group)
   {
-    sdk_kinematics::InverseKinematicsRequest request;
-    request.kinematics.group_name = group.name;
-    request.kinematics.base_link = group.base_frame;
-    request.kinematics.link_name = group.tip_frame;
-    request.target_pose.position_m = {
-      desired.position_m[0], desired.position_m[1], desired.position_m[2]};
-    request.target_pose.orientation = {
-      desired.orientation_xyzw[0], desired.orientation_xyzw[1],
-      desired.orientation_xyzw[2], desired.orientation_xyzw[3]};
-    sdk_kinematics::JointState seed;
-    seed.joint_names = feedback.joint_names;
-    seed.positions_rad = feedback.positions_rad;
-    request.seed = seed;
-    request.parameters.position_tolerance_m = ik_tuning_.position_tolerance_mm / 1000.0;
-    request.parameters.orientation_tolerance_rad = ik_tuning_.orientation_tolerance_rad;
-    request.parameters.enable_joint_task = ik_tuning_.enable_joint_task;
-    request.parameters.placo_joint_task_weight = ik_tuning_.joint_task_weight;
-    if (ik_tuning_.enable_joint_task) {
-      request.parameters.redundancy_preference = seed;
+    motion::CommandPipelineConfig config;
+    config.control_frequency_hz = 1.0 / nominal_period_sec_;
+    config.feedback_max_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+      feedback_timeout_);
+    group.pipeline = std::make_unique<motion::CommandPipeline>(
+      backend_, std::vector<JointGroupModel>{group.model}, config);
+    motion::EndpointPolicy policy;
+    policy.endpoint_name = group.name;
+    policy.group_name = group.name;
+    policy.kind = motion::MotionKind::SERVO_P;
+    policy.priority = 100;
+    policy.servo_lease = servo_lease_;
+    const auto status = group.pipeline->registerEndpoint(policy);
+    if (!status.ok()) {
+      throw std::runtime_error("cannot register ServoP endpoint: " + status.message);
     }
-
-    const auto result = diagnostic_kinematics_->inverseKinematics(request);
-    std::ostringstream detail;
-    detail << "target_m=[" << desired.position_m[0] << ',' << desired.position_m[1] << ',' <<
-      desired.position_m[2] << "] direct_ik=";
-    if (!result.ok()) {
-      detail << "failed(code=" << static_cast<int>(result.status.code) << ", reason='" <<
-        result.status.message << "')";
-    } else {
-      detail << "succeeded(position_error_m=" << result.value->position_error_m <<
-        ", orientation_error_rad=" << result.value->orientation_error_rad << ')';
-    }
-    return detail.str();
-  }
-
-  void reportTickFailure(
-    Group & group, const humanoid_motion_server::motion::MotionStatus & status,
-    const Pose & desired, const JointFeedback & feedback)
-  {
-    const auto diagnostic = diagnoseIkFailure(group, desired, feedback);
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 1000,
-      "RoboManip ServoP Tick failed for %s (%zu/%zu): api=%s code=%lld reason='%s'; %s; "
-      "holding_previous_candidate=%s",
-      group.name.c_str(), group.consecutive_tick_failures, tick_failure_reset_count_,
-      status.sdk_api.empty() ? "unknown" : status.sdk_api.c_str(),
-      static_cast<long long>(status.sdk_code), status.message.c_str(), diagnostic.c_str(),
-      group.last_safe_candidate ? "yes" : "no");
-  }
-
-  void reportFailure(Group & group, const char * stage, const std::string & reason)
-  {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000, "RoboManip %s failed for %s: %s",
-      stage, group.name.c_str(), reason.c_str());
   }
 
   void stop(Group & group)
   {
-    if (group.active && backend_) {
-      const auto result = backend_->stopSession(group.sdk_session_id);
-      if (!result.ok()) {
-        RCLCPP_WARN(
-          get_logger(), "failed to stop RoboManip session for %s: %s",
-          group.name.c_str(), result.message.c_str());
-      }
+    if (group.pipeline && !group.sdk_session_id.empty()) {
+      group.pipeline->cancel(group.sdk_session_id);
     }
+    // A new HC engagement is a new pipeline lifetime. Reset its elapsed-time
+    // history as well as its SDK session, so an idle gap is not an integration step.
+    configurePipeline(group);
     group.active = false;
     group.sdk_session_id.clear();
     group.last_published_sequence.reset();
-    group.last_safe_candidate.reset();
+    group.envelope.reset();
     group.last_accepted_target.reset();
-    group.consecutive_tick_failures = 0U;
     group.last_target_at = {};
-    group.last_step_at = {};
   }
 
   void expireSessions()
   {
-    const auto now_steady = SteadyClock::now();
+    const auto steady_now = SteadyClock::now();
     for (auto & entry : groups_) {
       auto & group = entry.second;
-      if (group.active && now_steady - group.last_target_at > session_reset_timeout_) {
+      if (!group.active) {continue;}
+      JointFeedback feedback;
+      const bool complete = feedbackFor(group, feedback);
+      // Tick an expired session so the package's own lease/feedback policy
+      // terminates it. Do not generate extra uncorrelated HC commands between inputs.
+      if (steady_now - group.last_target_at >= servo_lease_ || !complete ||
+        steady_now - feedback.received_at >= feedback_timeout_) {
+        group.pipeline->tick(feedback, steady_now);
+        stop(group);
+      } else if (group.envelope &&
+        timeNanoseconds(group.envelope->valid_until) <= now().nanoseconds()) {
         stop(group);
       }
     }
@@ -969,7 +878,8 @@ private:
       state.reference_frame = group.base_frame;
       state.tip_frame = group.tip_frame;
       JointFeedback feedback;
-      if (feedbackFor(group, feedback)) {
+      if (feedbackFor(group, feedback) &&
+        SteadyClock::now() - feedback.received_at < feedback_timeout_) {
         ForwardKinematicsRequest request;
         request.group_name = group.name;
         request.base_link = group.base_frame;
@@ -992,12 +902,10 @@ private:
   }
 
   std::map<std::string, Group> groups_;
-  std::unordered_map<std::string, double> positions_;
-  SteadyTime last_feedback_at_{};
+  FeedbackCache feedback_cache_;
   double nominal_period_sec_{1.0 / 60.0};
   SteadyClock::duration feedback_timeout_{std::chrono::milliseconds(200)};
-  SteadyClock::duration session_reset_timeout_{std::chrono::milliseconds(250)};
-  std::size_t tick_failure_reset_count_{3U};
+  std::chrono::milliseconds servo_lease_{100};
   bool publish_fk_{true};
   SdkIkTuning ik_tuning_;
   double joint_max_velocity_{1.0};

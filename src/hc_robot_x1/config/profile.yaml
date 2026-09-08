@@ -96,8 +96,8 @@ components:
       tip: R_ban_Link
 
 motion:
-  backend_package: hc_motion_backend_kdl
-  backend_executable: kdl_ik_backend_node
+  backend_package: hc_motion_backend_robo_manip
+  backend_executable: robo_manip_backend_node
   feedback_topic: state/joints
   candidate_topic: control/joint_candidate
   # Prevent a delayed Wi-Fi frame or a nearby IK branch from becoming a
@@ -118,9 +118,8 @@ motion:
   robo_manip_cartesian_max_angular_velocity_rad_s: 0.5
   robo_manip_cartesian_max_angular_acceleration_rad_s2: 2.0
   robo_manip_cartesian_max_angular_jerk_rad_s3: 10.0
-  # A single SDK Tick failure holds the last RTC-approved command. Three
-  # consecutive failures reset the per-arm session from measured feedback.
-  robo_manip_tick_failure_reset_count: 3
+  # Motion Server owns Servo expiry and failure termination.
+  robo_manip_servo_lease_ms: 100
   robo_manip_ik_position_tolerance_m: 0.001
   robo_manip_ik_orientation_tolerance_rad: 0.015
   robo_manip_ik_enable_regularization_task: true
