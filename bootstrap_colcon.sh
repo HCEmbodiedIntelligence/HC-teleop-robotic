@@ -41,15 +41,10 @@ prepare_motion_server_source() {
 
   if [[ -z "${HUMANOID_MOTION_SDK_DEPS_PREFIX:-}" ]]; then
     local project_sdk_deps="${PROJECT_ROOT}/.deps/robo_manip"
-    local legacy_sdk_deps="/home/maple/test/humanoid/.sdk_deps"
     if [[ -d "${project_sdk_deps}" ]]; then
       export HUMANOID_MOTION_SDK_DEPS_PREFIX="${project_sdk_deps}"
-    elif [[ -d "${legacy_sdk_deps}" ]]; then
-      export HUMANOID_MOTION_SDK_DEPS_PREFIX="${legacy_sdk_deps}"
-      echo "Using legacy RoboManip dependency prefix: ${legacy_sdk_deps}" >&2
-      echo "Set HUMANOID_MOTION_SDK_DEPS_PREFIX to use another installation." >&2
     else
-      echo "RoboManip dependencies not found." >&2
+      echo "RoboManip dependencies not found at ${project_sdk_deps}." >&2
       echo "Set HUMANOID_MOTION_SDK_DEPS_PREFIX to the prefix containing ruckig 0.17.3 and related SDK dependencies." >&2
       exit 2
     fi

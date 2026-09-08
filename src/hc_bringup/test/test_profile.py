@@ -240,3 +240,19 @@ def test_validates_simulation_only_robo_manip_limits():
     value["simulation"]["robo_manip_limits"] = {"unknown_limit": 1.0}
     with pytest.raises(ProfileError, match="unknown simulation.robo_manip_limits"):
         validate_profile(value)
+
+
+def test_motion_backend_requires_current_profile_contract():
+    from hc_bringup.profile import resolve_motion_backend
+
+    assert resolve_motion_backend("profile", {
+        "backend_package": "hc_motion_backend_robo_manip"
+    }) == "robo_manip"
+    assert resolve_motion_backend("robo_manip", {}) == "robo_manip"
+    assert resolve_motion_backend("external", {}) == "external"
+    for requested, motion in [
+        ("kdl", {}), ("profile", {}),
+        ("profile", {"backend_package": "hc_motion_backend_kdl"}),
+    ]:
+        with pytest.raises(ProfileError):
+            resolve_motion_backend(requested, motion)

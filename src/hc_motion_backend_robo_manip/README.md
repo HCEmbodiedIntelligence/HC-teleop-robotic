@@ -51,7 +51,8 @@ X1 and OpenArmX profiles select this backend by default:
 ./run.sh profile:=openarmx mode:=sim
 ```
 
-The existing KDL backend remains available via `motion_backend:=kdl`.
+The former KDL backend has been removed. Out-of-tree backends must implement
+the HC contract and be launched explicitly with `motion_backend:=external`.
 
 Build and test with the workspace's ABI-pinned SDK dependencies:
 

@@ -35,7 +35,7 @@
               ▼
    ┌──────────────────────┐
    │   IK/FK 后端选择器   │  运动学层：从 URDF 自动提取关节链条，完成正逆运动学
-   │  ┌────────────────┐ │  - KDL (轻量通用，全开源，任意 3~7 自由度自适应)
+   │  ┌────────────────┐ │  - Motion Server CommandPipeline (ServoP / RTC / 反馈检查)
    │  │ hc_motion_...  │ │  - RoboManip / Humanoid Motion Server (Pinocchio/RTC动力学)
    │  └────────────────┘ │
    └──────────┬───────────┘
@@ -128,17 +128,18 @@ teleop:
 
 ```yaml
 motion:
-  # 选项 A: hc_motion_backend_kdl (轻量、无需外部闭源 SDK、自闭环 FK)
-  backend_package: hc_motion_backend_kdl
-  backend_executable: kdl_ik_backend_node
-  servo_velocity_scale: 0.5
-  servo_acceleration_limit: 20.0
-  servo_nominal_rate_hz: 60.0
+  backend_package: hc_motion_backend_robo_manip
+  backend_executable: robo_manip_backend_node
+  servo_nominal_rate_hz: 100.0
+  robo_manip_servo_lease_ms: 100
+  robo_manip_joint_max_velocity_rad_s: 0.6
+  robo_manip_joint_max_acceleration_rad_s2: 2.4
+  robo_manip_joint_max_jerk_rad_s3: 9.6
 
-  # 选项 B: hc_motion_backend_robo_manip (基于 Pinocchio 与 CasADi 的高性能人形动力学求解器)
-  # backend_package: hc_motion_backend_robo_manip
-  # backend_executable: robo_manip_backend_node
 ```
+
+还需在 `resources.robo_manip_sdk` 指定机器人的 SDK YAML，配置关节组、模型和 RTC；
+可参考 `src/hc_robot_x1/config/motion/robo_manip.yaml`。
 
 ### 步骤 4：运行与调试
 启动仿真或真机进行验证：
@@ -146,8 +147,7 @@ motion:
 # 1. 运行仿真模式验证运动学与映射
 ./run.sh profile:=<robot_id> mode:=sim
 
-# 2. 随时通过命令行强制切换解算器 (无需重新编译)
-./run.sh profile:=<robot_id> mode:=sim motion_backend:=kdl
+# 2. 显式选择当前运动后端
 ./run.sh profile:=<robot_id> mode:=sim motion_backend:=robo_manip
 
 # 3. 打开 RViz 查看 3D 机械臂模型与位姿
@@ -191,6 +191,7 @@ display_name: UR5 Single Arm Robot
 
 resources:
   urdf: package://hc_robot_ur5/urdf/ur5.urdf
+  robo_manip_sdk: package://hc_robot_ur5/config/motion/robo_manip.yaml
 
 components:
   - id: arm
@@ -217,8 +218,8 @@ components:
       tip: robotiq_coupler
 
 motion:
-  backend_package: hc_motion_backend_kdl
-  backend_executable: kdl_ik_backend_node
+  backend_package: hc_motion_backend_robo_manip
+  backend_executable: robo_manip_backend_node
 
 teleop:
   position_scale: 0.8
@@ -253,6 +254,6 @@ teleop:
    - 检查 `teleop.axis_mapping`（或每条臂独立的 `axis_mapping`）。它是手柄朝向与机器人基座朝向的对齐矩阵，旋转 90 度或取反即可调整对应的轴向运动方向。
 2. **手柄按住 Grip 机械臂不动**：
    - 查看终端是否提示 `fresh measured FK is required before clutch engagement`。
-   - 离合器需要机械臂的当前实测末端位姿（`state/cartesian`）作为锚点。KDL 后端现已原生自动计算并发布；如使用真机，需确保电机驱动正在向 `state/joints` 发布有效的关节角度。
+   - 离合器需要机械臂的当前实测末端位姿（`state/cartesian`）作为锚点。RoboManip 后端通过实测关节 FK 计算并发布；如使用真机，需确保电机驱动正在向 `state/joints` 发布有效的关节角度。
 3. **运动卡顿或超速保护跳闸**：
-   - 调整 `motion.servo_velocity_scale`（默认 0.5，可适当放宽）以及 `motion.servo_acceleration_limit`。
+   - 先检查输入/求解延迟与反馈新鲜度，再核对 `motion.robo_manip_joint_max_velocity_rad_s`、`motion.robo_manip_joint_max_acceleration_rad_s2` 和 `motion.robo_manip_joint_max_jerk_rad_s3`。

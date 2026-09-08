@@ -23,10 +23,6 @@ repositories:
     type: git
     url: git@github.com:HCEmbodiedIntelligence/hc-motion.git
     version: 0.1.0
-  src/hc_motion_backend_kdl:
-    type: git
-    url: git@github.com:HCEmbodiedIntelligence/hc-motion-backend-kdl.git
-    version: 0.1.0
   src/hc_device_sdk:
     type: git
     url: git@github.com:HCEmbodiedIntelligence/hc-device-sdk.git

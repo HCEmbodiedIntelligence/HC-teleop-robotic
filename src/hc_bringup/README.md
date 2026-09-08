@@ -37,9 +37,10 @@ profile-relative or `package://`; absolute paths and directory escape are
 rejected. Topics in profiles must be relative so `/robots/<robot_id>` can be
 applied by launch.
 
-The backend can be selected explicitly with `motion_backend:=kdl`,
-`motion_backend:=robo_manip`, or `motion_backend:=external`. The default
-`motion_backend:=profile` uses `motion.backend_package`. RoboManip is always a
+The backend can be selected explicitly with `motion_backend:=robo_manip`
+or `motion_backend:=external`. The default
+`motion_backend:=profile` requires `motion.backend_package` to select RoboManip;
+there is no implicit KDL fallback. RoboManip is always a
 separate process and its measured FK is the sole `state/cartesian` publisher:
 
 ```bash
@@ -47,9 +48,11 @@ separate process and its measured FK is the sole `state/cartesian` publisher:
 ros2 topic info -v /robots/x1/state/cartesian
 ```
 
-The RoboManip option requires the independently built
-`/home/maple/humanoid/install` underlay. The default KDL build has no private
-SDK dependency.
+X1 and OpenArmX profiles select RoboManip by default. Motion Server and its
+interfaces are built from the pinned submodules in this workspace; no external
+Humanoid underlay is loaded. SDK dependencies must be installed at
+`.deps/robo_manip` or explicitly selected with `HUMANOID_MOTION_SDK_DEPS_PREFIX`.
+The build no longer searches old workspaces for dependencies.
 
 For responsive simulation without changing real-robot commissioning limits,
 profiles may define `simulation.robo_manip_limits`. The launch file applies

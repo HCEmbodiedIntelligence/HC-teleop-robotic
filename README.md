@@ -27,7 +27,7 @@ cd /home/maple/test/HC-teleop-robotic
 
 - `hc_vr_gateway`：PICO UDP v1/v2 解码
 - `hc_teleop_core`：VR 映射、clutch/deadman、多组命令仲裁和 watchdog
-- `hc_motion` + `hc_motion_backend_kdl`：目标路由与轻量 IK
+- `hc_motion` + `hc_motion_backend_robo_manip`：目标路由与 Motion Server 控制流水线
 - `hc_adapter_openarmx`：OpenArmX 仿真设备适配
 - `robot_state_publisher`：URDF 状态发布
 
@@ -63,15 +63,16 @@ Server 与接口仓以固定提交的 Git submodule 保存，仍保持各自独�
 git submodule update --init --recursive
 
 # 指向 ruckig 0.17.3、toppra 0.6.8 等 ABI 固定依赖的安装前缀。
-# 当前开发机未设置时会兼容检测 /home/maple/test/humanoid/.sdk_deps。
-export HUMANOID_MOTION_SDK_DEPS_PREFIX=/home/maple/test/humanoid/.sdk_deps
+# 默认读取本工作区 .deps/robo_manip；其他安装位置必须显式指定。
+export HUMANOID_MOTION_SDK_DEPS_PREFIX=/path/to/robo_manip/dependencies
 
 ./bootstrap_colcon.sh build
 ./run.sh profile:=x1 mode:=sim
 ```
 
 默认 `motion_backend:=profile` 读取机器人 profile；X1 和 OpenArmX 当前均默认
-使用 `robo_manip`，无需显式指定。需要切换到 KDL 时传入 `motion_backend:=kdl`。
+使用 `robo_manip`，无需显式指定。旧 KDL 后端已移除；独立扩展后端使用
+`motion_backend:=external`，并自行启动符合 HC 消息契约的后端。
 运行时仅 source ROS 2 和本工作区的安装环境，不再 source 外部 Humanoid underlay。
 
 ## X1 真机

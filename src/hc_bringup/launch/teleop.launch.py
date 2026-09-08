@@ -9,7 +9,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from hc_bringup.profile import load_profile, resolve_profile
+from hc_bringup.profile import load_profile, resolve_profile, resolve_motion_backend
 
 
 def _truthy(value: str) -> bool:
@@ -167,26 +167,8 @@ def _setup(context: LaunchContext):
         raise ValueError("mode must be sim, shadow, or real")
     if composition not in {"compact", "isolated"}:
         raise ValueError("composition must be compact or isolated")
-    if backend not in {"profile", "kdl", "robo_manip", "external"}:
-        raise ValueError("motion_backend must be profile, kdl, robo_manip, or external")
-
     motion = profile.value.get("motion", {})
-    if backend == "profile":
-        profile_backend = str(
-            motion.get("backend_package", "hc_motion_backend_kdl")
-        ).strip()
-        backend_by_package = {
-            "hc_motion_backend_kdl": "kdl",
-            "hc_motion_backend_robo_manip": "robo_manip",
-        }
-        try:
-            backend = backend_by_package[profile_backend]
-        except KeyError as error:
-            raise ValueError(
-                "profile motion.backend_package must be hc_motion_backend_kdl or "
-                "hc_motion_backend_robo_manip; use motion_backend:=external for an "
-                "out-of-tree backend"
-            ) from error
+    backend = resolve_motion_backend(backend, motion)
 
     shadow_arg = LaunchConfiguration("shadow").perform(context).strip().lower()
     shadow = mode == "shadow" if shadow_arg in {"", "auto"} else _truthy(shadow_arg)
@@ -194,16 +176,10 @@ def _setup(context: LaunchContext):
     start_arbiter = _auto_bool(LaunchConfiguration("start_arbiter").perform(context), True)
     start_mapper = _auto_bool(LaunchConfiguration("start_vr_mapper").perform(context), True)
     start_router = _auto_bool(LaunchConfiguration("start_motion_router").perform(context), True)
-    start_kdl = _auto_bool(
-        LaunchConfiguration("start_kdl_backend").perform(context),
-        backend == "kdl",
-    )
     start_robo_manip = _auto_bool(
         LaunchConfiguration("start_robo_manip_backend").perform(context),
         backend == "robo_manip",
     )
-    if start_kdl and start_robo_manip:
-        raise ValueError("KDL and RoboManip backends cannot own the same backend topics")
     start_sim = _auto_bool(LaunchConfiguration("start_sim_adapter").perform(context), mode == "sim")
     hardware_argument = LaunchConfiguration("start_hardware_adapter").perform(context)
     start_lease = _auto_bool(LaunchConfiguration("start_auto_lease").perform(context), mode == "sim")
@@ -402,21 +378,6 @@ def _setup(context: LaunchContext):
             "right_finger_open": float(right_tool["open"][0]),
             "right_finger_closed": float(right_tool["closed"][0]),
         })
-    kdl_parameters = {
-        **group_parameters,
-        "urdf_path": urdf_path,
-        "target_topic": "motion/backend/cartesian_targets",
-        "joint_state_topic": "state/joints",
-        "candidate_topic": "motion/backend/joint_candidate",
-        "feedback_timeout_sec": float(teleop.get("feedback_timeout_ms", 200)) / 1000.0,
-        "command_velocity_scale": float(motion.get("servo_velocity_scale", 0.5)),
-        "command_acceleration_limit": float(motion.get("servo_acceleration_limit", 20.0)),
-        "command_nominal_rate_hz": float(motion.get("servo_nominal_rate_hz", 60.0)),
-        "command_reset_timeout_sec": float(motion.get("servo_reset_timeout_ms", 250)) / 1000.0,
-        "command_tracking_error_reset": float(motion.get("servo_tracking_error_reset", 0.5)),
-        "cartesian_state_topic": "state/cartesian",
-        "publish_cartesian_state": True,
-    }
     robo_manip_parameters = {
         **group_parameters,
         **_target_filter_parameters(arms),
@@ -483,10 +444,10 @@ def _setup(context: LaunchContext):
         "publish_rate_hz": float(simulation.get("publish_rate_hz", 100.0)),
         "max_velocity_scale": float(simulation.get("max_velocity_scale", 0.2)),
         "fallback_max_velocity": float(simulation.get("fallback_max_velocity", 1.0)),
-        # The active motion backend (RoboManip or KDL) owns measured FK.
+        # The active motion backend (RoboManip) owns measured FK.
         # This guarantees exactly one state/cartesian publisher and keeps
         # mapper feedback consistent with the active solver.
-        "publish_cartesian_state": not (start_robo_manip or start_kdl),
+        "publish_cartesian_state": not start_robo_manip,
     }
     if str(arms[0].get("adapter", {}).get("package", "")) == "hc_adapter_x1":
         # The selected motion backend already rate-limits and the arbiter still
@@ -609,8 +570,6 @@ def _setup(context: LaunchContext):
         descriptions.append(_component("hc_teleop_core", "hc_teleop_core::VrMapperNode", "vr_mapper", namespace, mapper_parameters))
     if start_router:
         descriptions.append(_component("hc_motion", "hc_motion::MotionRouterNode", "motion_router", namespace, router_parameters))
-    if start_kdl:
-        descriptions.append(_component("hc_motion_backend_kdl", "hc_motion_backend_kdl::KdlIkBackendNode", "kdl_ik_backend", namespace, kdl_parameters))
     if start_sim:
         descriptions.append(_component(sim_package, sim_plugin, sim_node_name, namespace, sim_parameters))
     if start_hardware:
@@ -649,8 +608,6 @@ def _setup(context: LaunchContext):
         actions.append(_node("hc_teleop_core", "vr_mapper_node", "vr_mapper", namespace, mapper_parameters))
     if start_router:
         actions.append(_node("hc_motion", "motion_router_node", "motion_router", namespace, router_parameters))
-    if start_kdl:
-        actions.append(_node("hc_motion_backend_kdl", "kdl_ik_backend_node", "kdl_ik_backend", namespace, kdl_parameters))
     if start_sim:
         actions.append(_node(sim_package, sim_executable, sim_node_name, namespace, sim_parameters))
     if start_hardware:
@@ -673,12 +630,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("composition", default_value="compact", description="compact or isolated"),
             DeclareLaunchArgument(
                 "motion_backend", default_value="profile",
-                description="profile, kdl, robo_manip, or external"),
+                description="profile, robo_manip, or external"),
             DeclareLaunchArgument("start_vr", default_value="true"),
             DeclareLaunchArgument("start_arbiter", default_value="true"),
             DeclareLaunchArgument("start_vr_mapper", default_value="true"),
             DeclareLaunchArgument("start_motion_router", default_value="true"),
-            DeclareLaunchArgument("start_kdl_backend", default_value="auto"),
             DeclareLaunchArgument("start_robo_manip_backend", default_value="auto"),
             DeclareLaunchArgument("start_sim_adapter", default_value="auto"),
             DeclareLaunchArgument("start_hardware_adapter", default_value="auto"),

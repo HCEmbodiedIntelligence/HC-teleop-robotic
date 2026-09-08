@@ -295,11 +295,7 @@ def validate_profile(value: Any) -> dict[str, Any]:
             "resources.robo_manip_sdk is required by hc_motion_backend_robo_manip"
         )
     for field in (
-        "servo_velocity_scale",
-        "servo_acceleration_limit",
         "servo_nominal_rate_hz",
-        "servo_reset_timeout_ms",
-        "servo_tracking_error_reset",
         "robo_manip_joint_max_velocity_rad_s",
         "robo_manip_joint_max_acceleration_rad_s2",
         "robo_manip_joint_max_jerk_rad_s3",
@@ -600,3 +596,17 @@ def resolve_profile(value: str | Path) -> Path:
         if source.is_file():
             return source.resolve()
     raise ProfileError(f"unable to resolve installed or source profile '{profile_id}'")
+
+
+def resolve_motion_backend(requested: str, motion: dict) -> str:
+    """Select the current backend contract without an implicit legacy fallback."""
+    if requested not in {"profile", "robo_manip", "external"}:
+        raise ProfileError("motion_backend must be profile, robo_manip, or external")
+    if requested != "profile":
+        return requested
+    if motion.get("backend_package") == "hc_motion_backend_robo_manip":
+        return "robo_manip"
+    raise ProfileError(
+        "profile motion.backend_package must be hc_motion_backend_robo_manip; "
+        "use motion_backend:=external for an out-of-tree backend"
+    )
