@@ -15,6 +15,7 @@
   <exec_depend>hc_adapter_openarmx</exec_depend>
   <exec_depend>hc_adapter_x1</exec_depend>
   <exec_depend>hc_motion</exec_depend>
+  <exec_depend>rviz2</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

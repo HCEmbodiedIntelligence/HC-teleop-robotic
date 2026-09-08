@@ -31,6 +31,7 @@ TOP_LEVEL_KEYS = {
     "teleop",
     "safety",
     "recording",
+    "standard_interfaces",
     "diagnostics",
     "hardware",
     "vr",
@@ -282,9 +283,19 @@ def validate_profile(value: Any) -> dict[str, Any]:
 
     for section in (
         "motion", "simulation", "teleop", "safety", "recording", "diagnostics",
-        "hardware", "vr"
+        "hardware", "vr", "standard_interfaces"
     ):
         profile[section] = dict(_mapping(profile.get(section, {}), section))
+
+    standard = profile["standard_interfaces"]
+    unknown_standard = sorted(set(standard) - {"feedback_joint_order"})
+    if unknown_standard:
+        raise ProfileError("unknown standard_interfaces fields: " + ", ".join(unknown_standard))
+    if "feedback_joint_order" in standard:
+        standard["feedback_joint_order"] = _string_list(
+            standard["feedback_joint_order"], "standard_interfaces.feedback_joint_order",
+            allow_empty=True,
+        )
 
     motion = profile["motion"]
     backend_package = motion.get("backend_package")

@@ -12,16 +12,21 @@ git submodule update --init --recursive
 ./run.sh profile:=openarmx mode:=sim
 ```
 
-仿真启动完成后，在另一个终端打开对应机器人的 RViz：
+`run.sh` 默认同时打开当前机器人 profile 的 RViz。无需界面时关闭：
 
 ```bash
-cd /home/maple/test/HC-teleop-robotic
-./rviz.sh x1
+./run.sh profile:=x1 mode:=sim --rviz-sim:=false
+# 显式开启（也是默认值）
+./run.sh profile:=x1 mode:=sim --rviz-sim:=true
 ```
 
-`run.sh` 会把实际使用的 ROS Domain 写入 `runtime/active_ros_domain`；
-`rviz.sh` 自动使用同一 Domain，并等待 URDF、TF 和关节状态就绪后再打开界面。
-需要人工覆盖时使用 `HC_ROS_DOMAIN_ID=14 ./rviz.sh x1`。
+也支持 `rviz-sim:=false`；直接使用 ROS launch 时参数名为 `rviz_sim:=false`。
+RViz 随 launch 一起退出，并使用同一 ROS Domain。此开关只控制 RViz 显示，
+不改变 `mode` 或仿真设备节点的启动。
+
+需要之后单独打开界面时，仍可使用 `./rviz.sh x1`。该脚本读取
+`runtime/active_ros_domain` 并等待 URDF、TF 和关节状态就绪；手动覆盖 Domain
+可使用 `HC_ROS_DOMAIN_ID=14 ./rviz.sh x1`。
 
 默认启动以下组件：
 
@@ -30,6 +35,7 @@ cd /home/maple/test/HC-teleop-robotic
 - `hc_motion` + `hc_motion_backend_robo_manip`：目标路由与 Motion Server 控制流水线
 - `hc_adapter_openarmx`：OpenArmX 仿真设备适配
 - `robot_state_publisher`：URDF 状态发布
+- `rviz2`：机器人模型与状态显示
 
 调试时使用 `composition:=isolated`，对比真实设备时使用
 `mode:=shadow`；真实设备必须由独立 `hc-adapter-*` 包提供唯一硬件命令发布者。

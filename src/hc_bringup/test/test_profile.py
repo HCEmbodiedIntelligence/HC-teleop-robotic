@@ -256,3 +256,23 @@ def test_motion_backend_requires_current_profile_contract():
     ]:
         with pytest.raises(ProfileError):
             resolve_motion_backend(requested, motion)
+
+
+def test_standard_interface_feedback_order():
+    value = minimal_profile()
+    value['standard_interfaces'] = {'feedback_joint_order': ['joint_1', 'wheel_1']}
+    assert validate_profile(value)['standard_interfaces']['feedback_joint_order'] == ['joint_1', 'wheel_1']
+
+
+@pytest.mark.parametrize('section', [[], {'unknown': []}, {'feedback_joint_order': 'joint_1'}, {'feedback_joint_order': ['joint_1', 'joint_1']}, {'feedback_joint_order': ['']}])
+def test_rejects_invalid_standard_interface_order(section):
+    value = minimal_profile()
+    value['standard_interfaces'] = section
+    with pytest.raises(ProfileError):
+        validate_profile(value)
+
+
+def test_shipped_x1_standard_feedback_order():
+    path = Path(__file__).resolve().parents[2] / 'hc_robot_x1/config/profile.yaml'
+    profile = load_profile(path)
+    assert len(profile.value['standard_interfaces']['feedback_joint_order']) == 29

@@ -253,3 +253,36 @@ vr:
   # the arbiter watchdog still stop motion after 300 ms without fresh input.
   pose_timeout_ms: 600
   session_id: pico
+
+# Standard observation topic order, matching the X1 simulator joint feedback.
+standard_interfaces:
+  feedback_joint_order:
+    - leg_1
+    - leg_2
+    - zhi
+    - head_1
+    - head_2
+    - Joint1_R
+    - Joint2_R
+    - Joint3_R
+    - Joint4_R
+    - Joint5_R
+    - Joint6_R
+    - Joint7_R
+    - R_ban
+    - Joint1_L
+    - Joint2_L
+    - Joint3_L
+    - Joint4_L
+    - Joint5_L
+    - Joint6_L
+    - Joint7_L
+    - L_ban
+    - right_wheel_1
+    - right_wheel_2
+    - right_wheel_3
+    - right_wheel_4
+    - left_wheel_1
+    - left_wheel_2
+    - left_wheel_3
+    - left_wheel_4

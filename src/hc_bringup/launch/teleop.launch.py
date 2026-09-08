@@ -518,6 +518,28 @@ def _setup(context: LaunchContext):
         )
 
     actions = []
+    rviz_sim = LaunchConfiguration("rviz_sim").perform(context).strip().lower()
+    if rviz_sim not in {"true", "false"}:
+        raise ValueError("rviz_sim must be true or false")
+    if rviz_sim == "true":
+        rviz_config = profile.path.parent / "teleop.rviz"
+        if not rviz_config.is_file():
+            raise ValueError(
+                f"RViz configuration not found: {rviz_config}; "
+                "provide teleop.rviz beside the profile or use rviz_sim:=false"
+            )
+        actions.append(Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz_sim",
+            namespace=namespace,
+            arguments=["-d", str(rviz_config)],
+            remappings=[
+                (f"/robots/{profile.robot_id}/robot_description",
+                 f"/{namespace}/robot_description"),
+            ],
+            output="screen",
+        ))
     if start_dashboard:
         actions.append(
             _node(
@@ -624,6 +646,7 @@ def _setup(context: LaunchContext):
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
+            DeclareLaunchArgument("rviz_sim", default_value="true", description="Start RViz with the robot profile visualization"),
             DeclareLaunchArgument("profile", default_value="openarmx", description="Profile id or profile.yaml path"),
             DeclareLaunchArgument("robot_id", default_value="", description="Runtime robot id override"),
             DeclareLaunchArgument("mode", default_value="sim", description="sim, shadow, or real"),

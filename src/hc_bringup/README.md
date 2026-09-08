@@ -58,3 +58,8 @@ For responsive simulation without changing real-robot commissioning limits,
 profiles may define `simulation.robo_manip_limits`. The launch file applies
 that mapping only in `mode:=sim`; shadow and real modes always use the
 conservative `motion.robo_manip_*` values.
+
+RViz starts by default using `teleop.rviz` beside the selected profile. Disable
+it with `./run.sh --rviz-sim:=false` or the native launch argument
+`rviz_sim:=false`. This only controls visualization, not the simulation adapter.
+The RViz process shares the launch lifecycle and ROS domain.

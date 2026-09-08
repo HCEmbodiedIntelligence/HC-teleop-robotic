@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,25 @@ def create_app(node: DashboardRosBridge) -> Any:
     async def status(request: Any) -> Any:
         return web.json_response(node.model.snapshot())
 
+    async def runtime(request: Any) -> Any:
+        from .inspection import profiles
+        return web.json_response({
+            "profiles": await asyncio.to_thread(profiles, node.profile),
+            "active": node.robot_id,
+            "server": {"host": node.host, "port": node.port},
+            "ros": {"domain_id": int(os.environ.get("ROS_DOMAIN_ID", "0")),
+                    "node_name": node.get_name(), "namespace": node.get_namespace()},
+            "topics": [{"name": name, "types": types}
+                       for name, types in node.get_topic_names_and_types()],
+            "ws_clients": len(sockets),
+        })
+
+    async def dataset_list(request: Any) -> Any:
+        from .inspection import datasets
+        return web.json_response(await asyncio.to_thread(datasets, node.dataset_root))
+
+    sockets: set[Any] = set()
+
     async def health(request: Any) -> Any:
         snapshot = node.model.snapshot()
         return web.json_response(
@@ -69,21 +89,32 @@ def create_app(node: DashboardRosBridge) -> Any:
     async def websocket(request: Any) -> Any:
         socket = web.WebSocketResponse(heartbeat=10.0, max_msg_size=4096)
         await socket.prepare(request)
+        sockets.add(socket)
+        try:
+            await stream_socket(socket)
+        finally:
+            sockets.discard(socket)
+        return socket
+
+    async def stream_socket(socket: Any) -> None:
         while not socket.closed:
-            await socket.send_json(node.model.snapshot())
+            snapshot = node.model.snapshot()
+            snapshot["ws_clients"] = len(sockets)
+            await socket.send_json(snapshot)
             try:
                 message = await socket.receive(timeout=0.25)
             except asyncio.TimeoutError:
                 continue
             if message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
                 break
-        return socket
 
     app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/", index)
     app.router.add_get("/dashboard/", index)
     app.router.add_get("/api/v1/status", status)
     app.router.add_get("/api/v1/health", health)
+    app.router.add_get("/api/v1/runtime", runtime)
+    app.router.add_get("/api/v1/datasets", dataset_list)
     app.router.add_post("/api/v1/safety/enabled", set_enabled)
     app.router.add_post("/api/v1/safety/reset", reset_fault)
     app.router.add_get("/ws", websocket)

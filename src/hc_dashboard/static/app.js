@@ -1,467 +1,266 @@
-const $ = (id) => document.getElementById(id);
-const $$ = (selector) => [...document.querySelectorAll(selector)];
-
-const pageTitles = { overview: "运行总览", joints: "关节监控", diagnostics: "链路诊断" };
-const streamNames = {
-  vr: "VR FRAME",
-  joints: "JOINT STATE",
-  cartesian_targets: "CARTESIAN TARGET",
-  backend_candidates: "IK CANDIDATE",
-  commands: "FINAL COMMAND",
-};
-const buttonBits = [[1, "主键"], [2, "副键"], [4, "Grip"], [8, "Trigger"], [16, "Menu"], [32, "摇杆"]];
-let socket = null;
-let reconnectTimer = null;
-let toastTimer = null;
-let latestSnapshot = null;
-
-function text(value) {
-  return value === null || value === undefined || value === "" ? "—" : String(value);
+'use strict';
+const $ = id => document.getElementById(id);
+const pages = {overview:'状态监控',topics:'话题录制',datasets:'数据集管理',config:'系统配置'};
+const streams = [
+ ['joints','实际关节反馈','standard/joint_states','sensor_msgs/msg/JointState'],
+ ['backend_candidates','控制器关节目标','standard/joint_targets','sensor_msgs/msg/JointState'],
+ ['commands','机器人最终关节命令','standard/joint_commands','sensor_msgs/msg/JointState'],
+];
+function standardStreams(snapshot) {
+ return [...streams,
+ ['cartesian_targets','控制器末端目标','standard/controller_target_ee_poses','geometry_msgs/msg/PoseArray'],
+ ['cartesian_targets','可视化末端目标','standard/target_ee_poses','geometry_msgs/msg/PoseArray'],
+ ['cartesian_feedback','实际末端位姿','standard/actual_ee_poses','geometry_msgs/msg/PoseArray']];
 }
-
-function setText(id, value) {
-  const element = $(id);
-  if (element) element.textContent = text(value);
+let runtime = null, selectedProfile = null, datasetItems = [];
+let latest = null, connected = false, pending = false, reconnectTimer, watchdog, toastTimer;
+const set = (id,value) => {if ($(id)) $(id).textContent = value ?? '—';};
+const num = (value,digits=4) => value === null || value === undefined || !Number.isFinite(Number(value)) ? '--' : Number(value).toFixed(digits);
+const live = metric => Boolean(connected && metric && metric.total && !metric.stale);
+function toast(message) {
+  set('toast',message); $('toast').classList.add('show'); clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>$('toast').classList.remove('show'),3500);
 }
-
-function number(value, digits = 3) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed.toFixed(digits) : "—";
+function row(body,values) {
+  const tr=document.createElement('tr');
+  for (const value of values) {const td=document.createElement('td');td.textContent=value ?? '—';td.title=value ?? '';tr.append(td);}
+  body.append(tr);return tr;
 }
-
-function showToast(message, error = false) {
-  const element = $("toast");
-  element.textContent = message;
-  element.className = error ? "show error" : "show";
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { element.className = ""; }, 3200);
+function empty(id,message,columns) {
+  const body=$(id);body.replaceChildren();const tr=row(body,[message]);tr.firstChild.colSpan=columns;tr.firstChild.className='empty-monitor';
 }
-
 function route() {
-  const requested = location.hash.slice(1) || "overview";
-  const page = pageTitles[requested] ? requested : "overview";
-  $$(".page").forEach((element) => element.classList.toggle("hidden", element.id !== page));
-  $$("nav a").forEach((element) => element.classList.toggle("active", element.dataset.page === page));
-  setText("page-title", pageTitles[page]);
-  if (latestSnapshot && page === "joints") renderJoints(latestSnapshot);
-  requestAnimationFrame(() => window.scrollTo(0, 0));
+  const page=Object.hasOwn(pages,location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
+  document.querySelectorAll('.page').forEach(el=>el.classList.toggle('hidden',el.id!==page));
+  document.querySelectorAll('nav a').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
+  set('pageTitle',pages[page]);$('nativeDiagnostics').classList.toggle('hidden',page!=='overview');
 }
-
-function metricState(metric, optional = false) {
-  if (!metric || !metric.total) return optional ? "idle" : "stale";
-  return metric.stale ? "stale" : "live";
+function controls() {
+  $('stopButton').disabled=!connected || pending;
+  $('resumeButton').disabled=!connected || pending || !latest;
 }
-
-function renderMetrics(streams) {
-  const grid = $("metric-grid");
-  grid.replaceChildren();
-  Object.entries(streamNames).forEach(([key, label]) => {
-    const metric = streams[key] || { hz: 0, age_ms: null, stale: true, total: 0 };
-    const optional = ["cartesian_targets", "backend_candidates", "commands"].includes(key);
-    const state = metricState(metric, optional);
-    const card = document.createElement("article");
-    card.className = `metric ${state === "stale" ? "stale" : ""} ${state === "idle" ? "idle" : ""}`;
-    const top = document.createElement("div");
-    top.className = "metric-top";
-    const name = document.createElement("span");
-    name.textContent = label;
-    const dot = document.createElement("i");
-    dot.className = "dot";
-    top.append(name, dot);
-    const rate = document.createElement("strong");
-    rate.textContent = `${number(metric.hz || 0, 1)} Hz`;
-    const age = document.createElement("small");
-    age.textContent = metric.age_ms === null ? "尚未收到消息" : `${number(metric.age_ms, 0)} ms ago · ${metric.total} frames`;
-    card.append(top, rate, age);
-    grid.append(card);
-  });
+function connection(value) {
+  connected=value;set('connectionText',value?'实时状态已连接':'连接断开 · 正在重连');
+  $('connectionDot').className=value?'online':'offline';controls();
+  if (!value && latest) render(latest);
 }
-
-function setPipelineStage(name, state, label) {
-  const stage = document.querySelector(`.pipeline-stage[data-stage="${name}"]`);
-  if (!stage) return;
-  stage.className = `pipeline-stage ${state}`;
-  stage.querySelector(":scope > b").textContent = label;
+function metric(id,meta,stream,path) {
+  const active=live(stream), slow=active && stream.hz<50;
+  set(id,active?(slow?'偏低':'正常'):'无数据');
+  $(id).className=active?(slow?'warning':'running'):'error';
+  set(meta,`${active?num(stream.hz,1):'0.0'} Hz · ${path}`);
 }
-
-function renderPipeline(snapshot) {
-  const streams = snapshot.streams || {};
-  const vrLive = metricState(streams.vr) === "live";
-  const jointsLive = metricState(streams.joints) === "live";
-  const mapperLive = metricState(streams.cartesian_targets, true) === "live";
-  const backendLive = metricState(streams.backend_candidates, true) === "live";
-  const commandLive = metricState(streams.commands, true) === "live";
-  const safety = snapshot.safety || {};
-
-  setPipelineStage("vr", vrLive ? "live" : "error", vrLive ? "在线" : "断流");
-  setPipelineStage("mapper", mapperLive ? "live" : (vrLive ? "wait" : "error"), mapperLive ? "目标有效" : (vrLive ? "待离合" : "无输入"));
-  setPipelineStage("ik", backendLive ? "live" : (mapperLive ? "error" : "wait"), backendLive ? "解算正常" : (mapperLive ? "无解" : "待目标"));
-  const safetyError = safety.fault_latched || safety.estop_active;
-  setPipelineStage("arbiter", safetyError ? "error" : (commandLive ? "live" : "wait"), safetyError ? "已锁存" : (commandLive ? "已授权" : (safety.enabled ? "待租约" : "未启用")));
-  setPipelineStage("robot", jointsLive ? "live" : "error", jointsLive ? "反馈正常" : "无反馈");
-
-  const allRequired = vrLive && jointsLive && !safetyError;
-  setText("pipeline-badge", allRequired ? (commandLive ? "控制链路活动" : "已就绪，等待操作") : "链路未就绪");
-  setText("pipeline-source", snapshot.vr?.source_id || safety.active_source);
-  setText("pipeline-session", safety.active_session);
-  setText("pipeline-groups", Object.keys(snapshot.commands || {}).length);
-}
-
-function tracked(value) {
-  if (typeof value === "boolean") return { tracked: value, confidence: value ? 1 : 0, pose: {} };
-  return value || { tracked: false, confidence: 0, pose: {} };
-}
-
-function setTracking(id, confidenceId, value) {
-  const state = tracked(value);
-  $(id).classList.toggle("good", Boolean(state.tracked));
-  setText(confidenceId, `${Math.round((Number(state.confidence) || 0) * 100)}%`);
-}
-
-function setBar(id, value) {
-  const safe = Math.max(0, Math.min(1, Number(value) || 0));
-  $(id).style.width = `${safe * 100}%`;
-  setText(`${id}-value`, safe.toFixed(3));
-}
-
-function heldButtons(mask) {
-  const names = buttonBits.filter(([bit]) => (Number(mask) & bit) !== 0).map(([, name]) => name);
-  return names.length ? names.join(" + ") : "无按键";
-}
-
-function axis(value) {
-  const values = Array.isArray(value) ? value : [0, 0];
-  return `${number(values[0])}, ${number(values[1])}`;
-}
-
-function position(value) {
-  const pose = tracked(value).pose || {};
-  if (![pose.x, pose.y, pose.z].every((item) => Number.isFinite(Number(item)))) return "—";
-  return `${number(pose.x)} / ${number(pose.y)} / ${number(pose.z)}`;
-}
-
-function renderVr(snapshot) {
-  const vr = snapshot.vr || {};
-  const input = vr.inputs || {};
-  const tracking = vr.tracking || {};
-  setText("vr-source", vr.source_id ? `${vr.source_id} · ${snapshot.streams?.vr?.total || 0} 帧` : "头显尚未连接");
-  setText("vr-protocol", vr.protocol_version ? `协议 v${vr.protocol_version}` : "协议 —");
-  setText("vr-sequence", vr.sequence);
-  setText("vr-loss", vr.packet_loss_total);
-  setText("vr-rate", `${number(snapshot.streams?.vr?.hz || 0, 1)} Hz`);
-  setTracking("track-head", "head-confidence", tracking.head);
-  setTracking("track-left", "left-confidence", tracking.left);
-  setTracking("track-right", "right-confidence", tracking.right);
-  ["left", "right"].forEach((side) => {
-    const controller = input[side] || {};
-    setBar(`${side}-grip`, controller.grip);
-    setBar(`${side}-trigger`, controller.trigger);
-    setText(`${side}-buttons`, heldButtons(controller.held_mask));
-    setText(`${side}-axis`, axis(controller.primary_axis));
-    setText(`${side}-position`, position(tracking[side]));
-  });
-}
-
-function modeName(value) {
-  return ({ 1: "POSITION", 2: "VELOCITY", 3: "EFFORT" })[Number(value)] || "UNKNOWN";
-}
-
-function renderCommands(commands) {
-  const root = $("command-groups");
-  const entries = Object.entries(commands || {}).sort(([left], [right]) => left.localeCompare(right));
-  setText("command-count", `${entries.length} 组`);
-  root.replaceChildren();
-  root.className = entries.length ? "command-groups" : "command-groups empty-state";
-  if (!entries.length) {
-    root.textContent = "尚无最终命令；启用安全状态并建立控制租约后才会产生输出";
-    return;
-  }
-  entries.forEach(([group, command]) => {
-    const card = document.createElement("div");
-    card.className = "command-card";
-    const header = document.createElement("header");
-    const title = document.createElement("strong");
-    title.textContent = group;
-    const sequence = document.createElement("span");
-    sequence.textContent = `SEQ ${command.sequence}`;
-    header.append(title, sequence);
-    const values = document.createElement("code");
-    values.textContent = (command.positions || []).map((value) => number(value)).join("  ") || "no position values";
-    const meta = document.createElement("div");
-    meta.className = "command-meta";
-    meta.innerHTML = `<span>${modeName(command.mode)}</span><span>${text(command.source_id)}</span><span>${(command.positions || []).length} joints</span>`;
-    card.append(header, values, meta);
-    root.append(card);
-  });
-}
-
-function commandJointMap(commands) {
-  const result = new Map();
-  Object.entries(commands || {}).forEach(([group, command]) => {
-    const names = command.names || [];
-    (command.positions || []).forEach((value, index) => {
-      if (names[index]) result.set(String(names[index]), { value: Number(value), group });
-    });
-  });
-  return result;
-}
-
-function renderJoints(snapshot) {
-  const root = $("joint-rows");
-  const feedback = new Map((snapshot.joints?.values || []).map((joint) => [String(joint.name), Number(joint.position)]));
-  const commands = commandJointMap(snapshot.commands);
-  const filter = ($("joint-filter").value || "").trim().toLowerCase();
-  const names = [...new Set([...feedback.keys(), ...commands.keys()])].filter((name) => !filter || name.toLowerCase().includes(filter));
-  root.replaceChildren();
-  setText("joint-count", `${names.length} 个关节`);
-  if (!names.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 7;
-    cell.className = "empty-cell";
-    cell.textContent = filter ? "没有匹配的关节" : "等待 JointState 消息…";
-    row.append(cell);
-    root.append(row);
-    return;
-  }
-  names.forEach((name) => {
-    const feedbackValue = feedback.has(name) ? feedback.get(name) : NaN;
-    const command = commands.get(name);
-    const commandValue = command?.value;
-    const errorRad = Number.isFinite(commandValue) && Number.isFinite(feedbackValue) ? commandValue - feedbackValue : NaN;
-    const errorDeg = errorRad * 180 / Math.PI;
-    const row = document.createElement("tr");
-    if (Number.isFinite(errorDeg) && Math.abs(errorDeg) > 5) row.className = "error";
-    else if (Number.isFinite(errorDeg) && Math.abs(errorDeg) > 2) row.className = "warn";
-    const values = [name, command?.group || "—", number(commandValue, 4), number(commandValue * 180 / Math.PI, 2), number(feedbackValue, 4), number(feedbackValue * 180 / Math.PI, 2), number(errorDeg, 2)];
-    values.forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    });
-    root.append(row);
-  });
-}
-
-function healthTag(metric, optional = false) {
-  if (!metric?.total && optional) return '<span class="health-tag idle"><i></i>待操作</span>';
-  if (!metric?.total || metric.stale) return '<span class="health-tag bad"><i></i>已超时</span>';
-  return '<span class="health-tag"><i></i>正常</span>';
-}
-
-function renderStreams(streams) {
-  const root = $("stream-rows");
-  root.replaceChildren();
-  Object.entries(streamNames).forEach(([key, label]) => {
-    const metric = streams[key] || {};
-    const optional = ["cartesian_targets", "backend_candidates", "commands"].includes(key);
-    const row = document.createElement("tr");
-    row.innerHTML = `<td>${label}</td><td>${healthTag(metric, optional)}</td><td>${number(metric.hz || 0, 1)} Hz</td><td>${metric.age_ms === null || metric.age_ms === undefined ? "—" : `${number(metric.age_ms, 1)} ms`}</td><td>${number(metric.max_gap_ms || 0, 1)} ms</td><td>${metric.total || 0}</td>`;
-    root.append(row);
-  });
-}
-
-function renderTargets(cartesian) {
-  const root = $("target-groups");
-  const groups = cartesian?.groups || [];
-  setText("target-sequence", cartesian?.sequence === undefined ? "SEQ —" : `SEQ ${cartesian.sequence}`);
-  root.replaceChildren();
-  root.className = groups.length ? "target-groups" : "target-groups empty-state";
-  if (!groups.length) {
-    root.textContent = "尚无笛卡尔目标";
-    return;
-  }
-  groups.forEach((target) => {
-    const pose = target.pose || {};
-    const card = document.createElement("div");
-    card.className = "data-card";
-    card.innerHTML = `<header><strong>${text(target.name)}</strong><span>${text(target.reference_frame)} → ${text(target.tip_frame)}</span></header><code>XYZ ${number(pose.x)}  ${number(pose.y)}  ${number(pose.z)} · Q ${number(pose.qx)}  ${number(pose.qy)}  ${number(pose.qz)}  ${number(pose.qw)}</code><div class="data-meta"><span>POSE MODE ${target.pose_mode}</span></div>`;
-    root.append(card);
-  });
-}
-
-function renderBackend(candidates) {
-  const root = $("backend-groups");
-  const entries = Object.entries(candidates || {}).sort(([left], [right]) => left.localeCompare(right));
-  root.replaceChildren();
-  root.className = entries.length ? "backend-groups" : "backend-groups empty-state";
-  if (!entries.length) {
-    root.textContent = "尚无 IK 候选命令";
-    return;
-  }
-  entries.forEach(([group, candidate]) => {
-    const card = document.createElement("div");
-    card.className = "data-card";
-    card.innerHTML = `<header><strong>${group}</strong><span>SEQ ${candidate.sequence}</span></header><code>${(candidate.positions || []).map((value) => number(value)).join("  ")}</code><div class="data-meta"><span>${modeName(candidate.control_mode)}</span><span>${(candidate.positions || []).length} joints</span><span>${text(candidate.source_id)}</span></div>`;
-    root.append(card);
-  });
-}
-
-function renderDiagnostics(diagnostics) {
-  const statuses = diagnostics?.statuses || {};
-  const overview = statuses.control_chain || {};
-  const latency = statuses.latency?.values || {};
-  const badge = $("diagnostic-health");
-  const available = Boolean(diagnostics?.available);
-  const level = Math.max(0, ...Object.values(statuses).map((status) => Number(status.level || 0)));
-  badge.textContent = !available ? "等待" : (level > 0 ? "警告" : "正常");
-  badge.className = `panel-badge ${!available ? "" : (level > 0 ? "warn" : "live")}`;
-  const values = overview.values || {};
-  setText("diagnostic-count", available ? values.anomaly_count ?? 0 : "—");
-  setText("diagnostic-last", values.last_anomaly_code ? `${values.last_anomaly_code} · ${values.last_anomaly_group || "—"} · SEQ ${values.last_anomaly_sequence ?? "—"}` : "无");
-  setText("diagnostic-log", values.log_path || "未启用持久化");
-  const stages = [
-    ["vr_receive_gap", "UDP 网关接收间隔"],
-    ["vr_callback_delay", "网关 → ROS 回调"],
-    ["vr_to_target", "VR → Mapper"],
-    ["target_to_candidate", "Mapper → IK"],
-    ["candidate_to_command", "IK → Arbiter"],
-    ["vr_to_command", "VR → Command"],
-  ];
-  const root = $("latency-rows");
-  const vectors = $("diagnostic-vectors");
-  root.replaceChildren();
-  if (!available) {
-    const row = document.createElement("tr");
-    row.innerHTML = '<td colspan="6" class="empty-cell">等待诊断节点…</td>';
-    root.append(row);
-    vectors.className = "diagnostic-vectors empty-state";
-    vectors.textContent = "等待 IK 跳变量与命令反馈误差…";
-    return;
-  }
-  stages.forEach(([key, label]) => {
-    const row = document.createElement("tr");
-    const fields = [label, latency[`${key}.samples`] || 0, `${number(latency[`${key}.last_ms`] || 0, 2)} ms`, `${number(latency[`${key}.mean_ms`] || 0, 2)} ms`, `${number(latency[`${key}.p95_ms`] || 0, 2)} ms`, `${number(latency[`${key}.max_ms`] || 0, 2)} ms`];
-    fields.forEach((field) => {
-      const cell = document.createElement("td");
-      cell.textContent = field;
-      row.append(cell);
-    });
-    root.append(row);
-  });
-
-  const metrics = Object.entries(latency)
-    .filter(([key]) => key.startsWith("candidate_step_rad.") || key.startsWith("feedback_error_rad."))
-    .sort(([left], [right]) => left.localeCompare(right));
-  vectors.replaceChildren();
-  vectors.className = metrics.length ? "diagnostic-vectors" : "diagnostic-vectors empty-state";
-  if (!metrics.length) {
-    vectors.textContent = "尚无活动手臂的 IK 跳变量与命令反馈误差";
-  } else {
-    metrics.forEach(([key, value]) => {
-      const step = key.startsWith("candidate_step_rad.");
-      const group = key.slice(key.indexOf(".") + 1);
-      const card = document.createElement("div");
-      const title = document.createElement("strong");
-      const kind = document.createElement("span");
-      const reading = document.createElement("code");
-      title.textContent = group;
-      kind.textContent = step ? "IK 单帧跳变" : "命令 → 反馈误差";
-      reading.textContent = `${number(value, 4)} rad / ${number(Number(value) * 180 / Math.PI, 2)}°`;
-      card.append(title, kind, reading);
-      vectors.append(card);
-    });
-  }
-}
-
-function renderSafety(safety) {
-  const label = String(safety.label || "UNKNOWN");
-  const className = label.toLowerCase();
-  const pill = $("safety-state");
-  pill.className = `status-pill ${className}`;
-  pill.innerHTML = `<i></i>${label}`;
-  $("safety-banner").className = `safety-banner panel ${className}`;
-  setText("safety-reason", safety.reason || "等待安全状态");
-  setText("session-label", safety.active_session ? `${safety.active_source} / ${safety.active_session}` : "尚无控制会话");
-  setText("safety-enabled", safety.enabled ? "已启用" : "已关闭");
-  setText("fault-state", safety.estop_active ? "急停" : (safety.fault_latched ? "已锁存" : "正常"));
-}
-
-function renderRuntime(snapshot) {
-  setText("runtime-robot", snapshot.robot_id);
-  setText("runtime-profile", snapshot.profile);
-  setText("runtime-mode", snapshot.mode);
-  setText("runtime-namespace", `/robots/${snapshot.robot_id}`);
-}
-
 function render(snapshot) {
-  latestSnapshot = snapshot;
-  const robot = String(snapshot.robot_id || "robot");
-  setText("robot-name", robot);
-  setText("robot-avatar", robot.slice(0, 3).toUpperCase());
-  setText("profile-label", `${snapshot.profile || "profile"} · ${snapshot.mode || "runtime"}`);
-  setText("mode-label", String(snapshot.mode || "runtime").toUpperCase());
-  setText("uptime", `${snapshot.uptime_sec || 0} s`);
-  renderSafety(snapshot.safety || {});
-  renderMetrics(snapshot.streams || {});
-  renderPipeline(snapshot);
-  renderVr(snapshot);
-  renderCommands(snapshot.commands || {});
-  renderJoints(snapshot);
-  renderStreams(snapshot.streams || {});
-  renderTargets(snapshot.cartesian || {});
-  renderBackend(snapshot.backend_candidates || {});
-  renderDiagnostics(snapshot.diagnostics || {});
-  renderRuntime(snapshot);
-}
-
-function confirmAction(title, message, danger = false) {
-  const dialog = $("confirm-dialog");
-  setText("dialog-title", title);
-  setText("dialog-message", message);
-  setText("dialog-symbol", danger ? "!!" : "!");
-  $("dialog-confirm").className = danger ? "danger" : "primary";
-  dialog.showModal();
-  return new Promise((resolve) => {
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true });
-  });
-}
-
-async function request(path, body) {
-  const buttons = $$("button");
-  buttons.forEach((button) => { button.disabled = true; });
-  try {
-    const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const result = await response.json();
-    if (!response.ok || !result.success) throw new Error(result.reason || `HTTP ${response.status}`);
-    showToast(result.reason || "操作完成");
-  } catch (error) {
-    showToast(`操作失败：${error.message}`, true);
-  } finally {
-    buttons.forEach((button) => { button.disabled = false; });
+  latest=snapshot;const state=snapshot.safety || {}, metrics=snapshot.streams || {}, namespace=`/robots/${snapshot.robot_id}`;
+  set('rosState',connected?'RUNNING':'DISCONNECTED');$('rosState').className=connected?'running':'error';
+  const total=Object.values(metrics).reduce((sum,item)=>sum+(item.total || 0),0);
+  set('rosMeta',`${Object.keys(metrics).length} 个监测流 · ${total} 条消息 · Domain ${runtime?.ros?.domain_id ?? '--'}`);
+  const owner=state.active_source;
+  const sourceLabel=owner && (owner===snapshot.vr?.source_id || /^(vr|pico)$/i.test(owner))?'VR / IK':owner || '待授权';
+  set('controlSourceState',connected ? sourceLabel : '--');
+  $('controlSourceState').className=!connected?'':state.enabled?'running':'error';
+  set('controlSourceMeta',!connected?'等待数据':state.enabled?'命令输出已使能':'命令输出已停用');
+  metric('jointCommandState','jointCommandMeta',metrics.commands,`${namespace}/control/joint_command`);
+  metric('jointFeedbackState','jointFeedbackMeta',metrics.joints,`${namespace}/state/joints`);
+  set('muxSafetyBadge',!connected?'状态未知':state.estop_active?'急停':state.fault_latched?'故障锁存':state.enabled?'已使能':'已停用');
+  set('vrSourceStatus',`${live(metrics.backend_candidates)?'输入正常':'无数据'} · ${metrics.backend_candidates?.total || 0} 帧`);set('exoSourceStatus','未配置 · 0 帧');
+  $('sourceVr').classList.toggle('active',connected && sourceLabel==='VR / IK');
+  set('vrCommandTopic',`${namespace}/motion/backend/joint_candidate`);
+  set('exoCommandTopic','未配置');set('outputCommandTopic',`${namespace}/control/joint_command`);
+  set('muxForwarded',metrics.commands?.total || 0);
+  set('vrState',live(metrics.vr)?'running':'无数据');set('vrMeta',`v${snapshot.vr?.protocol_version || '--'} · ${metrics.vr?.total || 0} 包`);
+  set('vrPeer',live(metrics.vr)?snapshot.vr?.source_id || 'VR 已连接':'VR 未连接');
+  set('teleopBackend',live(metrics.backend_candidates)?'Motion Server 在线':'Motion Server 未响应');set('teleopMode',live(metrics.cartesian_targets)?'跟随':'保持');
+  set('cameraState','未接入');set('cameraMeta','当前 Dashboard 无相机接口');set('wsClients',connected ? snapshot.ws_clients ?? '--' : '0');
+  $('wsClients').nextElementSibling.textContent='WebSocket 客户端';
+  for (const [key,id] of [['head','trackHead'],['left','trackLeft'],['right','trackRight']]) {
+    $(id).className=live(metrics.vr) && snapshot.vr?.tracking?.[key]?.tracked?'online':'offline';
   }
+  set('teleopLeft','未提供');
+  set('teleopRight','未提供');
+  set('teleopFeedback',live(metrics.joints)?'正常':'等待反馈');
+  const commands=new Map(), feedback=new Map();
+  Object.values(snapshot.commands || {}).forEach(group=>(group.names || []).forEach((name,i)=>commands.set(name,group.positions?.[i])));
+  (snapshot.joints?.values || []).forEach(item=>feedback.set(item.name,item.position));
+  const names=[...new Set([...commands.keys(),...feedback.keys()])];
+  $('jointMonitorRows').replaceChildren();set('jointMonitorCount',`${names.length} 个关节`);
+  for(const name of names) {
+    const command=live(metrics.commands)?commands.get(name):null, actual=live(metrics.joints)?feedback.get(name):null;
+    const degrees=value=>value==null?null:value*180/Math.PI;
+    const error=command==null || actual==null?null:degrees(command-actual);
+    const tr=row($('jointMonitorRows'),[name,num(command),num(degrees(command),2),num(actual),num(degrees(actual),2),num(error,2)]);
+    if(error!==null && Math.abs(error)>0.08*180/Math.PI) tr.className='joint-error';
+  }
+  if (!names.length) empty('jointMonitorRows','等待 JointState 消息…',6);
+  renderTopics(snapshot);
+  renderPoses(snapshot);
+  $('diagnosticRows').replaceChildren();
+  Object.entries(snapshot.diagnostics?.statuses || {}).forEach(([key,status])=>row($('diagnosticRows'),[key,!connected?'连接断开':status.level===0?'正常':status.level===1?'警告':'异常',status.message]));
+  if (!$('diagnosticRows').children.length) empty('diagnosticRows','等待控制链路诊断消息',3);
+  controls();
 }
-
-function setConnection(online) {
-  const element = $("socket-state");
-  element.className = online ? "connection online" : "connection offline";
-  element.querySelector("span").textContent = online ? "实时状态已连接" : "连接断开，正在重试";
-  setText("runtime-websocket", online ? "已连接 · 4 Hz" : "未连接");
+async function post(path,body) {
+  const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)});
+  const result=await response.json();if(!response.ok || !result.success) throw new Error(result.reason || '操作失败');return result;
 }
-
+async function safety(resume) {
+  if(!connected || pending)return;
+  pending=true;controls();
+  try {
+    if(resume && (latest?.safety?.fault_latched || latest?.safety?.estop_active))await post('/api/v1/safety/reset',{});
+    await post('/api/v1/safety/enabled',{enabled:resume});toast(resume?'使能请求已确认':'停止请求已确认');
+  }catch(error){toast(error.message);}finally{pending=false;controls();}
+}
 function connect() {
-  clearTimeout(reconnectTimer);
-  const scheme = location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${scheme}://${location.host}/ws`);
-  socket.addEventListener("open", () => setConnection(true));
-  socket.addEventListener("message", (event) => {
-    try { render(JSON.parse(event.data)); } catch (error) { showToast(`状态解析失败：${error.message}`, true); }
-  });
-  socket.addEventListener("close", () => {
-    setConnection(false);
-    reconnectTimer = setTimeout(connect, 1200);
-  });
-  socket.addEventListener("error", () => socket.close());
+  const socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);
+  socket.onmessage=event=>{
+    try {const snapshot=JSON.parse(event.data);if(snapshot.schema!=='hc-dashboard/v1')throw new Error('未知数据格式');connection(true);render(snapshot);
+      clearTimeout(watchdog);watchdog=setTimeout(()=>{connection(false);socket.close();},2000);
+    }catch(error){connection(false);socket.close();}
+  };
+  socket.onerror=()=>socket.close();socket.onclose=()=>{clearTimeout(watchdog);connection(false);clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connect,1500);};
+}
+function initialize() {
+  const unsupported=['homeButton','sourceVr','sourceExoskeleton','startRecordingBtn','stopRecordingBtn','importMcapBtn','batchDeleteDatasets','openImportProfile','deleteProfile','activateProfile','saveConfig'];
+  unsupported.forEach(id=>{if($(id)){$(id).disabled=true;$(id).title='当前 Dashboard 未提供此操作接口';}});
+  document.querySelectorAll('#config input').forEach(el=>{el.readOnly=true;});
+  document.querySelector('[data-path="vr.enabled"]').disabled=true;
+  set('recordingMeta','未录制 · 选择与查看当前机器人话题');
+  set('recordingReadinessText','正在检测话题消息发布与频率标准…');set('recordingBadgeText','未录制');
+  empty('recordingRows','暂无自定义录制规则',7);
+  empty('datasetRows','正在加载数据集列表…',10);set('datasetsSummary','正在加载数据集列表…');
+  set('profileDetail','等待运行配置…');
+  document.querySelector('[data-path="server.host"]').value=location.hostname;
+  document.querySelector('[data-path="server.port"]').value=location.port || (location.protocol==='https:'?'443':'80');
+  document.querySelector('.profile-manager .panel-title p').textContent='查看已安装的机器人 URDF、关节组与运行配置';
+  $('homeButton').title='当前后端未提供回零服务';
+  $('stopButton').title='调用当前安全服务停用运动输出';$('resumeButton').title='复位故障（如有）并请求使能';
+  $('stopButton').onclick=()=>safety(false);$('resumeButton').onclick=()=>safety(true);
+  $('selectAllDatasets').onchange=()=>{document.querySelectorAll('#datasetRows input[type=checkbox]').forEach(input=>input.checked=$('selectAllDatasets').checked);updateDatasetSelection();};
+  $('refreshDatasets').onclick=loadDatasets;
+  $('refreshTopics').onclick=()=>loadRuntime(true);
+  $('refreshProfiles').onclick=()=>loadRuntime();
+  $('robotProfileSelect').onchange=()=>renderProfile($('robotProfileSelect').value);
+  $('saveRecording').onclick=()=>{try{localStorage.setItem('hc.dashboard.selection',JSON.stringify([...selection]));saveRules();toast('已保存浏览器内的选择；当前未接入录制服务');}catch{toast('浏览器不允许保存本地配置');}};
+  $('addRecording').onclick=addRule;
+  window.addEventListener('hashchange',route);route();connect();loadRuntime();loadDatasets();
 }
 
-window.addEventListener("hashchange", route);
-$("joint-filter").addEventListener("input", () => latestSnapshot && renderJoints(latestSnapshot));
-$("enable-button").addEventListener("click", async () => {
-  if (await confirmAction("启用机器人控制", "确认机器人周围无人，并已检查初始姿态、映射方向和关节限位。")) request("/api/v1/safety/enabled", { enabled: true });
-});
-$("disable-button").addEventListener("click", () => request("/api/v1/safety/enabled", { enabled: false }));
-$("reset-button").addEventListener("click", async () => {
-  if (await confirmAction("复位故障锁存", "仅在故障原因已经排除后复位。复位不会自动启用控制。", true)) request("/api/v1/safety/reset");
-});
-route();
-connect();
+const selection = new Map();
+try { const entries=JSON.parse(localStorage.getItem('hc.dashboard.selection') || '[]'); if(Array.isArray(entries))entries.forEach(item=>{if(Array.isArray(item)&&typeof item[0]==='string'&&typeof item[1]==='boolean')selection.set(...item);}); } catch {}
+let customRules = [];
+try { customRules=JSON.parse(localStorage.getItem('hc.dashboard.rules') || '[]'); if(!Array.isArray(customRules))customRules=[];customRules=customRules.filter(rule=>rule&&typeof rule.topic==='string'&&typeof rule.type==='string'); } catch {customRules=[];}
+function element(tag,text,className='') {const el=document.createElement(tag);el.textContent=text;el.className=className;return el;}
+function formatBytes(bytes) {if(!Number.isFinite(Number(bytes)))return '--';let n=Number(bytes);let unit=0;const units=['B','KB','MB','GB'];while(n>=1024 && unit<3){n/=1024;unit++;}return `${n.toFixed(unit?1:0)} ${units[unit]}`;}
+function rateCells(tr,metric,key) {
+  const active=live(metric), thresholds={vr:[60,30],joints:[100,50],cartesian_feedback:[100,50],commands:[100,50],backend_candidates:[60,30],cartesian_targets:[60,30]};
+  const [target,min]=thresholds[key] || [0,0], low=active && metric.hz<min;
+  tr.append(document.createElement('td'),document.createElement('td'),document.createElement('td'));
+  const cells=[...tr.children].slice(-3);
+  cells[0].append(element('span',active?`${num(metric.hz,1)} Hz`:'0.0 Hz',`topic-rate ${active?(low?'low':'ok'):'none'}`));
+  cells[1].append(element('span',min?`≥ ${min} Hz (${target} Hz)`:'--','topic-target-rate'));
+  const badge=element('span','',`topic-status-badge ${active?(low?'status-low':'status-ok'):'status-none'}`);
+  badge.append(document.createElement('i'),document.createTextNode(active?(low?`偏低 (${num(metric.hz,1)} Hz)`:'消息正常'):'无消息 (0 Hz)'));cells[2].append(badge);
+}
+function renderTopics(snapshot) {
+  const ns=`/robots/${snapshot.robot_id}`;
+  const body=$('standardTopicRows');body.replaceChildren();$('configInterfaceRows').replaceChildren();
+  let selected=0,ready=0;
+  for(const [key,label,path,type] of standardStreams(snapshot)) {
+    const topic=`${ns}/${path}`, metric=snapshot.streams?.[path.startsWith('standard/') && path.includes('_ee_pose')?path:key];
+    const tr=row(body,['',label,'',type]);tr.children[2].append(element('code',topic));tr.children[2].title=topic;
+    const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=selection.get(topic) ?? true;
+    checkbox.setAttribute('aria-label',`录制 ${label}`);checkbox.onchange=()=>{selection.set(topic,checkbox.checked);renderTopics(latest);};tr.firstChild.append(checkbox);
+    if(checkbox.checked){selected++;if(live(metric) && metric.hz>=(['joints','commands','cartesian_feedback'].includes(key)?50:30))ready++;}rateCells(tr,metric,key);
+    const interfaceRow=row($('configInterfaceRows'),[label,'',type]);interfaceRow.children[1].append(element('code',topic));
+  }
+  $('recordingReadinessBanner').className=`recording-readiness-banner ${ready===selected?'ready':'warn'}`;
+  set('recordingReadinessText',ready===selected?`标准话题已达到监测频率（共勾选 ${selected} 个）`:`⚠️ 待录制话题检测未达标：${selected-ready} 个无数据或频率偏低（共勾选 ${selected} 个话题，已就绪 ${ready} 个）`);
+  if($('recordingRows').contains(document.activeElement))return;
+  const custom=$('recordingRows');custom.replaceChildren();
+  customRules.forEach((rule,index)=>{
+    const tr=row(custom,['','','','未监测','仅保存本地规则','','']);
+    const check=document.createElement('input');check.type='checkbox';check.checked=rule.enabled!==false;check.onchange=()=>{rule.enabled=check.checked;saveRules();};tr.firstChild.append(check);
+    tr.children[1].append(element('code',rule.topic));tr.children[2].textContent=rule.type;
+    const rate=document.createElement('input');rate.type='number';rate.min='0';rate.value=rule.max_hz;rate.setAttribute('aria-label',`${rule.topic} 最大频率`);rate.onchange=()=>{rule.max_hz=Math.max(0,Number(rate.value)||0);saveRules();};tr.children[5].append(rate);
+    const remove=element('button','删除');remove.onclick=()=>{customRules.splice(index,1);saveRules();renderTopics(latest);};tr.lastChild.append(remove);
+  });
+  if(!customRules.length)empty('recordingRows','暂无自定义录制规则',7);
+}
+function saveRules() {try{localStorage.setItem('hc.dashboard.rules',JSON.stringify(customRules));}catch{toast('浏览器不允许保存本地配置');}}
+function addRule() {
+  const topic=$('recordTopic').value.trim(),type=$('recordType').value;
+  if(!/^\/[A-Za-z0-9_/]+$/.test(topic) || !type){toast('请输入有效的绝对话题名称并选择消息类型');return;}
+  if(customRules.some(rule=>rule.topic===topic)){toast('此话题已在自定义列表中');return;}
+  customRules.push({topic,type,max_hz:Math.max(0,Number($('recordMaxHz').value)||0),enabled:true});saveRules();if(latest)renderTopics(latest);toast('已添加本地录制规则');
+}
+function renderProfile(id) {
+  const profile=runtime?.profiles?.find(item=>item.id===id);if(!profile)return;
+  selectedProfile=id;set('activeProfileBadge',`当前：${runtime.active}`);
+  const detail=$('profileDetail');detail.replaceChildren();
+  const heading=element('div','','profile-heading');heading.append(element('strong',profile.display_name),element('code',profile.id));detail.append(heading);
+  const summary=element('div','','profile-summary');
+  for(const [label,value] of [['格式',profile.schema],['URDF',profile.urdf?.split('/').pop()],['关节',profile.joint_count],['自由关节',profile.free_joint_count],['任务',profile.task_count],['机械臂',profile.arm_count]]){
+    const cell=document.createElement('span');cell.append(element('small',label),element('b',value ?? '--'));summary.append(cell);
+  }detail.append(summary);summary.children[1].title=profile.urdf || '';
+}
+async function loadRuntime(notify=false) {
+  try{
+    const response=await fetch('/api/v1/runtime',{signal:AbortSignal.timeout(5000)});if(!response.ok)throw new Error('运行配置读取失败，请重启 Dashboard 服务');runtime=await response.json();
+    const select=$('robotProfileSelect');const previous=selectedProfile || runtime.active;select.replaceChildren();
+    runtime.profiles.forEach(profile=>select.append(new Option(`${profile.display_name}${profile.id===runtime.active?'（当前）':''}`,profile.id)));
+    select.value=runtime.profiles.some(p=>p.id===previous)?previous:runtime.active;renderProfile(select.value);
+    const active=runtime.profiles.find(profile=>profile.id===runtime.active);
+    const fields={...Object.fromEntries(Object.entries(runtime.server).map(([k,v])=>[`server.${k}`,v])),...Object.fromEntries(Object.entries(runtime.ros).map(([k,v])=>[`ros.${k}`,v])),...Object.fromEntries(Object.entries(active?.vr || {}).map(([k,v])=>[`vr.${k}`,v]))};
+    for(const [path,value] of Object.entries(fields)){const input=document.querySelector(`[data-path="${path}"]`);if(input)input.value=value;}
+    const enabled=document.querySelector('[data-path="vr.enabled"]');enabled.checked=Boolean(active?.vr?.pose_port);
+    document.querySelectorAll('[data-path]').forEach(input=>{if(!(input.dataset.path in fields) && input.type!=='checkbox')input.placeholder='当前未配置';});
+    $('rosTopicOptions').replaceChildren();const types=new Set(['sensor_msgs/msg/JointState','geometry_msgs/msg/PoseStamped','std_msgs/msg/String']);
+    runtime.topics.forEach(topic=>{$('rosTopicOptions').append(new Option(topic.name,topic.name));topic.types.forEach(type=>types.add(type));});
+    $('recordType').replaceChildren();[...types].sort().forEach(type=>$('recordType').append(new Option(type,type)));$('recordType').value='sensor_msgs/msg/JointState';
+    if(latest)render(latest);if(notify)toast(`发现 ${runtime.topics.length} 个 ROS 2 话题`);
+  }catch(error){set('profileDetail',error.message);if(notify)toast(error.message);}
+}
+async function loadDatasets() {
+  try{
+    const response=await fetch('/api/v1/datasets',{signal:AbortSignal.timeout(5000)});if(!response.ok)throw new Error('数据集列表读取失败，请重启 Dashboard 服务');
+    const data=await response.json();datasetItems=data.items;const total=data.items.reduce((sum,item)=>sum+(Number(item.bytes_written)||0),0);
+    set('datasetsSummary',`共 ${data.items.length} 个数据集 · 总大小 ${formatBytes(total)} · 存储目录: ${data.directory}`);
+    $('topicRecordingDirectory').value=data.directory;$('topicRecordingDirectory').readOnly=true;
+    set('recordingMeta',`未录制 · 保存目录：${data.directory}`);
+    $('datasetRows').replaceChildren();
+    data.items.forEach(item=>{
+      const duration=item.completed_at?Math.max(0,(Date.parse(item.completed_at)-Date.parse(item.created_at))/1000):null;
+      const tr=row($('datasetRows'),['',item.name || item.dataset_id,item.metadata?.robot_id || '--',formatBytes(item.bytes_written),duration===null?'--':`${num(duration,1)} s`,item.message_count || 0,item.topics?.length || 0,item.created_at?new Date(item.created_at).toLocaleString():'--',item.state,'']);
+      const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.setAttribute('aria-label',`选择 ${item.name || item.dataset_id}`);checkbox.onchange=updateDatasetSelection;tr.firstChild.append(checkbox);
+      const detail=element('button','详情');detail.onclick=()=>showDataset(item);tr.lastChild.append(detail);
+    });
+    $('selectAllDatasets').checked=false;updateDatasetSelection();
+    if(!data.items.length)empty('datasetRows','暂无录制数据集文件。当前目录尚未生成 MCAP 数据集。',10);
+  }catch(error){set('datasetsSummary',error.message);empty('datasetRows',error.message,10);}
+}
+function updateDatasetSelection() {
+ const boxes=[...document.querySelectorAll('#datasetRows input[type=checkbox]')], count=boxes.filter(box=>box.checked).length;set('selectedDatasetCount',count);$('selectAllDatasets').checked=boxes.length>0 && count===boxes.length;$('selectAllDatasets').indeterminate=count>0 && count<boxes.length;
+}
+function showDataset(item) {
+  set('datasetDetailTitle',item.name || item.dataset_id);set('datasetDetailMeta',item.dataset_id);
+  const summary=$('datasetDetailSummary');summary.replaceChildren();
+  for(const [label,value] of [['文件大小',formatBytes(item.bytes_written)],['消息总数',item.message_count || 0],['录制话题',item.topics?.length || 0],['状态',item.state]]){
+    const cell=document.createElement('span');cell.append(element('small',label),element('b',value));summary.append(cell);
+  }
+  $('datasetDetailChannelRows').replaceChildren();(item.topics || []).forEach(topic=>row($('datasetDetailChannelRows'),[topic,'--','--','--']));
+  $('datasetDetailDialog').showModal();
+}
+initialize();
+
+function renderPoses(snapshot) {
+ const body=$('cartesianMonitorRows');body.replaceChildren();
+ for(const [key,kind,metric] of [['cartesian','目标','cartesian_targets'],['cartesian_feedback','反馈','cartesian_feedback']]) {
+  for(const group of snapshot[key]?.groups || []) {
+   const valid=live(snapshot.streams?.[metric]) && group.valid!==false;
+   const pose=group.pose || {};
+   row(body,[group.name,kind,group.reference_frame,group.tip_frame,valid?'有效':'无效 / 超时',...['x','y','z','qx','qy','qz','qw'].map(k=>valid?num(pose[k]):'--')]);
+  }
+ }
+ if(!body.children.length)empty('cartesianMonitorRows','等待末端目标与实际位姿反馈…',12);
+}

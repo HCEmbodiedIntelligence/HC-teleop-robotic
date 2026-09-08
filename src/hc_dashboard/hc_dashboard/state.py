@@ -62,6 +62,7 @@ class DashboardModel:
         "vr": (2.0, 0.25),
         "joints": (2.0, 0.25),
         "cartesian_targets": (2.0, 0.35),
+        "cartesian_feedback": (2.0, 0.35),
         "backend_candidates": (2.0, 0.35),
         "commands": (2.0, 0.35),
     }
@@ -89,6 +90,7 @@ class DashboardModel:
         self._vr: dict[str, Any] = {}
         self._joints: dict[str, Any] = {"count": 0, "values": []}
         self._cartesian: dict[str, Any] = {"groups": []}
+        self._cartesian_feedback = {"groups": []}
         self._backend: dict[str, dict[str, Any]] = {}
         self._commands: dict[str, dict[str, Any]] = {}
         self._diagnostics: dict[str, Any] = {"available": False, "statuses": {}}
@@ -103,8 +105,16 @@ class DashboardModel:
                 self._vr = copy.deepcopy(payload)
             elif stream == "joints":
                 self._joints = copy.deepcopy(payload)
+            elif stream == "cartesian_feedback":
+                self._cartesian_feedback = copy.deepcopy(payload)
             elif stream == "cartesian_targets":
                 self._cartesian = copy.deepcopy(payload)
+
+    def observe_standard_pose(self, topic: str) -> None:
+        with self._lock:
+            if topic not in self._streams:
+                self._streams[topic] = StreamMetric(2.0, 0.35)
+            self._streams[topic].observe(time.monotonic())
 
     def observe_group(self, stream: str, group_name: str, payload: dict[str, Any]) -> None:
         if stream not in {"backend_candidates", "commands"}:
@@ -136,6 +146,7 @@ class DashboardModel:
                 "vr": copy.deepcopy(self._vr),
                 "joints": copy.deepcopy(self._joints),
                 "cartesian": copy.deepcopy(self._cartesian),
+                "cartesian_feedback": copy.deepcopy(self._cartesian_feedback),
                 "backend_candidates": copy.deepcopy(self._backend),
                 "commands": copy.deepcopy(self._commands),
                 "diagnostics": copy.deepcopy(self._diagnostics),

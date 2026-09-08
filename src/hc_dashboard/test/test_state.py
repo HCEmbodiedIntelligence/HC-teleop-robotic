@@ -38,3 +38,14 @@ def test_dashboard_model_copies_diagnostics_snapshot():
 def test_diagnostic_level_accepts_humble_uint8_representation():
     assert _diagnostic_level(1) == 1
     assert _diagnostic_level(b"\x02") == 2
+
+
+def test_cartesian_feedback_snapshot_is_independent():
+    model = DashboardModel('x1')
+    payload = {'groups': [{'name': 'left_arm', 'valid': False}]}
+    model.observe('cartesian_feedback', payload)
+    payload['groups'][0]['valid'] = True
+    snapshot = model.snapshot()
+    assert snapshot['cartesian_feedback']['groups'][0]['valid'] is False
+    assert snapshot['streams']['cartesian_feedback']['total'] == 1
+    assert snapshot['cartesian']['groups'] == []
