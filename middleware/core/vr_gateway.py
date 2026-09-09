@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any, Callable
 
+from .network import enable_packet_info, receive_packet, reply_packet
+
 from .protocol import (
     DISCOVERY_REQUEST,
     PacketError,
@@ -131,6 +133,7 @@ class VrGateway:
                 (self.config["listen_host"], int(self.config["discovery_port"]))
             )
             discovery_socket.setblocking(False)
+            discovery_packet_info = enable_packet_info(discovery_socket)
             response = f"PICO_RECEIVER_V1|{self.config['pose_port']}".encode("ascii")
             self._set_status(state="running", error=None)
 
@@ -153,12 +156,15 @@ class VrGateway:
                     # actual network receive path instead of callback latency.
                     while True:
                         try:
-                            packet, sender = current_socket.recvfrom(65535)
+                            if current_socket is discovery_socket:
+                                packet, sender, packet_info = receive_packet(current_socket, discovery_packet_info)
+                            else:
+                                packet, sender = current_socket.recvfrom(65535)
                         except BlockingIOError:
                             break
                         if current_socket is discovery_socket:
                             if packet.strip() == DISCOVERY_REQUEST:
-                                discovery_socket.sendto(response, sender)
+                                reply_packet(discovery_socket, response, sender, packet_info)
                             continue
 
                         now = time.monotonic()

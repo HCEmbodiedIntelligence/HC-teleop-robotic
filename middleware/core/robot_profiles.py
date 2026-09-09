@@ -17,6 +17,7 @@ import yaml
 
 
 STANDARD_TOPICS = {
+    "vr_frame": "/vrdata",
     "joint_state": "/hc_teleop/joint_states",
     "joint_target": "/hc_teleop/joint_cmd_arm",
     "joint_command": "/hc_teleop/joint_cmd",
@@ -942,6 +943,7 @@ class RobotProfileManager:
             control = cfg.get("control", {})
             body = cfg.get("body", {})
             return {
+                "vr_frame": STANDARD_TOPICS["vr_frame"],
                 "joint_state": control.get("joint_state_topic", STANDARD_TOPICS["joint_state"]),
                 "joint_target": control.get("generic_command_topic", STANDARD_TOPICS["joint_target"]),
                 "joint_command": STANDARD_TOPICS["joint_command"],

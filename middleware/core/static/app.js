@@ -10,6 +10,7 @@ let discoveredTopics = [];
 let latestTopicHealth = {};
 const jointMonitor = {command:new Map(), feedback:new Map()};
 const standardTopicStandards = {
+  vr_frame: { target_hz: 60, min_hz: 30 },
   joint_state: { target_hz: 100, min_hz: 50 },
   joint_target: { target_hz: 100, min_hz: 50 },
   joint_command: { target_hz: 100, min_hz: 50 },
@@ -20,6 +21,7 @@ const standardTopicStandards = {
   base_move: { target_hz: 60, min_hz: 20 },
 };
 const standardTopicTypes = {
+  vr_frame: 'std_msgs/msg/String',
   joint_state:'sensor_msgs/msg/JointState', joint_target:'sensor_msgs/msg/JointState',
   joint_command:'sensor_msgs/msg/JointState', ee_target:'geometry_msgs/msg/PoseArray',
   ee_visual_target:'geometry_msgs/msg/PoseArray', ee_actual:'geometry_msgs/msg/PoseArray',
@@ -521,7 +523,7 @@ function collectConfig() {
 
 function renderStandardTopics() {
   const labels={
-    joint_state:'关节反馈', joint_target:'控制器关节目标', joint_command:'机器人关节命令',
+    vr_frame:'VR Frame', joint_state:'关节反馈', joint_target:'控制器关节目标', joint_command:'机器人关节命令',
     ee_target:'控制器末端目标', ee_visual_target:'可视化末端目标', ee_actual:'实际末端位姿',
     solver_state:'求解器状态', base_move:'底盘运动',
   };
@@ -553,7 +555,7 @@ function renderStandardTopics() {
 
 function renderConfigInterface() {
   const labels={
-    joint_state:'关节反馈', joint_target:'控制器关节目标', joint_command:'机器人关节命令',
+    vr_frame:'VR Frame', joint_state:'关节反馈', joint_target:'控制器关节目标', joint_command:'机器人关节命令',
     ee_target:'控制器末端目标', ee_visual_target:'可视化末端目标', ee_actual:'实际末端位姿',
     solver_state:'求解器状态', base_move:'底盘运动',
   };
@@ -639,6 +641,7 @@ function renderProfiles(preselect='') {
 async function loadProfiles(preselect='') {
   try {
     profilesData=await api('/api/robot-profiles');
+    profilesData.standard_topics={vr_frame:config?.vr?.data_topic||'/vrdata',...profilesData.standard_topics};
     renderProfiles(preselect);
   } catch(error) {
     toast(`机器人配置加载失败：${error.message}`,true);

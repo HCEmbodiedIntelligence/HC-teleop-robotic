@@ -25,7 +25,7 @@ cleanup() {
   log "通用控制层已退出；外部硬件适配项目未被触碰。"
 }
 trap cleanup EXIT
-trap 'exit 0' INT TERM
+trap 'exit 0' HUP INT TERM
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -95,13 +95,13 @@ fi
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 log "机器人配置: ${ROBOT_NAME} (${PROFILE_DIR})"
 log "启动 Pinocchio v23 逆解..."
-setsid "${CONTROLLER_COMMAND[@]}" \
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${CONTROLLER_COMMAND[@]}" \
   >"${LOG_DIR}/v23_solver.log" 2>&1 &
 PIDS+=("$!")
 sleep 1
 
 log "启动 VR 到标准机器人接口控制节点..."
-setsid /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py" \
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py" \
   --config "${ARM_CONFIG}" --backend v23 \
   >"${LOG_DIR}/teleop_controller.log" 2>&1 &
 PIDS+=("$!")

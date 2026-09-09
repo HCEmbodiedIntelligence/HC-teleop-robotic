@@ -208,8 +208,14 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 
 按住左手柄中指 Grip 后，左主摇杆 Y 控制底盘前进/后退，X 控制左/右横移。摇杆平移直接使用左手柄 `Joy` 数据，不再依赖头显跟踪是否有效；松开 Grip、输入超时、急停或双臂与腰部回零时都会发布零命令。
 
+X1 的 `./run.sh sim` 会应用 `arm_teleop.yaml` 中的 `simulation_body`，启用三个腰关节。按住左 Grip 时以当前头显姿态为参考：转头控制底盘转向，头部位移控制腰部升降/俯仰；松开后再次按住会重新设定参考。底盘偏航死区为 0.18 rad（约 10°），最大角速度为 0.45 rad/s。仿真按时间积分速度命令，200 ms 未收到新底盘命令即停止；真机模式保留原有腰部关闭配置。
+
 机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
+
+X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TARGET`（橙色标签、长坐标轴），橙色连线表示位置误差。实际位姿由关节反馈和 `camera_head` FK 得到，目标是头显输入映射到腰部升降/俯仰后对应的机器人头部位姿，并非 VR 房间中的原始绝对位置。松开左 Grip 或停用控制时目标回到实际位姿；数据断流 0.5 s 后隐藏标记。话题 `/hc_teleop/head_tracking_poses` 使用 `geometry_msgs/msg/PoseArray`，顺序为 `[actual, target]`，`header.frame_id=robot_base` 表示 PyBullet 模型根部位姿坐标系。需要带 GUI 启动仿真才能看到标记。
 
 默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd_vr → Command Mux → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `adapters/v23/`，X1 参数位于 `adapters/robots/x1/controller_v23.yml`。
 
 新机器人优先从网页或 CLI 导入包含 URDF、YAML、Mesh 和 `arm_teleop.yaml` 的 ZIP 压缩包；也可手工在 `adapters/robots/<机器人名>/` 配置这些文件。默认选择来自 `middleware/config.yaml`，`HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 仍可作为启动时覆盖项。
+
+X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；`+Z`（前移）控制前倾、`-Z`（后移）控制后仰。俯仰输入采用位置增量，不使用头显低头/抬头的旋转角度。按住左 Grip 时建立参考，松开再按可重新定中心。

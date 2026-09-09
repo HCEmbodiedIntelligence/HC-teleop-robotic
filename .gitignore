@@ -19,3 +19,7 @@ runtime/
 .idea/
 .DS_Store
 *~
+
+# Runtime supervisor is source code, not generated session data.
+!tools/runtime/
+!tools/runtime/**

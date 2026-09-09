@@ -153,10 +153,22 @@ class SimRobotController(Node, AssembledRobot):
             Bool, f"/io_teleop/hardware_ready", 1
         )
         self.hardware_ready = True
+        self.head_tracking_poses = None
+        self.head_tracking_stamp = 0.0
+        self.head_frame_ids = [None, None]
+        self.head_text_ids = [-1, -1]
+        self.head_error_id = -1
+        self.head_tracking_sub = self.create_subscription(
+            PoseArray, "/hc_teleop/head_tracking_poses",
+            self.head_tracking_callback, 1,
+        )
         self.hardware_ready_pub.publish(Bool(data=True))
 
         # Timer for publishing joint states
         self.joint_state_pub_rate = 100
+        self.base_velocity = [0.0, 0.0, 0.0]
+        self.base_command_stamp = 0.0
+        self.base_update_stamp = time.monotonic()
         self.timer = self.create_timer(1.0 / 100, self.update_joint_state)
         
         # Service server
@@ -179,6 +191,8 @@ class SimRobotController(Node, AssembledRobot):
         return response
 
     def update_joint_state(self):
+        self._update_base_velocity()
+        self._draw_head_tracking()
         joint_state = JointState()
         joint_state.header.stamp = self.get_clock().now().to_msg()
         joint_state.name = []
@@ -263,12 +277,76 @@ class SimRobotController(Node, AssembledRobot):
         else:
             time.sleep(0.001)
 
+    def head_tracking_callback(self, msg):
+        if msg.header.frame_id != "robot_base" or len(msg.poses) != 2:
+            return
+        poses = [pose_msg_to_list(pose) for pose in msg.poses]
+        if not all(np.isfinite(position).all() and np.isfinite(orientation).all()
+                   for position, orientation in poses):
+            return
+        self.head_tracking_poses = poses
+        self.head_tracking_stamp = time.monotonic()
+
+    def _draw_head_tracking(self):
+        if self.head_tracking_poses is None:
+            return
+        if time.monotonic() - self.head_tracking_stamp > 0.5:
+            for item in [*(self.head_frame_ids[0] or []),
+                         *(self.head_frame_ids[1] or []),
+                         *self.head_text_ids, self.head_error_id]:
+                if item >= 0:
+                    p.removeUserDebugItem(item, physicsClientId=self.physics_clent_id)
+            self.head_frame_ids = [None, None]
+            self.head_text_ids = [-1, -1]
+            self.head_error_id = -1
+            self.head_tracking_poses = None
+            return
+        # Match the controller's getBasePositionAndOrientation reference.
+        root = p.getBasePositionAndOrientation(
+            self.robot_id, physicsClientId=self.physics_clent_id)
+        poses = [multiply_transforms(root, pose) for pose in self.head_tracking_poses]
+        for i, (pose, label, color) in enumerate(zip(
+                poses, ("HEAD ACTUAL", "HEAD TARGET"), ((0, 1, 1), (1, 0.65, 0)))):
+            self.head_frame_ids[i] = debug_draw_pose(
+                pose, self.head_frame_ids[i], line_width=2.0 if i == 0 else 5.0,
+                line_length=0.12 if i == 0 else 0.20,
+                physics_client_id=self.physics_clent_id)
+            position = list(pose[0])
+            position[2] += 0.06 + i * 0.06
+            self.head_text_ids[i] = p.addUserDebugText(
+                label, position, textColorRGB=color, textSize=1.2,
+                replaceItemUniqueId=self.head_text_ids[i],
+                physicsClientId=self.physics_clent_id)
+        self.head_error_id = p.addUserDebugLine(
+            poses[0][0], poses[1][0], lineColorRGB=[1, 0.65, 0], lineWidth=2,
+            replaceItemUniqueId=self.head_error_id,
+            physicsClientId=self.physics_clent_id)
+
     def target_base_move_callback(self, msg):
-        delta_pos = msg.data[1]
-        delta_yaw = msg.data[0]
+        if len(msg.data) != 3 or not np.isfinite(msg.data).all():
+            self.base_velocity = [0.0, 0.0, 0.0]
+            return
+        if self.configs.get("base_command_mode", "delta") == "velocity":
+            self.base_velocity = list(msg.data)
+            self.base_command_stamp = time.monotonic()
+            return
+        # Historical delta profiles use local Y for forward motion.
+        self._move_base(msg.data[0], msg.data[2], msg.data[1])
+
+    def _update_base_velocity(self):
+        now = time.monotonic()
+        # Bound a delayed tick; never replay elapsed motion after a stall.
+        dt = min(max(now - self.base_update_stamp, 0.0), 0.05)
+        self.base_update_stamp = now
+        if now - self.base_command_stamp > 0.2:
+            self.base_velocity = [0.0, 0.0, 0.0]
+        if any(self.base_velocity):
+            self._move_base(*(value * dt for value in self.base_velocity))
+
+    def _move_base(self, delta_yaw, delta_pos, delta_lateral):
         tar_pose = multiply_transforms(
             self.base.pose,
-            [[0, delta_pos, 0], p.getQuaternionFromEuler([0, 0, delta_yaw])],
+            [[delta_pos, delta_lateral, 0], p.getQuaternionFromEuler([0, 0, delta_yaw])],
         )
         self.base.reset_base(tar_pose)
 

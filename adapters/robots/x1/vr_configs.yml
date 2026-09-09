@@ -2,6 +2,7 @@
 # 修改 URDF 拓扑或关节顺序后必须重新核对，不能当作 ROS JointState 数组下标。
 urdf_path: urdf/hc_tj_robot.urdf
 robot_name: x1
+base_command_mode: velocity  # [yaw rad/s, forward m/s, lateral m/s]
 wo_controller: false  # false 表示仿真同时接收外部关节控制命令。
 # 机器人根节点在 PyBullet 世界坐标系中的初始位姿，四元数顺序为 XYZW。
 base_pose:

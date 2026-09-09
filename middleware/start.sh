@@ -23,7 +23,7 @@ cleanup() {
   warn "正在关闭网页、VR 网关和录制进程..."
   local pid
   for pid in "${PIDS[@]}"; do
-    kill -TERM "${pid}" 2>/dev/null || true
+    kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
   done
   for pid in "${PIDS[@]}"; do
     wait "${pid}" 2>/dev/null || true
@@ -32,7 +32,7 @@ cleanup() {
 }
 
 trap cleanup EXIT
-trap 'exit 0' INT TERM
+trap 'exit 0' HUP INT TERM
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -100,14 +100,14 @@ if [[ "${START_MONITOR}" == true ]]; then
     MONITOR_SCRIPT="${PROJECT_ROOT}/middleware/session_monitor.py"
   if [[ -f "${MONITOR_SCRIPT}" ]]; then
     log "启动遥操作事件记录器..."
-    /usr/bin/python3 -u "${MONITOR_SCRIPT}" \
+    setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${MONITOR_SCRIPT}" \
       --log-file "${LOG_DIR}/teleop_operations.log" > "${LOG_DIR}/monitor.log" 2>&1 &
     PIDS+=("$!")
   fi
 fi
 
 log "启动前端、系统配置、ZIP 导入与 MCAP 录制服务..."
-/usr/bin/python3 -u "${PROJECT_ROOT}/middleware/server.py" \
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/middleware/server.py" \
   --config "${CONFIG_PATH}" "${SERVER_ARGS[@]}" > >(tee "${LOG_DIR}/middleware.log") 2>&1 &
 SERVER_PID="$!"
 PIDS+=("${SERVER_PID}")

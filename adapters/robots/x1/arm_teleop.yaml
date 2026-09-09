@@ -58,6 +58,10 @@ arms:
     - Joint5_L
     - Joint6_L
     - Joint7_L
+simulation_body:
+  # 仅 run.sh sim 应用；真机腰部仍需完成标定后单独启用。
+  enabled: true
+  waist_joint_names: [leg_1, leg_2, zhi]
 body:
   # 当前腰部控制关闭；重新启用时取消下面三个腰关节注释并完成真机标定。
   # waist_joint_names:
@@ -67,6 +71,7 @@ body:
   enabled: false
   waist_joint_names: []
   torso_link: zhi_Link
+  visualization_head_link: camera_head
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
   # Joy.axes 下标：0=Trigger、1=Grip、2/3=主摇杆 X/Y、4/5=副摇杆 X/Y。
@@ -83,14 +88,14 @@ body:
   yaw_gain: 0.6
   yaw_direction: -1.0
   max_angular_velocity: 0.45
-  # 头显 position=[x,y,z] 的数组下标；这是兼容既有标定的位移控制通道。
-  head_height_axis: 2
-  head_pitch_position_axis: 1
+  # 原始 VR position：+Y 向上、+Z 向前，与手柄位移映射一致。
+  head_height_axis: 1
+  head_pitch_position_axis: 2
   # 头部位移到腰部高度/俯仰的缩放、方向和最大变化量。
   height_scale: 0.5
   pitch_scale: 0.8
-  height_direction: -1.0
-  pitch_direction: -1.0
+  height_direction: 1.0
+  pitch_direction: 1.0
   max_height_delta: 0.18
   max_pitch_delta: 0.35
   # 腰部俯仰在世界坐标系中的旋转轴。

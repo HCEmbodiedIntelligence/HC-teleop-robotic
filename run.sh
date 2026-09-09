@@ -160,6 +160,7 @@ if [[ -z "${LOG_DIR}" ]]; then
 fi
 mkdir -p "${LOG_DIR}/control" "${LOG_DIR}/middleware"
 chmod 700 "${LOG_DIR}" "${LOG_DIR}/control" "${LOG_DIR}/middleware"
+mkdir -p "${PROJECT_ROOT}/runtime/teleop_logs"
 ln -sfn "${LOG_DIR}" "${PROJECT_ROOT}/runtime/teleop_logs/latest"
 
 MIDDLEWARE_ARGS=(
@@ -239,7 +240,7 @@ stop_tree() {
 
 cleanup() {
   local status=$?
-  trap - INT TERM EXIT
+  trap - HUP INT TERM EXIT
   stop_tree "${DIAGNOSTICS_PID}"
   stop_tree "${SIM_PID}"
   stop_tree "${CONTROL_PID}"
@@ -250,21 +251,22 @@ cleanup() {
   [[ -z "${MIDDLEWARE_PID}" ]] || wait "${MIDDLEWARE_PID}" 2>/dev/null || true
   exit "${status}"
 }
-trap cleanup INT TERM EXIT
+trap cleanup HUP INT TERM EXIT
 
 # Start discovery first so the headset can pair while IK and simulation load.
-setsid "${PROJECT_ROOT}/middleware/start.sh" "${MIDDLEWARE_ARGS[@]}" &
+export HC_TELEOP_MODE="${MODE}"
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${PROJECT_ROOT}/middleware/start.sh" "${MIDDLEWARE_ARGS[@]}" &
 MIDDLEWARE_PID=$!
-setsid "${PROJECT_ROOT}/adapters/start.sh" \
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${PROJECT_ROOT}/adapters/start.sh" \
   --config "${MIDDLEWARE_CONFIG}" --log-dir "${LOG_DIR}/control" &
 CONTROL_PID=$!
 
 if [[ "${MODE}" == sim ]]; then
-  setsid /usr/bin/python3 "${SIM_ENTRY}" "${SIM_ARGS[@]}" "${SIM_ROS_ARGS[@]}" &
+  setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 "${SIM_ENTRY}" "${SIM_ARGS[@]}" "${SIM_ROS_ARGS[@]}" &
   SIM_PID=$!
   if [[ "${DIAGNOSTICS}" == true && -f "${PROJECT_ROOT}/tools/diagnostics/teleop_diagnostics.py" ]]; then
     DIAGNOSTICS_LOG="${TELEOP_LOG_PATH:-${LOG_DIR}/teleop_diagnostics.csv}"
-    setsid /usr/bin/python3 -m tools.diagnostics.teleop_diagnostics \
+    setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -m tools.diagnostics.teleop_diagnostics \
       --output "${DIAGNOSTICS_LOG}" --rate "${TELEOP_LOG_RATE:-30}" &
     DIAGNOSTICS_PID=$!
     echo "[HC] diagnostics=${DIAGNOSTICS_LOG}"

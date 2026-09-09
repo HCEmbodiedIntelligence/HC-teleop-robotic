@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,8 @@ class RobotArmTeleopNode(Node):
         self.config_path = Path(config_path).expanduser().resolve()
         with self.config_path.open(encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream)
+        if os.environ.get("HC_TELEOP_MODE") == "sim":
+            self.config["body"].update(self.config.get("simulation_body", {}))
         self._validate_config()
         self.control = self.config["control"]
         self.body_config = self.config["body"]
@@ -227,6 +230,9 @@ class RobotArmTeleopNode(Node):
         )
         self.base_pub = self.create_publisher(
             Float64MultiArray, self.body_config["base_command_topic"], 10
+        )
+        self.head_visualization_pub = self.create_publisher(
+            PoseArray, "/hc_teleop/head_tracking_poses", latest_reliable_qos
         )
         self.status_pub = self.create_publisher(
             String, self.control["status_topic"], 10
@@ -1639,7 +1645,7 @@ class RobotArmTeleopNode(Node):
 
     def _solve_waist(
         self,
-        target_height: float,
+        target_position: np.ndarray,
         target_orientation: np.ndarray,
         seed: np.ndarray,
     ) -> np.ndarray:
@@ -1648,24 +1654,27 @@ class RobotArmTeleopNode(Node):
         pitch_axis = np.asarray(self.body_config["pitch_axis_world"], dtype=float)
         pitch_axis /= np.linalg.norm(pitch_axis)
         damping = float(self.body_config["ik_damping"])
+        # PyBullet Jacobians are expressed in the base frame; FK errors below
+        # are world-frame quantities. Rotate both linear and angular rows.
+        base_rotation = np.asarray(
+            bullet.getMatrixFromQuaternion(self._root_pose()[1]), dtype=float
+        ).reshape(3, 3)
         for _ in range(int(self.body_config["ik_iterations"])):
             self._set_group(body.joint_indices, q)
             position, orientation = self._link_pose(body.torso_index)
             rotation_delta = orientation_error(target_orientation, orientation)
-            error = np.asarray(
-                [target_height - position[2], float(pitch_axis @ rotation_delta)]
-            )
+            error = np.r_[target_position - position, float(pitch_axis @ rotation_delta)]
             if np.linalg.norm(error) < 0.002:
                 break
             linear, angular = self._jacobian(body.torso_index)
             matrix = np.vstack(
                 [
-                    linear[2, body.dof_indices],
-                    pitch_axis @ angular[:, body.dof_indices],
+                    (base_rotation @ linear)[:, body.dof_indices],
+                    pitch_axis @ (base_rotation @ angular)[:, body.dof_indices],
                 ]
             )
             update = matrix.T @ np.linalg.solve(
-                matrix @ matrix.T + np.eye(2) * damping * damping, error
+                matrix @ matrix.T + np.eye(4) * damping * damping, error
             )
             norm = float(np.linalg.norm(update))
             max_update = float(self.body_config["ik_max_update"])
@@ -1674,7 +1683,7 @@ class RobotArmTeleopNode(Node):
             q = np.clip(q + update, body.lower, body.upper)
         self._set_group(body.joint_indices, q)
         position, orientation = self._link_pose(body.torso_index)
-        body.lift_error = abs(target_height - float(position[2]))
+        body.lift_error = abs(float(target_position[2] - position[2]))
         body.pitch_error = abs(float(pitch_axis @ orientation_error(target_orientation, orientation)))
         return q
 
@@ -1698,39 +1707,14 @@ class RobotArmTeleopNode(Node):
         self.get_logger().info("left clutch engaged: base + waist")
 
     def _update_body(self, command: dict[str, float]) -> None:
+        self._update_body_target()
         body = self.body
-        assert body.head_pose is not None
-        assert body.reference_head is not None
-        assert body.reference_torso is not None
-        delta_height = float(
-            body.head_pose[0][int(self.body_config["head_height_axis"])]
-            - body.reference_head[0][int(self.body_config["head_height_axis"])]
-        )
-        delta_pitch = float(
-            body.head_pose[0][int(self.body_config["head_pitch_position_axis"])]
-            - body.reference_head[0][int(self.body_config["head_pitch_position_axis"])]
-        )
-        lift = np.clip(
-            delta_height
-            * float(self.body_config.get("height_direction", 1.0))
-            * float(self.body_config["height_scale"]),
-            -float(self.body_config["max_height_delta"]),
-            float(self.body_config["max_height_delta"]),
-        )
-        pitch = np.clip(
-            delta_pitch
-            * float(self.body_config.get("pitch_direction", 1.0))
-            * float(self.body_config["pitch_scale"]),
-            -float(self.body_config["max_pitch_delta"]),
-            float(self.body_config["max_pitch_delta"]),
-        )
-        target_height = float(body.reference_torso[0][2] + lift)
-        target_orientation = quaternion_multiply(
-            quaternion_from_axis_angle(self.body_config["pitch_axis_world"], pitch),
-            body.reference_torso[1],
+        assert body.target_base is not None
+        target_position, target_orientation = self._world_pose(
+            self._root_pose(), body.target_base
         )
         solution = self._solve_waist(
-            target_height, target_orientation, body.last_solution
+            target_position, target_orientation, body.last_solution
         )
         previous = np.asarray(
             [self.last_command.get(name, self.joint_state[name]) for name in body.joint_names]
@@ -2398,6 +2382,35 @@ class RobotArmTeleopNode(Node):
             ) = local[1]
             message.poses.append(pose)
         self.actual_pub.publish(message)
+        self._publish_head_tracking_poses()
+
+    def _publish_head_tracking_poses(self) -> None:
+        """Feedback and mapped head target, relative to the model base pose."""
+        head_link = self.body_config.get("visualization_head_link")
+        if head_link not in self.link_by_name:
+            return
+        root = self._root_pose()
+        actual_world = self._link_pose(self.link_by_name[head_link])
+        actual = self._relative_pose(root, actual_world)
+        target = actual
+        body = self.body
+        if (body.active and body.target_base is not None
+                and self.enabled and self.hardware_ready
+                and self._monotonic() - body.head_stamp <= float(self.control["pose_timeout"])):
+            head_in_torso = self._relative_pose(
+                self._link_pose(body.torso_index), actual_world
+            )
+            target = self._world_pose(body.target_base, head_in_torso)
+        message = PoseArray()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = "robot_base"
+        for position, orientation in (actual, target):
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = position
+            (pose.orientation.x, pose.orientation.y,
+             pose.orientation.z, pose.orientation.w) = orientation
+            message.poses.append(pose)
+        self.head_visualization_pub.publish(message)
 
     def _publish_status(self, now: float, feedback_fresh: bool) -> None:
         if now - self.last_status_publish < 0.2:

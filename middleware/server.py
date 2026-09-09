@@ -30,15 +30,19 @@ def main() -> None:
         )
         raise SystemExit(2)
 
-    from middleware.core.app import create_app, local_ip
+    from middleware.core.app import create_app
+    from middleware.core.network import local_addresses
     from middleware.core.config import ConfigStore
 
     store = ConfigStore(args.config)
     config = store.load()
     host = args.host or config["server"]["host"]
     port = args.port or config["server"]["port"]
-    print(f"Dashboard: http://{local_ip()}:{port}/dashboard/")
-    print(f"WebSocket: ws://{local_ip()}:{port}/ws")
+    addresses = local_addresses() if host == "0.0.0.0" else [("bound", host)]
+    for interface, address in addresses:
+        print(f"Dashboard [{interface}]: http://{address}:{port}/dashboard/")
+        print(f"WebSocket [{interface}]: ws://{address}:{port}/ws")
+    print("请选择与 PICO 互通的网卡地址；VPN/TUN 地址不一定能被头显访问。")
     print(f"Config: {store.path}")
     web.run_app(create_app(store), host=host, port=port)
 

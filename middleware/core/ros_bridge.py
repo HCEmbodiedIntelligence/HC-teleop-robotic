@@ -520,6 +520,21 @@ class RosBridge:
                 )
                 subscription_names.append(topic)
 
+            # Keep the standard VR frame health visible even before recording
+            # is selected. This subscriber only counts messages; raw-CDR recording
+            # remains owned by RosRecordingExecutor.
+            if "/vrdata" not in trackers:
+                from std_msgs.msg import String
+
+                vr_tracker = TopicHealthTracker("/vrdata", "std_msgs/msg/String")
+                trackers["/vrdata"] = vr_tracker
+                subscriptions.append(node.create_subscription(
+                    String, "/vrdata",
+                    lambda message: vr_tracker.record_message(time.monotonic()),
+                    qos_profile_sensor_data,
+                ))
+                subscription_names.append("/vrdata")
+
             with self._lock:
                 self._trackers = trackers
             self._set_status(state="running", subscriptions=subscription_names, error=None)
