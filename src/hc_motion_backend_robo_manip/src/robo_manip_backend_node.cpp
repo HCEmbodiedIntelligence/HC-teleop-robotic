@@ -263,6 +263,7 @@ struct Group
   TargetFilterConfig target_filter;
 
   SteadyTime last_target_at{};
+  std::uint64_t failure_count{0};
 
 };
 
@@ -761,11 +762,53 @@ private:
         group.name.c_str(), submitted.status.message.c_str());
       return;
     }
+    const bool restarting = !group.active;
+    const double input_gap_ms = group.last_target_at == SteadyTime{} ? -1.0 :
+      std::chrono::duration<double, std::milli>(steady_now - group.last_target_at).count();
     group.active = true;
     group.last_target_at = steady_now;
     group.envelope = envelope;
     group.last_accepted_target = desired;
+    const auto tick_started = SteadyClock::now();
     const auto result = group.pipeline->tick(feedback, steady_now);
+    const auto tick_finished = SteadyClock::now();
+    const double pipeline_ms = std::chrono::duration<double, std::milli>(
+      tick_finished - tick_started).count();
+    const double feedback_age_ms = std::chrono::duration<double, std::milli>(
+      tick_finished - feedback.received_at).count();
+    const auto ros_now_ns = now().nanoseconds();
+    const double target_age_ms = (ros_now_ns - timeNanoseconds(envelope.header.stamp)) / 1e6;
+    const double deadline_left_ms = (timeNanoseconds(envelope.valid_until) - ros_now_ns) / 1e6;
+    const bool ended = !result.events.empty() &&
+      (result.events.back().state == motion::SessionState::ABORTED ||
+      result.events.back().state == motion::SessionState::CANCELED);
+    // Log before deadline rejection: otherwise a slow failed solve loses its cause.
+    if (ended) {
+      ++group.failure_count;
+      std::ostringstream detail;
+      detail << "ServoP ended for " << group.name << ": "
+             << result.events.back().status.message
+             << " pipeline_ms=" << pipeline_ms << " target_age_ms=" << target_age_ms
+             << " feedback_age_ms=" << feedback_age_ms << " deadline_left_ms=" << deadline_left_ms
+             << " input_gap_ms=" << input_gap_ms << " nominal_ms=" << nominal_period_sec_ * 1000.0
+             << " restarted=" << restarting << " failures=" << group.failure_count
+             << " sequence=" << envelope.sequence << " source=" << envelope.source_id
+             << " session=" << envelope.session_id << " target_limited=" << target_limited
+             << " target_xyz_m=[" << desired.position_m[0] << "," << desired.position_m[1]
+             << "," << desired.position_m[2] << "] target_xyzw=[";
+      for (const auto value : desired.orientation_xyzw) {detail << value << ",";}
+      detail << "] feedback_rad=[";
+      for (const auto value : feedback.positions_rad) {detail << value << ",";}
+      detail << "]";
+      RCLCPP_WARN(get_logger(), "%s", detail.str().c_str());
+    } else if (pipeline_ms > nominal_period_sec_ * 1000.0 || deadline_left_ms <= 0.0 ||
+      feedback_age_ms >= std::chrono::duration<double, std::milli>(feedback_timeout_).count()) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+        "ServoP timing group=%s pipeline_ms=%.3f target_age_ms=%.3f feedback_age_ms=%.3f "
+        "deadline_left_ms=%.3f input_gap_ms=%.3f restarted=%d",
+        group.name.c_str(), pipeline_ms, target_age_ms, feedback_age_ms,
+        deadline_left_ms, input_gap_ms, restarting);
+    }
     // Never advance to a later target from an output that missed its HC deadline.
     if (timeNanoseconds(envelope.valid_until) <= now().nanoseconds() ||
       SteadyClock::now() - feedback.received_at >= feedback_timeout_) {
@@ -781,8 +824,6 @@ private:
       const auto & event = result.events.back();
       if (event.state == motion::SessionState::ABORTED ||
         event.state == motion::SessionState::CANCELED) {
-        RCLCPP_WARN(get_logger(), "ServoP ended for %s: %s",
-          group.name.c_str(), event.status.message.c_str());
         stop(group);
       }
     }

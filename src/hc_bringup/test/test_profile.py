@@ -276,3 +276,13 @@ def test_shipped_x1_standard_feedback_order():
     path = Path(__file__).resolve().parents[2] / 'hc_robot_x1/config/profile.yaml'
     profile = load_profile(path)
     assert len(profile.value['standard_interfaces']['feedback_joint_order']) == 29
+
+
+def test_x1_both_arms_have_target_protection():
+    path = Path(__file__).resolve().parents[2] / 'hc_robot_x1/config/profile.yaml'
+    profile = load_profile(path)
+    left = profile.component('left_arm')['target_filter']
+    right = profile.component('right_arm')['target_filter']
+    assert left == right
+    assert right['enabled'] is True
+    assert right['max_radius_m'] == 0.72

@@ -56,6 +56,15 @@ components:
       base: R_arm_0_Link
       tip: io_teleop_ee_link_right
     command_modes: [servo_j, servo_p, move_j, move_l, move_p]
+    # Same conservative envelope as left_arm, expressed in R_arm_0_Link.
+    target_filter:
+      enabled: true
+      workspace_min_m: [-0.05, -0.55, -0.45]
+      workspace_max_m: [0.72, 0.55, 0.72]
+      min_radius_m: 0.15
+      max_radius_m: 0.72
+      max_position_step_m: 0.03
+      max_orientation_step_rad: 0.15
 
   - id: waist
     kind: waist

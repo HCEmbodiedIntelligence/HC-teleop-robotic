@@ -73,3 +73,21 @@ ROS_DOMAIN_ID=188 /usr/bin/python3 src/hc_motion_backend_robo_manip/test/verify_
 
 The probe checks both arms, input expiry, session rollover, feedback expiry, and
 recovery. It allows up to 25 seconds for SDK initialization.
+
+### ServoP 卡顿诊断
+
+`ServoP ended` 现在包含以下字段：
+
+- `sdk_tick_ms`：失败的 `TickRealtimeMoveLine` 调用耗时（单调时钟）。
+- `sdk_period_ms`：实际传给 SDK 的积分周期，不是调用耗时。
+- `pipeline_ms`：整个管线 tick 耗时，含 SDK、最终 RTC 和失败停止处理。
+- `target_age_ms` / `deadline_left_ms`：tick 结束时，目标从 header 到当前 ROS 时间的年龄及距离有效期的剩余时间；负剩余时间代表过期。
+- `feedback_age_ms`：tick 结束时距本节点收到反馈的时间，不能代替硬件采样到达延迟。
+- `input_gap_ms`：该臂本次与上次接受目标的处理时间间隔，首次/重建后为 -1。
+- `restarted`、`failures`、`sequence`、`source`、`session`：是否刚启动及累计失败和输入身份。
+- `target_limited`、`target_xyz_m`、`target_xyzw`、`feedback_rad`：过滤后的目标及实际使用的关节反馈；关节顺序为该臂配置顺序。
+
+成功调用如果管线耗时超过名义周期，或目标/反馈过期，会产生限频的 `ServoP timing` 告警。
+失败日志在过期输出丢弃之前记录，防止超时掩盖 SDK 错误。SDK 公开 API 未提供 MoveLine 详细
+错误码，目前不能仅凭 `returned false` 区分 RTC、IK 或奇异性失败；需 SDK 内部状态接口进一步支持。
+本改动只增加诊断，不改变租约、反馈超时、限速和失败停止行为。

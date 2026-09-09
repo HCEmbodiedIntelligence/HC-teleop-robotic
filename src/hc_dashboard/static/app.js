@@ -121,7 +121,7 @@ function connect() {
   socket.onerror=()=>socket.close();socket.onclose=()=>{clearTimeout(watchdog);connection(false);clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connect,1500);};
 }
 function initialize() {
-  const unsupported=['homeButton','sourceVr','sourceExoskeleton','startRecordingBtn','stopRecordingBtn','importMcapBtn','batchDeleteDatasets','openImportProfile','deleteProfile','activateProfile','saveConfig'];
+  const unsupported=['sourceVr','sourceExoskeleton','startRecordingBtn','stopRecordingBtn','importMcapBtn','batchDeleteDatasets','openImportProfile','deleteProfile','activateProfile','saveConfig'];
   unsupported.forEach(id=>{if($(id)){$(id).disabled=true;$(id).title='当前 Dashboard 未提供此操作接口';}});
   document.querySelectorAll('#config input').forEach(el=>{el.readOnly=true;});
   document.querySelector('[data-path="vr.enabled"]').disabled=true;
@@ -133,7 +133,6 @@ function initialize() {
   document.querySelector('[data-path="server.host"]').value=location.hostname;
   document.querySelector('[data-path="server.port"]').value=location.port || (location.protocol==='https:'?'443':'80');
   document.querySelector('.profile-manager .panel-title p').textContent='查看已安装的机器人 URDF、关节组与运行配置';
-  $('homeButton').title='当前后端未提供回零服务';
   $('stopButton').title='调用当前安全服务停用运动输出';$('resumeButton').title='复位故障（如有）并请求使能';
   $('stopButton').onclick=()=>safety(false);$('resumeButton').onclick=()=>safety(true);
   $('selectAllDatasets').onchange=()=>{document.querySelectorAll('#datasetRows input[type=checkbox]').forEach(input=>input.checked=$('selectAllDatasets').checked);updateDatasetSelection();};
