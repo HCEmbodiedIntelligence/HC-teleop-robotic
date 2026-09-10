@@ -15,18 +15,35 @@ sim_camera:
   pitch: -25
   target_position: [0, 0.25, 0.85]
 sim_opengl2: true  # 使用兼容性更好的 OpenGL2 显示路径。
-# 双臂顺序固定为右、左；rest_j_pos 是仿真复位姿态，单位为 rad。
+# 双臂顺序固定为右、左；
 arms:
-  - joint_index: [8, 9, 10, 11, 12, 13, 14]
-    ee_index: 18
-    rest_j_pos: [-1.44, -0.77, 1.44, -1.57, 0.0, 0.0, 0.0]
-  - joint_index: [20, 21, 22, 23, 24, 25, 26]
-    ee_index: 30
-    rest_j_pos: [1.44, -0.77, -1.44, -1.57, 0.0, 0.0, 0.0]
+  right:
+    base_link: zhi_Link
+    generic_task_base_link: R_arm_0_Link
+    ee_link: io_teleop_ee_link_right
+    joint_names:
+    - Joint1_R
+    - Joint2_R
+    - Joint3_R
+    - Joint4_R
+    - Joint5_R
+    - Joint6_R
+    - Joint7_R
+  left:
+    base_link: zhi_Link
+    generic_task_base_link: L_arm_0_Link
+    ee_link: io_teleop_ee_link_left
+    joint_names:
+    - Joint1_L
+    - Joint2_L
+    - Joint3_L
+    - Joint4_L
+    - Joint5_L
+    - Joint6_L
+    - Joint7_L
 folding_waist:
-  # 三个折叠腰关节及其复位姿态；cmd_ee/base 指定腰部任务的末端与参考 Link。
+  # 三个折叠腰关节；cmd_ee/base 指定腰部任务的末端与参考 Link。
   joint_index: [1, 2, 3]
-  rest_j_pos: [0.5, 1.2, -0.6]
   rot_offset: [0, 0, 1.57]
   cmd_ee: 3
   base: 0

@@ -92,9 +92,10 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(p.returncode is not None for p in processes))
 
     async def test_missing_sim_config_and_external_stack_are_rejected(self):
-        (self.profiles.root / 'test_bot/vr_configs.yml').unlink()
+        (self.profiles.root / 'test_bot/vr_configs.yml').unlink(missing_ok=True)
+        (self.profiles.root / 'test_bot/arm_teleop.yaml').unlink(missing_ok=True)
         async with self.service.lock:
-            with self.assertRaisesRegex(SimulationError, 'vr_configs'):
+            with self.assertRaisesRegex(SimulationError, 'arm_teleop.yaml 或 vr_configs.yml'):
                 await self.service.start()
         os.environ['HC_EXTERNAL_STACK'] = '1'
         self.assertIn('run.sh middleware', self.service.status()['unavailable_reason'])

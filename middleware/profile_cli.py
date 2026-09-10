@@ -57,7 +57,11 @@ def main() -> None:
             "profile-dir": profile_dir,
             "controller": profile_dir / "controller_v23.yml",
             "teleop": profile_dir / "arm_teleop.yaml",
-            "simulation": profile_dir / "vr_configs.yml",
+            "simulation": (
+                profile_dir / "arm_teleop.yaml"
+                if not (profile_dir / "vr_configs.yml").is_file() and (profile_dir / "arm_teleop.yaml").is_file()
+                else profile_dir / "vr_configs.yml"
+            ),
         }
         selected = paths[arguments.field]
         if arguments.field != "profile-dir" and not selected.is_file():

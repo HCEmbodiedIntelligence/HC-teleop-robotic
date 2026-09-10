@@ -49,8 +49,8 @@ class SimulationService:
             reason = '机器人配置目录已变更，请先重启中间件。'
         elif not active:
             reason = '请先导入并应用机器人 ZIP 配置。'
-        elif not (self.profiles.root / active / 'vr_configs.yml').is_file():
-            reason = '当前机器人包缺少 vr_configs.yml，无法启动 PyBullet。'
+        elif not ((self.profiles.root / active / 'arm_teleop.yaml').is_file() or (self.profiles.root / active / 'vr_configs.yml').is_file()):
+            reason = '当前机器人包缺少 arm_teleop.yaml 或 vr_configs.yml，无法启动 PyBullet。'
         logs = list(self.logs)
         if self.state == 'failed' and self.log_dir:
             for name in ('v23_solver.log', 'teleop_controller.log'):
@@ -101,9 +101,19 @@ class SimulationService:
         name = status['active_profile']
         profile = self.profiles.root / name
         try:
-            self.profiles.get(name)
-            config = yaml.safe_load((profile / 'vr_configs.yml').read_text())
-            urdf = (profile / config['urdf_path']).resolve()
+            if (profile / 'arm_teleop.yaml').is_file():
+                config = yaml.safe_load((profile / 'arm_teleop.yaml').read_text())
+                urdf_rel = config.get('robot', {}).get('urdf_path') if isinstance(config, dict) else None
+                if not urdf_rel and isinstance(config, dict):
+                    urdf_rel = config.get('urdf_path')
+            elif (profile / 'vr_configs.yml').is_file():
+                config = yaml.safe_load((profile / 'vr_configs.yml').read_text())
+                urdf_rel = config.get('urdf_path') if isinstance(config, dict) else None
+            else:
+                raise SimulationError('当前机器人包缺少 arm_teleop.yaml 或 vr_configs.yml')
+            if not urdf_rel:
+                raise SimulationError('配置文件中缺少 urdf_path')
+            urdf = (profile / urdf_rel).resolve()
             urdf.relative_to(profile.resolve())
             UrdfModel(urdf.read_bytes())
             if options['with_control']:

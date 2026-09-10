@@ -187,8 +187,8 @@ if [[ "${MODE}" == sim ]]; then
     exit 2
   }
   [[ -f "${SIM_ENTRY}" ]] || { echo "Bundled simulator not found: ${SIM_ENTRY}" >&2; exit 2; }
-  [[ -f "${PROFILE_DIR}/vr_configs.yml" ]] || {
-    echo "Active profile has no simulation config: ${PROFILE_DIR}/vr_configs.yml" >&2
+  [[ -f "${PROFILE_DIR}/arm_teleop.yaml" || -f "${PROFILE_DIR}/vr_configs.yml" ]] || {
+    echo "Active profile has no simulation config: ${PROFILE_DIR}/arm_teleop.yaml or vr_configs.yml" >&2
     exit 2
   }
 

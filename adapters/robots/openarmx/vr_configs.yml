@@ -20,14 +20,31 @@ sim_opengl2: true  # 使用兼容性更好的 OpenGL2 显示路径。
 
 # V10 模型的稳定 URDF 顺序下标，运行时会转换为 PyBullet 遍历下标。
 # 双臂顺序必须与 arm_teleop.yaml/controller_v23.yml 一致：右臂在前，左臂在后；
-# rest_j_pos 为仿真复位姿态，单位为 rad。
 arms:
-  - joint_index: [12, 13, 14, 15, 17, 18, 19]
-    ee_index: 26
-    rest_j_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  - joint_index: [2, 3, 4, 5, 7, 8, 9]
-    ee_index: 22
-    rest_j_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  right:
+    base_link: openarmx_body_link0
+    generic_task_base_link: openarmx_right_link0
+    ee_link: openarmx_right_hand_tcp
+    joint_names:
+    - openarmx_right_joint1
+    - openarmx_right_joint2
+    - openarmx_right_joint3
+    - openarmx_right_joint4
+    - openarmx_right_joint5
+    - openarmx_right_joint6
+    - openarmx_right_joint7
+  left:
+    base_link: openarmx_body_link0
+    generic_task_base_link: openarmx_left_link0
+    ee_link: openarmx_left_hand_tcp
+    joint_names:
+    - openarmx_left_joint1
+    - openarmx_left_joint2
+    - openarmx_left_joint3
+    - openarmx_left_joint4
+    - openarmx_left_joint5
+    - openarmx_left_joint6
+    - openarmx_left_joint7
 
 grippers:
   # 右、左夹爪各包含两个平移指关节，顺序与双臂一致。

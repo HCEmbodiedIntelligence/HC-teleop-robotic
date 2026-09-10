@@ -7,15 +7,17 @@ the robot description and its home pose testable with PyBullet in DIRECT mode.
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import threading
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 from xml.etree import ElementTree
 
 import numpy as np
 import pybullet as p
+import yaml
 
 from .utils import invert_transform, multiply_transforms
 
@@ -343,15 +345,186 @@ class AssembledRobot:
         debug=False,
         with_ee_constraint=False,
         physics_clent_id=0,
+        initial_joints=None,
     ):
-        self.configs = configs
+        self.configs = copy.deepcopy(configs)
         self.physics_clent_id = physics_clent_id
         if not hasattr(self, "_bullet_lock"):
             self._bullet_lock = threading.RLock()
         self._debug_joint_parameters: dict[int, int] = {}
         self.fixed_link_constraint_id: Optional[int] = None
+        self.teleop_config = self._load_teleop_config(robot_urdf_path)
+        self.initial_joints = self._resolve_initial_joints(initial_joints)
+        self._normalize_sim_configs()
         self.load_urdf(robot_urdf_path, debug)
         self.assemble_robot(with_ee_constraint)
+
+    def _load_teleop_config(self, robot_urdf_path: str) -> dict[str, Any]:
+        if isinstance(self.configs, dict) and "robot" in self.configs and "arms" in self.configs:
+            return copy.deepcopy(self.configs)
+        candidates = []
+        if "arm_teleop_path" in self.configs:
+            candidates.append(self.configs["arm_teleop_path"])
+        urdf_dir = os.path.dirname(os.path.abspath(robot_urdf_path))
+        candidates.extend([
+            os.path.join(urdf_dir, "arm_teleop.yaml"),
+            os.path.join(os.path.dirname(urdf_dir), "arm_teleop.yaml"),
+        ])
+        for path in candidates:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as stream:
+                        teleop_cfg = yaml.safe_load(stream)
+                    if isinstance(teleop_cfg, dict):
+                        return teleop_cfg
+                except Exception:
+                    pass
+        return {}
+
+    def _resolve_initial_joints(
+        self, initial_joints: Optional[dict[str, float]] = None
+    ) -> dict[str, float]:
+        resolved: dict[str, float] = {}
+        if isinstance(initial_joints, dict):
+            resolved.update({str(k): float(v) for k, v in initial_joints.items()})
+            return resolved
+
+        if isinstance(self.configs.get("robot"), dict) and isinstance(
+            self.configs["robot"].get("initial_joints"), dict
+        ):
+            resolved.update(
+                {str(k): float(v) for k, v in self.configs["robot"]["initial_joints"].items()}
+            )
+            return resolved
+
+        if isinstance(self.configs.get("initial_joints"), dict):
+            resolved.update(
+                {str(k): float(v) for k, v in self.configs["initial_joints"].items()}
+            )
+            return resolved
+
+        if self.teleop_config:
+            joints = self.teleop_config.get("robot", {}).get("initial_joints", {})
+            if isinstance(joints, dict):
+                resolved.update({str(k): float(v) for k, v in joints.items()})
+        return resolved
+
+    def _normalize_sim_configs(self) -> None:
+        # 1. Fallback base_pose if missing
+        if "base_pose" not in self.configs:
+            robot_cfg = self.configs.get("robot") or self.teleop_config.get("robot", {})
+            if isinstance(robot_cfg, dict):
+                self.configs["base_pose"] = {
+                    "position": list(robot_cfg.get("base_position", [0.0, 0.0, 0.0])),
+                    "orientation": list(robot_cfg.get("base_orientation", [0.0, 0.0, 0.0, 1.0])),
+                }
+            else:
+                self.configs["base_pose"] = {
+                    "position": [0.0, 0.0, 0.0],
+                    "orientation": [0.0, 0.0, 0.0, 1.0],
+                }
+
+        # 2. Fallback urdf_path if missing
+        if "urdf_path" not in self.configs:
+            robot_cfg = self.configs.get("robot") or self.teleop_config.get("robot", {})
+            if isinstance(robot_cfg, dict) and "urdf_path" in robot_cfg:
+                self.configs["urdf_path"] = robot_cfg["urdf_path"]
+
+        # 3. Fallback arms from arm_teleop.yaml if missing
+        if not self.configs.get("arms") and "arms" in self.teleop_config:
+            self.configs["arms"] = copy.deepcopy(self.teleop_config["arms"])
+
+        # 4. Convert dict-format arms (arms: right: ... left: ...) to list format
+        if isinstance(self.configs.get("arms"), dict):
+            arms_dict = self.configs["arms"]
+            arms_list = []
+            for side in ("right", "left"):
+                if side in arms_dict and isinstance(arms_dict[side], dict):
+                    arms_list.append(copy.deepcopy(arms_dict[side]))
+            for side, arm in arms_dict.items():
+                if side not in ("right", "left") and isinstance(arm, dict):
+                    arms_list.append(copy.deepcopy(arm))
+            self.configs["arms"] = arms_list
+
+        # 5. Auto-derive controller_indices if missing
+        if "controller_indices" not in self.configs and isinstance(self.configs.get("arms"), list):
+            cmd_ee = []
+            bases = []
+            for arm in self.configs["arms"]:
+                if isinstance(arm, dict):
+                    ee = arm.get("ee_link") or arm.get("ee_index")
+                    if ee is not None:
+                        cmd_ee.append(ee)
+                    base = arm.get("base_link", -1)
+                    bases.append(-1 if base in (-1, "-1", "base", "root") else base)
+            if cmd_ee:
+                self.configs["controller_indices"] = {"cmd_ee": cmd_ee, "base": bases}
+
+        # 6. Auto-derive grippers and finger_command_topics if missing or dict
+        grippers_cfg = self.configs.get("grippers")
+        if not grippers_cfg and "grippers" in self.teleop_config:
+            grippers_cfg = self.teleop_config.get("grippers")
+
+        if isinstance(grippers_cfg, dict):
+            vr_grippers = []
+            finger_topics = []
+            for side in ("right", "left"):
+                g = grippers_cfg.get(side, {})
+                if isinstance(g, dict):
+                    sim_j = g.get("sim_joint")
+                    fj = g.get("finger_joint_names", [])
+                    joints = list(fj) if fj else ([str(sim_j)] if sim_j else [])
+                    if joints:
+                        entry = {"joint_index": joints}
+                        if sim_j:
+                            entry["fallback_sim_joint"] = str(sim_j)
+                        vr_grippers.append(entry)
+                    topic = g.get("finger_topic")
+                    if topic:
+                        finger_topics.append(str(topic))
+            if vr_grippers:
+                self.configs["grippers"] = vr_grippers
+            else:
+                self.configs["grippers"] = []
+            if finger_topics and "finger_command_topics" not in self.configs:
+                self.configs["finger_command_topics"] = finger_topics
+
+        # 7. Sim camera & opengl2 fallback
+        sim_cfg = self.configs.get("simulation")
+        if not isinstance(sim_cfg, dict):
+            sim_cfg = self.teleop_config.get("simulation", {})
+        if not isinstance(sim_cfg, dict):
+            sim_cfg = {}
+        if "sim_camera" not in self.configs:
+            if "sim_camera" in sim_cfg and isinstance(sim_cfg["sim_camera"], dict):
+                self.configs["sim_camera"] = copy.deepcopy(sim_cfg["sim_camera"])
+            else:
+                self.configs["sim_camera"] = {
+                    "distance": 2.0,
+                    "yaw": 180,
+                    "pitch": -25,
+                    "target_position": [0.0, 0.0, 0.6],
+                }
+        if "sim_opengl2" not in self.configs:
+            self.configs["sim_opengl2"] = sim_cfg.get("sim_opengl2", True)
+
+        # 8. arm_pos_scale fallback
+        if "arm_pos_scale" not in self.configs:
+            ctrl_cfg = self.configs.get("control")
+            if not isinstance(ctrl_cfg, dict):
+                ctrl_cfg = self.teleop_config.get("control", {})
+            if isinstance(ctrl_cfg, dict):
+                self.configs["arm_pos_scale"] = float(ctrl_cfg.get("position_scale", 1.0))
+            else:
+                self.configs["arm_pos_scale"] = 1.0
+
+        # 9. base_command_mode fallback
+        if "base_command_mode" not in self.configs:
+            body_cfg = self.configs.get("body")
+            if not isinstance(body_cfg, dict):
+                body_cfg = self.teleop_config.get("body", {})
+            if isinstance(body_cfg, dict) and "base_command_mode" in body_cfg:
+                self.configs["base_command_mode"] = body_cfg["base_command_mode"]
 
     @property
     def bullet_lock(self):
@@ -370,7 +543,7 @@ class AssembledRobot:
             raise FileNotFoundError(f"Robot URDF does not exist: {robot_urdf_path}")
         base_pose = self.configs.get("base_pose")
         if not isinstance(base_pose, dict):
-            raise ValueError("vr_configs.yml must define base_pose")
+            raise ValueError("Robot config must define base_pose or robot.base_position/base_orientation")
 
         use_fixed_base = "fixed_link" not in self.configs
         # The numeric indices in existing vr_configs.yml files were generated
@@ -396,6 +569,13 @@ class AssembledRobot:
         self.joint_types: dict[int, int] = {}
 
         with self.bullet_lock:
+            body_info = p.getBodyInfo(
+                self.robot_id, physicsClientId=self.physics_clent_id
+            )
+            self.base_link_name = body_info[0].decode("utf-8") if body_info else ""
+            if self.base_link_name:
+                self.link_name2id_dict[self.base_link_name] = -1
+
             joint_count = p.getNumJoints(
                 self.robot_id, physicsClientId=self.physics_clent_id
             )
@@ -468,6 +648,8 @@ class AssembledRobot:
                         return self.link_name2id_dict[name]
                     if name in self.joint_name2id_dict:
                         return self.joint_name2id_dict[name]
+                    if getattr(self, "base_link_name", None) == name:
+                        return -1
                     raise ValueError(
                         f"{label} specifies unknown link name: '{name}'"
                     )
@@ -497,24 +679,41 @@ class AssembledRobot:
                 for offset, item in enumerate(value)
             ]
 
-        for group_name in ("arms", "grippers"):
-            for offset, group in enumerate(self.configs.get(group_name, [])):
-                if "joint_index" in group:
-                    group["joint_index"] = resolve_list(
-                        group["joint_index"], f"{group_name}[{offset}].joint_index", is_link=False
-                    )
-                elif "joint_names" in group:
-                    group["joint_index"] = resolve_list(
-                        group["joint_names"], f"{group_name}[{offset}].joint_names", is_link=False
-                    )
-                if "ee_index" in group:
-                    group["ee_index"] = resolve(
-                        group["ee_index"], f"{group_name}[{offset}].ee_index", is_link=True
-                    )
-                elif "ee_link" in group:
-                    group["ee_index"] = resolve(
-                        group["ee_link"], f"{group_name}[{offset}].ee_link", is_link=True
-                    )
+        for offset, group in enumerate(self.configs.get("arms", [])):
+            if "joint_index" in group:
+                group["joint_index"] = resolve_list(
+                    group["joint_index"], f"arms[{offset}].joint_index", is_link=False
+                )
+            elif "joint_names" in group:
+                group["joint_index"] = resolve_list(
+                    group["joint_names"], f"arms[{offset}].joint_names", is_link=False
+                )
+            if "ee_index" in group:
+                group["ee_index"] = resolve(
+                    group["ee_index"], f"arms[{offset}].ee_index", is_link=True
+                )
+            elif "ee_link" in group:
+                group["ee_index"] = resolve(
+                    group["ee_link"], f"arms[{offset}].ee_link", is_link=True
+                )
+
+        valid_grippers = []
+        for offset, group in enumerate(self.configs.get("grippers", [])):
+            raw_joints = group.get("joint_index") or group.get("joint_names", [])
+            resolved_joints = []
+            for j in raw_joints:
+                if isinstance(j, str) and j in self.joint_name2id_dict:
+                    resolved_joints.append(self.joint_name2id_dict[j])
+                elif isinstance(j, int) and (j in self.joint_id2name_dict or j == -1):
+                    resolved_joints.append(j)
+            if not resolved_joints and "fallback_sim_joint" in group:
+                fb = group["fallback_sim_joint"]
+                if fb in self.joint_name2id_dict:
+                    resolved_joints.append(self.joint_name2id_dict[fb])
+            if resolved_joints:
+                group["joint_index"] = resolved_joints
+                valid_grippers.append(group)
+        self.configs["grippers"] = valid_grippers
 
         for group_name in ("folding_waist", "waist", "dorsal", "head"):
             group = self.configs.get(group_name)
@@ -597,12 +796,29 @@ class AssembledRobot:
         if index != -1 and index not in self.joint_id2name_dict:
             raise ValueError(f"{label} references missing URDF link index {index}")
 
+    def _resolve_group_positions(self, indices: Sequence[Any], fallback_rest: Any) -> list[float]:
+        positions: list[float] = []
+        is_list_fallback = isinstance(fallback_rest, list)
+        for i, idx in enumerate(indices):
+            jname = self.joint_id2name_dict.get(idx, str(idx)) if isinstance(idx, int) else str(idx)
+            if jname in self.initial_joints:
+                positions.append(float(self.initial_joints[jname]))
+            elif is_list_fallback and i < len(fallback_rest):
+                positions.append(float(fallback_rest[i]))
+            elif isinstance(fallback_rest, (int, float)):
+                positions.append(float(fallback_rest))
+            else:
+                positions.append(0.0)
+        return positions
+
     def _make_group(self, config_name: str):
         config = self.configs[config_name]
+        indices = _as_index_list(config["joint_index"])
+        home_pos = self._resolve_group_positions(indices, config.get("rest_j_pos"))
         group = RobotJointGroup(
             self,
             config["joint_index"],
-            config.get("rest_j_pos", 0.0),
+            home_pos,
         )
         self._validate_joint_group(group.joint_index, config_name)
         return group
@@ -612,9 +828,9 @@ class AssembledRobot:
         self.arms: list[RobotArm] = []
         for arm_number, config in enumerate(self.configs.get("arms", [])):
             self._validate_link_index(config["ee_index"], f"arms[{arm_number}].ee_index")
-            rest_j_pos = config.get("rest_j_pos")
-            if rest_j_pos is None:
-                rest_j_pos = [0.0] * len(config["joint_index"])
+            rest_j_pos = self._resolve_group_positions(
+                config["joint_index"], config.get("rest_j_pos")
+            )
             arm = RobotArm(
                 self,
                 config["joint_index"],
@@ -625,8 +841,8 @@ class AssembledRobot:
             self._validate_joint_group(arm.joint_index, f"arms[{arm_number}]")
             self.arms.append(arm)
 
-        if "grippers" in self.configs:
-            self.grippers: list[RobotGripper] = []
+        self.grippers: list[RobotGripper] = []
+        if "grippers" in self.configs and isinstance(self.configs["grippers"], list):
             for gripper_number, config in enumerate(self.configs["grippers"]):
                 indices = _as_index_list(config["joint_index"])
                 self._validate_joint_group(indices, f"grippers[{gripper_number}]")
@@ -663,14 +879,18 @@ class AssembledRobot:
 
         if "head" in self.configs:
             config = self.configs["head"]
+            indices = _as_index_list(config["joint_index"])
+            home_pos = self._resolve_group_positions(indices, config.get("rest_j_pos"))
             self.head = RobotHead(
-                self, config["joint_index"], config.get("rest_j_pos", 0.0)
+                self, config["joint_index"], home_pos
             )
             self._validate_joint_group(self.head.joint_index, "head")
         if "dorsal" in self.configs:
             config = self.configs["dorsal"]
+            indices = _as_index_list(config["joint_index"])
+            home_pos = self._resolve_group_positions(indices, config.get("rest_j_pos"))
             self.dorsal = RobotDorsal(
-                self, config["joint_index"], config.get("rest_j_pos", 0.0)
+                self, config["joint_index"], home_pos
             )
             self._validate_joint_group(self.dorsal.joint_index, "dorsal")
         if "waist" in self.configs:

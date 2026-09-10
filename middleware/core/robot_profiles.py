@@ -443,16 +443,39 @@ def _normalize_io(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
     normalized = copy.deepcopy(config)
     arms = normalized.get("arms")
+    if isinstance(arms, dict):
+        arms_list = []
+        for side in ("right", "left"):
+            if side in arms and isinstance(arms[side], dict):
+                arms_list.append(arms[side])
+        for k, v in arms.items():
+            if k not in ("right", "left") and isinstance(v, dict):
+                arms_list.append(v)
+        arms = arms_list
+        normalized["arms"] = arms
     if not isinstance(arms, list) or not arms:
         raise RobotProfileError("HC robot YAML requires a non-empty arms list")
     joint_count = len(model.joints)
     arm_joint_indices: list[list[int]] = []
     arm_ee_indices: list[int] = []
+    joint_name_map = {j["name"]: i for i, j in enumerate(model.joints)}
+    link_child_map = {j["child"]: i for i, j in enumerate(model.joints)}
     for arm_index, arm in enumerate(arms):
         if not isinstance(arm, dict):
             raise RobotProfileError(f"arms[{arm_index}] must be an object")
+        raw_joints = arm.get("joint_index") or arm.get("joint_names")
+        if not raw_joints:
+            raise RobotProfileError(f"arms[{arm_index}] must define joint_index or joint_names")
+        resolved_joints = []
+        for item in raw_joints:
+            if isinstance(item, int):
+                resolved_joints.append(item)
+            elif isinstance(item, str) and item.strip() in joint_name_map:
+                resolved_joints.append(joint_name_map[item.strip()])
+            else:
+                raise RobotProfileError(f"arms[{arm_index}] invalid joint: {item}")
         indices = _index_list(
-            arm.get("joint_index"), joint_count, f"arms[{arm_index}].joint_index"
+            resolved_joints, joint_count, f"arms[{arm_index}].joint_index"
         )
         if not indices:
             raise RobotProfileError(f"arms[{arm_index}].joint_index must not be empty")
@@ -467,8 +490,17 @@ def _normalize_io(
                 + ", ".join(fixed)
             )
         arm_joint_indices.append(indices)
+        raw_ee = arm.get("ee_index") if "ee_index" in arm else arm.get("ee_link")
+        if isinstance(raw_ee, int):
+            resolved_ee = raw_ee
+        elif isinstance(raw_ee, str) and raw_ee.strip() in link_child_map:
+            resolved_ee = link_child_map[raw_ee.strip()]
+        elif isinstance(raw_ee, str) and raw_ee.strip() == model.root_link:
+            resolved_ee = -1
+        else:
+            raise RobotProfileError(f"arms[{arm_index}] invalid ee_index or ee_link: {raw_ee}")
         arm_ee_indices.append(
-            _index(arm.get("ee_index"), joint_count, f"arms[{arm_index}].ee_index")
+            _index(resolved_ee, joint_count, f"arms[{arm_index}].ee_index", root_allowed=True)
         )
         if "rest_j_pos" in arm:
             _number_list(arm["rest_j_pos"], len(indices), f"arms[{arm_index}].rest_j_pos")
@@ -481,9 +513,9 @@ def _normalize_io(
 
     controller_indices = normalized.get("controller_indices", {})
     if not isinstance(controller_indices, dict):
-        raise RobotProfileError("controller_indices must be an object")
+        controller_indices = {}
     command_ee = controller_indices.get("cmd_ee", arm_ee_indices)
-    command_ee = _index_list(command_ee, joint_count, "controller_indices.cmd_ee")
+    command_ee = _index_list(command_ee, joint_count, "controller_indices.cmd_ee", root_allowed=True)
     bases = controller_indices.get("base", [-1] * len(arms))
     bases = _index_list(
         bases, joint_count, "controller_indices.base", root_allowed=True
@@ -637,11 +669,9 @@ def _normalize_teleop(
         task_base = raw_task_base if raw_task_base in link_set else model.root_link
         tasks.append([[task_base, ee_link], 5.0, 1.0, 3.0])
 
-        rest_pos = [float(initial_joints.get(j, 0.0)) for j in joint_names]
         vr_arms.append({
             "joint_index": joint_names,
             "ee_index": ee_link,
-            "rest_j_pos": rest_pos,
         })
         cmd_ee_list.append(ee_link)
         base_link = str(arm.get("base_link", "base")).strip()
@@ -709,7 +739,7 @@ def _normalize_teleop(
             "target_position": [0.0, 0.0, 0.5],
         }),
         "sim_opengl2": True,
-        "arms": vr_arms,
+        "arms": copy.deepcopy(arms_config),
         "grippers": vr_grippers,
         "controller_indices": {
             "cmd_ee": cmd_ee_list,

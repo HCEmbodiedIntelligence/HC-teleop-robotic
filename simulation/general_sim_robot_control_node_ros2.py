@@ -39,7 +39,11 @@ class SimRobotController(Node, AssembledRobot):
         self.robot_description_path = os.path.dirname(config_file)
         with open(config_file, encoding="utf-8") as stream:
             self.configs = yaml.safe_load(stream)
-        options = "--opengl2" if self.configs.get("sim_opengl2", False) and not headless else ""
+        sim_cfg = self.configs.get("simulation", {})
+        if not isinstance(sim_cfg, dict):
+            sim_cfg = {}
+        opengl2 = self.configs.get("sim_opengl2", sim_cfg.get("sim_opengl2", True))
+        options = "--opengl2" if opengl2 and not headless else ""
         client_id = p.connect(p.DIRECT if headless else p.GUI, options=options)
         if client_id < 0:
             raise RuntimeError("Unable to connect to PyBullet")
@@ -49,7 +53,7 @@ class SimRobotController(Node, AssembledRobot):
         p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0)
         p.configureDebugVisualizer(p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW, 0)
         p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
-        camera = self.configs.get("sim_camera", {})
+        camera = self.configs.get("sim_camera", sim_cfg.get("sim_camera", {}))
         p.resetDebugVisualizerCamera(
             cameraDistance=camera.get("distance", 1.5),
             cameraPitch=camera.get("pitch", -30),
@@ -58,9 +62,19 @@ class SimRobotController(Node, AssembledRobot):
         )
 
         self.wo_controller = False
+        urdf_rel = self.configs.get("urdf_path")
+        if not urdf_rel and isinstance(self.configs.get("robot"), dict):
+            urdf_rel = self.configs["robot"].get("urdf_path")
+        if not urdf_rel:
+            raise ValueError("No urdf_path specified in configs")
         robot_urdf_path = os.path.abspath(
-            os.path.join(self.robot_description_path, self.configs["urdf_path"])
+            os.path.join(self.robot_description_path, urdf_rel)
         )
+        arm_teleop_file = os.path.join(self.robot_description_path, "arm_teleop.yaml")
+        if os.path.isfile(arm_teleop_file):
+            self.configs.setdefault("arm_teleop_path", arm_teleop_file)
+        elif config_file.endswith("arm_teleop.yaml"):
+            self.configs.setdefault("arm_teleop_path", config_file)
         with_ee_constraint = False
         
         # Initialize the AssembledRobot
@@ -246,22 +260,25 @@ class SimRobotController(Node, AssembledRobot):
         joint_pos = msg.position
         joint_names = msg.name
         for pos, name in zip(joint_pos, joint_names):
-            joint_id = self.joint_name2id_dict[name]
-            self.reset_j([joint_id], [pos])
+            joint_id = self.joint_name2id_dict.get(name)
+            if joint_id is not None:
+                self.reset_j([joint_id], [pos])
 
     def joint_cmd_callback(self, msg):
         joint_pos = msg.position
         joint_names = msg.name
         for pos, name in zip(joint_pos, joint_names):
-            joint_id = self.joint_name2id_dict[name]
-            self.reset_j([joint_id], [pos])
+            joint_id = self.joint_name2id_dict.get(name)
+            if joint_id is not None:
+                self.reset_j([joint_id], [pos])
 
     def joint_cmd_from_vr_callback(self, msg):
         joint_names = msg.name
         joint_positions = msg.position
         for pos, name in zip(joint_positions, joint_names):
-            joint_id = self.joint_name2id_dict[name]
-            self.reset_j([joint_id], [pos])
+            joint_id = self.joint_name2id_dict.get(name)
+            if joint_id is not None:
+                self.reset_j([joint_id], [pos])
 
     def gripper_status_callback(self, msg):
         gripper_status = msg.position
@@ -414,9 +431,17 @@ def main(args=None):
         raise RuntimeError("PyBullet is already running in this ROS domain; stop it before launching another model")
     rclpy.init(args=ros_arguments)
     profile = os.path.abspath(os.path.expanduser(arguments.profile))
-    config_path = (
-        os.path.join(profile, "vr_configs.yml") if os.path.isdir(profile) else profile
-    )
+    if os.path.isdir(profile):
+        arm_teleop_candidate = os.path.join(profile, "arm_teleop.yaml")
+        vr_configs_candidate = os.path.join(profile, "vr_configs.yml")
+        if os.path.isfile(arm_teleop_candidate):
+            config_path = arm_teleop_candidate
+        elif os.path.isfile(vr_configs_candidate):
+            config_path = vr_configs_candidate
+        else:
+            config_path = arm_teleop_candidate
+    else:
+        config_path = profile
     
     robot = None
     try:

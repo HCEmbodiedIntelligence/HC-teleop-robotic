@@ -140,7 +140,7 @@ control:
   # OpenArmX 已标定的 Pico 位移映射：robot_x=-vr_z、robot_y=-vr_x、robot_z=vr_y；
   # 矩阵三行依次生成机器人 X/Y/Z 位移。
   axis_mapping:
-  - [0.0, 0.0, -1.0]
+  - [0.0, 0.0, 1.0]
   - [-1.0, 0.0, 0.0]
   - [0.0, 1.0, 0.0]
   # 头显方向映射矩阵；当前 body 关闭，保留供通用状态机兼容使用。
