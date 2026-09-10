@@ -294,5 +294,109 @@ class RobotProfileTests(unittest.TestCase):
                 manager.delete_profile("del_robot")
 
 
+    def test_import_archive_with_arm_teleop_only(self):
+        import io
+        import zipfile
+
+        teleop_yaml = yaml.safe_dump(
+            {
+                "robot": {
+                    "urdf_path": "urdf/robot.urdf",
+                    "base_position": [0.0, 0.0, 0.0],
+                    "base_orientation": [0.0, 0.0, 0.0, 1.0],
+                    "initial_joints": {
+                        "right_joint": 0.5,
+                        "left_joint": -0.5,
+                    },
+                },
+                "arms": {
+                    "right": {
+                        "base_link": "base",
+                        "generic_task_base_link": "right_shoulder",
+                        "ee_link": "right_hand",
+                        "joint_names": ["right_joint"],
+                    },
+                    "left": {
+                        "base_link": "base",
+                        "generic_task_base_link": "left_shoulder",
+                        "ee_link": "left_hand",
+                        "joint_names": ["left_joint"],
+                    },
+                },
+            }
+        )
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("simple_bot/urdf/robot.urdf", URDF)
+            zf.writestr("simple_bot/arm_teleop.yaml", teleop_yaml)
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RobotProfileManager(directory)
+            profile = manager.import_archive(
+                "simple_bot",
+                "Simple Bot",
+                zip_buffer.getvalue(),
+                "simple_bot.zip",
+            )
+            self.assertEqual(profile["id"], "simple_bot")
+            self.assertEqual(profile["schema"], "arm-teleop-v1")
+            self.assertEqual(profile["link_count"], 6)
+            self.assertEqual(profile["joint_count"], 5)
+            self.assertEqual(profile["movable_joint_count"], 3)
+            self.assertEqual(profile["free_joint_count"], 2)
+            self.assertEqual(profile["task_count"], 2)
+            self.assertEqual(profile["arm_count"], 2)
+
+            bot_dir = Path(directory) / "simple_bot"
+            self.assertTrue((bot_dir / "controller_v23.yml").is_file())
+            self.assertTrue((bot_dir / "vr_configs.yml").is_file())
+            self.assertTrue((bot_dir / "profile.yaml").is_file())
+
+            vr_cfg = yaml.safe_load((bot_dir / "vr_configs.yml").read_text())
+            self.assertEqual(vr_cfg["controller_indices"]["base"], [-1, -1])
+            self.assertEqual(vr_cfg["controller_indices"]["cmd_ee"], ["right_hand", "left_hand"])
+            self.assertEqual(vr_cfg["arms"][0]["joint_index"], ["right_joint"])
+            self.assertEqual(vr_cfg["arms"][0]["ee_index"], "right_hand")
+
+    def test_ensure_profile_files_on_get(self):
+        teleop_yaml = yaml.safe_dump(
+            {
+                "robot": {
+                    "urdf_path": "urdf/robot.urdf",
+                    "initial_joints": {"right_joint": 0.0, "left_joint": 0.0},
+                },
+                "arms": {
+                    "right": {
+                        "base_link": "base",
+                        "generic_task_base_link": "right_shoulder",
+                        "ee_link": "right_hand",
+                        "joint_names": ["right_joint"],
+                    },
+                    "left": {
+                        "base_link": "base",
+                        "generic_task_base_link": "left_shoulder",
+                        "ee_link": "left_hand",
+                        "joint_names": ["left_joint"],
+                    },
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            bot_dir = Path(directory) / "manual_bot"
+            (bot_dir / "urdf").mkdir(parents=True)
+            (bot_dir / "urdf" / "robot.urdf").write_bytes(URDF)
+            (bot_dir / "arm_teleop.yaml").write_text(teleop_yaml)
+
+            manager = RobotProfileManager(directory)
+            profile = manager.get("manual_bot")
+            self.assertEqual(profile["link_count"], 6)
+            self.assertEqual(profile["joint_count"], 5)
+            self.assertTrue((bot_dir / "controller_v23.yml").is_file())
+            self.assertTrue((bot_dir / "vr_configs.yml").is_file())
+            self.assertTrue((bot_dir / "profile.yaml").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
+

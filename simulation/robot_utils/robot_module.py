@@ -438,47 +438,82 @@ class AssembledRobot:
         return self.robot_id
 
     def _resolve_config_indices(self, robot_urdf_path: str) -> None:
-        """Translate stable URDF-order indices to PyBullet traversal indices."""
+        """Translate joint/link names and URDF-order indices to PyBullet traversal indices."""
         order = str(self.configs.get("joint_index_order", "pybullet")).lower()
-        if order == "pybullet":
-            return
-        if order != "urdf":
-            raise ValueError("joint_index_order must be 'pybullet' or 'urdf'")
+        if order not in ("pybullet", "urdf", "auto"):
+            raise ValueError("joint_index_order must be 'pybullet', 'urdf', or 'auto'")
 
-        document = ElementTree.parse(robot_urdf_path)
-        urdf_joints = document.getroot().findall("joint")
         index_map: dict[int, int] = {}
-        for index, joint in enumerate(urdf_joints):
-            name = str(joint.get("name", "")).strip()
-            if name not in self.joint_name2id_dict:
-                raise ValueError(
-                    f"URDF joint {name or index} is missing from the PyBullet model"
-                )
-            index_map[index] = self.joint_name2id_dict[name]
+        if os.path.isfile(robot_urdf_path):
+            try:
+                document = ElementTree.parse(robot_urdf_path)
+                urdf_joints = document.getroot().findall("joint")
+                for index, joint in enumerate(urdf_joints):
+                    name = str(joint.get("name", "")).strip()
+                    if name in self.joint_name2id_dict:
+                        index_map[index] = self.joint_name2id_dict[name]
+            except Exception:
+                if order == "urdf":
+                    raise
 
-        def resolve(value, label: str):
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"{label} must be an integer")
-            if value == -1:
-                return -1
-            if value not in index_map:
-                raise ValueError(f"{label} references missing URDF joint index {value}")
-            return index_map[value]
+        def resolve(value, label: str, *, is_link: bool = False):
+            if isinstance(value, bool):
+                raise ValueError(f"{label} must be a string name or an integer, got bool")
+            if isinstance(value, str):
+                name = value.strip()
+                if name in ("-1", "base", "root", "world_base"):
+                    return -1
+                if is_link:
+                    if name in self.link_name2id_dict:
+                        return self.link_name2id_dict[name]
+                    if name in self.joint_name2id_dict:
+                        return self.joint_name2id_dict[name]
+                    raise ValueError(
+                        f"{label} specifies unknown link name: '{name}'"
+                    )
+                else:
+                    if name in self.joint_name2id_dict:
+                        return self.joint_name2id_dict[name]
+                    if name in self.link_name2id_dict:
+                        return self.link_name2id_dict[name]
+                    raise ValueError(
+                        f"{label} specifies unknown joint name: '{name}'"
+                    )
+            if isinstance(value, int):
+                if value == -1:
+                    return -1
+                if order == "urdf":
+                    if value not in index_map:
+                        raise ValueError(f"{label} references missing URDF joint index {value}")
+                    return index_map[value]
+                return value
+            raise ValueError(f"{label} must be a string name or an integer, got {type(value).__name__}")
 
-        def resolve_list(value, label: str):
+        def resolve_list(value, label: str, *, is_link: bool = False):
             if not isinstance(value, list):
-                raise ValueError(f"{label} must be an integer list")
-            return [resolve(item, f"{label}[{offset}]") for offset, item in enumerate(value)]
+                raise ValueError(f"{label} must be a list")
+            return [
+                resolve(item, f"{label}[{offset}]", is_link=is_link)
+                for offset, item in enumerate(value)
+            ]
 
         for group_name in ("arms", "grippers"):
             for offset, group in enumerate(self.configs.get(group_name, [])):
                 if "joint_index" in group:
                     group["joint_index"] = resolve_list(
-                        group["joint_index"], f"{group_name}[{offset}].joint_index"
+                        group["joint_index"], f"{group_name}[{offset}].joint_index", is_link=False
+                    )
+                elif "joint_names" in group:
+                    group["joint_index"] = resolve_list(
+                        group["joint_names"], f"{group_name}[{offset}].joint_names", is_link=False
                     )
                 if "ee_index" in group:
                     group["ee_index"] = resolve(
-                        group["ee_index"], f"{group_name}[{offset}].ee_index"
+                        group["ee_index"], f"{group_name}[{offset}].ee_index", is_link=True
+                    )
+                elif "ee_link" in group:
+                    group["ee_index"] = resolve(
+                        group["ee_link"], f"{group_name}[{offset}].ee_link", is_link=True
                     )
 
         for group_name in ("folding_waist", "waist", "dorsal", "head"):
@@ -487,18 +522,22 @@ class AssembledRobot:
                 continue
             if "joint_index" in group:
                 group["joint_index"] = resolve_list(
-                    group["joint_index"], f"{group_name}.joint_index"
+                    group["joint_index"], f"{group_name}.joint_index", is_link=False
+                )
+            elif "joint_names" in group:
+                group["joint_index"] = resolve_list(
+                    group["joint_names"], f"{group_name}.joint_names", is_link=False
                 )
             for key in ("cmd_ee", "base"):
                 if key in group:
-                    group[key] = resolve(group[key], f"{group_name}.{key}")
+                    group[key] = resolve(group[key], f"{group_name}.{key}", is_link=True)
 
         controller = self.configs.get("controller_indices")
         if isinstance(controller, dict):
             for key in ("cmd_ee", "base"):
                 if key in controller:
                     controller[key] = resolve_list(
-                        controller[key], f"controller_indices.{key}"
+                        controller[key], f"controller_indices.{key}", is_link=True
                     )
         self.configs["joint_index_order"] = "pybullet"
 
@@ -573,11 +612,14 @@ class AssembledRobot:
         self.arms: list[RobotArm] = []
         for arm_number, config in enumerate(self.configs.get("arms", [])):
             self._validate_link_index(config["ee_index"], f"arms[{arm_number}].ee_index")
+            rest_j_pos = config.get("rest_j_pos")
+            if rest_j_pos is None:
+                rest_j_pos = [0.0] * len(config["joint_index"])
             arm = RobotArm(
                 self,
                 config["joint_index"],
                 config["ee_index"],
-                config["rest_j_pos"],
+                rest_j_pos,
                 with_ee_constraint,
             )
             self._validate_joint_group(arm.joint_index, f"arms[{arm_number}]")

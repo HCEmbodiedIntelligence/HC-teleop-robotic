@@ -574,6 +574,166 @@ def _normalize_io(
     }
 
 
+def _normalize_teleop(
+    profile_id: str,
+    config: dict[str, Any],
+    model: UrdfModel,
+    urdf_name: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    teleop = copy.deepcopy(config)
+    arms_config = teleop.get("arms")
+    if not isinstance(arms_config, (dict, list)) or not arms_config:
+        raise RobotProfileError("arm_teleop.yaml requires a non-empty arms section")
+
+    robot_config = teleop.get("robot", {})
+    if not isinstance(robot_config, dict):
+        robot_config = {}
+        teleop["robot"] = robot_config
+    base_pos = list(robot_config.get("base_position", [0.0, 0.0, 0.0]))
+    base_ori = list(robot_config.get("base_orientation", [0.0, 0.0, 0.0, 1.0]))
+    initial_joints = robot_config.get("initial_joints")
+    if not isinstance(initial_joints, dict):
+        initial_joints = {}
+
+    arm_items = []
+    if isinstance(arms_config, dict):
+        for side in ("right", "left"):
+            if side in arms_config:
+                arm_items.append((side, arms_config[side]))
+        for side, arm in arms_config.items():
+            if side not in ("right", "left"):
+                arm_items.append((side, arm))
+    else:
+        for index, arm in enumerate(arms_config):
+            side = "right" if index == 0 else "left" if index == 1 else f"arm_{index}"
+            arm_items.append((side, arm))
+
+    free_joints: list[str] = []
+    tasks = []
+    vr_arms = []
+    cmd_ee_list = []
+    base_list = []
+    rel_urdf_path = urdf_name if "/" in urdf_name else f"urdf/{urdf_name}"
+    joint_set = {j["name"] for j in model.joints}
+    link_set = set(model.links)
+
+    for side, arm in arm_items:
+        if not isinstance(arm, dict):
+            raise RobotProfileError(f"arms.{side} must be an object")
+        joint_names = arm.get("joint_names", [])
+        if not isinstance(joint_names, list) or not joint_names:
+            raise RobotProfileError(f"arms.{side}.joint_names must not be empty")
+        for jname in joint_names:
+            if str(jname) not in joint_set:
+                raise RobotProfileError(f"arms.{side} references missing URDF joint: '{jname}'")
+        joint_names = [str(j) for j in joint_names]
+        free_joints.extend(joint_names)
+
+        ee_link = str(arm.get("ee_link", "")).strip()
+        if not ee_link or ee_link not in link_set:
+            raise RobotProfileError(f"arms.{side}.ee_link '{ee_link}' is missing from URDF")
+
+        raw_task_base = str(arm.get("generic_task_base_link") or arm.get("base_link") or "").strip()
+        task_base = raw_task_base if raw_task_base in link_set else model.root_link
+        tasks.append([[task_base, ee_link], 5.0, 1.0, 3.0])
+
+        rest_pos = [float(initial_joints.get(j, 0.0)) for j in joint_names]
+        vr_arms.append({
+            "joint_index": joint_names,
+            "ee_index": ee_link,
+            "rest_j_pos": rest_pos,
+        })
+        cmd_ee_list.append(ee_link)
+        base_link = str(arm.get("base_link", "base")).strip()
+        base_list.append(-1 if base_link in ("-1", "base", "root", model.root_link) else base_link)
+
+    body = teleop.get("body", {})
+    if isinstance(body, dict) and body.get("enabled", False):
+        for wj in body.get("waist_joint_names", []):
+            if wj in model.movable_joint_names and wj not in free_joints:
+                free_joints.append(wj)
+
+    free_joints = list(dict.fromkeys(free_joints))
+
+    velocity_limits = []
+    joint_map = {j["name"]: j for j in model.joints}
+    for jname in free_joints:
+        jinfo = joint_map.get(jname)
+        if jinfo and jinfo.get("velocity") is not None:
+            velocity_limits.append(round(math.degrees(float(jinfo["velocity"])), 2))
+        else:
+            velocity_limits.append(60.0)
+
+    controller = {
+        "ros_interface": _standard_ros_interface(profile_id),
+        "control": {"method": "control", "dt": 0.01, "damping": 1.0e-5, "joints_init": []},
+        "model": {"urdf": rel_urdf_path, "free_joints": free_joints},
+        "task": {"pose": tasks, "axis": [], "joint": []},
+        "limit": {"velocity": velocity_limits},
+    }
+
+    grippers_config = teleop.get("grippers", {})
+    vr_grippers = []
+    finger_topics = []
+    if isinstance(grippers_config, dict):
+        for side, _arm in arm_items:
+            gripper = grippers_config.get(side, {})
+            if isinstance(gripper, dict):
+                finger_joints = gripper.get("finger_joint_names", [])
+                if finger_joints:
+                    vr_grippers.append({"joint_index": list(finger_joints)})
+                topic = gripper.get("finger_topic")
+                if topic:
+                    finger_topics.append(str(topic))
+    elif isinstance(grippers_config, list):
+        for item in grippers_config:
+            if isinstance(item, dict) and "joint_index" in item:
+                vr_grippers.append({"joint_index": item["joint_index"]})
+
+    sim_settings = teleop.get("simulation", {})
+    if not isinstance(sim_settings, dict):
+        sim_settings = {}
+    io_config = {
+        "urdf_path": rel_urdf_path,
+        "robot_name": profile_id,
+        "wo_controller": False,
+        "joint_index_order": "pybullet",
+        "base_pose": {
+            "position": base_pos,
+            "orientation": base_ori,
+        },
+        "sim_camera": sim_settings.get("sim_camera", {
+            "distance": 2.5,
+            "yaw": 45,
+            "pitch": -25,
+            "target_position": [0.0, 0.0, 0.5],
+        }),
+        "sim_opengl2": True,
+        "arms": vr_arms,
+        "grippers": vr_grippers,
+        "controller_indices": {
+            "cmd_ee": cmd_ee_list,
+            "base": base_list,
+        },
+        "vibration_thresholds": {
+            "ee_dist": [0.1, 0.15],
+        },
+        "arm_pos_scale": 1.0,
+        "ee_wrt_head": False,
+    }
+    if finger_topics:
+        io_config["finger_command_topics"] = finger_topics
+
+    summary = {
+        "schema": "arm-teleop-v1",
+        "free_joint_count": len(free_joints),
+        "task_count": len(tasks),
+        "arm_count": len(arm_items),
+        "warnings": [],
+    }
+    return teleop, controller, io_config, summary
+
+
 class RobotProfileManager:
     def __init__(self, root: str | Path):
         self.root = Path(root).expanduser().resolve()
@@ -582,11 +742,120 @@ class RobotProfileManager:
     def _path(self, profile_id: str) -> Path:
         return self.root / validate_profile_id(profile_id)
 
+    def _ensure_profile_files(self, path: Path, profile_id: str) -> None:
+        teleop_path = path / "arm_teleop.yaml"
+        controller_path = path / "controller_v23.yml"
+        vr_path = path / "vr_configs.yml"
+        metadata_path = path / "profile.yaml"
+
+        urdf_files = sorted(path.glob("**/*.urdf"), key=lambda p: len(p.parts))
+        if not urdf_files:
+            return
+        urdf_file = urdf_files[0]
+        rel_urdf = urdf_file.relative_to(path).as_posix()
+
+        try:
+            model = UrdfModel(urdf_file.read_bytes())
+        except Exception:
+            return
+
+        if teleop_path.is_file():
+            try:
+                teleop_data = _load_yaml(teleop_path.read_bytes())
+                if isinstance(teleop_data, dict) and isinstance(teleop_data.get("arms"), (dict, list)):
+                    _teleop, controller, io_config, summary = _normalize_teleop(
+                        profile_id, teleop_data, model, rel_urdf
+                    )
+                    if not controller_path.is_file():
+                        controller_path.write_text(
+                            yaml.safe_dump(controller, allow_unicode=True, sort_keys=False),
+                            encoding="utf-8",
+                        )
+                    if not vr_path.is_file():
+                        vr_path.write_text(
+                            yaml.safe_dump(io_config, allow_unicode=True, sort_keys=False),
+                            encoding="utf-8",
+                        )
+                    if not metadata_path.is_file():
+                        metadata = {
+                            "version": 1,
+                            "id": profile_id,
+                            "display_name": profile_id,
+                            "schema": summary["schema"],
+                            "managed": True,
+                            "imported_at": datetime.now(timezone.utc).isoformat(),
+                            "robot_name": model.robot_name,
+                            "urdf": rel_urdf,
+                            "primary_config": "controller_v23.yml" if controller_path.is_file() else "arm_teleop.yaml",
+                            "config_files": [
+                                f for f in ("controller_v23.yml", "vr_configs.yml", "arm_teleop.yaml")
+                                if (path / f).is_file()
+                            ],
+                            "link_count": len(model.links),
+                            "joint_count": len(model.joints),
+                            "movable_joint_count": len(model.movable_joint_names),
+                            "free_joint_count": summary["free_joint_count"],
+                            "task_count": summary["task_count"],
+                            "arm_count": summary["arm_count"],
+                            "teleop_compatible": True,
+                            "warnings": summary["warnings"],
+                        }
+                        metadata_path.write_text(
+                            yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False),
+                            encoding="utf-8",
+                        )
+                    return
+            except Exception:
+                pass
+
+        if vr_path.is_file() and not metadata_path.is_file():
+            try:
+                io_data = _load_yaml(vr_path.read_bytes())
+                if isinstance(io_data, dict) and "arms" in io_data:
+                    io_config, controller, teleop, summary = _normalize_io(
+                        profile_id, io_data, model, rel_urdf
+                    )
+                    if not controller_path.is_file():
+                        controller_path.write_text(
+                            yaml.safe_dump(controller, allow_unicode=True, sort_keys=False),
+                            encoding="utf-8",
+                        )
+                    metadata = {
+                        "version": 1,
+                        "id": profile_id,
+                        "display_name": profile_id,
+                        "schema": summary["schema"],
+                        "managed": True,
+                        "imported_at": datetime.now(timezone.utc).isoformat(),
+                        "robot_name": model.robot_name,
+                        "urdf": rel_urdf,
+                        "primary_config": "controller_v23.yml" if controller_path.is_file() else "vr_configs.yml",
+                        "config_files": [
+                            f for f in ("controller_v23.yml", "vr_configs.yml", "arm_teleop.yaml")
+                            if (path / f).is_file()
+                        ],
+                        "link_count": len(model.links),
+                        "joint_count": len(model.joints),
+                        "movable_joint_count": len(model.movable_joint_names),
+                        "free_joint_count": summary["free_joint_count"],
+                        "task_count": summary["task_count"],
+                        "arm_count": summary["arm_count"],
+                        "teleop_compatible": (path / "arm_teleop.yaml").is_file(),
+                        "warnings": summary["warnings"],
+                    }
+                    metadata_path.write_text(
+                        yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False),
+                        encoding="utf-8",
+                    )
+            except Exception:
+                pass
+
     def get(self, profile_id: str) -> dict[str, Any]:
         path = self._path(profile_id)
-        metadata_path = path / "profile.yaml"
         if not path.is_dir():
             raise RobotProfileError(f"robot profile does not exist: {profile_id}")
+        self._ensure_profile_files(path, profile_id)
+        metadata_path = path / "profile.yaml"
         if metadata_path.is_file():
             try:
                 metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
@@ -598,6 +867,8 @@ class RobotProfileManager:
             config_name = (
                 "controller_v23.yml"
                 if (path / "controller_v23.yml").is_file()
+                else "arm_teleop.yaml"
+                if (path / "arm_teleop.yaml").is_file()
                 else "vr_configs.yml"
                 if (path / "vr_configs.yml").is_file()
                 else ""
@@ -613,6 +884,18 @@ class RobotProfileManager:
                 "managed": False,
                 "warnings": ["legacy profile without profile.yaml metadata"],
             }
+        if "link_count" not in metadata:
+            urdf_files = sorted(path.glob("**/*.urdf"), key=lambda p: len(p.parts))
+            if urdf_files:
+                try:
+                    m = UrdfModel(urdf_files[0].read_bytes())
+                    metadata.setdefault("link_count", len(m.links))
+                    metadata.setdefault("joint_count", len(m.joints))
+                    metadata.setdefault("movable_joint_count", len(m.movable_joint_names))
+                    metadata.setdefault("robot_name", m.robot_name)
+                    metadata.setdefault("urdf", urdf_files[0].relative_to(path).as_posix())
+                except Exception:
+                    pass
         metadata = copy.deepcopy(metadata)
         metadata["id"] = profile_id
         metadata["managed"] = bool(metadata.get("managed", metadata_path.is_file()))
@@ -671,7 +954,17 @@ class RobotProfileManager:
         model = UrdfModel(urdf_payload)
         source_config = _load_yaml(config_payload)
         files: dict[str, dict[str, Any]] = {}
-        if isinstance(source_config.get("model"), dict) and "task" in source_config:
+        if isinstance(source_config.get("arms"), (dict, list)) and (
+            "robot" in source_config or "grippers" in source_config or "control" in source_config
+        ):
+            teleop, controller, io_config, summary = _normalize_teleop(
+                profile_id, source_config, model, urdf_filename
+            )
+            files["arm_teleop.yaml"] = teleop
+            files["controller_v23.yml"] = controller
+            files["vr_configs.yml"] = io_config
+            primary_config = "controller_v23.yml"
+        elif isinstance(source_config.get("model"), dict) and "task" in source_config:
             controller, summary = _normalize_v23(
                 profile_id, source_config, model, urdf_filename
             )
@@ -828,34 +1121,59 @@ class RobotProfileManager:
                 ]
 
                 chosen_source_config = None
+                source_kind = None
                 for candidate in sorted(
                     yaml_files,
                     key=lambda p: (
-                        {"controller_v23.yml": 0, "vr_configs.yml": 1}.get(
-                            p.name, 2
+                        {"arm_teleop.yaml": 0, "controller_v23.yml": 1, "vr_configs.yml": 2}.get(
+                            p.name, 3
                         ),
                         len(p.parts),
                     ),
                 ):
                     try:
                         loaded = _load_yaml(candidate.read_bytes())
-                        if isinstance(loaded, dict) and (
-                            ("model" in loaded and "task" in loaded)
-                            or ("urdf_path" in loaded and "arms" in loaded)
-                        ):
-                            chosen_source_config = loaded
-                            break
+                        if isinstance(loaded, dict):
+                            if isinstance(loaded.get("arms"), (dict, list)) and (
+                                "robot" in loaded or "grippers" in loaded or "control" in loaded
+                            ):
+                                chosen_source_config = loaded
+                                source_kind = "teleop"
+                                break
+                            elif "model" in loaded and "task" in loaded:
+                                chosen_source_config = loaded
+                                source_kind = "v23"
+                                break
+                            elif "urdf_path" in loaded and "arms" in loaded:
+                                chosen_source_config = loaded
+                                source_kind = "io"
+                                break
                     except Exception:
                         continue
 
                 if not chosen_source_config:
                     raise RobotProfileError(
-                        "no supported YAML found in archive (expected vr_configs.yml or controller_v23.yml schema)"
+                        "no supported YAML found in archive (expected arm_teleop.yaml, vr_configs.yml, or controller_v23.yml schema)"
                     )
 
                 model = UrdfModel(urdf_payload)
                 files: dict[str, dict[str, Any]] = {}
-                if isinstance(chosen_source_config.get("model"), dict) and "task" in chosen_source_config:
+                if source_kind == "teleop":
+                    teleop, controller, io_config, summary = _normalize_teleop(
+                        profile_id, chosen_source_config, model, rel_urdf_path
+                    )
+                    files["arm_teleop.yaml"] = teleop
+                    files["controller_v23.yml"] = controller
+                    sim_file = next((f for f in yaml_files if f.name == "vr_configs.yml"), None)
+                    if sim_file is not None:
+                        try:
+                            files["vr_configs.yml"] = _load_yaml(sim_file.read_bytes())
+                        except Exception:
+                            files["vr_configs.yml"] = io_config
+                    else:
+                        files["vr_configs.yml"] = io_config
+                    primary_config = "controller_v23.yml"
+                elif source_kind == "v23":
                     controller, summary = _normalize_v23(
                         profile_id, chosen_source_config, model, rel_urdf_path
                     )
@@ -875,7 +1193,7 @@ class RobotProfileManager:
                             )
                         )
                         files["vr_configs.yml"] = io_config
-                elif "urdf_path" in chosen_source_config and "arms" in chosen_source_config:
+                elif source_kind == "io":
                     io_config, controller, teleop, summary = _normalize_io(
                         profile_id, chosen_source_config, model, rel_urdf_path
                     )
