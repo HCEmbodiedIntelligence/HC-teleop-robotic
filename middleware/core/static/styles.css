@@ -17,3 +17,7 @@
 
 
 
+
+.simulation-actions {display:flex;gap:10px;flex-wrap:wrap;margin:16px 0;}
+.simulation-logs {max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);padding:12px;}
+#simulationError {color:var(--muted);white-space:pre-wrap;}

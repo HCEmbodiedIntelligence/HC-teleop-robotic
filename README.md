@@ -35,7 +35,7 @@
 cd /home/maple/test/HC-teleop-robotic
 chmod +x install.sh run.sh
 ./install.sh
-./run.sh sim
+./run.sh middleware
 ```
 
 然后访问 `http://<机器人IP>:7876/dashboard/#config`。相机不在系统配置页中管理；需要独立启用 WebRTC 服务时安装可选依赖：
@@ -56,7 +56,9 @@ cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
-根目录只保留 `./run.sh` 作为产品入口：`sim` 启动完整仿真，`teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制。省略模式时，带 `vr_configs.yml` 的 Profile 自动进入 `sim`，仅含控制器配置的 Profile 自动进入 `teleop`。X1 和 OpenArmX 均已包含仿真配置。`middleware/start.sh` 和 `adapters/start.sh` 是内部组件入口，不用于正常运行。
+根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择无窗口模式、关节调试和是否同时启动 IK/VR 控制。窗口显示在运行中间件的服务器桌面；无桌面环境请选择无窗口模式。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
+
+显式 `./run.sh sim` 仍启动完整仿真，`./run.sh teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制；这两种方式由命令行管理进程，不允许从网页另起一套仿真。网页管理模式下，中间件退出会清理其启动的仿真与控制进程。
 
 ### 网页导入机器人配置
 

@@ -17,10 +17,11 @@ from geometry_msgs.msg import PoseArray
 from std_msgs.msg import Bool, Float64MultiArray
 from std_srvs.srv import Trigger
 import argparse
+import fcntl
 
-from io_teleop_robot_utils.robot_module import AssembledRobot
+from robot_utils.robot_module import AssembledRobot
 
-from io_teleop_robot_utils.utils import (
+from robot_utils.utils import (
     debug_draw_pose,
     multiply_transforms,
     pose_msg_to_list,
@@ -32,36 +33,30 @@ class SimRobotController(Node, AssembledRobot):
         # Initialize ROS2 node
         Node.__init__(self, "sim_robot_controller_node")
 
-        # Connect to PyBullet
-        client_id = p.connect(p.DIRECT if headless else p.GUI)
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
-        p.resetDebugVisualizerCamera(
-            cameraDistance=1.5,
-            cameraPitch=-30,
-            cameraYaw=180,
-            cameraTargetPosition=[0, 0, 0.6],
-        )
-
-        # Start simulation
-        def physics_sim():
-            # p.setRealTimeSimulation(1)
-            while rclpy.ok():
-                p.stepSimulation()
-                time.sleep(1.0 / 240.0)
-
-        physics_sim_thread = threading.Thread(target=physics_sim)
-        physics_sim_thread.start()
-        self.physics_clent_id = client_id
         config_file = os.path.abspath(os.path.expanduser(config_path))
         if not os.path.isfile(config_file):
             raise FileNotFoundError(f"simulation profile does not exist: {config_file}")
         self.robot_description_path = os.path.dirname(config_file)
         with open(config_file, encoding="utf-8") as stream:
             self.configs = yaml.safe_load(stream)
+        options = "--opengl2" if self.configs.get("sim_opengl2", False) and not headless else ""
+        client_id = p.connect(p.DIRECT if headless else p.GUI, options=options)
+        if client_id < 0:
+            raise RuntimeError("Unable to connect to PyBullet")
+        self.physics_clent_id = client_id
+        p.configureDebugVisualizer(p.COV_ENABLE_GUI, int(init_debug and not headless))
+        p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0)
+        p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0)
+        p.configureDebugVisualizer(p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW, 0)
+        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
+        camera = self.configs.get("sim_camera", {})
+        p.resetDebugVisualizerCamera(
+            cameraDistance=camera.get("distance", 1.5),
+            cameraPitch=camera.get("pitch", -30),
+            cameraYaw=camera.get("yaw", 180),
+            cameraTargetPosition=camera.get("target_position", [0, 0, 0.6]),
+        )
+
         self.wo_controller = False
         robot_urdf_path = os.path.abspath(
             os.path.join(self.robot_description_path, self.configs["urdf_path"])
@@ -175,6 +170,32 @@ class SimRobotController(Node, AssembledRobot):
         self.reset_service_server = self.create_service(
             Trigger, "io_teleop_reset_robot", self.reset_service_callback
         )
+
+        # Start physics only after all joints and home poses are assembled.
+        self.physics_stop = threading.Event()
+        def physics_sim():
+            try:
+                while rclpy.ok() and not self.physics_stop.is_set():
+                    with self.bullet_lock:
+                        if not p.isConnected(self.physics_clent_id):
+                            break
+                        p.stepSimulation(physicsClientId=self.physics_clent_id)
+                    self.physics_stop.wait(1.0 / 240.0)
+            except p.error:
+                pass
+            finally:
+                if not self.physics_stop.is_set():
+                    rclpy.try_shutdown()
+        self.physics_thread = threading.Thread(target=physics_sim, daemon=True)
+        self.physics_thread.start()
+        if init_debug and not headless:
+            self.debug_timer = self.create_timer(1.0 / 60, self.update_debug_joints)
+
+    def close_simulation(self):
+        self.physics_stop.set()
+        self.physics_thread.join(timeout=2)
+        if p.isConnected(self.physics_clent_id):
+            p.disconnect(self.physics_clent_id)
 
     def reset_service_callback(self, request, response):
         print(
@@ -384,6 +405,13 @@ def main(args=None):
     parser.add_argument("--headless", action="store_true")
 
     arguments, ros_arguments = parser.parse_known_args(args)
+    # One PyBullet ROS publisher per user/domain, including CLI launches.
+    lock_path = f"/tmp/hc-pybullet-{os.getuid()}-{os.environ.get('ROS_DOMAIN_ID', '0')}.lock"
+    simulation_lock = open(lock_path, "a")
+    try:
+        fcntl.flock(simulation_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise RuntimeError("PyBullet is already running in this ROS domain; stop it before launching another model")
     rclpy.init(args=ros_arguments)
     profile = os.path.abspath(os.path.expanduser(arguments.profile))
     config_path = (
@@ -397,11 +425,13 @@ def main(args=None):
             init_debug=arguments.init_debug,
             headless=arguments.headless,
         )
+        print("HC_SIMULATION_READY", flush=True)
         rclpy.spin(robot)
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
         if robot is not None:
+            robot.close_simulation()
             robot.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

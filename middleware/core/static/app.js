@@ -957,8 +957,62 @@ function configureProfileDialog() {
   };
 }
 
+let simulationBusy=false;
+let simulationActionError='';
+async function loadSimulation() {
+  try {
+    const value=await api('/api/simulation');
+    const states={stopped:'已停止',starting:'启动中',running:'运行中',stopping:'停止中',failed:'启动失败 / 已退出'};
+    if(!simulationBusy)$('#simulationState').textContent=states[value.state]||value.state;
+    $('#simulationProfile').textContent=`当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
+    $('#simulationError').textContent=simulationActionError||value.error||value.unavailable_reason||'';
+    $('#simulationLogs').textContent=value.logs.join('\n')||'暂无日志';
+    const active=['starting','running','stopping'].includes(value.state);
+    $('#startSimulation').disabled=simulationBusy||active||!value.available;
+    $('#restartSimulation').disabled=simulationBusy||!value.available||value.state==='stopping';
+    $('#stopSimulation').disabled=simulationBusy||!active;
+  } catch(error) {
+    $('#simulationError').textContent=`无法读取仿真状态：${error.message}`;
+    for(const id of ['startSimulation','restartSimulation','stopSimulation']) $('#'+id).disabled=true;
+  }
+}
+async function simulationAction(action) {
+  if(simulationBusy)return;
+  simulationBusy=true;
+  simulationActionError='';
+  $('#simulationState').textContent=action==='stop'?'正在停止…':'正在提交启动请求…';
+  $('#simulationError').textContent='';
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),30000);
+  for(const id of ['startSimulation','restartSimulation','stopSimulation']) $('#'+id).disabled=true;
+  try {
+    if(action!=='stop') {
+      const options={};
+      $$('[data-path^="simulation."]').forEach(input=>{options[input.dataset.path.split('.')[1]]=input.checked;});
+      await api('/api/simulation/options',{method:'PUT',body:JSON.stringify(options),signal:controller.signal});
+      if(config)config.simulation=options;
+    }
+    await api(`/api/simulation/${action}`,{method:'POST',signal:controller.signal});
+    toast(action==='stop'?'仿真已停止，中间件继续运行':'正在启动当前机器人仿真，请查看运行状态');
+  } catch(error) {
+    simulationActionError=error.name==='AbortError'?'请求超过 30 秒，正在查询实际运行状态；请查看下方日志。':error.message;
+    $('#simulationError').textContent=simulationActionError;
+    toast(simulationActionError,true);
+  }
+  finally {clearTimeout(timeout);simulationBusy=false;await loadSimulation();}
+}
+
+function bindSimulationControls() {
+  for(const [id,action] of [['startSimulation','start'],['restartSimulation','restart'],['stopSimulation','stop']]) {
+    $('#'+id).onclick=()=>simulationAction(action);
+  }
+}
+
 async function init() {
   route();
+  bindSimulationControls();
+  await loadSimulation();
+  setInterval(()=>{if(document.visibilityState==='visible')loadSimulation();},2000);
   window.addEventListener('hashchange',route);
   try {
     [config,profilesData]=await Promise.all([api('/api/config'),api('/api/robot-profiles')]);
@@ -1015,7 +1069,7 @@ async function init() {
       profilesData.active=result.active;
       if(config?.robot_profiles)config.robot_profiles.active=result.active;
       renderProfiles(result.active);
-      toast(result.restart_simulation_required?'配置已应用；请重启仿真/遥操作进程':'配置已经是活动配置');
+      toast(result.restart_simulation_required?'配置已应用；可在下方启动当前机器人仿真':'配置已经是活动配置');
     } catch(error){toast(`应用失败：${error.message}`,true);}
   };
   $('#saveConfig').onclick=async()=>{

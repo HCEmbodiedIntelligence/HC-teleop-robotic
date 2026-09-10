@@ -14,7 +14,8 @@ from aiohttp import WSMsgType, web
 import yaml
 
 from .camera import CameraService
-from .config import ConfigError, ConfigStore
+from .simulation import SimulationService, register_simulation_routes
+from .config import ConfigError, ConfigStore, validate_config
 from .profile_api import register_profile_routes
 from .protocol import envelope
 from .robot_profiles import RobotProfileManager
@@ -613,6 +614,38 @@ def create_app(store: ConfigStore) -> web.Application:
     app = web.Application(
         client_max_size=100 * 1024 * 1024, middlewares=[cors_middleware]
     )
+    simulation = SimulationService(store, profiles)
+
+    @web.middleware
+    async def serialize_simulation_changes(request, handler):
+        # Serialize profile/config writes against launches so a running model can
+        # never observe half-imported assets or a different active selection.
+        if request.method in {"POST", "PUT", "DELETE"} and (
+            request.path.startswith("/api/robot-profiles") or request.path == "/api/config"
+        ):
+            async with simulation.lock:
+                stop_required = True
+                if request.path == "/api/config":
+                    try:
+                        proposed = validate_config(await request.json())
+                        stop_required = (
+                            proposed["robot_profiles"] != store.value["robot_profiles"]
+                            or proposed["ros"]["domain_id"] != store.value["ros"]["domain_id"]
+                            or proposed["simulation"] != store.value["simulation"]
+                        )
+                    except (ConfigError, ValueError, TypeError):
+                        stop_required = False  # Let the config handler report validation errors.
+                elif request.path.endswith("/activate"):
+                    stop_required = request.match_info["profile_id"] != store.value["robot_profiles"].get("active")
+                elif request.method == "DELETE":
+                    stop_required = request.match_info["profile_id"] == simulation.profile_id
+                if simulation.processes and stop_required:
+                    await simulation.stop()
+                return await handler(request)
+        return await handler(request)
+
+    app.middlewares.append(serialize_simulation_changes)
+    register_simulation_routes(app, simulation)
     static_dir = Path(__file__).parent / "static"
 
     async def index(_request: web.Request) -> web.FileResponse:
@@ -1147,6 +1180,8 @@ def create_app(store: ConfigStore) -> web.Application:
     async def shutdown(_app: web.Application) -> None:
         for ws in tuple(runtime.websockets):
             await ws.close(code=1001, message=b"server shutdown")
+        async with simulation.lock:
+            await simulation.stop()
         await runtime.stop()
 
     async def options(_request: web.Request) -> web.Response:

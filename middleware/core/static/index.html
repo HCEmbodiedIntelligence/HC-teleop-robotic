@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=7">
+  <link rel="stylesheet" href="/static/styles.css?v=9">
 </head>
 <body>
   <aside class="sidebar">
@@ -184,6 +184,19 @@
           <div class="table-wrap"><table><thead><tr><th>用途</th><th>Topic</th><th>默认消息类型</th></tr></thead><tbody id="configInterfaceRows"></tbody></table></div>
         </details>
       </article>
+      <article class="panel" id="simulationPanel">
+        <div class="panel-title"><div><h2>PyBullet 仿真</h2><p>使用上方已应用的机器人 ZIP 配置，独立启动或停止仿真。</p></div><span id="simulationState" class="tag">正在加载控制界面</span></div>
+        <p id="simulationProfile">正在读取活动配置…</p>
+        <div class="form-grid">
+          <label class="toggle"><input type="checkbox" data-path="simulation.headless"><span></span>无窗口模式（关闭时在服务器桌面打开 PyBullet）</label>
+          <label class="toggle"><input type="checkbox" data-path="simulation.with_control"><span></span>同时启动逆解与 VR 遥操作控制</label>
+          <label class="toggle"><input type="checkbox" data-path="simulation.debug_joints"><span></span>启用关节调试</label>
+        </div>
+        <p class="muted">初始姿态和相机参数使用 ZIP 内的 vr_configs.yml。启动、重启会保存上述选项；停止仿真保留中间件运行。导入、切换机器人或修改仿真选项、ROS Domain ID 会停止当前仿真。</p>
+        <div class="simulation-actions"><button class="primary" id="startSimulation" disabled>启动仿真</button><button id="restartSimulation" disabled>重启仿真</button><button class="danger" id="stopSimulation" disabled>停止仿真</button></div>
+        <p id="simulationError" role="status"></p>
+        <details><summary>仿真日志</summary><pre id="simulationLogs" class="simulation-logs">暂无日志</pre></details>
+      </article>
       <div class="config-actions"><p>保存后 ROS、VR 和相机网关会自动重载。</p><button class="primary" id="saveConfig">保存并应用</button></div>
       <article class="panel"><h2>服务、ROS 2 与 VR 网关</h2>
         <div class="form-grid">
@@ -296,6 +309,6 @@
     </dialog>
     <div id="toast" role="status"></div>
   </main>
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

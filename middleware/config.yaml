@@ -3,7 +3,11 @@ server:
   port: 7876
 robot_profiles:
   root: ../adapters/robots
-  active: x1
+  active: baxter
+simulation:
+  headless: false
+  with_control: true
+  debug_joints: false
 ros:
   enabled: true
   domain_id: 14

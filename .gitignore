@@ -23,3 +23,11 @@ runtime/
 # Runtime supervisor is source code, not generated session data.
 !tools/runtime/
 !tools/runtime/**
+
+# User-imported robot profiles in adapters/robots/ (keep built-in profiles)
+adapters/robots/*
+!adapters/robots/openarmx/
+!adapters/robots/x1/
+!adapters/robots/.gitkeep
+!adapters/robots/*.md
+

@@ -1188,6 +1188,16 @@ class RobotArmTeleopNode(Node):
             )
 
     def _link_pose(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+        if index == -1:
+            # PyBullet's base pose is the inertial frame; task frames refer to
+            # the URDF root link, which may have a nonzero inertial offset.
+            position, orientation = self._root_pose()
+            dynamics = bullet.getDynamicsInfo(
+                self.robot_id, -1, physicsClientId=self.physics_client
+            )
+            inverse = bullet.invertTransform(dynamics[3], dynamics[4])
+            link = bullet.multiplyTransforms(position, orientation, *inverse)
+            return np.asarray(link[0], dtype=float), np.asarray(link[1], dtype=float)
         state = bullet.getLinkState(
             self.robot_id,
             index,

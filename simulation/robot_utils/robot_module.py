@@ -1,4 +1,4 @@
-"""Config-driven PyBullet robot model used by TeleXperience simulations.
+"""Config-driven PyBullet robot model used by generic simulations.
 
 This is a ROS-independent adaptation of the utility module in
 ``ioai-tech/TeleXperience_robot_ros1_ws``.  Keeping ROS out of this module makes

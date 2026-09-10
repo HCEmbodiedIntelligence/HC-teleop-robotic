@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MODE=""
+MODE="middleware"
 MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${PROJECT_ROOT}/middleware/config.yaml}"
 HEADLESS=false
 MONITOR=true
@@ -15,13 +15,14 @@ SERVER_PORT=""
 
 usage() {
   cat <<EOF
-Usage: $0 [sim|teleop] [options]
+Usage: $0 [middleware|sim|teleop] [options]
 
+  middleware Dashboard + VR gateway; launch PyBullet from System Configuration
   sim       VR discovery + Dashboard + IK/control + PyBullet
   teleop    VR discovery + Dashboard + IK/control for an external real driver
 
-  With no mode, sim is selected only when the active profile contains
-  vr_configs.yml; otherwise teleop is selected.
+  With no mode, middleware is selected. Import/apply a robot ZIP and start
+  PyBullet independently from Dashboard System Configuration.
 
 Options:
   --headless            Run simulation without the PyBullet GUI (sim only)
@@ -42,11 +43,11 @@ EOF
 
 if (($#)); then
   case "$1" in
-    sim|teleop)
+    middleware|sim|teleop)
       MODE="$1"
       shift
       ;;
-    simulator|middleware)
+    simulator)
       echo "Mode '$1' was removed. Use 'sim' or 'teleop'." >&2
       exit 2
       ;;
@@ -116,6 +117,18 @@ done
   exit 2
 }
 
+if [[ "${MODE}" == middleware ]]; then
+  [[ "${HEADLESS}" == false ]] || { echo "Configure headless mode in Dashboard." >&2; exit 2; }
+  unset HC_EXTERNAL_STACK HC_ROBOT_NAME HC_ROBOT_CONFIG_ROOT HC_TELEOP_MODE
+  ARGS=(--config "${MIDDLEWARE_CONFIG}")
+  [[ -z "${LOG_DIR}" ]] || ARGS+=(--log-dir "${LOG_DIR}")
+  [[ "${MONITOR}" == true ]] || ARGS+=(--no-monitor)
+  [[ -z "${SERVER_HOST}" ]] || ARGS+=(--host "${SERVER_HOST}")
+  [[ -z "${SERVER_PORT}" ]] || ARGS+=(--port "${SERVER_PORT}")
+  exec "${PROJECT_ROOT}/middleware/start.sh" "${ARGS[@]}"
+fi
+export HC_EXTERNAL_STACK=1
+
 if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
   export ROS_DOMAIN_ID
   ROS_DOMAIN_ID="$(/usr/bin/python3 - "${MIDDLEWARE_CONFIG}" <<'PY'
@@ -142,14 +155,6 @@ if [[ -z "${ROBOT_NAME}" ]]; then
   ROBOT_NAME="$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")"
 fi
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
-if [[ -z "${MODE}" ]]; then
-  if [[ -f "${PROFILE_DIR}/vr_configs.yml" ]]; then
-    MODE="sim"
-  else
-    MODE="teleop"
-  fi
-  echo "[HC] no mode specified; selected ${MODE} for profile ${ROBOT_NAME}"
-fi
 if [[ "${MODE}" == teleop && "${HEADLESS}" == true ]]; then
   echo "--headless is only valid in sim mode." >&2
   exit 2

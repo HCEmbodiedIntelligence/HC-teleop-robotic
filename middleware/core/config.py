@@ -12,6 +12,7 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"host": "0.0.0.0", "port": 7876},
     "robot_profiles": {"root": "../adapters/robots", "active": "x1"},
+    "simulation": {"headless": False, "with_control": True, "debug_joints": False},
     "ros": {
         "enabled": True,
         "domain_id": 14,
@@ -83,6 +84,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ConfigError("configuration root must be an object")
     value = _merge(DEFAULT_CONFIG, config)
+
+    simulation = value.get("simulation")
+    if not isinstance(simulation, dict):
+        raise ConfigError("simulation must be an object")
+    for key in ("headless", "with_control", "debug_joints"):
+        if not isinstance(simulation.get(key), bool):
+            raise ConfigError(f"simulation.{key} must be boolean")
 
     profile_config = value.get("robot_profiles")
     if not isinstance(profile_config, dict):
