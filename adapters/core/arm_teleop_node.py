@@ -48,6 +48,33 @@ from .teleop_state import ArmRuntime, BodyRuntime, IkCandidate
 from .vr_input import decode_vr_frame
 
 
+LEGACY_IK_DEFAULTS = {
+    "ik_iterations": 16,
+    "ik_position_tolerance": 0.01,
+    "ik_orientation_tolerance": 0.06,
+    "ik_damping_min": 0.05,
+    "ik_damping_max": 0.45,
+    "ik_singularity_threshold": 0.08,
+    "ik_limit_margin": 0.12,
+    "ik_reseed_limit_margin": 0.08,
+    "ik_failure_retry_interval": 0.2,
+    "ik_reseed_interval": 0.5,
+    "ik_reseed_target_position_delta": 0.005,
+    "ik_reseed_target_orientation_delta": 0.035,
+    "ik_reseed_perturbation": 0.3,
+    "ik_limit_avoidance_gain": 0.035,
+    "ik_posture_gain": 0.02,
+    "ik_solution_limit_weight": 4.0,
+    "ik_min_progress_ratio": 0.001,
+    "ik_min_progress_absolute": 0.0001,
+    "ik_reseed_escape_progress_ratio": 0.05,
+    "ik_reseed_escape_max_regression": 0.25,
+    "ik_max_update": 0.08,
+    "max_joint_velocity": 1.8,
+    "max_joint_velocity_norm": 3.2,
+}
+
+
 class RobotArmTeleopNode(Node):
     """Profile-driven bimanual teleop node with a two-clutch state machine."""
 
@@ -58,13 +85,16 @@ class RobotArmTeleopNode(Node):
             self.config = yaml.safe_load(stream)
         if os.environ.get("HC_TELEOP_MODE") == "sim":
             self.config["body"].update(self.config.get("simulation_body", {}))
-        self._validate_config()
-        self.control = self.config["control"]
-        self.body_config = self.config["body"]
-        self.backend = str(backend or self.control.get("backend", "legacy")).lower()
+        self.control = self.config.get("control", {})
+        self.body_config = self.config.get("body", {})
+        self.backend = str(backend or self.control.get("backend", "v23")).lower()
         if self.backend not in {"v23", "generic", "legacy"}:
             raise ValueError("control.backend must be v23, generic or legacy")
         self.external_ik = self.backend in {"v23", "generic"}
+        if not self.external_ik:
+            for k, v in LEGACY_IK_DEFAULTS.items():
+                self.control.setdefault(k, v)
+        self._validate_config()
         self.enabled = bool(self.control.get("enabled_on_start", True))
         self.stop_reason = ""
         self.joint_state: dict[str, float] = {}
@@ -426,46 +456,47 @@ class RobotArmTeleopNode(Node):
             "velocity",
         }:
             raise ValueError("body.base_command_mode must be delta or velocity")
-        for key in (
-            "ik_position_tolerance",
-            "ik_orientation_tolerance",
-            "ik_damping_min",
-            "ik_damping_max",
-            "ik_singularity_threshold",
-            "ik_max_update",
-            "ik_reseed_interval",
-            "ik_reseed_perturbation",
-            "ik_failure_retry_interval",
-            "max_joint_velocity",
-            "max_joint_velocity_norm",
-            "ik_reseed_target_position_delta",
-            "ik_reseed_target_orientation_delta",
-        ):
-            value = float(self.config["control"].get(key, 0.0))
-            if not math.isfinite(value) or value <= 0.0:
-                raise ValueError(f"control.{key} must be finite and positive")
-        if float(self.config["control"]["ik_damping_max"]) < float(
-            self.config["control"]["ik_damping_min"]
-        ):
-            raise ValueError("control.ik_damping_max must be >= ik_damping_min")
-        for key in ("ik_limit_margin", "ik_reseed_limit_margin"):
-            value = float(self.config["control"].get(key, 0.0))
-            if not math.isfinite(value) or not 0.0 < value < 0.5:
-                raise ValueError(f"control.{key} must be in (0, 0.5)")
-        for key in (
-            "ik_limit_avoidance_gain",
-            "ik_posture_gain",
-            "ik_solution_limit_weight",
-            "ik_min_progress_ratio",
-            "ik_min_progress_absolute",
-            "ik_reseed_escape_progress_ratio",
-            "ik_reseed_escape_max_regression",
-        ):
-            value = float(self.config["control"].get(key, -1.0))
-            if not math.isfinite(value) or value < 0.0:
-                raise ValueError(f"control.{key} must be finite and non-negative")
-        if int(self.config["control"].get("ik_iterations", 0)) <= 0:
-            raise ValueError("control.ik_iterations must be positive")
+        if not self.external_ik:
+            for key in (
+                "ik_position_tolerance",
+                "ik_orientation_tolerance",
+                "ik_damping_min",
+                "ik_damping_max",
+                "ik_singularity_threshold",
+                "ik_max_update",
+                "ik_reseed_interval",
+                "ik_reseed_perturbation",
+                "ik_failure_retry_interval",
+                "max_joint_velocity",
+                "max_joint_velocity_norm",
+                "ik_reseed_target_position_delta",
+                "ik_reseed_target_orientation_delta",
+            ):
+                value = float(self.config["control"].get(key, 0.0))
+                if not math.isfinite(value) or value <= 0.0:
+                    raise ValueError(f"control.{key} must be finite and positive")
+            if float(self.config["control"]["ik_damping_max"]) < float(
+                self.config["control"]["ik_damping_min"]
+            ):
+                raise ValueError("control.ik_damping_max must be >= ik_damping_min")
+            for key in ("ik_limit_margin", "ik_reseed_limit_margin"):
+                value = float(self.config["control"].get(key, 0.0))
+                if not math.isfinite(value) or not 0.0 < value < 0.5:
+                    raise ValueError(f"control.{key} must be in (0, 0.5)")
+            for key in (
+                "ik_limit_avoidance_gain",
+                "ik_posture_gain",
+                "ik_solution_limit_weight",
+                "ik_min_progress_ratio",
+                "ik_min_progress_absolute",
+                "ik_reseed_escape_progress_ratio",
+                "ik_reseed_escape_max_regression",
+            ):
+                value = float(self.config["control"].get(key, -1.0))
+                if not math.isfinite(value) or value < 0.0:
+                    raise ValueError(f"control.{key} must be finite and non-negative")
+            if int(self.config["control"].get("ik_iterations", 0)) <= 0:
+                raise ValueError("control.ik_iterations must be positive")
         home_threshold = float(self.config["control"].get("home_gesture_threshold", 0.8))
         home_release = float(
             self.config["control"].get("home_gesture_release_threshold", 0.35)

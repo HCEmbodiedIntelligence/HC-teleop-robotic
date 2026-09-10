@@ -168,28 +168,3 @@ control:
   collision_check_arm_body: true
   collision_latch_until_release: true
   collision_escape_epsilon: 0.00001
-  # 下面是适配器内置兼容 IK 的收敛、奇异规避、重播种及单步速度参数；
-  # v23 主求解器的阻尼和任务权重仍以 controller_v23.yml 为准。
-  ik_iterations: 16
-  ik_position_tolerance: 0.01
-  ik_orientation_tolerance: 0.06
-  ik_damping_min: 0.05
-  ik_damping_max: 0.45
-  ik_singularity_threshold: 0.08
-  ik_limit_margin: 0.12
-  ik_reseed_limit_margin: 0.08
-  ik_failure_retry_interval: 0.2
-  ik_reseed_interval: 0.5
-  ik_reseed_target_position_delta: 0.005
-  ik_reseed_target_orientation_delta: 0.035
-  ik_reseed_perturbation: 0.3
-  ik_limit_avoidance_gain: 0.035
-  ik_posture_gain: 0.02
-  ik_solution_limit_weight: 4.0
-  ik_min_progress_ratio: 0.001
-  ik_min_progress_absolute: 0.0001
-  ik_reseed_escape_progress_ratio: 0.05
-  ik_reseed_escape_max_regression: 0.25
-  ik_max_update: 0.06
-  max_joint_velocity: 1.5
-  max_joint_velocity_norm: 2.8
