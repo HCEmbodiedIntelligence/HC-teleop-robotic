@@ -45,13 +45,16 @@ Launch Arguments:
   mode:=<sim|real|shadow>      Operating mode (default: sim)
   --rviz-sim:=<true|false>     Start RViz with robot visualization (default: true)
   --headless                   Equivalent to --rviz-sim:=false
+  --web:=<true|false>          Start Web Dashboard on port 7876 (default: true)
+  --no-web                     Equivalent to --web:=false
 
 Examples:
   ./run.sh                                    # Start Web Dashboard
-  ./run.sh sim openarmx                       # Start OpenArmX simulation with RViz
+  ./run.sh sim openarmx                       # Start OpenArmX simulation with RViz & Web Dashboard
   ./run.sh profile:=openarmx mode:=sim        # Standard ROS launch syntax
-  ./run.sh profile:=x1 mode:=sim              # Start X1 simulation with RViz
-  ./run.sh profile:=openarmx mode:=sim --rviz-sim:=false  # Headless sim
+  ./run.sh profile:=x1 mode:=sim              # Start X1 simulation with RViz & Web Dashboard
+  ./run.sh profile:=openarmx mode:=sim --rviz-sim:=false  # Headless sim with Web Dashboard
+  ./run.sh profile:=openarmx mode:=sim --no-web           # Sim without Web Dashboard
   ./run.sh mock                               # Low-level mock stack
 EOF
 }
@@ -115,6 +118,24 @@ for argument in "$@"; do
       ;;
     --headless)
       LAUNCH_ARGS+=("rviz_sim:=false" "headless:=true")
+      ;;
+    --web:=*|web:=*)
+      value="${argument#*:=}"
+      case "${value}" in
+        true|false) LAUNCH_ARGS+=("start_web:=${value}") ;;
+        *) echo "web must be true or false" >&2; exit 2 ;;
+      esac
+      ;;
+    --no-web)
+      LAUNCH_ARGS+=("start_web:=false")
+      ;;
+    --port:=*|port:=*)
+      value="${argument#*:=}"
+      LAUNCH_ARGS+=("web_port:=${value}")
+      ;;
+    --host:=*|host:=*)
+      value="${argument#*:=}"
+      LAUNCH_ARGS+=("web_host:=${value}")
       ;;
     *)
       LAUNCH_ARGS+=("${argument}")

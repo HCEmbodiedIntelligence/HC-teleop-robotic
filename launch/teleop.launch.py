@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unified teleoperation and simulation launcher for HC-teleop-robotic."""
 
+import os
 from pathlib import Path
 import yaml
 
@@ -37,6 +38,7 @@ def _setup(context):
     start_motion = LaunchConfiguration("start_motion").perform(context).strip().lower() in {"1", "true", "yes", "on"}
     start_teleop = LaunchConfiguration("start_teleop").perform(context).strip().lower() in {"1", "true", "yes", "on"}
     start_rsp = LaunchConfiguration("start_rsp").perform(context).strip().lower() in {"1", "true", "yes", "on"}
+    start_web = LaunchConfiguration("start_web").perform(context).strip().lower() in {"1", "true", "yes", "on"}
 
     # Resolve package and profile directory
     known_packages = {
@@ -156,6 +158,25 @@ def _setup(context):
                 )
             )
 
+    # 6. Web Dashboard & Configuration Manager
+    if start_web:
+        web_host = LaunchConfiguration("web_host").perform(context).strip()
+        web_port = LaunchConfiguration("web_port").perform(context).strip()
+        domain_id = os.environ.get("ROS_DOMAIN_ID", "14")
+        actions.append(
+            Node(
+                package="humanoid_manager",
+                executable="configurator_launcher.py",
+                name="humanoid_web_manager",
+                output="screen",
+                arguments=[
+                    "--host", web_host,
+                    "--port", web_port,
+                    "--domain-id", domain_id,
+                ],
+            )
+        )
+
     return actions
 
 
@@ -169,6 +190,9 @@ def generate_launch_description():
         DeclareLaunchArgument("start_motion", default_value="true"),
         DeclareLaunchArgument("start_teleop", default_value="true"),
         DeclareLaunchArgument("start_rsp", default_value="true"),
+        DeclareLaunchArgument("start_web", default_value="true", description="Start humanoid web dashboard and manager"),
+        DeclareLaunchArgument("web_host", default_value="0.0.0.0", description="Web server bind host"),
+        DeclareLaunchArgument("web_port", default_value="7876", description="Web server bind port"),
         OpaqueFunction(function=_setup),
     ])
 

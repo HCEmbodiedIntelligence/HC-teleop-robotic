@@ -42,6 +42,7 @@ input:
   source_ip: ''
   pose_port: 5005
   discovery_port: 5006
+  event_port: 5007
   vr_data_topic: /vrdata
   publish_vrdata: true
 control:
