@@ -1,58 +1,46 @@
-# HC Teleop
+# HC Humanoid Teleop
 
-HC 通用遥操作框架的原生 ROS 2 工作区。当前分支只包含解耦后的运行时，
-不再保留旧 middleware、Python adapters、PyBullet 控制链或兼容转发入口。
+HC 通用遥操作框架的官方模块化解耦 ROS 2 工作区。系统基于 `HCEmbodiedIntelligence` 官方 7 个核心独立解耦仓库及辅助遥操作接收端组装：
 
-## 构建与启动
+1. `humanoid_motion_interfaces`：通用 ROS 2 消息/服务/Action 通信规范定义
+2. `humanoid_driver_interface`：统一 pluginlib 驱动规范（`RobotDriverPlugin`、`GripperDriverPlugin`）
+3. `humanoid_driver_runtime`：硬件运行层与驱动加载器（内置 `RosTopicRobotDriver`，看门狗保护，发布 `/hc_teleop/joint_states`）
+4. `humanoid_gripper`：独立夹爪驱动体系（内置 `RosTopicGripperDriver`）
+5. `humanoid_camera`：RealSense 多相机管理、曝光中点时间戳对齐与可靠 QoS
+6. `humanoid_motion_server`：权威运动控制、IK 解算与限位保护（权威发布 `/hc_teleop/joint_cmd`）
+7. `humanoid_adapter_manager` (`humanoid_manager`)：Web 管理控制台（端口 7876）、机器人组合配置与 MCAP 数据录制
+8. `hc_teleop_recv`：VR 遥操作手柄与位姿 UDP 接收端
+
+---
+
+## 快速构建与启动
+
+### 1. 编译全工作区
 
 ```bash
 cd /home/maple/test/HC-teleop-robotic
-git submodule update --init --recursive
 ./bootstrap_colcon.sh build
-./run.sh profile:=openarmx mode:=sim
 ```
 
-`run.sh` 默认同时打开当前机器人 profile 的 RViz。无需界面时关闭：
+### 2. 启动方式
 
+#### 方式 A：启动 Web 管理配置后台（推荐）
 ```bash
-./run.sh profile:=x1 mode:=sim --rviz-sim:=false
-# 显式开启（也是默认值）
-./run.sh profile:=x1 mode:=sim --rviz-sim:=true
+./run.sh
+# 浏览器打开 http://localhost:7876/dashboard/#robots 即可可视化管理、配置、启动与急停机器人
 ```
 
-也支持 `rviz-sim:=false`；直接使用 ROS launch 时参数名为 `rviz_sim:=false`。
-RViz 随 launch 一起退出，并使用同一 ROS Domain。此开关只控制 RViz 显示，
-不改变 `mode` 或仿真设备节点的启动。
-
-需要之后单独打开界面时，仍可使用 `./rviz.sh x1`。该脚本读取
-`runtime/active_ros_domain` 并等待 URDF、TF 和关节状态就绪；手动覆盖 Domain
-可使用 `HC_ROS_DOMAIN_ID=14 ./rviz.sh x1`。
-
-默认启动以下组件：
-
-- `hc_vr_gateway`：PICO UDP v1/v2 解码
-- `hc_teleop_core`：VR 映射、clutch/deadman、多组命令仲裁和 watchdog
-- `hc_motion` + `hc_motion_backend_robo_manip`：目标路由与 Motion Server 控制流水线
-- `hc_adapter_openarmx`：OpenArmX 仿真设备适配
-- `robot_state_publisher`：URDF 状态发布
-- `rviz2`：机器人模型与状态显示
-
-调试时使用 `composition:=isolated`，对比真实设备时使用
-`mode:=shadow`；真实设备必须由独立 `hc-adapter-*` 包提供唯一硬件命令发布者。
-
-## 工作区布局
-
-业务代码全部位于 `src/hc_*`：接口、VR 网关、遥操作核心、运动后端、设备 SDK、
-设备适配、机器人 profile、数据集控制面和 bringup。机器人 URDF 与 profile
-由 `hc_robot_<model>` 包提供，厂商 SDK 后端作为独立可选包构建。
-
+#### 方式 B：启动 Mock 仿真与运动规划闭环
 ```bash
-hcctl doctor --profile openarmx
-./bootstrap_colcon.sh test
+./run.sh mock
 ```
 
-所有话题在启动时统一放到 `/robots/<robot_id>/` 命名空间；最终执行命令只允许
-安全仲裁器发布。
+#### 方式 C：启动驱动运行层
+```bash
+./run.sh driver
+```
+
+---
 
 ## 使用 Humanoid Motion Server
 

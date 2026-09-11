@@ -7,6 +7,8 @@ MOTION_SERVER_SOURCE="${PROJECT_ROOT}/src/humanoid_motion_server"
 MOTION_INTERFACES_SOURCE="${PROJECT_ROOT}/src/humanoid_motion_interfaces"
 MOTION_SERVER_PATCH="${PROJECT_ROOT}/patches/humanoid_motion_server/humble-hpp-fcl-2.4.5.patch"
 
+export PATH="/home/maple/.nvm/versions/node/v20.20.2/bin:/usr/bin:${PATH}"
+
 if [[ ! -f /opt/ros/humble/setup.bash ]]; then
   echo "ROS 2 Humble is not installed at /opt/ros/humble" >&2
   exit 2
@@ -18,8 +20,7 @@ set -u
 
 prepare_motion_server_source() {
   if [[ -d "${PROJECT_ROOT}/.git" ]]; then
-    git -C "${PROJECT_ROOT}" submodule update --init --recursive -- \
-      src/humanoid_motion_interfaces src/humanoid_motion_server
+    git -C "${PROJECT_ROOT}" submodule update --init --recursive
   fi
 
   if [[ ! -f "${MOTION_SERVER_SOURCE}/package.xml" ||
@@ -41,6 +42,10 @@ prepare_motion_server_source() {
 
   if [[ -z "${HUMANOID_MOTION_SDK_DEPS_PREFIX:-}" ]]; then
     local project_sdk_deps="${PROJECT_ROOT}/.deps/robo_manip"
+    if [[ ! -d "${project_sdk_deps}" && -d "/home/maple/test/humanoid/.sdk_deps" ]]; then
+      mkdir -p "${PROJECT_ROOT}/.deps"
+      ln -sfn "/home/maple/test/humanoid/.sdk_deps" "${project_sdk_deps}"
+    fi
     if [[ -d "${project_sdk_deps}" ]]; then
       export HUMANOID_MOTION_SDK_DEPS_PREFIX="${project_sdk_deps}"
     else
@@ -57,8 +62,7 @@ export COLCON_DEFAULTS_FILE="${PROJECT_ROOT}/colcon_defaults.yaml"
 
 case "${1:-build}" in
   deps)
-    rosdep install --from-paths "${PROJECT_ROOT}/src" --ignore-src -r -y \
-      --skip-keys "humanoid_driver_runtime teleop_vr_recv"
+    rosdep install --from-paths "${PROJECT_ROOT}/src" --ignore-src -r -y
     ;;
   build)
     colcon --log-base "${PROJECT_ROOT}/log" build --base-paths "${PROJECT_ROOT}/src" \
@@ -66,6 +70,11 @@ case "${1:-build}" in
       --install-base "${PROJECT_ROOT}/install"
     ;;
   test)
+    if [[ -f "${PROJECT_ROOT}/install/setup.bash" ]]; then
+      set +u
+      source "${PROJECT_ROOT}/install/setup.bash"
+      set -u
+    fi
     colcon --log-base "${PROJECT_ROOT}/log" test --base-paths "${PROJECT_ROOT}/src" \
       --build-base "${PROJECT_ROOT}/build" \
       --install-base "${PROJECT_ROOT}/install"

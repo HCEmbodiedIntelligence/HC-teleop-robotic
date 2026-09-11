@@ -1,7 +1,0 @@
-{
-  "name": "hc-dashboard-frontend",
-  "private": true,
-  "version": "0.1.0",
-  "scripts": {"build": "tsc --noEmit", "check": "tsc --noEmit"},
-  "devDependencies": {"typescript": "5.6.3"}
-}

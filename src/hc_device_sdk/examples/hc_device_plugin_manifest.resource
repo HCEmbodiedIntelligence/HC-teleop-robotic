@@ -1,1 +1,0 @@
-share/example_arm_driver/device_plugin_manifest.yaml

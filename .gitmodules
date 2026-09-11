@@ -4,3 +4,21 @@
 [submodule "src/humanoid_motion_interfaces"]
 	path = src/humanoid_motion_interfaces
 	url = https://github.com/HCEmbodiedIntelligence/humanoid_motion_interfaces.git
+[submodule "src/humanoid_driver_interface"]
+	path = src/humanoid_driver_interface
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_driver_interface.git
+[submodule "src/humanoid_driver_runtime"]
+	path = src/humanoid_driver_runtime
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_driver_runtime.git
+[submodule "src/humanoid_gripper"]
+	path = src/humanoid_gripper
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_gripper.git
+[submodule "src/humanoid_camera"]
+	path = src/humanoid_camera
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_camera.git
+[submodule "src/humanoid_adapter_manager"]
+	path = src/humanoid_adapter_manager
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_adapter_manager.git
+[submodule "src/hc_teleop_recv"]
+	path = src/hc_teleop_recv
+	url = https://github.com/HCEmbodiedIntelligence/hc_teleop_recv.git

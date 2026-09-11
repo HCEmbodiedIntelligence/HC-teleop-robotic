@@ -1,6 +1,0 @@
-string requester_id
-string reason
----
-bool success
-SafetyState state
-string reason

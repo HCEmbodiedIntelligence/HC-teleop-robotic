@@ -4,20 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # Translate the user-facing switch to a ROS launch argument. Keep every other
-# argument intact, including profile paths containing spaces.
-LAUNCH_ARGS=()
-for argument in "$@"; do
-  case "${argument}" in
-    --rviz-sim:=*|rviz-sim:=*)
-      value="${argument#*:=}"
-      case "${value}" in
-        true|false) LAUNCH_ARGS+=("rviz_sim:=${value}") ;;
-        *) echo "rviz-sim must be true or false" >&2; exit 2 ;;
-      esac
-      ;;
-    *) LAUNCH_ARGS+=("${argument}") ;;
-  esac
-done
+export PATH="/home/maple/.nvm/versions/node/v20.20.2/bin:/usr/bin:${PATH}"
 
 # Native HC entry point for the decomposed ROS 2 runtime.
 if [[ ! -f "${SCRIPT_DIR}/install/setup.bash" ]]; then
@@ -40,4 +27,40 @@ printf '%s\n' "${ROS_DOMAIN_ID}" > "${ACTIVE_DOMAIN_TMP}"
 mv -f "${ACTIVE_DOMAIN_TMP}" "${ACTIVE_DOMAIN_FILE}"
 
 echo "[HC-Teleop] ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
-exec ros2 launch hc_bringup teleop.launch.py "${LAUNCH_ARGS[@]}"
+
+case "${1:-web}" in
+  mock)
+    shift
+    exec ros2 launch humanoid_motion_server mock.launch.py "$@"
+    ;;
+  driver)
+    shift
+    exec ros2 launch humanoid_driver_runtime bringup.launch.py "$@"
+    ;;
+  camera)
+    shift
+    exec ros2 launch humanoid_camera multi_camera.launch.py "$@"
+    ;;
+  launch)
+    shift
+    exec ros2 launch "$@"
+    ;;
+  web|--web)
+    [[ "${1:-}" == "web" || "${1:-}" == "--web" ]] && shift || true
+    exec "${SCRIPT_DIR}/src/humanoid_adapter_manager/start_configurator.sh" "$@"
+    ;;
+  help|-h|--help)
+    echo "Usage: $0 [web|mock|driver|camera|launch <pkg> <launch_file>] [options]"
+    echo ""
+    echo "Modes:"
+    echo "  web (default)    Start the humanoid web configurator and manager (http://localhost:7876)"
+    echo "  mock             Start mock driver + motion server stack"
+    echo "  driver           Start humanoid_driver_runtime bringup"
+    echo "  camera           Start humanoid_camera multi-camera launch"
+    echo "  launch ...       Run arbitrary ros2 launch command"
+    exit 0
+    ;;
+  *)
+    exec "${SCRIPT_DIR}/src/humanoid_adapter_manager/start_configurator.sh" "$@"
+    ;;
+esac
