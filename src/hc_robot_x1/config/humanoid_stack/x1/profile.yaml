@@ -1,0 +1,11 @@
+schema_version: 1
+name: X1 Humanoid Dual-Arm
+resources:
+  driver_params: driver_sim.yaml
+  motion_params: motion.yaml
+  sdk_config: sdk.yaml
+  channel_config: channels.yaml
+  tool_config: tools.yaml
+  urdf: package://hc_robot_x1/urdf/x1_robot.urdf
+  teleop_config: hc_teleop.yaml
+

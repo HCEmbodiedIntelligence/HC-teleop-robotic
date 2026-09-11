@@ -1,0 +1,60 @@
+model_path: x1_robot.urdf
+
+joint_groups:
+  left_arm: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L]
+  right_arm: [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
+  whole_body: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L, Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
+
+tools: []
+
+planning:
+  offline_planning_backend: rmp
+  sample_period_sec: 0.01
+  limit_scale: 1.0
+  ik:
+    solver: placo
+    placo:
+      max_iterations: 1000
+      position_tolerance: 1.0
+      orientation_tolerance: 0.015
+      enable_tolerance_check: true
+      frame_task_priority: soft
+      frame_position_weight: 1.0
+      frame_orientation_weight: 1.0
+      solver_dt_sec: 0.01
+      enable_regularization_task: true
+      regularization_task_weight: 0.0005
+      enable_manipulability_task: false
+      enable_joint_task: true
+      joint_task_weight: 0.001
+      enable_joint_limits: true
+      mask_floating_base: true
+
+wbc:
+  active_group: whole_body
+  active_joint_names: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L, Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
+
+rmp:
+  cartesian_max_linear_velocity: 100.0
+  groups:
+    left_arm:
+      joint_max_velocity: [35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0]
+      joint_max_acceleration: [140.0, 140.0, 140.0, 140.0, 140.0, 140.0, 140.0]
+      cartesian_max_linear_velocity: 100.0
+    right_arm:
+      joint_max_velocity: [35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0]
+      joint_max_acceleration: [140.0, 140.0, 140.0, 140.0, 140.0, 140.0, 140.0]
+      cartesian_max_linear_velocity: 100.0
+
+rtc:
+  max_velocity: 35.0
+  max_acceleration: 140.0
+  max_jerk: 560.0
+  cartesian_max_linear_velocity: 100.0
+  cartesian_max_linear_acceleration: 300.0
+  cartesian_max_linear_jerk: 1500.0
+  cartesian_max_angular_velocity: 0.5
+  cartesian_max_angular_acceleration: 2.0
+  cartesian_max_angular_jerk: 10.0
+  cartesian_mode: smooth_xyz
+

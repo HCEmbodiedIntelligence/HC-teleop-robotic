@@ -1,0 +1,69 @@
+humanoid_driver_runtime:
+  ros__parameters:
+    platform_joint_state_topic: /hc_teleop/joint_states
+    platform_joint_command_topic: /hc_teleop/joint_cmd
+    diagnostics_topic: /diagnostics
+    control_frequency_hz: 100.0
+    diagnostic_frequency_hz: 10.0
+    command_watchdog_ms: 250.0
+
+    plugin_class: humanoid_driver_runtime/MockRobotDriver
+    joint_names:
+      - openarmx_left_joint1
+      - openarmx_left_joint2
+      - openarmx_left_joint3
+      - openarmx_left_joint4
+      - openarmx_left_joint5
+      - openarmx_left_joint6
+      - openarmx_left_joint7
+      - openarmx_left_finger_joint1
+      - openarmx_right_joint1
+      - openarmx_right_joint2
+      - openarmx_right_joint3
+      - openarmx_right_joint4
+      - openarmx_right_joint5
+      - openarmx_right_joint6
+      - openarmx_right_joint7
+      - openarmx_right_finger_joint1
+    vendor_joint_names:
+      - openarmx_left_joint1
+      - openarmx_left_joint2
+      - openarmx_left_joint3
+      - openarmx_left_joint4
+      - openarmx_left_joint5
+      - openarmx_left_joint6
+      - openarmx_left_joint7
+      - openarmx_left_finger_joint1
+      - openarmx_right_joint1
+      - openarmx_right_joint2
+      - openarmx_right_joint3
+      - openarmx_right_joint4
+      - openarmx_right_joint5
+      - openarmx_right_joint6
+      - openarmx_right_joint7
+      - openarmx_right_finger_joint1
+    vendor_joint_groups:
+      - left_arm
+      - left_arm
+      - left_arm
+      - left_arm
+      - left_arm
+      - left_arm
+      - left_arm
+      - left_gripper
+      - right_arm
+      - right_arm
+      - right_arm
+      - right_arm
+      - right_arm
+      - right_arm
+      - right_arm
+      - right_gripper
+    vendor_to_logical_scales: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    vendor_to_logical_offsets_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    plugin_parameters:
+      - velocity_limit_rad_s=8.0
+      - latency_s=0.0
+      - position_error_rad=0.0
+      - initial_position_rad=0.0
+

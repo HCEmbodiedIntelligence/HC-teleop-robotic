@@ -1,0 +1,91 @@
+schema_version: 1
+grippers:
+  - id: left_gripper
+    enabled: true
+    controller: right
+    input_axis: trigger
+    enable_button: grip_button
+    command_type: joint_state
+    command_topic: /hc_teleop/gripper_commands
+    feedback_type: joint_state
+    feedback_topic: /hc_teleop/gripper_states
+    joint_name: L_ban
+    position_unit: rad
+    open_position: 0.0
+    closed_position: 1.5707
+    max_speed: 1.0
+    max_effort: 10.0
+    deadband: 0.01
+    rate_hz: 20.0
+    feedback_timeout: 0.5
+  - id: right_gripper
+    enabled: true
+    controller: right
+    input_axis: trigger
+    enable_button: grip_button
+    command_type: joint_state
+    command_topic: /hc_teleop/gripper_commands
+    feedback_type: joint_state
+    feedback_topic: /hc_teleop/gripper_states
+    joint_name: R_ban
+    position_unit: rad
+    open_position: 0.0
+    closed_position: 1.5707
+    max_speed: 1.0
+    max_effort: 10.0
+    deadband: 0.01
+    rate_hz: 20.0
+    feedback_timeout: 0.5
+input:
+  mode: udp
+  bind_host: 0.0.0.0
+  source_ip: ''
+  pose_port: 5005
+  discovery_port: 5006
+  vr_data_topic: /vrdata
+  publish_vrdata: true
+control:
+  rate_hz: 100
+  enabled_on_start: false
+  resume_on_a: true
+  input_timeout: 0.25
+  fk_timeout: 0.25
+  emergency_stop_topic: /teleop/emergency_stop
+channels:
+  - id: left_arm
+    controller: left
+    clutch_controller: right
+    clutch_threshold: 0.5
+    target_pose_topic: /teleop/left_arm/servo_p
+    fk_pose_topic: /teleop/left_arm/fk_pose
+    base_frame: base_link
+    tool_frame: io_teleop_ee_link_left
+    axis_mapping:
+      - [0.0, 0.0, 1.0]
+      - [-1.0, 0.0, 0.0]
+      - [0.0, -1.0, 0.0]
+    position_scale: 0.85
+    max_displacement: 0.8
+    orientation_enabled: true
+    filter_alpha: 0.75
+    position_deadband: 0.0
+    orientation_deadband: 0.0
+  - id: right_arm
+    controller: right
+    clutch_controller: right
+    clutch_threshold: 0.5
+    target_pose_topic: /teleop/right_arm/servo_p
+    fk_pose_topic: /teleop/right_arm/fk_pose
+    base_frame: base_link
+    tool_frame: io_teleop_ee_link_right
+    axis_mapping:
+      - [0.0, 0.0, 1.0]
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
+    position_scale: 0.85
+    max_displacement: 0.8
+    orientation_enabled: true
+    filter_alpha: 0.75
+    position_deadband: 0.0
+    orientation_deadband: 0.0
+

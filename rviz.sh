@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROFILE="${1:-x1}"
+export PATH="/home/maple/.nvm/versions/node/v20.20.2/bin:/usr/bin:${PATH}"
+
+PROFILE="${1:-openarmx}"
+FORCE=false
+if [[ "${PROFILE}" == "--force" || "${PROFILE}" == "-f" ]]; then
+  FORCE=true
+  PROFILE="${2:-openarmx}"
+fi
 
 if [[ ! -f "${SCRIPT_DIR}/install/setup.bash" ]]; then
   echo "HC workspace is not built; run ./bootstrap_colcon.sh build first" >&2
@@ -41,40 +48,50 @@ if [[ ! -f "${RVIZ_CFG}" ]]; then
 fi
 
 if [[ ! -f "${RVIZ_CFG}" ]]; then
-  echo "RViz configuration not found for profile '${PROFILE}'" >&2
+  echo "RViz configuration not found for profile '${PROFILE}' at: ${RVIZ_CFG}" >&2
   exit 1
 fi
 
-DESCRIPTION_TOPIC="/robots/${PROFILE}/robot_description"
-JOINT_STATE_TOPIC="/robots/${PROFILE}/state/joints"
-READY_TIMEOUT_SECONDS="${HC_RVIZ_READY_TIMEOUT_SECONDS:-15}"
+DESCRIPTION_TOPIC="/robot_description"
+ALT_DESCRIPTION_TOPIC="/robots/${PROFILE}/robot_description"
+JOINT_STATE_TOPIC="/hc_teleop/joint_states"
+ALT_JOINT_STATE_TOPIC="/robots/${PROFILE}/state/joints"
+READY_TIMEOUT_SECONDS="${HC_RVIZ_READY_TIMEOUT_SECONDS:-6}"
 
-echo "Waiting for ${PROFILE} visualization data on ROS_DOMAIN_ID=${ROS_DOMAIN_ID}..."
-description_ready=false
-for ((attempt = 0; attempt < READY_TIMEOUT_SECONDS; attempt++)); do
-  topic_info="$(ros2 topic info "${DESCRIPTION_TOPIC}" 2>/dev/null || true)"
-  if [[ "${topic_info}" =~ Publisher\ count:\ [1-9][0-9]* ]]; then
-    description_ready=true
-    break
+if [[ "${FORCE}" != true ]]; then
+  echo "Waiting for ${PROFILE} visualization data on ROS_DOMAIN_ID=${ROS_DOMAIN_ID}..."
+  description_ready=false
+  for ((attempt = 0; attempt < READY_TIMEOUT_SECONDS; attempt++)); do
+    for topic in "${DESCRIPTION_TOPIC}" "${ALT_DESCRIPTION_TOPIC}"; do
+      topic_info="$(ros2 topic info "${topic}" 2>/dev/null || true)"
+      if [[ "${topic_info}" =~ Publisher\ count:\ [1-9][0-9]* ]]; then
+        description_ready=true
+        DESCRIPTION_TOPIC="${topic}"
+        break 2
+      fi
+    done
+    sleep 1
+  done
+
+  if [[ "${description_ready}" != true ]]; then
+    echo "No publisher found for robot_description on ROS_DOMAIN_ID=${ROS_DOMAIN_ID}." >&2
+    echo "Start the stack first with: ./run.sh profile:=${PROFILE} mode:=sim" >&2
+    echo "To launch RViz anyway without waiting, use: ./rviz.sh --force ${PROFILE}" >&2
+    exit 3
   fi
-  sleep 1
-done
 
-if [[ "${description_ready}" != true ]]; then
-  echo "No publisher found for ${DESCRIPTION_TOPIC} on ROS_DOMAIN_ID=${ROS_DOMAIN_ID}." >&2
-  echo "Start the stack first with: ./run.sh profile:=${PROFILE} mode:=sim" >&2
-  echo "To force another domain, use HC_ROS_DOMAIN_ID=<id> ./rviz.sh ${PROFILE}" >&2
-  exit 3
-fi
+  joint_ready=false
+  for topic in "${JOINT_STATE_TOPIC}" "${ALT_JOINT_STATE_TOPIC}"; do
+    if timeout 2 ros2 topic echo --once "${topic}" >/dev/null 2>&1; then
+      joint_ready=true
+      JOINT_STATE_TOPIC="${topic}"
+      break
+    fi
+  done
 
-if ! timeout 5 ros2 topic echo --once /tf_static >/dev/null 2>&1; then
-  echo "No /tf_static data received on ROS_DOMAIN_ID=${ROS_DOMAIN_ID}." >&2
-  exit 4
-fi
-
-if ! timeout 5 ros2 topic echo --once "${JOINT_STATE_TOPIC}" >/dev/null 2>&1; then
-  echo "No joint state received from ${JOINT_STATE_TOPIC}." >&2
-  exit 5
+  if [[ "${joint_ready}" != true ]]; then
+    echo "Notice: Waiting for joint state on ${JOINT_STATE_TOPIC}... (RViz will launch anyway)" >&2
+  fi
 fi
 
 echo "Launching RViz with profile=${PROFILE}, ROS_DOMAIN_ID=${ROS_DOMAIN_ID}..."

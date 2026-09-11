@@ -1,0 +1,75 @@
+model_path: openarmx_robot.urdf
+
+joint_groups:
+  left_arm: [openarmx_left_joint1, openarmx_left_joint2, openarmx_left_joint3, openarmx_left_joint4, openarmx_left_joint5, openarmx_left_joint6, openarmx_left_joint7]
+  right_arm: [openarmx_right_joint1, openarmx_right_joint2, openarmx_right_joint3, openarmx_right_joint4, openarmx_right_joint5, openarmx_right_joint6, openarmx_right_joint7]
+  whole_body: [openarmx_left_joint1, openarmx_left_joint2, openarmx_left_joint3, openarmx_left_joint4, openarmx_left_joint5, openarmx_left_joint6, openarmx_left_joint7, openarmx_right_joint1, openarmx_right_joint2, openarmx_right_joint3, openarmx_right_joint4, openarmx_right_joint5, openarmx_right_joint6, openarmx_right_joint7]
+
+tools:
+  - name: left_tool0
+    parent_link: openarmx_left_link7
+    x: 0.0
+    y: 0.0
+    z: 180.1
+    rx: 0.0
+    ry: 0.0
+    rz: 0.0
+  - name: right_tool0
+    parent_link: openarmx_right_link7
+    x: 0.0
+    y: 0.0
+    z: 180.1
+    rx: 0.0
+    ry: 0.0
+    rz: 0.0
+
+planning:
+  offline_planning_backend: rmp
+  sample_period_sec: 0.01
+  limit_scale: 1.0
+  ik:
+    solver: placo
+    placo:
+      max_iterations: 1000
+      position_tolerance: 1.0
+      orientation_tolerance: 0.001
+      enable_tolerance_check: true
+      frame_task_priority: soft
+      frame_position_weight: 1.0
+      frame_orientation_weight: 1.0
+      solver_dt_sec: 0.01
+      enable_regularization_task: false
+      regularization_task_weight: 0.0001
+      enable_manipulability_task: false
+      enable_joint_task: false
+      enable_joint_limits: true
+      mask_floating_base: true
+
+wbc:
+  active_group: whole_body
+  active_joint_names: [openarmx_left_joint1, openarmx_left_joint2, openarmx_left_joint3, openarmx_left_joint4, openarmx_left_joint5, openarmx_left_joint6, openarmx_left_joint7, openarmx_right_joint1, openarmx_right_joint2, openarmx_right_joint3, openarmx_right_joint4, openarmx_right_joint5, openarmx_right_joint6, openarmx_right_joint7]
+
+rmp:
+  cartesian_max_linear_velocity: 100.0
+  groups:
+    left_arm:
+      joint_max_velocity: [35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0]
+      joint_max_acceleration: [140.0, 140.0, 140.0, 140.0, 140.0, 140.0, 140.0]
+      cartesian_max_linear_velocity: 100.0
+    right_arm:
+      joint_max_velocity: [35.0, 35.0, 35.0, 35.0, 35.0, 35.0, 35.0]
+      joint_max_acceleration: [140.0, 140.0, 140.0, 140.0, 140.0, 140.0, 140.0]
+      cartesian_max_linear_velocity: 100.0
+
+rtc:
+  max_velocity: 35.0
+  max_acceleration: 140.0
+  max_jerk: 560.0
+  cartesian_max_linear_velocity: 100.0
+  cartesian_max_linear_acceleration: 300.0
+  cartesian_max_linear_jerk: 1500.0
+  cartesian_max_angular_velocity: 0.5
+  cartesian_max_angular_acceleration: 2.0
+  cartesian_max_angular_jerk: 10.0
+  cartesian_mode: smooth_xyz
+

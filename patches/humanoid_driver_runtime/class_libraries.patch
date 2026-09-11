@@ -1,0 +1,14 @@
+diff --git a/plugins/driver_plugins.xml b/plugins/driver_plugins.xml
+index fa0a3c8..0049b23 100644
+--- a/plugins/driver_plugins.xml
++++ b/plugins/driver_plugins.xml
+@@ -1,3 +1,4 @@
++<class_libraries>
+ <library path="humanoid_mock_driver">
+   <class
+     name="humanoid_driver_runtime/MockRobotDriver"
+@@ -17,3 +18,4 @@
+     </description>
+   </class>
+ </library>
++</class_libraries>

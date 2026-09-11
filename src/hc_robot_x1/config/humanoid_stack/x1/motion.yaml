@@ -1,0 +1,38 @@
+humanoid_motion_control:
+  ros__parameters:
+    joint_state_endpoint: /hc_teleop/joint_states
+    joint_command_endpoint: /hc_teleop/joint_cmd
+
+    control_frequency_hz: 100.0
+    input_stamp_max_age_s: 0.5
+    input_stamp_future_tolerance_s: 0.1
+    feedback_max_age_ms: 200
+    servo_lease_ms: 100
+    default_move_timeout_s: 60.0
+    stable_duration_s: 0.10
+    move_j_position_tolerance_rad: 0.01
+    stopped_velocity_tolerance_rad_s: 0.02
+    cartesian_position_tolerance_m: 0.005
+    cartesian_orientation_tolerance_rad: 0.02
+
+    joint_max_velocity_rad_s: 0.60
+    joint_max_acceleration_rad_s2: 2.40
+    joint_max_jerk_rad_s3: 9.60
+    cartesian_max_linear_velocity_m_s: 0.10
+    cartesian_max_linear_acceleration_m_s2: 0.30
+    cartesian_max_linear_jerk_m_s3: 1.50
+    cartesian_max_angular_velocity_rad_s: 0.50
+    cartesian_max_angular_acceleration_rad_s2: 2.0
+    cartesian_max_angular_jerk_rad_s3: 10.0
+
+    joint_group_names: [left_arm, right_arm, whole_body]
+    groups.left_arm: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L]
+    groups.right_arm: [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
+    groups.whole_body: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L, Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
+
+    group_lower_limits.left_arm: [-3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14]
+    group_upper_limits.left_arm: [3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14]
+    group_lower_limits.right_arm: [-3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14]
+    group_upper_limits.right_arm: [3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14]
+    group_lower_limits.whole_body: [-3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14, -3.14]
+    group_upper_limits.whole_body: [3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14, 3.14]

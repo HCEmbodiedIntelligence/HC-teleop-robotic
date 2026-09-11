@@ -6,6 +6,8 @@ PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MOTION_SERVER_SOURCE="${PROJECT_ROOT}/src/humanoid_motion_server"
 MOTION_INTERFACES_SOURCE="${PROJECT_ROOT}/src/humanoid_motion_interfaces"
 MOTION_SERVER_PATCH="${PROJECT_ROOT}/patches/humanoid_motion_server/humble-hpp-fcl-2.4.5.patch"
+DRIVER_RUNTIME_SOURCE="${PROJECT_ROOT}/src/humanoid_driver_runtime"
+DRIVER_RUNTIME_PATCH="${PROJECT_ROOT}/patches/humanoid_driver_runtime/class_libraries.patch"
 
 export PATH="/home/maple/.nvm/versions/node/v20.20.2/bin:/usr/bin:${PATH}"
 
@@ -38,6 +40,12 @@ prepare_motion_server_source() {
       "${MOTION_SERVER_PATCH}" >/dev/null 2>&1; then
     echo "Motion Server compatibility patch does not match the pinned commit" >&2
     exit 2
+  fi
+
+  if [[ -f "${DRIVER_RUNTIME_PATCH}" && -d "${DRIVER_RUNTIME_SOURCE}" ]]; then
+    if git -C "${DRIVER_RUNTIME_SOURCE}" apply --check "${DRIVER_RUNTIME_PATCH}" >/dev/null 2>&1; then
+      git -C "${DRIVER_RUNTIME_SOURCE}" apply "${DRIVER_RUNTIME_PATCH}"
+    fi
   fi
 
   if [[ -z "${HUMANOID_MOTION_SDK_DEPS_PREFIX:-}" ]]; then
