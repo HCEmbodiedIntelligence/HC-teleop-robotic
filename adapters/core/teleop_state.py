@@ -73,3 +73,7 @@ class BodyRuntime:
     last_solution: np.ndarray | None = None
     lift_error: float = 0.0
     pitch_error: float = 0.0
+    forward_error: float = 0.0
+    target_link_index: int | None = None
+    reference_target_link: tuple[np.ndarray, np.ndarray] | None = None
+    target_head_local: tuple[np.ndarray, np.ndarray] | None = None

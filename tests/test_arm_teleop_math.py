@@ -9,6 +9,7 @@ from adapters.core.arm_teleop_math import (
     clamp_step,
     joystick_base_velocity,
     joint_limit_avoidance,
+    mapped_relative_pitch,
     mapped_relative_yaw,
     ordered_homing_joint_names,
     orientation_error,
@@ -83,6 +84,17 @@ class ArmTeleopMathTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             mapped_relative_yaw(roll, [0, 0, 0, 1], mapping), 0.0, places=7
+        )
+
+    def test_openxr_pitch_maps_to_robot_pitch(self):
+        mapping = [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
+        pitch_down = quaternion_from_axis_angle([1, 0, 0], -0.3)
+        roll = quaternion_from_axis_angle([0, 0, 1], 0.3)
+        self.assertAlmostEqual(
+            mapped_relative_pitch(pitch_down, [0, 0, 0, 1], mapping), 0.3, places=7
+        )
+        self.assertAlmostEqual(
+            mapped_relative_pitch(roll, [0, 0, 0, 1], mapping), 0.0, places=7
         )
 
     def test_pose_stabilizer_holds_noise_and_smooths_real_motion(self):

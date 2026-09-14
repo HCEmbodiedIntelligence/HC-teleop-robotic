@@ -28,6 +28,7 @@ from .arm_teleop_math import (
     clamp_step,
     joystick_base_velocity,
     joint_limit_avoidance,
+    mapped_relative_pitch,
     mapped_relative_yaw,
     ordered_homing_joint_names,
     orientation_error,
@@ -571,6 +572,13 @@ class RobotArmTeleopNode(Node):
             lower = np.asarray(config["joint_lower"], dtype=float)
         if "joint_upper" in config:
             upper = np.asarray(config["joint_upper"], dtype=float)
+        target_link_name = config.get(
+            "target_link",
+            config.get("visualization_head_link", config.get("torso_link")),
+        )
+        target_link_index = self.link_by_name.get(
+            target_link_name, self.link_by_name[config["torso_link"]]
+        )
         return BodyRuntime(
             names,
             indices,
@@ -578,6 +586,7 @@ class RobotArmTeleopNode(Node):
             lower,
             upper,
             self.link_by_name[config["torso_link"]],
+            target_link_index=target_link_index,
         )
 
     @staticmethod
@@ -729,7 +738,9 @@ class RobotArmTeleopNode(Node):
         self.generic_command_count += 1
         if not self.enabled:
             return
-        if not self.hardware_ready or self.homing or self.solver_rearm.blocked:
+        if not self.hardware_ready or self.homing:
+            return
+        if self.solver_rearm.blocked:
             stamp_ns = (
                 int(message.header.stamp.sec) * 1_000_000_000
                 + int(message.header.stamp.nanosec)
@@ -738,9 +749,11 @@ class RobotArmTeleopNode(Node):
                 self.get_logger().info(
                     "fresh post-reset IK output received; release and press right Grip to resume"
                 )
-            return
         merged = dict(zip(message.name, (float(value) for value in message.position)))
-        arms_active = any(self.arms[side].active for side in ("right", "left"))
+        arms_active = (
+            not self.solver_rearm.blocked
+            and any(self.arms[side].active for side in ("right", "left"))
+        )
         if not arms_active:
             for arm in self.arms.values():
                 for name in arm.joint_names:
@@ -836,6 +849,8 @@ class RobotArmTeleopNode(Node):
         self.body.active = False
         self.body.reference_head = None
         self.body.reference_torso = None
+        self.body.reference_target_link = None
+        self.body.target_head_local = None
         if send_base_zero:
             self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
 
@@ -930,6 +945,8 @@ class RobotArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
+            self.body.reference_target_link = None
+            self.body.target_head_local = None
             if self.external_ik:
                 self.solver_rearm.homing_complete()
             self.get_logger().info(
@@ -1700,30 +1717,85 @@ class RobotArmTeleopNode(Node):
         base_rotation = np.asarray(
             bullet.getMatrixFromQuaternion(self._root_pose()[1]), dtype=float
         ).reshape(3, 3)
+        fwd_axis = base_rotation[:, 0]
+        up_axis = np.array([0.0, 0.0, 1.0])
+        ik_mode = str(
+            self.body_config.get(
+                "ik_mode",
+                "3dof" if bool(self.body_config.get("unconstrained", False)) else "2dof",
+            )
+        )
+        link_index = (
+            body.target_link_index
+            if body.target_link_index is not None
+            else body.torso_index
+        )
+
         for _ in range(int(self.body_config["ik_iterations"])):
             self._set_group(body.joint_indices, q)
-            position, orientation = self._link_pose(body.torso_index)
+            position, orientation = self._link_pose(link_index)
             rotation_delta = orientation_error(target_orientation, orientation)
-            error = np.r_[target_position - position, float(pitch_axis @ rotation_delta)]
-            if np.linalg.norm(error) < 0.002:
-                break
-            linear, angular = self._jacobian(body.torso_index)
-            matrix = np.vstack(
-                [
-                    (base_rotation @ linear)[:, body.dof_indices],
-                    pitch_axis @ (base_rotation @ angular)[:, body.dof_indices],
-                ]
-            )
-            update = matrix.T @ np.linalg.solve(
-                matrix @ matrix.T + np.eye(4) * damping * damping, error
-            )
+            linear, angular = self._jacobian(link_index)
+            linear_world = (base_rotation @ linear)[:, body.dof_indices]
+            angular_world = (base_rotation @ angular)[:, body.dof_indices]
+
+            if ik_mode == "3dof":
+                fwd_error = float(fwd_axis @ (target_position - position))
+                height_error = float(up_axis @ (target_position - position))
+                pitch_error = float(pitch_axis @ rotation_delta)
+                error = np.array([fwd_error, height_error, pitch_error], dtype=float)
+                if (
+                    abs(fwd_error) < 0.002
+                    and abs(height_error) < 0.002
+                    and abs(pitch_error) < 0.002
+                ):
+                    break
+                matrix = np.vstack(
+                    [
+                        (fwd_axis @ linear_world).reshape(1, -1),
+                        (up_axis @ linear_world).reshape(1, -1),
+                        (pitch_axis @ angular_world).reshape(1, -1),
+                    ]
+                )
+                update = matrix.T @ np.linalg.solve(
+                    matrix @ matrix.T + np.eye(3) * damping * damping, error
+                )
+            elif ik_mode == "2dof":
+                height_error = float(target_position[2] - position[2])
+                pitch_error = float(pitch_axis @ rotation_delta)
+                error = np.array([height_error, pitch_error], dtype=float)
+                if abs(height_error) < 0.002 and abs(pitch_error) < 0.002:
+                    break
+                matrix = np.vstack(
+                    [
+                        linear_world[2:3, :],
+                        (pitch_axis @ angular_world).reshape(1, -1),
+                    ]
+                )
+                update = matrix.T @ np.linalg.solve(
+                    matrix @ matrix.T + np.eye(2) * damping * damping, error
+                )
+            else:
+                error = np.r_[target_position - position, float(pitch_axis @ rotation_delta)]
+                if np.linalg.norm(error) < 0.002:
+                    break
+                matrix = np.vstack(
+                    [
+                        linear_world,
+                        (pitch_axis @ angular_world).reshape(1, -1),
+                    ]
+                )
+                update = matrix.T @ np.linalg.solve(
+                    matrix @ matrix.T + np.eye(4) * damping * damping, error
+                )
             norm = float(np.linalg.norm(update))
             max_update = float(self.body_config["ik_max_update"])
             if norm > max_update:
                 update *= max_update / norm
             q = np.clip(q + update, body.lower, body.upper)
         self._set_group(body.joint_indices, q)
-        position, orientation = self._link_pose(body.torso_index)
+        position, orientation = self._link_pose(link_index)
+        body.forward_error = abs(float(fwd_axis @ (target_position - position)))
         body.lift_error = abs(float(target_position[2] - position[2]))
         body.pitch_error = abs(float(pitch_axis @ orientation_error(target_orientation, orientation)))
         return q
@@ -1741,6 +1813,14 @@ class RobotArmTeleopNode(Node):
         body = self.body
         body.active = True
         body.reference_head = body.head_pose
+        target_link_idx = (
+            body.target_link_index
+            if body.target_link_index is not None
+            else body.torso_index
+        )
+        body.reference_target_link = self._relative_pose(
+            self._root_pose(), self._link_pose(target_link_idx)
+        )
         body.reference_torso = self._link_pose(body.torso_index)
         body.last_solution = np.asarray(
             [self.joint_state[name] for name in body.joint_names], dtype=float
@@ -1774,38 +1854,132 @@ class RobotArmTeleopNode(Node):
             command[name] = float(value)
 
     def _update_body_target(self) -> None:
-        """Update the torso task without solving joints in the VR adapter."""
+        """Update the body task without solving joints in the VR adapter."""
         body = self.body
         assert body.head_pose is not None
         assert body.reference_head is not None
         assert body.reference_torso is not None
+
+        if bool(self.body_config.get("unconstrained", False)):
+            axis_mapping = self.body_config.get(
+                "head_axis_mapping",
+                self.control.get("head_axis_mapping", self.control["axis_mapping"]),
+            )
+            ref_target = (
+                body.reference_target_link
+                if body.reference_target_link is not None
+                else self._relative_pose(
+                    self._root_pose(), self._link_pose(body.torso_index)
+                )
+            )
+            target_head_local = relative_target(
+                *body.head_pose,
+                *body.reference_head,
+                *ref_target,
+                axis_mapping,
+                position_scale=float(self.body_config.get("head_position_scale", 1.0)),
+                max_displacement=float(self.body_config.get("head_max_displacement", 0.0)),
+                orientation_enabled=bool(self.body_config.get("head_orientation_enabled", True)),
+            )
+            body.target_base = target_head_local
+            body.target_head_local = target_head_local
+            return
+
         delta_height = float(
             body.head_pose[0][int(self.body_config["head_height_axis"])]
             - body.reference_head[0][int(self.body_config["head_height_axis"])]
         )
-        delta_pitch = float(
-            body.head_pose[0][int(self.body_config["head_pitch_position_axis"])]
-            - body.reference_head[0][int(self.body_config["head_pitch_position_axis"])]
-        )
-        lift = float(
-            np.clip(
-                delta_height
-                * float(self.body_config.get("height_direction", 1.0))
-                * float(self.body_config["height_scale"]),
-                -float(self.body_config["max_height_delta"]),
-                float(self.body_config["max_height_delta"]),
+        pitch_source = str(self.body_config.get("pitch_source", "auto"))
+        if pitch_source == "orientation":
+            delta_pitch = mapped_relative_pitch(
+                body.head_pose[1],
+                body.reference_head[1],
+                self.control.get(
+                    "head_axis_mapping", self.control["axis_mapping"]
+                ),
+            )
+        elif pitch_source == "position":
+            delta_pitch = float(
+                body.head_pose[0][int(self.body_config["head_pitch_position_axis"])]
+                - body.reference_head[0][int(self.body_config["head_pitch_position_axis"])]
+            )
+        elif pitch_source == "combined":
+            ori_pitch = mapped_relative_pitch(
+                body.head_pose[1],
+                body.reference_head[1],
+                self.control.get(
+                    "head_axis_mapping", self.control["axis_mapping"]
+                ),
+            )
+            pos_axis = int(self.body_config.get("head_pitch_position_axis", 2))
+            pos_delta = float(body.head_pose[0][pos_axis] - body.reference_head[0][pos_axis])
+            delta_pitch = ori_pitch + pos_delta * float(self.body_config.get("pitch_pos_gain", 1.0))
+        else:  # "auto"
+            ori_pitch = mapped_relative_pitch(
+                body.head_pose[1],
+                body.reference_head[1],
+                self.control.get(
+                    "head_axis_mapping", self.control["axis_mapping"]
+                ),
+            )
+            if abs(ori_pitch) > 1e-4:
+                delta_pitch = ori_pitch
+            elif "head_pitch_position_axis" in self.body_config:
+                delta_pitch = float(
+                    body.head_pose[0][int(self.body_config.get("head_pitch_position_axis", 2))]
+                    - body.reference_head[0][int(self.body_config.get("head_pitch_position_axis", 2))]
+                )
+            else:
+                delta_pitch = 0.0
+        head_forward_axis = int(
+            self.body_config.get(
+                "head_forward_axis", self.body_config.get("head_pitch_position_axis", 2)
             )
         )
-        pitch = float(
-            np.clip(
-                delta_pitch
-                * float(self.body_config.get("pitch_direction", 1.0))
-                * float(self.body_config["pitch_scale"]),
-                -float(self.body_config["max_pitch_delta"]),
-                float(self.body_config["max_pitch_delta"]),
-            )
+        delta_forward = float(
+            body.head_pose[0][head_forward_axis]
+            - body.reference_head[0][head_forward_axis]
         )
+        lift = (
+            delta_height
+            * float(self.body_config.get("height_direction", 1.0))
+            * float(self.body_config["height_scale"])
+        )
+        max_height = float(self.body_config.get("max_height_delta", 0.18))
+        if max_height > 0.0:
+            lift = float(np.clip(lift, -max_height, max_height))
+
+        pitch = (
+            delta_pitch
+            * float(self.body_config.get("pitch_direction", 1.0))
+            * float(self.body_config["pitch_scale"])
+        )
+        max_pitch = float(self.body_config.get("max_pitch_delta", 0.35))
+        if max_pitch > 0.0:
+            pitch = float(np.clip(pitch, -max_pitch, max_pitch))
+
+        forward = (
+            delta_forward
+            * float(self.body_config.get("forward_direction", 1.0))
+            * float(self.body_config.get("forward_scale", 0.0))
+        )
+        max_fwd = float(self.body_config.get("max_forward_delta", 0.15))
+        if max_fwd > 0.0:
+            forward = float(np.clip(forward, -max_fwd, max_fwd))
+
+        if "forward_axis_world" in self.body_config:
+            forward_axis = np.asarray(self.body_config["forward_axis_world"], dtype=float)
+        else:
+            base_rotation = np.asarray(
+                bullet.getMatrixFromQuaternion(self._root_pose()[1]), dtype=float
+            ).reshape(3, 3)
+            forward_axis = base_rotation[:, 0]
+        norm = float(np.linalg.norm(forward_axis))
+        if norm > 1e-6:
+            forward_axis = forward_axis / norm
+
         target_position = np.array(body.reference_torso[0], dtype=float, copy=True)
+        target_position += forward_axis * forward
         target_position[2] += lift
         target_orientation = quaternion_multiply(
             quaternion_from_axis_angle(self.body_config["pitch_axis_world"], pitch),
@@ -1814,6 +1988,15 @@ class RobotArmTeleopNode(Node):
         body.target_base = self._relative_pose(
             self._root_pose(), (target_position, target_orientation)
         )
+        head_link = self.body_config.get("visualization_head_link")
+        if head_link in self.link_by_name:
+            actual_world = self._link_pose(self.link_by_name[head_link])
+            head_in_torso = self._relative_pose(
+                self._link_pose(body.torso_index), actual_world
+            )
+            body.target_head_local = self._world_pose(body.target_base, head_in_torso)
+        else:
+            body.target_head_local = body.target_base
 
     def _publish_base_command(self, *, track_head_yaw: bool) -> None:
         left = self.arms["left"]
@@ -2074,6 +2257,8 @@ class RobotArmTeleopNode(Node):
         self.body.active = False
         self.body.reference_head = None
         self.body.reference_torso = None
+        self.body.reference_target_link = None
+        self.body.target_head_local = None
         self.homing = True
         self.homing_start_time = self._monotonic()
         for name in self.controlled_names:
@@ -2158,6 +2343,8 @@ class RobotArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
+            self.body.reference_target_link = None
+            self.body.target_head_local = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
             for name in self.body.joint_names:
                 body_command[name] = float(
@@ -2280,6 +2467,8 @@ class RobotArmTeleopNode(Node):
             self.body.active = False
             self.body.reference_head = None
             self.body.reference_torso = None
+            self.body.reference_target_link = None
+            self.body.target_head_local = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
 
         if base_requested:
@@ -2435,13 +2624,19 @@ class RobotArmTeleopNode(Node):
         actual = self._relative_pose(root, actual_world)
         target = actual
         body = self.body
-        if (body.active and body.target_base is not None
-                and self.enabled and self.hardware_ready
-                and self._monotonic() - body.head_stamp <= float(self.control["pose_timeout"])):
-            head_in_torso = self._relative_pose(
-                self._link_pose(body.torso_index), actual_world
-            )
-            target = self._world_pose(body.target_base, head_in_torso)
+        if (
+            body.active
+            and self.enabled
+            and self.hardware_ready
+            and self._monotonic() - body.head_stamp <= float(self.control["pose_timeout"])
+        ):
+            if body.target_head_local is not None:
+                target = body.target_head_local
+            elif body.target_base is not None:
+                head_in_torso = self._relative_pose(
+                    self._link_pose(body.torso_index), actual_world
+                )
+                target = self._world_pose(body.target_base, head_in_torso)
         message = PoseArray()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = "robot_base"
@@ -2505,12 +2700,12 @@ class RobotArmTeleopNode(Node):
             "mode": (
                 "homing"
                 if self.homing
-                else "ik_rearming"
-                if self.solver_rearm.blocked
                 else "both"
-                if left_clutch and right_clutch
+                if left_clutch and right_clutch and not self.solver_rearm.blocked
                 else "base_waist"
                 if left_clutch
+                else "ik_rearming"
+                if self.solver_rearm.blocked
                 else "arms_grippers"
                 if right_clutch
                 else "hold"

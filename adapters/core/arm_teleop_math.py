@@ -135,6 +135,24 @@ def mapped_relative_yaw(
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def mapped_relative_pitch(
+    orientation: Sequence[float],
+    reference_orientation: Sequence[float],
+    axis_mapping: Sequence[Sequence[float]],
+) -> float:
+    """Return relative headset pitch after mapping VR axes into robot axes."""
+    mapping = np.asarray(axis_mapping, dtype=float)
+    if mapping.shape != (3, 3) or not np.all(np.isfinite(mapping)):
+        raise ValueError("axis_mapping must be finite 3x3")
+    relative = quaternion_multiply(
+        orientation, quaternion_inverse(reference_orientation)
+    )
+    mapped = mapping @ quaternion_to_matrix(relative) @ mapping.T
+    x, y, z, w = matrix_to_quaternion(mapped)
+    sin_pitch = float(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
+    return math.asin(sin_pitch)
+
+
 def stabilize_pose(
     target_position: Sequence[float],
     target_orientation: Sequence[float],
@@ -332,9 +350,13 @@ def clamp_step(
     upper: Sequence[float],
     max_step: float,
 ) -> np.ndarray:
+    """Clamp the joint step vector proportionally so all joints move coordinately."""
     target_array = np.asarray(target, dtype=float)
     previous_array = np.asarray(previous, dtype=float)
-    limited = previous_array + np.clip(
-        target_array - previous_array, -max_step, max_step
-    )
+    delta = target_array - previous_array
+    max_abs = float(np.max(np.abs(delta))) if len(delta) > 0 else 0.0
+    if max_abs > max_step and max_abs > 1e-12:
+        delta = delta * (max_step / max_abs)
+    limited = previous_array + delta
     return np.clip(limited, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float))
+

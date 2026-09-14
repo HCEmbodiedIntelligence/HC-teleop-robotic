@@ -62,6 +62,17 @@ simulation_body:
   # 仅 run.sh sim 应用；真机腰部仍需完成标定后单独启用。
   enabled: true
   waist_joint_names: [leg_1, leg_2, zhi]
+  unconstrained: true
+  ik_mode: 3dof
+  target_link: camera_head
+  head_position_scale: 1.0
+  head_max_displacement: 0.0
+  head_orientation_enabled: true
+  max_joint_velocity: 1.5
+  ik_iterations: 20
+  ik_damping: 0.05
+  ik_max_update: 0.15
+  yaw_direction: 1.0
 body:
   # 当前腰部控制关闭；重新启用时取消下面三个腰关节注释并完成真机标定。
   # waist_joint_names:
@@ -86,18 +97,26 @@ body:
   # 头显偏航超过死区后控制底盘角速度（rad/s）。
   yaw_deadzone: 0.18
   yaw_gain: 0.6
-  yaw_direction: -1.0
+  yaw_direction: 1.0
   max_angular_velocity: 0.45
   # 原始 VR position：+Y 向上、+Z 向前，与手柄位移映射一致。
   head_height_axis: 1
   head_pitch_position_axis: 2
-  # 头部位移到腰部高度/俯仰的缩放、方向和最大变化量。
+  head_forward_axis: 2
+  # 腰部逆解模式：2dof（放开平移硬约束，仅约束世界高度和俯仰角，自然随动前伸）或 4dof
+  ik_mode: 2dof
+  # 俯仰源：orientation（由头显姿态俯仰角直接驱动）、position（前后位移）或 auto
+  pitch_source: orientation
+  # 头部位移到腰部高度/俯仰/前后位移的缩放、方向和最大变化量。
   height_scale: 0.5
-  pitch_scale: 0.8
+  pitch_scale: 1.0
+  forward_scale: 0.0
   height_direction: 1.0
   pitch_direction: 1.0
+  forward_direction: 1.0
   max_height_delta: 0.18
   max_pitch_delta: 0.35
+  max_forward_delta: 0.15
   # 腰部俯仰在世界坐标系中的旋转轴。
   pitch_axis_world:
   - -1.0
@@ -113,10 +132,10 @@ body:
   - 2.356194
   - 1.117011
   # 腰部最大关节速度及兼容内置 IK 的迭代参数。
-  max_joint_velocity: 0.35
-  ik_iterations: 10
+  max_joint_velocity: 1.0
+  ik_iterations: 15
   ik_damping: 0.05
-  ik_max_update: 0.08
+  ik_max_update: 0.10
 grippers:
   # Trigger 连续量控制夹爪；axes[0] 是 Trigger，阈值用于生成二值抓握状态。
   trigger_axis: 0
@@ -251,7 +270,7 @@ control:
   head_axis_mapping:
   - - 0.0
     - 0.0
-    - -1.0
+    - 1.0
   - - -1.0
     - 0.0
     - 0.0
