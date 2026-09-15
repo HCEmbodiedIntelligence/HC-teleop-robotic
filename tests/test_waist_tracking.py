@@ -34,6 +34,11 @@ class WaistTrackingTests(unittest.TestCase):
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
             node = RobotArmTeleopNode(str(path), backend="v23")
         try:
+            node.body_config["ik_mode"] = "3dof"
+            node.body_config["target_position_deadband"] = 0.0
+            node.body_config["target_orientation_deadband"] = 0.0
+            node.body_config["target_filter_alpha"] = 1.0
+            node.body_config["ik_posture_gain"] = 0.0
             head_link = node.link_by_name["camera_head"]
             pitch_axis = np.asarray(node.body_config["pitch_axis_world"], dtype=float)
             pitch_axis /= np.linalg.norm(pitch_axis)
@@ -121,6 +126,10 @@ class WaistTrackingTests(unittest.TestCase):
             node.body_config["target_link"] = "zhi_Link"
             node.body.target_link_index = node.link_by_name["zhi_Link"]
             node.body_config["ik_mode"] = "2dof"
+            node.body_config["target_position_deadband"] = 0.0
+            node.body_config["target_orientation_deadband"] = 0.0
+            node.body_config["target_filter_alpha"] = 1.0
+            node.body_config["ik_posture_gain"] = 0.0
 
             for delta in ([0.0, 0.1, 0.0], [0.0, 0.0, 0.1]):
                 with self.subTest(head_delta=delta):
@@ -281,3 +290,122 @@ class WaistTrackingTests(unittest.TestCase):
             self.assertTrue(node.body.active)
         finally:
             node.destroy_node()
+
+    def test_waist_deadband_jitter_rejection(self):
+        """Verify that micro-jitter within deadbands produces zero joint motion."""
+        path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
+        with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
+            node = RobotArmTeleopNode(str(path), backend="v23")
+        try:
+            node.joint_state.update(node.initial_joints)
+            node.last_command.update(node.initial_joints)
+            node._sync_model()
+
+            # Ensure deadbands are active
+            self.assertGreater(float(node.body_config.get("target_position_deadband", 0.0)), 0.01)
+            self.assertGreater(float(node.body_config.get("target_orientation_deadband", 0.0)), 0.02)
+
+            node.body.head_pose = (np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0]))
+            node._engage_body()
+
+            # Simulate jitter within deadband (< 0.02 m, < 0.05 rad)
+            jitters = [
+                ([0.01, 0.005, -0.008], 0.02),
+                ([-0.008, 0.012, 0.004], -0.03),
+                ([0.005, -0.010, 0.005], 0.015),
+                ([0.0, 0.014, 0.0], -0.025),
+            ]
+            for pos_jitter, rot_jitter in jitters:
+                q_rot = quaternion_from_axis_angle([1.0, 0.0, 0.0], rot_jitter)
+                node.body.head_pose = (np.array(pos_jitter), q_rot)
+                node._update_body_target()
+                command = {}
+                node._update_body(command)
+                for name in node.body.joint_names:
+                    self.assertAlmostEqual(
+                        command[name],
+                        node.initial_joints[name],
+                        places=4,
+                        msg=f"Joint {name} moved during micro-jitter within deadband!",
+                    )
+        finally:
+            node.destroy_node()
+
+    def test_waist_pitch_glance_stability_and_no_knee_collapse(self):
+        """Verify that natural head pitch tilt in 2-DOF mode does not cause knee collapse or solver divergence."""
+        path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
+        with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
+            node = RobotArmTeleopNode(str(path), backend="v23")
+        try:
+            node.joint_state.update(node.initial_joints)
+            node.last_command.update(node.initial_joints)
+            node._sync_model()
+
+            node.body.head_pose = (np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0]))
+            node._engage_body()
+
+            # Operator tilts head down by 20 deg (~0.35 rad) with negligible head translation (pure neck glance)
+            head_pitch_rad = np.deg2rad(20.0)
+            target_rot = quaternion_from_axis_angle([1.0, 0.0, 0.0], head_pitch_rad)
+            node.body.head_pose = (np.array([0.0, 0.0, 0.0]), target_rot)
+
+            # Stream 120 ticks of control to allow velocity ramp-up to steady state
+            for _ in range(120):
+                node._sync_model()
+                command = {}
+                node._update_body(command)
+                node.joint_state.update(command)
+                node.last_command.update(command)
+
+            # 1. Knee joint (leg_2) must NOT collapse to 0 (home is ~1.2, limit is 0)
+            self.assertGreater(
+                command["leg_2"],
+                0.7,
+                f"Knee joint leg_2 collapsed! value: {command['leg_2']}",
+            )
+
+            # 2. Torso joint (zhi) must not slam to forward limit
+            self.assertLess(
+                command["zhi"],
+                0.2,
+                f"Torso joint zhi folded excessively! value: {command['zhi']}",
+            )
+
+            # 3. Robot target link pitch should have tracked the tilt smoothly
+            node._sync_model()
+            target_link_idx = (
+                node.body.target_link_index
+                if node.body.target_link_index is not None
+                else node.body.torso_index
+            )
+            actual_link = node._link_pose(target_link_idx)
+            mapped_target = node._world_pose(node._root_pose(), node.body.target_base)
+            pitch_axis = np.asarray(node.body_config["pitch_axis_world"], dtype=float)
+            pitch_axis /= np.linalg.norm(pitch_axis)
+            pitch_err = float(pitch_axis @ orientation_error(mapped_target[1], actual_link[1]))
+            self.assertLess(
+                abs(pitch_err),
+                0.01,
+                f"Target link pitch tracking error too large: {pitch_err}",
+            )
+
+            # 4. Operator returns head upright
+            node.body.head_pose = (np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0]))
+            for _ in range(120):
+                node._sync_model()
+                command = {}
+                node._update_body(command)
+                node.joint_state.update(command)
+                node.last_command.update(command)
+
+            # Verify joints return cleanly back to home
+            for name in node.body.joint_names:
+                self.assertAlmostEqual(
+                    command[name],
+                    node.initial_joints[name],
+                    delta=0.08,
+                    msg=f"Joint {name} did not return to home pose!",
+                )
+        finally:
+            node.destroy_node()
+

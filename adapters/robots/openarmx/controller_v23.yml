@@ -55,7 +55,25 @@ task:
     - 3.0
     - 15.0
   axis: []   # 不额外约束某一工具轴方向。
-  joint: []  # 不设置肘部等关节的显式偏好姿态。
+  # 零空间关节姿态任务格式：[[关节名称列表], 权重, 增益[, 目标关节角]]。
+  # 若省略目标关节角，则自动继承 control.joints_init 或 arm_teleop.yaml，持续引导机械臂偏好初始位姿。
+  joint:
+  - - - openarmx_right_joint1
+      - openarmx_right_joint2
+      - openarmx_right_joint3
+      - openarmx_right_joint4
+      - openarmx_right_joint5
+      - openarmx_right_joint6
+      - openarmx_right_joint7
+      - openarmx_left_joint1
+      - openarmx_left_joint2
+      - openarmx_left_joint3
+      - openarmx_left_joint4
+      - openarmx_left_joint5
+      - openarmx_left_joint6
+      - openarmx_left_joint7
+    - 0.5
+    - 2.0
 limit:
   # 各自由关节最大速度，单位为 degree/s；真机适配器还会执行额外的 rad/s 限速。
   velocity:

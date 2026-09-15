@@ -6,6 +6,14 @@ from typing import Sequence
 
 import numpy as np
 
+try:
+    from .tasks.joint_task import JointTask
+except ImportError:
+    try:
+        from tasks.joint_task import JointTask
+    except ImportError:
+        JointTask = None
+
 
 @dataclass
 class SolveIKResult:
@@ -17,19 +25,63 @@ class SolveIKResult:
 
 
 def _stack_tasks(interface, q, tasks, targets):
-    matrix_rows, target_rows = [], []
+    primary_matrix_rows, primary_target_rows = [], []
+    secondary_matrix_rows, secondary_target_rows = [], []
     for task in tasks:
         linearized = task.linearize(interface, q, targets)
         if linearized is None:
             continue
         matrix, target = linearized.weighted_rows()
         keep = np.linalg.norm(matrix, axis=1) > 0.0
-        if np.any(keep):
-            matrix_rows.append(matrix[keep])
-            target_rows.append(target[keep])
-    if not matrix_rows:
-        return np.zeros((0, interface.nv_free)), np.zeros(0)
-    return np.vstack(matrix_rows), np.concatenate(target_rows)
+        if not np.any(keep):
+            continue
+        is_secondary = (
+            (JointTask is not None and isinstance(task, JointTask))
+            or getattr(task, "is_secondary", False)
+        )
+        if is_secondary:
+            secondary_matrix_rows.append(matrix[keep])
+            secondary_target_rows.append(target[keep])
+        else:
+            primary_matrix_rows.append(matrix[keep])
+            primary_target_rows.append(target[keep])
+
+    if not primary_matrix_rows:
+        if not secondary_matrix_rows:
+            return np.zeros((0, interface.nv_free)), np.zeros(0)
+        return np.vstack(secondary_matrix_rows), np.concatenate(secondary_target_rows)
+
+    j_primary = np.vstack(primary_matrix_rows)
+    target_primary = np.concatenate(primary_target_rows)
+
+    if not secondary_matrix_rows:
+        return j_primary, target_primary
+
+    # Project secondary posture tasks into the nullspace of primary tasks:
+    # N = I - J_primary^+ @ J_primary
+    j_secondary = np.vstack(secondary_matrix_rows)
+    target_secondary = np.concatenate(secondary_target_rows)
+
+    lam = 1e-3
+    m_prim = j_primary.shape[0]
+    reg = j_primary @ j_primary.T + (lam * lam) * np.eye(m_prim)
+    try:
+        j_pinv = j_primary.T @ np.linalg.solve(reg, np.eye(m_prim))
+    except np.linalg.LinAlgError:
+        j_pinv = j_primary.T @ np.linalg.lstsq(reg, np.eye(m_prim), rcond=None)[0]
+
+    n_proj = np.eye(interface.nv_free) - j_pinv @ j_primary
+    j_sec_proj = j_secondary @ n_proj
+
+    v_des = np.zeros(interface.nv_free)
+    for i in range(len(target_secondary)):
+        row_norm = float(np.linalg.norm(j_secondary[i]))
+        if row_norm > 1e-12:
+            col = int(np.argmax(np.abs(j_secondary[i])))
+            v_des[col] = float(target_secondary[i]) / row_norm
+    target_sec_proj = j_secondary @ (n_proj @ v_des)
+
+    return np.vstack([j_primary, j_sec_proj]), np.concatenate([target_primary, target_sec_proj])
 
 
 def velocity_bounds(interface, q: np.ndarray, dt: float, velocity_limits=None):

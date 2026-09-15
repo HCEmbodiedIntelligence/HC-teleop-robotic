@@ -83,7 +83,37 @@ class ControllerV23:
         self.damping = float(configured_damping if damping is None else damping)
         if self.damping < 0.0:
             raise ValueError("control.damping must be non-negative")
-        self.tasks = self._build_tasks(self.cfg.get("task", {}))
+
+        # Resolve initial / home joints from config or peer arm_teleop.yaml
+        joints_init_raw = control.get("joints_init")
+        self.joints_init: dict[str, float] = {}
+        if isinstance(joints_init_raw, dict):
+            self.joints_init = {str(k): float(v) for k, v in joints_init_raw.items()}
+        elif isinstance(joints_init_raw, (list, tuple)) and len(joints_init_raw) == len(free_joints):
+            self.joints_init = {name: float(v) for name, v in zip(free_joints, joints_init_raw)}
+
+        if not self.joints_init:
+            arm_teleop_file = self.config_path.parent / "arm_teleop.yaml"
+            if arm_teleop_file.exists():
+                try:
+                    with arm_teleop_file.open("r", encoding="utf-8") as stream:
+                        arm_cfg = yaml.safe_load(stream)
+                    initial_map = arm_cfg.get("robot", {}).get("initial_joints", {})
+                    if isinstance(initial_map, dict):
+                        self.joints_init = {
+                            name: float(initial_map[name])
+                            for name in free_joints
+                            if name in initial_map
+                        }
+                except Exception:
+                    pass
+
+        self.tasks = self._build_tasks(
+            self.cfg.get("task", {}),
+            default_posture=self.joints_init,
+            control_cfg=control,
+            free_joints=free_joints,
+        )
         self.pose_tasks = [task for task in self.tasks if isinstance(task, FrameTask)]
         self.axis_tasks = [task for task in self.tasks if isinstance(task, AxisTask)]
         self.joint_tasks = [task for task in self.tasks if isinstance(task, JointTask)]
@@ -97,8 +127,14 @@ class ControllerV23:
         self.velocity_limits = np.deg2rad(raw_limits)
         self.last_result = None
 
-    @staticmethod
-    def _build_tasks(config):
+    @classmethod
+    def _build_tasks(
+        cls,
+        config,
+        default_posture=None,
+        control_cfg=None,
+        free_joints=None,
+    ):
         tasks = []
         for item in config.get("pose", []) or []:
             (root, frame), position_cost, orientation_cost, *rest = item
@@ -113,9 +149,40 @@ class ControllerV23:
             tasks.append(
                 AxisTask(root, frame, axis, cost, rest[0] if rest else 1.0)
             )
-        for item in config.get("joint", []) or []:
+        joint_items = config.get("joint", []) or []
+        for item in joint_items:
             names, cost, *rest = item
-            tasks.append(JointTask(names, cost, rest[0] if rest else 1.0))
+            gain = rest[0] if len(rest) > 0 else 1.0
+            target = rest[1] if len(rest) > 1 else None
+            if target is None and default_posture:
+                if isinstance(default_posture, dict):
+                    resolved = [default_posture.get(n) for n in names]
+                    if all(v is not None for v in resolved):
+                        target = resolved
+                elif (
+                    isinstance(default_posture, (list, tuple, np.ndarray))
+                    and free_joints
+                    and len(default_posture) == len(free_joints)
+                ):
+                    name_to_val = dict(zip(free_joints, default_posture))
+                    resolved = [name_to_val.get(n) for n in names]
+                    if all(v is not None for v in resolved):
+                        target = resolved
+            tasks.append(JointTask(names, cost, gain, target=target))
+
+        if not joint_items and control_cfg and free_joints and default_posture:
+            posture_cost = float(control_cfg.get("posture_cost", 0.0))
+            if posture_cost > 0.0:
+                posture_gain = float(control_cfg.get("posture_gain", 1.0))
+                if isinstance(default_posture, dict):
+                    resolved = [default_posture.get(n) for n in free_joints]
+                    if all(v is not None for v in resolved):
+                        tasks.append(
+                            JointTask(
+                                free_joints, posture_cost, posture_gain, target=resolved
+                            )
+                        )
+
         return tasks
 
     def update_joint_state(

@@ -63,16 +63,26 @@ simulation_body:
   enabled: true
   waist_joint_names: [leg_1, leg_2, zhi]
   unconstrained: true
-  ik_mode: 3dof
+  ik_mode: 2dof
   target_link: camera_head
   head_position_scale: 1.0
   head_max_displacement: 0.0
   head_orientation_enabled: true
-  max_joint_velocity: 1.5
+  target_position_deadband: 0.02
+  target_orientation_deadband: 0.05
+  target_filter_alpha: 0.5
+  max_joint_velocity: 0.6
   ik_iterations: 20
   ik_damping: 0.05
-  ik_max_update: 0.15
+  ik_max_update: 0.08
+  ik_posture_gain: 0.5
+  ik_forward_weight: 0.3
   yaw_direction: 1.0
+  right_stick_yaw_enabled: true
+  right_stick_yaw_axis: 2
+  right_stick_yaw_direction: -1.0
+  right_stick_yaw_deadzone: 0.08
+  right_stick_independent_base: true
 body:
   # 当前腰部控制关闭；重新启用时取消下面三个腰关节注释并完成真机标定。
   # waist_joint_names:
@@ -86,14 +96,20 @@ body:
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
   # Joy.axes 下标：0=Trigger、1=Grip、2/3=主摇杆 X/Y、4/5=副摇杆 X/Y。
-  stick_x_axis: 2
-  stick_y_axis: 3
+  stick_x_axis: 3
+  stick_y_axis: 2
   # 摇杆死区、方向符号和底盘最大线速度（m/s）。
   stick_deadzone: 0.08
   stick_forward_direction: 1.0
-  stick_lateral_direction: -1.0
+  stick_lateral_direction: 1.0
   max_linear_velocity: 0.35
   max_lateral_velocity: 0.25
+  # 右手柄摇杆控制底盘旋转（Yaw）配置
+  right_stick_yaw_enabled: true
+  right_stick_yaw_axis: 2          # Joy.axes 下标，通常为 2（主摇杆 X 轴）
+  right_stick_yaw_direction: -1.0  # -1.0 表示向左推摇杆底盘向左旋转（逆时针正方向）
+  right_stick_yaw_deadzone: 0.08   # 摇杆死区
+  right_stick_independent_base: true # 允许不按左手 Grip 独立拨动右手摇杆原地旋转底盘
   # 头显偏航超过死区后控制底盘角速度（rad/s）。
   yaw_deadzone: 0.18
   yaw_gain: 0.6
@@ -103,6 +119,10 @@ body:
   head_height_axis: 1
   head_pitch_position_axis: 2
   head_forward_axis: 2
+  # 头显位姿死区与滤波
+  target_position_deadband: 0.02
+  target_orientation_deadband: 0.05
+  target_filter_alpha: 0.5
   # 腰部逆解模式：2dof（放开平移硬约束，仅约束世界高度和俯仰角，自然随动前伸）或 4dof
   ik_mode: 2dof
   # 俯仰源：orientation（由头显姿态俯仰角直接驱动）、position（前后位移）或 auto
@@ -132,10 +152,12 @@ body:
   - 2.356194
   - 1.117011
   # 腰部最大关节速度及兼容内置 IK 的迭代参数。
-  max_joint_velocity: 1.0
+  max_joint_velocity: 0.6
   ik_iterations: 15
   ik_damping: 0.05
-  ik_max_update: 0.10
+  ik_max_update: 0.08
+  ik_posture_gain: 0.5
+  ik_forward_weight: 0.3
 grippers:
   # Trigger 连续量控制夹爪；axes[0] 是 Trigger，阈值用于生成二值抓握状态。
   trigger_axis: 0

@@ -77,3 +77,4 @@ class BodyRuntime:
     target_link_index: int | None = None
     reference_target_link: tuple[np.ndarray, np.ndarray] | None = None
     target_head_local: tuple[np.ndarray, np.ndarray] | None = None
+    smoothed_head_pose: tuple[np.ndarray, np.ndarray] | None = None

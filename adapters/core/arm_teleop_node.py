@@ -27,6 +27,7 @@ from .arm_teleop_math import (
     binary_trigger_state,
     clamp_step,
     joystick_base_velocity,
+    joystick_yaw_velocity,
     joint_limit_avoidance,
     mapped_relative_pitch,
     mapped_relative_yaw,
@@ -65,6 +66,8 @@ LEGACY_IK_DEFAULTS = {
     "ik_reseed_perturbation": 0.3,
     "ik_limit_avoidance_gain": 0.035,
     "ik_posture_gain": 0.02,
+    "ik_home_posture_weight": 0.8,
+    "ik_candidate_home_weight": 0.5,
     "ik_solution_limit_weight": 4.0,
     "ik_min_progress_ratio": 0.001,
     "ik_min_progress_absolute": 0.0001,
@@ -496,6 +499,14 @@ class RobotArmTeleopNode(Node):
                 value = float(self.config["control"].get(key, -1.0))
                 if not math.isfinite(value) or value < 0.0:
                     raise ValueError(f"control.{key} must be finite and non-negative")
+            for key in (
+                "ik_home_posture_weight",
+                "ik_candidate_home_weight",
+            ):
+                if key in self.config["control"]:
+                    value = float(self.config["control"][key])
+                    if not math.isfinite(value) or value < 0.0:
+                        raise ValueError(f"control.{key} must be finite and non-negative")
             if int(self.config["control"].get("ik_iterations", 0)) <= 0:
                 raise ValueError("control.ik_iterations must be positive")
         home_threshold = float(self.config["control"].get("home_gesture_threshold", 0.8))
@@ -1326,9 +1337,19 @@ class RobotArmTeleopNode(Node):
         limit_cost = float(
             np.sum(np.maximum(preferred_margin - normalized_margin, 0.0) ** 2)
         )
-        score = transition + float(
-            self.control.get("ik_solution_limit_weight", 4.0)
-        ) * limit_cost
+        arm_home = np.asarray(
+            [self.initial_joints.get(name, 0.0) for name in arm.joint_names],
+            dtype=float,
+        )
+        home_distance = float(np.linalg.norm((q - arm_home) / span))
+        candidate_home_weight = float(
+            self.control.get("ik_candidate_home_weight", 0.5)
+        )
+        score = (
+            transition
+            + candidate_home_weight * home_distance
+            + float(self.control.get("ik_solution_limit_weight", 4.0)) * limit_cost
+        )
         return IkCandidate(
             q,
             position_error,
@@ -1419,7 +1440,14 @@ class RobotArmTeleopNode(Node):
             avoidance = joint_limit_avoidance(
                 q, arm.lower, arm.upper, limit_margin
             )
-            posture = reference - q
+            arm_home = np.asarray(
+                [self.initial_joints.get(name, 0.0) for name in arm.joint_names],
+                dtype=float,
+            )
+            home_weight = float(self.control.get("ik_home_posture_weight", 0.8))
+            posture_home = arm_home - q
+            posture_prev = reference - q
+            posture = posture_home * home_weight + posture_prev * (1.0 - home_weight)
             update += nullspace @ (
                 avoidance * limit_gain + posture * posture_gain
             )
@@ -1709,9 +1737,14 @@ class RobotArmTeleopNode(Node):
     ) -> np.ndarray:
         body = self.body
         q = np.clip(np.asarray(seed, dtype=float), body.lower, body.upper)
+        q_home = np.array(
+            [self.initial_joints.get(name, 0.0) for name in body.joint_names],
+            dtype=float,
+        )
         pitch_axis = np.asarray(self.body_config["pitch_axis_world"], dtype=float)
         pitch_axis /= np.linalg.norm(pitch_axis)
         damping = float(self.body_config["ik_damping"])
+        posture_gain = float(self.body_config.get("ik_posture_gain", 0.5))
         # PyBullet Jacobians are expressed in the base frame; FK errors below
         # are world-frame quantities. Rotate both linear and angular rows.
         base_rotation = np.asarray(
@@ -1722,7 +1755,7 @@ class RobotArmTeleopNode(Node):
         ik_mode = str(
             self.body_config.get(
                 "ik_mode",
-                "3dof" if bool(self.body_config.get("unconstrained", False)) else "2dof",
+                "2dof" if bool(self.body_config.get("unconstrained", False)) else "2dof",
             )
         )
         link_index = (
@@ -1743,23 +1776,29 @@ class RobotArmTeleopNode(Node):
                 fwd_error = float(fwd_axis @ (target_position - position))
                 height_error = float(up_axis @ (target_position - position))
                 pitch_error = float(pitch_axis @ rotation_delta)
-                error = np.array([fwd_error, height_error, pitch_error], dtype=float)
                 if (
                     abs(fwd_error) < 0.002
                     and abs(height_error) < 0.002
                     and abs(pitch_error) < 0.002
                 ):
                     break
+                fwd_weight = float(self.body_config.get("ik_forward_weight", 0.5))
+                error = np.array([fwd_error * fwd_weight, height_error, pitch_error], dtype=float)
                 matrix = np.vstack(
                     [
-                        (fwd_axis @ linear_world).reshape(1, -1),
+                        (fwd_axis @ linear_world).reshape(1, -1) * fwd_weight,
                         (up_axis @ linear_world).reshape(1, -1),
                         (pitch_axis @ angular_world).reshape(1, -1),
                     ]
                 )
-                update = matrix.T @ np.linalg.solve(
-                    matrix @ matrix.T + np.eye(3) * damping * damping, error
-                )
+                if posture_gain > 0.0:
+                    posture = q_home - q
+                    reg = matrix.T @ matrix + (damping * damping + posture_gain) * np.eye(3)
+                    update = np.linalg.solve(reg, matrix.T @ error + posture_gain * posture)
+                else:
+                    update = matrix.T @ np.linalg.solve(
+                        matrix @ matrix.T + np.eye(3) * damping * damping, error
+                    )
             elif ik_mode == "2dof":
                 height_error = float(target_position[2] - position[2])
                 pitch_error = float(pitch_axis @ rotation_delta)
@@ -1775,6 +1814,13 @@ class RobotArmTeleopNode(Node):
                 update = matrix.T @ np.linalg.solve(
                     matrix @ matrix.T + np.eye(2) * damping * damping, error
                 )
+                reg = matrix @ matrix.T + np.eye(2) * damping * damping
+                pseudo_inverse = matrix.T @ np.linalg.solve(reg, np.eye(2))
+                update = pseudo_inverse @ error
+                if posture_gain > 0.0:
+                    nullspace = np.eye(len(q)) - pseudo_inverse @ matrix
+                    posture = q_home - q
+                    update += nullspace @ (posture * posture_gain)
             else:
                 error = np.r_[target_position - position, float(pitch_axis @ rotation_delta)]
                 if np.linalg.norm(error) < 0.002:
@@ -1813,6 +1859,7 @@ class RobotArmTeleopNode(Node):
         body = self.body
         body.active = True
         body.reference_head = body.head_pose
+        body.smoothed_head_pose = body.head_pose
         target_link_idx = (
             body.target_link_index
             if body.target_link_index is not None
@@ -1860,6 +1907,24 @@ class RobotArmTeleopNode(Node):
         assert body.reference_head is not None
         assert body.reference_torso is not None
 
+        pos_deadband = float(self.body_config.get("target_position_deadband", 0.0))
+        orn_deadband = float(self.body_config.get("target_orientation_deadband", 0.0))
+        filter_alpha = float(self.body_config.get("target_filter_alpha", 1.0))
+        if body.smoothed_head_pose is None:
+            body.smoothed_head_pose = body.head_pose
+        elif pos_deadband > 0.0 or orn_deadband > 0.0 or filter_alpha < 1.0:
+            body.smoothed_head_pose = stabilize_pose(
+                *body.head_pose,
+                *body.smoothed_head_pose,
+                pos_deadband,
+                orn_deadband,
+                filter_alpha,
+            )
+        else:
+            body.smoothed_head_pose = body.head_pose
+
+        effective_head = body.smoothed_head_pose
+
         if bool(self.body_config.get("unconstrained", False)):
             axis_mapping = self.body_config.get(
                 "head_axis_mapping",
@@ -1873,7 +1938,7 @@ class RobotArmTeleopNode(Node):
                 )
             )
             target_head_local = relative_target(
-                *body.head_pose,
+                *effective_head,
                 *body.reference_head,
                 *ref_target,
                 axis_mapping,
@@ -1886,13 +1951,13 @@ class RobotArmTeleopNode(Node):
             return
 
         delta_height = float(
-            body.head_pose[0][int(self.body_config["head_height_axis"])]
+            effective_head[0][int(self.body_config["head_height_axis"])]
             - body.reference_head[0][int(self.body_config["head_height_axis"])]
         )
         pitch_source = str(self.body_config.get("pitch_source", "auto"))
         if pitch_source == "orientation":
             delta_pitch = mapped_relative_pitch(
-                body.head_pose[1],
+                effective_head[1],
                 body.reference_head[1],
                 self.control.get(
                     "head_axis_mapping", self.control["axis_mapping"]
@@ -1900,23 +1965,23 @@ class RobotArmTeleopNode(Node):
             )
         elif pitch_source == "position":
             delta_pitch = float(
-                body.head_pose[0][int(self.body_config["head_pitch_position_axis"])]
+                effective_head[0][int(self.body_config["head_pitch_position_axis"])]
                 - body.reference_head[0][int(self.body_config["head_pitch_position_axis"])]
             )
         elif pitch_source == "combined":
             ori_pitch = mapped_relative_pitch(
-                body.head_pose[1],
+                effective_head[1],
                 body.reference_head[1],
                 self.control.get(
                     "head_axis_mapping", self.control["axis_mapping"]
                 ),
             )
             pos_axis = int(self.body_config.get("head_pitch_position_axis", 2))
-            pos_delta = float(body.head_pose[0][pos_axis] - body.reference_head[0][pos_axis])
+            pos_delta = float(effective_head[0][pos_axis] - body.reference_head[0][pos_axis])
             delta_pitch = ori_pitch + pos_delta * float(self.body_config.get("pitch_pos_gain", 1.0))
         else:  # "auto"
             ori_pitch = mapped_relative_pitch(
-                body.head_pose[1],
+                effective_head[1],
                 body.reference_head[1],
                 self.control.get(
                     "head_axis_mapping", self.control["axis_mapping"]
@@ -1926,7 +1991,7 @@ class RobotArmTeleopNode(Node):
                 delta_pitch = ori_pitch
             elif "head_pitch_position_axis" in self.body_config:
                 delta_pitch = float(
-                    body.head_pose[0][int(self.body_config.get("head_pitch_position_axis", 2))]
+                    effective_head[0][int(self.body_config.get("head_pitch_position_axis", 2))]
                     - body.reference_head[0][int(self.body_config.get("head_pitch_position_axis", 2))]
                 )
             else:
@@ -1937,7 +2002,7 @@ class RobotArmTeleopNode(Node):
             )
         )
         delta_forward = float(
-            body.head_pose[0][head_forward_axis]
+            effective_head[0][head_forward_axis]
             - body.reference_head[0][head_forward_axis]
         )
         lift = (
@@ -1998,27 +2063,48 @@ class RobotArmTeleopNode(Node):
         else:
             body.target_head_local = body.target_base
 
-    def _publish_base_command(self, *, track_head_yaw: bool) -> None:
-        left = self.arms["left"]
-        body = self.body
-        assert left.joy is not None
-        axes = left.joy.axes
-        x_index = int(self.body_config["stick_x_axis"])
-        y_index = int(self.body_config["stick_y_axis"])
-        stick_x = axes[x_index] if len(axes) > x_index else 0.0
-        stick_y = axes[y_index] if len(axes) > y_index else 0.0
-        forward, lateral = joystick_base_velocity(
-            stick_x,
-            stick_y,
-            float(self.body_config["stick_deadzone"]),
-            float(self.body_config["max_linear_velocity"]),
-            float(self.body_config["max_lateral_velocity"]),
-            float(self.body_config.get("stick_forward_direction", 1.0)),
-            float(self.body_config.get("stick_lateral_direction", -1.0)),
+    def _right_stick_yaw_active(self) -> bool:
+        right = self.arms["right"]
+        if right.joy is None:
+            return False
+        axes = right.joy.axes
+        yaw_axis = int(self.body_config.get("right_stick_yaw_axis", 2))
+        if len(axes) <= yaw_axis:
+            return False
+        deadzone = float(
+            self.body_config.get(
+                "right_stick_yaw_deadzone",
+                self.body_config.get("stick_deadzone", 0.08),
+            )
         )
-        yaw = 0.0
-        if track_head_yaw:
-            assert body.head_pose is not None and body.reference_head is not None
+        return abs(float(axes[yaw_axis])) > deadzone
+
+    def _publish_base_command(
+        self, *, track_head_yaw: bool, left_clutch_active: bool = True
+    ) -> None:
+        left = self.arms["left"]
+        right = self.arms["right"]
+        body = self.body
+        if left.joy is not None and left_clutch_active:
+            axes = left.joy.axes
+            x_index = int(self.body_config["stick_x_axis"])
+            y_index = int(self.body_config["stick_y_axis"])
+            stick_x = axes[x_index] if len(axes) > x_index else 0.0
+            stick_y = axes[y_index] if len(axes) > y_index else 0.0
+            forward, lateral = joystick_base_velocity(
+                stick_x,
+                stick_y,
+                float(self.body_config["stick_deadzone"]),
+                float(self.body_config["max_linear_velocity"]),
+                float(self.body_config["max_lateral_velocity"]),
+                float(self.body_config.get("stick_forward_direction", 1.0)),
+                float(self.body_config.get("stick_lateral_direction", -1.0)),
+            )
+        else:
+            forward, lateral = 0.0, 0.0
+
+        head_yaw = 0.0
+        if track_head_yaw and body.head_pose is not None and body.reference_head is not None:
             relative_yaw = self._wrap_angle(
                 mapped_relative_yaw(
                     body.head_pose[1],
@@ -2033,7 +2119,7 @@ class RobotArmTeleopNode(Node):
             if abs_yaw > yaw_deadzone:
                 excess = abs_yaw - yaw_deadzone
                 smooth_excess = math.copysign(excess ** 1.15, relative_yaw)
-                yaw = float(
+                head_yaw = float(
                     np.clip(
                         smooth_excess
                         * float(self.body_config.get("yaw_direction", -1.0))
@@ -2042,6 +2128,32 @@ class RobotArmTeleopNode(Node):
                         float(self.body_config.get("max_angular_velocity", 0.45)),
                     )
                 )
+
+        stick_yaw = 0.0
+        if bool(self.body_config.get("right_stick_yaw_enabled", True)) and right.joy is not None:
+            r_axes = right.joy.axes
+            yaw_axis = int(self.body_config.get("right_stick_yaw_axis", 2))
+            if len(r_axes) > yaw_axis:
+                r_deadzone = float(
+                    self.body_config.get(
+                        "right_stick_yaw_deadzone",
+                        self.body_config.get("stick_deadzone", 0.08),
+                    )
+                )
+                r_direction = float(
+                    self.body_config.get("right_stick_yaw_direction", -1.0)
+                )
+                max_ang = float(self.body_config.get("max_angular_velocity", 0.45))
+                stick_yaw = joystick_yaw_velocity(
+                    r_axes[yaw_axis],
+                    r_deadzone,
+                    max_ang,
+                    r_direction,
+                )
+
+        max_ang = float(self.body_config.get("max_angular_velocity", 0.45))
+        yaw = float(np.clip(head_yaw + stick_yaw, -max_ang, max_ang))
+
         if self.body_config.get("base_command_mode", "delta") == "delta":
             period = 1.0 / float(self.control["rate_hz"])
             yaw, forward, lateral = yaw * period, forward * period, lateral * period
@@ -2311,13 +2423,13 @@ class RobotArmTeleopNode(Node):
 
         left_input_fresh = self._input_fresh(self.arms["left"], now)
         right_input_fresh = self._input_fresh(self.arms["right"], now)
-        base_requested = left_input_fresh and self._clutch_pressed(
+        left_base_requested = left_input_fresh and self._clutch_pressed(
             self.arms["left"]
         )
-        body_requested = (
-            base_requested
-            and bool(self.body_config.get("enabled", True))
-            and now - self.body.head_stamp <= float(self.control["pose_timeout"])
+        right_stick_active = (
+            right_input_fresh
+            and bool(self.body_config.get("right_stick_yaw_enabled", True))
+            and self._right_stick_yaw_active()
         )
         arms_requested = right_input_fresh and self._clutch_pressed(
             self.arms["right"]
@@ -2329,10 +2441,23 @@ class RobotArmTeleopNode(Node):
                 )
             if self.solver_rearm.blocked:
                 arms_requested = False
+
+        right_stick_base = right_stick_active and (
+            left_base_requested
+            or not arms_requested
+            or bool(self.body_config.get("right_stick_with_arms", True))
+        ) and bool(self.body_config.get("right_stick_independent_base", True))
+        base_requested = left_base_requested or right_stick_base
+
         base_requested, arms_requested = self._apply_collision_latch(
             base_requested, arms_requested
         )
-        body_requested = body_requested and base_requested
+        body_requested = (
+            left_base_requested
+            and base_requested
+            and bool(self.body_config.get("enabled", True))
+            and now - self.body.head_stamp <= float(self.control["pose_timeout"])
+        )
 
         body_command: dict[str, float] = {}
         if body_requested:
@@ -2345,6 +2470,7 @@ class RobotArmTeleopNode(Node):
             self.body.reference_torso = None
             self.body.reference_target_link = None
             self.body.target_head_local = None
+            self.body.smoothed_head_pose = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
             for name in self.body.joint_names:
                 body_command[name] = float(
@@ -2363,7 +2489,10 @@ class RobotArmTeleopNode(Node):
         self.last_command.update(body_command)
 
         if base_requested:
-            self._publish_base_command(track_head_yaw=body_requested)
+            self._publish_base_command(
+                track_head_yaw=body_requested,
+                left_clutch_active=left_base_requested,
+            )
         else:
             self._stop_base_if_pending()
 
@@ -2443,19 +2572,32 @@ class RobotArmTeleopNode(Node):
             return
         left_input_fresh = self._input_fresh(self.arms["left"], now)
         right_input_fresh = self._input_fresh(self.arms["right"], now)
-        base_requested = left_input_fresh and self._clutch_pressed(
+        left_base_requested = left_input_fresh and self._clutch_pressed(
             self.arms["left"]
         )
-        body_requested = (
-            base_requested
-            and bool(self.body_config.get("enabled", True))
-            and now - self.body.head_stamp <= float(self.control["pose_timeout"])
+        right_stick_active = (
+            right_input_fresh
+            and bool(self.body_config.get("right_stick_yaw_enabled", True))
+            and self._right_stick_yaw_active()
         )
         arms_requested = right_input_fresh and self._clutch_pressed(self.arms["right"])
+
+        right_stick_base = right_stick_active and (
+            left_base_requested
+            or not arms_requested
+            or bool(self.body_config.get("right_stick_with_arms", True))
+        ) and bool(self.body_config.get("right_stick_independent_base", True))
+        base_requested = left_base_requested or right_stick_base
+
         base_requested, arms_requested = self._apply_collision_latch(
             base_requested, arms_requested
         )
-        body_requested = body_requested and base_requested
+        body_requested = (
+            left_base_requested
+            and base_requested
+            and bool(self.body_config.get("enabled", True))
+            and now - self.body.head_stamp <= float(self.control["pose_timeout"])
+        )
         any_active = False
 
         if body_requested:
@@ -2472,7 +2614,10 @@ class RobotArmTeleopNode(Node):
             self.get_logger().info("head/left clutch released: waist + yaw hold")
 
         if base_requested:
-            self._publish_base_command(track_head_yaw=body_requested)
+            self._publish_base_command(
+                track_head_yaw=body_requested,
+                left_clutch_active=left_base_requested,
+            )
         else:
             self._stop_base_if_pending()
 

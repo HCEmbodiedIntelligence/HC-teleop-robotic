@@ -23,7 +23,7 @@ class SupervisorTests(unittest.TestCase):
             with self.subTest(signal=sig), tempfile.TemporaryDirectory() as directory:
                 marker = Path(directory) / 'pid'
                 worker = "import os,signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(" + repr(str(marker)) + ").write_text(str(os.getpid()));time.sleep(60)"
-                launcher = "import subprocess,os,time;subprocess.Popen(" + repr([sys.executable, str(SUPERVISOR), '--parent']) + "+[str(os.getpid()),'--grace','0.2','--'," + repr(sys.executable) + ",' -c'.strip()," + repr(worker) + "],start_new_session=True);time.sleep(60)"
+                launcher = "import subprocess,os,time,signal;signal.signal(signal.SIGHUP,signal.SIG_DFL);subprocess.Popen(" + repr([sys.executable, str(SUPERVISOR), '--parent']) + "+[str(os.getpid()),'--grace','0.2','--'," + repr(sys.executable) + ",' -c'.strip()," + repr(worker) + "],start_new_session=True);time.sleep(60)"
                 parent = subprocess.Popen([sys.executable, '-c', launcher])
                 try:
                     deadline = time.monotonic() + 3

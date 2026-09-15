@@ -252,6 +252,39 @@ def joystick_base_velocity(
     return forward, lateral
 
 
+def joystick_yaw_velocity(
+    stick_yaw: float,
+    deadzone: float,
+    max_angular_velocity: float,
+    yaw_direction: float = -1.0,
+) -> float:
+    """Map a secondary or right joystick axis to robot yaw velocity."""
+    values = tuple(
+        float(value)
+        for value in (
+            stick_yaw,
+            deadzone,
+            max_angular_velocity,
+            yaw_direction,
+        )
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("joystick yaw mapping values must be finite")
+    raw, deadzone, max_ang, yaw_sign = values
+    if not 0.0 <= deadzone < 1.0:
+        raise ValueError("joystick deadzone must be in [0, 1)")
+    if max_ang < 0.0:
+        raise ValueError("max_angular_velocity must be non-negative")
+    if yaw_sign not in (-1.0, 1.0):
+        raise ValueError("yaw_direction must be -1 or 1")
+
+    val = float(np.clip(raw, -1.0, 1.0))
+    if abs(val) <= deadzone:
+        return 0.0
+    shaped = math.copysign((abs(val) - deadzone) / (1.0 - deadzone), val)
+    return float(shaped * max_ang * yaw_sign)
+
+
 def adaptive_damping(
     smallest_singular_value: float,
     minimum: float,

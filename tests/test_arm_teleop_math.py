@@ -8,6 +8,7 @@ from adapters.core.arm_teleop_math import (
     binary_trigger_state,
     clamp_step,
     joystick_base_velocity,
+    joystick_yaw_velocity,
     joint_limit_avoidance,
     mapped_relative_pitch,
     mapped_relative_yaw,
@@ -158,6 +159,28 @@ class ArmTeleopMathTests(unittest.TestCase):
         self.assertAlmostEqual(lateral, 0.2)
         _, lateral = joystick_base_velocity(1.0, 0.0, 0.12, 0.25, 0.2)
         self.assertAlmostEqual(lateral, -0.2)
+
+    def test_right_stick_maps_to_yaw_velocity(self):
+        # Deadzone suppression (< 0.08)
+        self.assertEqual(joystick_yaw_velocity(0.05, 0.08, 0.45, -1.0), 0.0)
+        self.assertEqual(joystick_yaw_velocity(-0.07, 0.08, 0.45, -1.0), 0.0)
+
+        # Full left (-1.0) with yaw_direction=-1.0 -> positive counter-clockwise yaw (+0.45)
+        yaw_left = joystick_yaw_velocity(-1.0, 0.08, 0.45, -1.0)
+        self.assertAlmostEqual(yaw_left, 0.45)
+
+        # Full right (+1.0) with yaw_direction=-1.0 -> negative clockwise yaw (-0.45)
+        yaw_right = joystick_yaw_velocity(1.0, 0.08, 0.45, -1.0)
+        self.assertAlmostEqual(yaw_right, -0.45)
+
+        # Inverted direction (+1.0)
+        yaw_left_inv = joystick_yaw_velocity(-1.0, 0.08, 0.45, 1.0)
+        self.assertAlmostEqual(yaw_left_inv, -0.45)
+
+        # Halfway deflection
+        # (0.54 - 0.08) / (1.0 - 0.08) = 0.46 / 0.92 = 0.5
+        yaw_half = joystick_yaw_velocity(-0.54, 0.08, 0.45, -1.0)
+        self.assertAlmostEqual(yaw_half, 0.225)
 
     def test_joint_step_and_limits(self):
         result = clamp_step([2, -2], [0, 0], [-1, -0.05], [1, 1], 0.1)

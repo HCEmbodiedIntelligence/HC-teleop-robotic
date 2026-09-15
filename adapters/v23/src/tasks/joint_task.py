@@ -16,11 +16,13 @@ class JointTask(Task):
         super().__init__(gain)
         self.joint_names = list(joint_names)
         self.cost = float(cost)
-        self.target = (
-            None if target is None else np.asarray(target, dtype=float).reshape(-1)
-        )
+        self.target = None
+        if target is not None:
+            self.set_target(target)
 
-    def set_target(self, values: Sequence[float]) -> None:
+    def set_target(self, values) -> None:
+        if isinstance(values, dict):
+            values = [values[name] for name in self.joint_names if name in values]
         values = np.asarray(values, dtype=float).reshape(-1)
         if values.size != len(self.joint_names):
             raise ValueError("joint target size mismatch")
