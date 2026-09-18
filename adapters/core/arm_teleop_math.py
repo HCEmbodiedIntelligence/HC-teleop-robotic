@@ -393,3 +393,165 @@ def clamp_step(
     limited = previous_array + delta
     return np.clip(limited, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float))
 
+
+def head_yaw_orientation_velocity(
+    relative_yaw: float,
+    deadzone_rad: float = math.radians(15.0),
+    active_threshold_rad: float = math.radians(45.0),
+    slow_gain: float = 0.25,
+    fast_gain: float = 0.70,
+    slow_max_velocity: float = 0.15,
+    max_angular_velocity: float = 0.45,
+    yaw_direction: float = 1.0,
+) -> float:
+    """Calculate chassis angular velocity from head-to-robot relative yaw in three zones:
+
+    Zone 1 (< 15 deg): Deadzone -> 0.0 (no rotation)
+    Zone 2 (15 ~ 45 deg): Gentle follow -> gradual, slow rotation (up to slow_max_velocity)
+    Zone 3 (> 45 deg): Active follow -> prominent follow (up to max_angular_velocity)
+    """
+    if not math.isfinite(relative_yaw):
+        return 0.0
+    abs_yaw = abs(float(relative_yaw))
+    if abs_yaw <= deadzone_rad or deadzone_rad >= active_threshold_rad:
+        return 0.0
+
+    sign = math.copysign(1.0, relative_yaw) * float(yaw_direction)
+
+    if abs_yaw <= active_threshold_rad:
+        # Zone 2: 15 ~ 45 deg - slow gentle follow
+        excess = abs_yaw - deadzone_rad
+        vel = slow_gain * excess
+        vel = min(vel, slow_max_velocity)
+    else:
+        # Zone 3: > 45 deg - active prominent follow
+        excess_fast = abs_yaw - active_threshold_rad
+        vel = slow_max_velocity + fast_gain * excess_fast
+        vel = min(vel, max_angular_velocity)
+
+    return float(sign * vel)
+
+
+def hands_reach_assist_velocity(
+    hand_offsets: Sequence[tuple[float, float]],
+    deadzone_forward: float = 0.08,
+    deadzone_backward: float = 0.06,
+    deadzone_lateral: float = 0.06,
+    gain_forward: float = 0.6,
+    gain_backward: float = 0.5,
+    gain_lateral: float = 0.6,
+    max_linear_velocity: float = 0.20,
+    max_lateral_velocity: float = 0.18,
+) -> tuple[float, float]:
+    """Calculate omnidirectional base assist velocity (v_x, v_y) from active hands' displacements.
+
+    hand_offsets: list of (delta_x, delta_y) in meters in the robot body frame.
+    Returns (v_x_assist, v_y_assist).
+    """
+    if not hand_offsets:
+        return (0.0, 0.0)
+
+    per_hand_vx: list[float] = []
+    per_hand_vy: list[float] = []
+
+    for dx, dy in hand_offsets:
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            continue
+
+        # Forward / backward assist (X)
+        if dx > deadzone_forward:
+            vx = min(gain_forward * (dx - deadzone_forward), max_linear_velocity)
+        elif dx < -deadzone_backward:
+            vx = max(gain_backward * (dx + deadzone_backward), -max_linear_velocity)
+        else:
+            vx = 0.0
+        per_hand_vx.append(vx)
+
+        # Lateral assist (Y)
+        if dy > deadzone_lateral:
+            vy = min(gain_lateral * (dy - deadzone_lateral), max_lateral_velocity)
+        elif dy < -deadzone_lateral:
+            vy = max(gain_lateral * (dy + deadzone_lateral), -max_lateral_velocity)
+        else:
+            vy = 0.0
+        per_hand_vy.append(vy)
+
+    if not per_hand_vx:
+        return (0.0, 0.0)
+
+    avg_vx = float(np.mean(per_hand_vx))
+    avg_vy = float(np.mean(per_hand_vy))
+    def _aggregate(velocities: list[float]) -> float:
+        active = [v for v in velocities if abs(v) > 1e-4]
+        if not active:
+            return 0.0
+        return float(sum(velocities) / len(active))
+
+    avg_vx = _aggregate(per_hand_vx)
+    avg_vy = _aggregate(per_hand_vy)
+    return (avg_vx, avg_vy)
+
+
+def rotate_velocity_to_base_frame(
+    forward: float,
+    lateral: float,
+    heading_yaw: float,
+) -> tuple[float, float]:
+    """Rotate 2D velocity from a heading frame (e.g. camera view) into base chassis frame.
+
+    forward: velocity along heading direction
+    lateral: velocity perpendicular (left-positive) to heading direction
+    heading_yaw: heading angle in radians relative to base frame (counterclockwise positive)
+    Returns (v_x_base, v_y_base).
+    """
+    c = math.cos(heading_yaw)
+    s = math.sin(heading_yaw)
+    v_x = c * float(forward) - s * float(lateral)
+    v_y = s * float(forward) + c * float(lateral)
+    return float(v_x), float(v_y)
+
+
+def project_displacement_to_heading_frame(
+    dx: float,
+    dy: float,
+    heading_yaw: float,
+) -> tuple[float, float]:
+    """Project 2D displacement from base/torso frame into a heading frame (e.g. camera view).
+
+    dx, dy: displacement in base frame
+    heading_yaw: heading angle in radians relative to base frame
+    Returns (dx_heading, dy_heading).
+    """
+    c = math.cos(heading_yaw)
+    s = math.sin(heading_yaw)
+    dx_h = c * float(dx) + s * float(dy)
+    dy_h = -s * float(dx) + c * float(dy)
+    return float(dx_h), float(dy_h)
+
+
+def blend_three_layer_base_velocity(
+    cmd_vel_user: Sequence[float],
+    cmd_vel_assist: Sequence[float],
+    cmd_vel_head: float,
+    alpha_reach: float = 1.0,
+    alpha_head: float = 1.0,
+    max_linear_velocity: float = 0.35,
+    max_lateral_velocity: float = 0.25,
+    max_angular_velocity: float = 0.45,
+) -> tuple[float, float, float]:
+    """Blend user command, reach assist, and head orientation assist into final [yaw, forward, lateral].
+
+    cmd_vel_user: (forward, lateral, yaw)
+    cmd_vel_assist: (forward, lateral, _) from hands reach
+    cmd_vel_head: yaw velocity from head orientation
+    Returns (yaw, forward, lateral).
+    """
+    u_fwd, u_lat, u_yaw = float(cmd_vel_user[0]), float(cmd_vel_user[1]), float(cmd_vel_user[2])
+    a_fwd, a_lat = float(cmd_vel_assist[0]), float(cmd_vel_assist[1])
+    h_yaw = float(cmd_vel_head)
+
+    fwd = float(np.clip(u_fwd + alpha_reach * a_fwd, -max_linear_velocity, max_linear_velocity))
+    lat = float(np.clip(u_lat + alpha_reach * a_lat, -max_lateral_velocity, max_lateral_velocity))
+    yaw = float(np.clip(u_yaw + alpha_head * h_yaw, -max_angular_velocity, max_angular_velocity))
+
+    return (yaw, fwd, lat)

@@ -19,6 +19,15 @@ const standardTopicStandards = {
   ee_actual: { target_hz: 60, min_hz: 30 },
   solver_state: { target_hz: 100, min_hz: 50 },
   base_move: { target_hz: 60, min_hz: 20 },
+  vr_frame: { target_hz: 60, min_hz: 20 },
+  joint_state: { target_hz: 100, min_hz: 20 },
+  joint_target: { target_hz: 100, min_hz: 20 },
+  joint_command: { target_hz: 100, min_hz: 20 },
+  ee_target: { target_hz: 60, min_hz: 20 },
+  ee_visual_target: { target_hz: 60, min_hz: 20 },
+  ee_actual: { target_hz: 60, min_hz: 20 },
+  solver_state: { target_hz: 100, min_hz: 20 },
+  base_move: { target_hz: 60, min_hz: 10 },
 };
 const standardTopicTypes = {
   vr_frame: 'std_msgs/msg/String',
@@ -179,6 +188,7 @@ function renderStatus(data) {
   renderCommandMux(ros);
   setState('#vrState', vr.state);
   setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
+  renderCameraStatus(cam,ros.topic_health||{});
   setState('#cameraState', cam.state);
   setText(
     '#cameraMeta',
@@ -348,6 +358,82 @@ function setPath(object,path,value) {
   target[last]=value;
 }
 
+const headsetCameraSlots = [
+  ['head', '头部相机'], ['overhead', '俯视相机'],
+  ['d405_left', '左腕相机'], ['d405_right', '右腕相机'],
+];
+function cameraStreams() {
+  const camera=config?.camera||{};
+  const existing=camera.streams||[];
+  if(existing.length>=4)return existing;
+  const defaults=headsetCameraSlots.map(([id,name],index)=>({
+    id,name,enabled:index===0&&Boolean(camera.enabled),
+    topic:index===0?(camera.custom_topic||camera.topic||'/hc_teleop/camera_head/color/compressed'):`/hc_teleop/camera_${id}/color/compressed`,
+    width:camera.width||640,height:camera.height||400,fps:camera.fps||30,codec:camera.codec||'H264',
+  }));
+  return [...existing,...defaults.filter(item=>!existing.some(stream=>stream.id===item.id))].slice(0,4);
+}
+function projectionTopicChoices() {
+  return customRecordingRules().filter(item=>
+    ['sensor_msgs/msg/Image','sensor_msgs/msg/CompressedImage'].includes(item.type));
+}
+function renderCameraTopicOptions() {
+  // Refresh choices after the custom-topic list changes, keeping pending picks.
+  const pending=new Map($$('[data-camera-select]').map(select=>[select.dataset.cameraSelect,select.value]));
+  renderCameraStreams(pending);
+}
+function renderCameraStreams(pending=new Map()) {
+  const container=$('#cameraStreamCards');if(!container)return;
+  container.textContent='';
+  const choices=projectionTopicChoices();
+  for(const [index,stream] of cameraStreams().entries()) {
+    const row=document.createElement('tr');
+    const number=document.createElement('td');number.textContent=`${index+1}号相机`;
+    const topicCell=document.createElement('td');
+    const select=document.createElement('select');select.dataset.cameraSelect=stream.id;
+    select.setAttribute('aria-label',`${index+1}号相机图像话题`);
+    const none=document.createElement('option');none.value='';none.textContent='不投射';select.append(none);
+    for(const item of choices){
+      const option=document.createElement('option');option.value=item.topic;option.textContent=item.topic;select.append(option);
+    }
+    const selected=pending.has(stream.id)?pending.get(stream.id):(stream.enabled!==false?stream.topic:'');
+    select.value=choices.some(item=>item.topic===selected)?selected:'';
+    topicCell.append(select);
+    const status=document.createElement('td');status.className='camera-status';status.dataset.cameraStatus=stream.id;
+    status.textContent='正在读取状态…';
+    row.append(number,topicCell,status);container.append(row);
+  }
+}
+function collectCameraStreams() {
+  const selects=$$('[data-camera-select]');if(!selects.length)return;
+  const previous=cameraStreams();
+  const choices=projectionTopicChoices();
+  config.camera.streams=selects.map(select=>{
+    const stream={...previous.find(item=>item.id===select.dataset.cameraSelect)};
+    const topic=select.value;
+    if(!topic)return {...stream,enabled:false};
+    const item=choices.find(item=>item.topic===topic);
+    if(!item)throw new Error('请先在下方自定义话题列表配置图像话题');
+    return {...stream,topic,type:item.type,custom_topic:'',enabled:true};
+  });
+  config.camera.source='ros';
+}
+function cameraMonitorSummary(stream,health) {
+  if(!stream)return '未启用 / 尚未应用';
+  if(stream.error)return `异常：${stream.error}`;
+  const receiving=health?Boolean(health.has_data):Number(stream.capture_fps)>0;
+  return `${receiving?'正在接收':'等待图像'} · 接收 ${receiving?Number(health?.hz??stream.capture_fps??0).toFixed(1):'0.0'} FPS · 投射 ${Number(stream.webrtc_send_fps||0).toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
+}
+function renderCameraStatus(camera,health={}) {
+  for(const element of $$('[data-camera-status]')){
+    const stream=(camera.streams||[]).find(item=>item.id===element.dataset.cameraStatus);
+    element.textContent=cameraMonitorSummary(stream,health[stream?.topic]);
+    const topic=document.createElement('div');topic.className='camera-active-topic';
+    topic.textContent=stream?`当前生效话题：${stream.topic}`:'保存并应用配置后开始监控';
+    element.append(topic);
+  }
+}
+
 function renderConfig() {
   $$('[data-path]').forEach(input=>{
     const value=getPath(config,input.dataset.path);
@@ -357,6 +443,7 @@ function renderConfig() {
   if($('#topicRecordingDirectory')) {
     $('#topicRecordingDirectory').value = config?.ros?.recording?.directory || 'runtime/topic_recordings';
   }
+  renderCameraStreams();
   renderRecordingRules();
   renderStandardTopics();
   renderConfigInterface();
@@ -389,6 +476,7 @@ function setTopicRecording(topic,type,enabled,maxHz=0) {
   }
   renderRecordingRules();
   renderStandardTopics();
+  renderCameraTopicOptions();
 }
 
 function renderTopicHealthBadge(topic, defaultMinHz = 10, defaultTargetHz = 50) {
@@ -518,6 +606,7 @@ function collectConfig() {
     if(!config.ros.recording) config.ros.recording = {};
     config.ros.recording.directory = $('#topicRecordingDirectory').value.trim() || 'runtime/topic_recordings';
   }
+  collectCameraStreams();
   return config;
 }
 
@@ -669,6 +758,7 @@ function renderRecordTypeOptions(selectedType='') {
 async function loadTopics() {
   try {
     discoveredTopics=await api('/api/ros/topics');
+    renderCameraTopicOptions();
     const topicOptions=$('#rosTopicOptions');
     topicOptions.textContent='';
     for(const item of discoveredTopics) {
@@ -1011,15 +1101,17 @@ function bindSimulationControls() {
 async function init() {
   route();
   bindSimulationControls();
-  await loadSimulation();
+  loadSimulation();
   setInterval(()=>{if(document.visibilityState==='visible')loadSimulation();},2000);
   window.addEventListener('hashchange',route);
   try {
-    [config,profilesData]=await Promise.all([api('/api/config'),api('/api/robot-profiles')]);
+    config=await api('/api/config');
     renderConfig();
-    renderProfiles();
     renderRecordTypeOptions();
-  } catch(error){toast(error.message,true);}
+    setText('#cameraConfigError','');
+  } catch(error){setText('#cameraConfigError',`相机配置加载失败：${error.message}。请刷新页面重试。`);toast(error.message,true);}
+  try {profilesData=await api('/api/robot-profiles');renderProfiles();renderStandardTopics();renderRecordingRules();}
+  catch(error){toast(error.message,true);}
   connectWebSocket();
   const update=async()=>{try{renderStatus(await api('/api/status'));}catch(_){} };
   update();
@@ -1078,6 +1170,12 @@ async function init() {
       config=result.config;
       renderConfig();
       toast(result.server_restart_required?'已保存；服务地址或配置目录变更需重启进程':'配置已保存并应用');
+    }catch(error){toast(error.message,true);}
+  };
+  $('#saveCameras').onclick=async()=>{
+    try {
+      const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
+      config=result.config;renderConfig();toast('四路相机话题绑定已保存并应用');
     }catch(error){toast(error.message,true);}
   };
   $('#saveRecording').onclick=async()=>{

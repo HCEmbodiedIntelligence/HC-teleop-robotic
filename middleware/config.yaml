@@ -125,8 +125,9 @@ ros:
     event_max_hz: 0.0
   - topic: /cameras/eye/color
     type: sensor_msgs/msg/Image
-    enabled: false
+    enabled: true
     outputs:
+    - websocket
     - record
     max_hz: 30.0
     event_max_hz: 0.0
@@ -192,18 +193,19 @@ safety:
 camera:
   enabled: true
   source: ros
-  topic: /hc_teleop/camera_head/color/compressed
+  topic: /cameras/eye/color
   custom_topic: ''
   streams:
   - id: head
     name: 头部相机
-    topic: /hc_teleop/camera_head/color/compressed
+    topic: /cameras/eye/color
     enabled: true
     custom_topic: ''
     width: 640
     height: 400
     fps: 30
     codec: H264
+    type: sensor_msgs/msg/Image
   - id: overhead
     name: 俯视相机
     topic: /hc_teleop/camera_overhead/color/compressed
@@ -213,6 +215,7 @@ camera:
     height: 400
     fps: 30
     codec: H264
+    type: sensor_msgs/msg/CompressedImage
   - id: d405_left
     name: 左腕相机
     topic: /hc_teleop/camera_d405_left/color/compressed
@@ -222,6 +225,7 @@ camera:
     height: 400
     fps: 30
     codec: H264
+    type: sensor_msgs/msg/CompressedImage
   - id: d405_right
     name: 右腕相机
     topic: /hc_teleop/camera_d405_right/color/compressed
@@ -231,6 +235,7 @@ camera:
     height: 400
     fps: 30
     codec: H264
+    type: sensor_msgs/msg/CompressedImage
   width: 640
   height: 400
   fps: 30

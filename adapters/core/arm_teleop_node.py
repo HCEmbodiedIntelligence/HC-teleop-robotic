@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -25,7 +24,10 @@ from std_srvs.srv import Trigger
 from .arm_teleop_math import (
     adaptive_damping,
     binary_trigger_state,
+    blend_three_layer_base_velocity,
     clamp_step,
+    hands_reach_assist_velocity,
+    head_yaw_orientation_velocity,
     joystick_base_velocity,
     joystick_yaw_velocity,
     joint_limit_avoidance,
@@ -33,9 +35,11 @@ from .arm_teleop_math import (
     mapped_relative_yaw,
     ordered_homing_joint_names,
     orientation_error,
+    project_displacement_to_heading_frame,
     quaternion_from_axis_angle,
     quaternion_multiply,
     relative_target,
+    rotate_velocity_to_base_frame,
     stabilize_pose,
     sticks_outward,
 )
@@ -87,8 +91,7 @@ class RobotArmTeleopNode(Node):
         self.config_path = Path(config_path).expanduser().resolve()
         with self.config_path.open(encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream)
-        if os.environ.get("HC_TELEOP_MODE") == "sim":
-            self.config["body"].update(self.config.get("simulation_body", {}))
+        # Simulation and external drivers share the same body parameters.
         self.control = self.config.get("control", {})
         self.body_config = self.config.get("body", {})
         self.backend = str(backend or self.control.get("backend", "v23")).lower()
@@ -108,6 +111,7 @@ class RobotArmTeleopNode(Node):
         self.base_zero_pending = False
         self.home_gesture_latched = False
         self.homing = False
+        self.initial_homing_done = False
         self.solver_stamp = 0.0
         self.solver_message_count = 0
         self.generic_command_stamp = 0.0
@@ -218,6 +222,17 @@ class RobotArmTeleopNode(Node):
             for side, arm_config in self.config["arms"].items()
         }
         self.body = self._create_body(self.body_config)
+        self.neck_enabled = bool(self.body_config.get("neck_tracking_enabled", True))
+        raw_neck_names = self.body_config.get("neck_joint_names", ["head_1", "head_2"])
+        self.neck_joint_names = [
+            str(name) for name in raw_neck_names if str(name) in self.joint_by_name
+        ]
+        self.neck_indices = [self.joint_by_name[name] for name in self.neck_joint_names]
+        for name in self.neck_joint_names:
+            self.initial_joints.setdefault(name, 0.0)
+        self.neck_reference_head: tuple[tuple[float, float, float], tuple[float, float, float, float]] | None = None
+        self.base_yaw_alignment_offset: float = 0.0
+
         if self.collision_enabled:
             self._initialize_collision_safety()
         self.zeros = [0.0] * len(self.dof_joint_indices)
@@ -225,6 +240,7 @@ class RobotArmTeleopNode(Node):
             self.arms["right"].joint_names
             + self.arms["left"].joint_names
             + self.body.joint_names
+            + self.neck_joint_names
         )
         if self.config["grippers"].get("include_sim_joints", True):
             self.controlled_names += [
@@ -635,6 +651,10 @@ class RobotArmTeleopNode(Node):
         if pose is not None:
             self.body.head_pose = pose
             self.body.head_stamp = self._monotonic()
+            if self.neck_reference_head is None:
+                self.neck_reference_head = pose
+            if self.body.reference_head is None and not self.body.active:
+                self.body.reference_head = pose
 
     def _joy_callback(self, arm: ArmRuntime, message: Joy) -> None:
         if all(math.isfinite(float(value)) for value in message.axes):
@@ -670,6 +690,8 @@ class RobotArmTeleopNode(Node):
         self.joint_state_stamp = self._monotonic()
         if not self.last_command:
             self.last_command = dict(self.joint_state)
+        if not self.initial_homing_done and self.hardware_ready:
+            self._check_initial_homing()
         if self.external_ik and self.solver_rearm.observe_feedback():
             cutoff_ns = int(self.get_clock().now().nanoseconds)
             self.solver_reset_pub.publish(Bool(data=True))
@@ -737,6 +759,8 @@ class RobotArmTeleopNode(Node):
                         self.get_logger().info(
                             "hardware ready: solver reset published to feedback"
                         )
+            if not self.initial_homing_done:
+                self._check_initial_homing()
 
     def _generic_command_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -859,6 +883,8 @@ class RobotArmTeleopNode(Node):
             self._release_arm(arm)
         self.body.active = False
         self.body.reference_head = None
+        self.neck_reference_head = None
+        self.base_yaw_alignment_offset = 0.0
         self.body.reference_torso = None
         self.body.reference_target_link = None
         self.body.target_head_local = None
@@ -888,11 +914,38 @@ class RobotArmTeleopNode(Node):
         return False
 
     def _homing_joint_names(self) -> list[str]:
-        return ordered_homing_joint_names(
-            self.arms["right"].joint_names,
-            self.arms["left"].joint_names,
-            self.body.joint_names,
+        return (
+            ordered_homing_joint_names(
+                self.arms["right"].joint_names,
+                self.arms["left"].joint_names,
+                self.body.joint_names,
+            )
+            + self.neck_joint_names
         )
+
+    def _check_initial_homing(self) -> None:
+        if self.initial_homing_done:
+            return
+        if not self.control.get("home_on_start", True):
+            self.initial_homing_done = True
+            return
+        homing_names = self._homing_joint_names()
+        if not homing_names or not all(name in self.joint_state for name in homing_names):
+            return
+        tolerance = float(self.control.get("home_tolerance", 0.08))
+        needs_homing = any(
+            abs(self.joint_state[name] - self.initial_joints.get(name, 0.0)) > tolerance
+            for name in homing_names
+        )
+        self.initial_homing_done = True
+        if needs_homing:
+            self.get_logger().info(
+                "joint feedback deviates from initial_joints on startup; triggering initial homing"
+            )
+            if self.backend in {"generic", "v23"}:
+                self._set_generic_home_targets()
+            else:
+                self._start_homing()
 
     def _start_homing(self) -> None:
         self._release_all(send_base_zero=True)
@@ -919,7 +972,7 @@ class RobotArmTeleopNode(Node):
         next_values = previous + np.clip(target - previous, -max_step, max_step)
         for name, value in zip(names, next_values):
             command[name] = float(value)
-            if name in self.body.joint_names:
+            if name in self.body.joint_names or name in self.neck_joint_names:
                 self.generic_aux_command[name] = float(value)
 
         feedback_error = max(
@@ -928,13 +981,11 @@ class RobotArmTeleopNode(Node):
         elapsed = self._monotonic() - getattr(self, "homing_start_time", 0.0)
         reached = np.max(np.abs(next_values - target)) <= float(self.control.get("home_tolerance", 0.08))
         feedback_close = feedback_error <= float(self.control.get("home_tolerance", 0.08))
-        feedback_requirement_met = feedback_close or (
-            not self.external_ik and elapsed >= 4.0
-        )
+        feedback_requirement_met = feedback_close or (elapsed >= 5.0)
         if reached and feedback_requirement_met:
             for name, value in zip(names, target):
                 command[name] = float(value)
-                if name in self.body.joint_names:
+                if name in self.body.joint_names or name in self.neck_joint_names:
                     self.generic_aux_command[name] = float(value)
             self.homing = False
             for name in names:
@@ -955,6 +1006,8 @@ class RobotArmTeleopNode(Node):
             )
             self.body.active = False
             self.body.reference_head = None
+            self.neck_reference_head = None
+            self.base_yaw_alignment_offset = 0.0
             self.body.reference_torso = None
             self.body.reference_target_link = None
             self.body.target_head_local = None
@@ -2063,6 +2116,128 @@ class RobotArmTeleopNode(Node):
         else:
             body.target_head_local = body.target_base
 
+    def _camera_heading_yaw(self) -> float:
+        if not bool(self.body_config.get("camera_heading_relative_base", True)):
+            return 0.0
+        # Translation and yaw assist must use the same headset-to-chassis map.
+        # The neck's FK uses joint/optical-axis conventions and can have the
+        # opposite yaw sign; it is not the headset's movement reference.
+        reference = self.neck_reference_head or self.body.reference_head
+        if self.body.head_pose is not None and reference is not None:
+            if self._monotonic() - self.body.head_stamp > float(self.control["pose_timeout"]):
+                return 0.0
+            head_yaw = mapped_relative_yaw(
+                self.body.head_pose[1], reference[1],
+                self.control.get("head_axis_mapping", self.control["axis_mapping"]),
+            )
+            return self._wrap_angle(
+                (head_yaw - self.base_yaw_alignment_offset)
+                * float(self.body_config.get("yaw_direction", 1.0))
+            )
+        link_name = self.body_config.get("camera_link", "camera_head")
+        if link_name in self.link_by_name:
+            cam_idx = self.link_by_name[link_name]
+            cam_world = self._link_pose(cam_idx)
+            root_world = self._root_pose()
+            cam_in_base = self._relative_pose(root_world, cam_world)
+            rot = np.asarray(
+                bullet.getMatrixFromQuaternion(cam_in_base[1]), dtype=float
+            ).reshape(3, 3)
+            # Optical forward axis of camera_head is [0, 0, 1] in camera frame
+            opt_forward = rot @ np.array([0.0, 0.0, 1.0], dtype=float)
+            if opt_forward[0] ** 2 + opt_forward[1] ** 2 >= 1e-4:
+                yaw = float(math.atan2(opt_forward[1], opt_forward[0]))
+                return 0.0 if abs(yaw) < 1e-4 else yaw
+
+        yaw_joint = self.body_config.get("neck_yaw_joint", "head_1")
+        if yaw_joint in self.last_command:
+            return float(self.last_command[yaw_joint])
+        if yaw_joint in self.joint_state:
+            return float(self.joint_state[yaw_joint])
+        return 0.0
+
+    def _update_neck_joints(self, command: dict[str, float], now: float) -> None:
+        if not self.neck_enabled or not self.neck_joint_names:
+            return
+        body = self.body
+        if body.head_pose is None:
+            return
+        if now - body.head_stamp > float(self.control["pose_timeout"]):
+            return
+
+        ref_pose = self.neck_reference_head or body.reference_head
+        if ref_pose is None:
+            return
+
+        raw_relative_yaw = self._wrap_angle(
+            mapped_relative_yaw(
+                body.head_pose[1],
+                ref_pose[1],
+                self.control.get("head_axis_mapping", self.control["axis_mapping"]),
+            )
+        )
+        relative_yaw = self._wrap_angle(
+            raw_relative_yaw - self.base_yaw_alignment_offset
+        )
+        relative_pitch = mapped_relative_pitch(
+            body.head_pose[1],
+            ref_pose[1],
+            self.control.get("head_axis_mapping", self.control["axis_mapping"]),
+        )
+
+        yaw_joint = self.body_config.get("neck_yaw_joint", "head_1")
+        pitch_joint = self.body_config.get("neck_pitch_joint", "head_2")
+
+        yaw_scale = float(self.body_config.get("neck_yaw_scale", 1.0))
+        pitch_scale = float(self.body_config.get("neck_pitch_scale", 1.0))
+        yaw_dir = float(self.body_config.get("neck_yaw_direction", 1.0))
+        pitch_dir = float(self.body_config.get("neck_pitch_direction", 1.0))
+
+        max_yaw = float(self.body_config.get("neck_max_yaw", 1.57))
+        max_pitch = float(self.body_config.get("neck_max_pitch", 0.8))
+
+        target_yaw = float(np.clip(relative_yaw * yaw_scale * yaw_dir, -max_yaw, max_yaw))
+        target_pitch = float(np.clip(relative_pitch * pitch_scale * pitch_dir, -max_pitch, max_pitch))
+
+        dt = 1.0 / float(self.control["rate_hz"])
+        max_v = float(self.body_config.get("neck_max_velocity", 1.5))
+        max_step = max_v * dt
+
+        targets = {yaw_joint: target_yaw, pitch_joint: target_pitch}
+        for name in self.neck_joint_names:
+            if name not in targets:
+                continue
+            prev_val = float(
+                self.last_command.get(
+                    name,
+                    self.joint_state.get(name, self.initial_joints.get(name, 0.0)),
+                )
+            )
+            step = float(np.clip(targets[name] - prev_val, -max_step, max_step))
+            cmd_val = prev_val + step
+            command[name] = cmd_val
+            self.last_command[name] = cmd_val
+            joint_idx = self.joint_by_name.get(name)
+            if joint_idx is not None:
+                bullet.resetJointState(
+                    self.robot_id,
+                    joint_idx,
+                    cmd_val,
+                    physicsClientId=self.physics_client,
+                )
+
+    def _left_stick_active(self) -> bool:
+        left = self.arms["left"]
+        if left.joy is None:
+            return False
+        axes = left.joy.axes
+        x_index = int(self.body_config.get("stick_x_axis", 3))
+        y_index = int(self.body_config.get("stick_y_axis", 2))
+        deadzone = float(self.body_config.get("stick_deadzone", 0.08))
+        x_val = axes[x_index] if len(axes) > x_index else 0.0
+        y_val = axes[y_index] if len(axes) > y_index else 0.0
+        return abs(float(x_val)) > deadzone or abs(float(y_val)) > deadzone
+
     def _right_stick_yaw_active(self) -> bool:
         right = self.arms["right"]
         if right.joy is None:
@@ -2079,58 +2254,40 @@ class RobotArmTeleopNode(Node):
         )
         return abs(float(axes[yaw_axis])) > deadzone
 
-    def _publish_base_command(
-        self, *, track_head_yaw: bool, left_clutch_active: bool = True
-    ) -> None:
+    def _compute_user_base_velocity(
+        self, now: float, left_clutch_active: bool = False
+    ) -> tuple[float, float, float]:
         left = self.arms["left"]
         right = self.arms["right"]
-        body = self.body
-        if left.joy is not None and left_clutch_active:
+        left_input_fresh = self._input_fresh(left, now)
+        right_input_fresh = self._input_fresh(right, now)
+
+        forward, lateral = 0.0, 0.0
+        allow_left_stick = left_clutch_active or bool(
+            self.body_config.get("left_stick_independent_base", True)
+        )
+        if left_input_fresh and allow_left_stick and left.joy is not None:
             axes = left.joy.axes
-            x_index = int(self.body_config["stick_x_axis"])
-            y_index = int(self.body_config["stick_y_axis"])
+            x_index = int(self.body_config.get("stick_x_axis", 3))
+            y_index = int(self.body_config.get("stick_y_axis", 2))
             stick_x = axes[x_index] if len(axes) > x_index else 0.0
             stick_y = axes[y_index] if len(axes) > y_index else 0.0
             forward, lateral = joystick_base_velocity(
                 stick_x,
                 stick_y,
-                float(self.body_config["stick_deadzone"]),
-                float(self.body_config["max_linear_velocity"]),
-                float(self.body_config["max_lateral_velocity"]),
+                float(self.body_config.get("stick_deadzone", 0.08)),
+                float(self.body_config.get("max_linear_velocity", 0.35)),
+                float(self.body_config.get("max_lateral_velocity", 0.25)),
                 float(self.body_config.get("stick_forward_direction", 1.0)),
-                float(self.body_config.get("stick_lateral_direction", -1.0)),
+                float(self.body_config.get("stick_lateral_direction", 1.0)),
             )
-        else:
-            forward, lateral = 0.0, 0.0
-
-        head_yaw = 0.0
-        if track_head_yaw and body.head_pose is not None and body.reference_head is not None:
-            relative_yaw = self._wrap_angle(
-                mapped_relative_yaw(
-                    body.head_pose[1],
-                    body.reference_head[1],
-                    self.control.get(
-                        "head_axis_mapping", self.control["axis_mapping"]
-                    ),
-                )
-            )
-            yaw_deadzone = float(self.body_config.get("yaw_deadzone", 0.18))
-            abs_yaw = abs(relative_yaw)
-            if abs_yaw > yaw_deadzone:
-                excess = abs_yaw - yaw_deadzone
-                smooth_excess = math.copysign(excess ** 1.15, relative_yaw)
-                head_yaw = float(
-                    np.clip(
-                        smooth_excess
-                        * float(self.body_config.get("yaw_direction", -1.0))
-                        * float(self.body_config.get("yaw_gain", 0.6)),
-                        -float(self.body_config.get("max_angular_velocity", 0.45)),
-                        float(self.body_config.get("max_angular_velocity", 0.45)),
-                    )
-                )
 
         stick_yaw = 0.0
-        if bool(self.body_config.get("right_stick_yaw_enabled", True)) and right.joy is not None:
+        if (
+            bool(self.body_config.get("right_stick_yaw_enabled", True))
+            and right_input_fresh
+            and right.joy is not None
+        ):
             r_axes = right.joy.axes
             yaw_axis = int(self.body_config.get("right_stick_yaw_axis", 2))
             if len(r_axes) > yaw_axis:
@@ -2143,7 +2300,9 @@ class RobotArmTeleopNode(Node):
                 r_direction = float(
                     self.body_config.get("right_stick_yaw_direction", -1.0)
                 )
-                max_ang = float(self.body_config.get("max_angular_velocity", 0.45))
+                max_ang = float(
+                    self.body_config.get("max_angular_velocity", 0.45)
+                )
                 stick_yaw = joystick_yaw_velocity(
                     r_axes[yaw_axis],
                     r_deadzone,
@@ -2151,14 +2310,173 @@ class RobotArmTeleopNode(Node):
                     r_direction,
                 )
 
-        max_ang = float(self.body_config.get("max_angular_velocity", 0.45))
-        yaw = float(np.clip(head_yaw + stick_yaw, -max_ang, max_ang))
+        return (forward, lateral, stick_yaw)
 
-        if self.body_config.get("base_command_mode", "delta") == "delta":
-            period = 1.0 / float(self.control["rate_hz"])
-            yaw, forward, lateral = yaw * period, forward * period, lateral * period
-        self.base_pub.publish(Float64MultiArray(data=[yaw, forward, lateral]))
-        self.base_zero_pending = True
+    def _compute_head_orientation_velocity(
+        self,
+        now: float,
+        *,
+        forward_velocity: float = 0.0,
+        lateral_velocity: float = 0.0,
+        track_head_yaw: bool = True,
+    ) -> float:
+        if not track_head_yaw:
+            return 0.0
+        if not bool(self.body_config.get("head_orientation_assist_enabled", True)):
+            return 0.0
+
+        align_on_move_only = bool(
+            self.body_config.get("head_orientation_align_on_move_only", True)
+        )
+        move_threshold = float(
+            self.body_config.get("head_orientation_move_threshold", 0.02)
+        )
+        linear_speed = math.hypot(forward_velocity, lateral_velocity)
+        if align_on_move_only and linear_speed <= move_threshold:
+            return 0.0
+
+        body = self.body
+        ref_head = self.neck_reference_head or body.reference_head
+        if body.head_pose is None or ref_head is None:
+            return 0.0
+        if now - body.head_stamp > float(self.control["pose_timeout"]):
+            return 0.0
+
+        raw_relative_yaw = self._wrap_angle(
+            mapped_relative_yaw(
+                body.head_pose[1],
+                ref_head[1],
+                self.control.get(
+                    "head_axis_mapping", self.control["axis_mapping"]
+                ),
+            )
+        )
+        relative_yaw = self._wrap_angle(
+            raw_relative_yaw - self.base_yaw_alignment_offset
+        )
+
+        deadzone_deg = float(self.body_config.get("head_yaw_deadzone_deg", 3.0))
+        active_deg = float(self.body_config.get("head_yaw_active_deg", 25.0))
+        slow_gain = float(self.body_config.get("head_yaw_slow_gain", 0.50))
+        fast_gain = float(self.body_config.get("head_yaw_fast_gain", 0.90))
+        slow_max_vel = float(self.body_config.get("head_yaw_slow_max_vel", 0.20))
+        max_angular_velocity = float(
+            self.body_config.get("max_angular_velocity", 0.45)
+        )
+        yaw_direction = float(self.body_config.get("yaw_direction", 1.0))
+
+        return head_yaw_orientation_velocity(
+            relative_yaw=relative_yaw,
+            deadzone_rad=math.radians(deadzone_deg),
+            active_threshold_rad=math.radians(active_deg),
+            slow_gain=slow_gain,
+            fast_gain=fast_gain,
+            slow_max_velocity=slow_max_vel,
+            max_angular_velocity=max_angular_velocity,
+            yaw_direction=yaw_direction,
+        )
+
+    def _compute_hands_reach_assist_velocity(self, now: float) -> tuple[float, float]:
+        if not bool(self.body_config.get("reach_assist_enabled", True)):
+            return (0.0, 0.0)
+
+        cam_yaw = self._camera_heading_yaw()
+        hand_offsets: list[tuple[float, float]] = []
+        for side in ("left", "right"):
+            arm = self.arms[side]
+            if not arm.active:
+                continue
+            if arm.target_local is None or arm.reference_local_ee is None:
+                continue
+            if now - arm.pose_stamp > float(self.control["pose_timeout"]):
+                continue
+
+            pos = np.asarray(arm.target_local[0], dtype=float)
+            ref = np.asarray(arm.reference_local_ee[0], dtype=float)
+            dx = float(pos[0] - ref[0])
+            dy = float(pos[1] - ref[1])
+            dx_cam, dy_cam = project_displacement_to_heading_frame(dx, dy, cam_yaw)
+            hand_offsets.append((dx_cam, dy_cam))
+
+        if not hand_offsets:
+            return (0.0, 0.0)
+
+        return hands_reach_assist_velocity(
+            hand_offsets=hand_offsets,
+            deadzone_forward=float(self.body_config.get("reach_deadzone_forward", 0.08)),
+            deadzone_backward=float(self.body_config.get("reach_deadzone_backward", 0.06)),
+            deadzone_lateral=float(self.body_config.get("reach_deadzone_lateral", 0.06)),
+            gain_forward=float(self.body_config.get("reach_gain_forward", 0.6)),
+            gain_backward=float(self.body_config.get("reach_gain_backward", 0.5)),
+            gain_lateral=float(self.body_config.get("reach_gain_lateral", 0.6)),
+            max_linear_velocity=float(
+                self.body_config.get("reach_max_linear_velocity", 0.20)
+            ),
+            max_lateral_velocity=float(
+                self.body_config.get("reach_max_lateral_velocity", 0.18)
+            ),
+        )
+
+    def _publish_base_command(
+        self,
+        now: float,
+        *,
+        track_head_yaw: bool = True,
+        left_clutch_active: bool = False,
+    ) -> None:
+        cmd_vel_user = self._compute_user_base_velocity(
+            now, left_clutch_active=left_clutch_active
+        )
+        cmd_vel_assist = self._compute_hands_reach_assist_velocity(now)
+
+        alpha_reach = float(self.body_config.get("reach_assist_alpha", 1.0))
+        fwd_intent = cmd_vel_user[0] + alpha_reach * cmd_vel_assist[0]
+        lat_intent = cmd_vel_user[1] + alpha_reach * cmd_vel_assist[1]
+
+        cmd_vel_head = self._compute_head_orientation_velocity(
+            now,
+            forward_velocity=fwd_intent,
+            lateral_velocity=lat_intent,
+            track_head_yaw=track_head_yaw,
+        )
+
+        alpha_reach = float(self.body_config.get("reach_assist_alpha", 1.0))
+        alpha_head = float(self.body_config.get("head_orientation_alpha", 1.0))
+        max_linear = float(self.body_config.get("max_linear_velocity", 0.35))
+        max_lateral = float(self.body_config.get("max_lateral_velocity", 0.25))
+        max_angular = float(self.body_config.get("max_angular_velocity", 0.45))
+
+        yaw, forward, lateral = blend_three_layer_base_velocity(
+            cmd_vel_user=cmd_vel_user,
+            cmd_vel_assist=cmd_vel_assist,
+            cmd_vel_head=cmd_vel_head,
+            alpha_reach=alpha_reach,
+            alpha_head=alpha_head,
+            max_linear_velocity=max_linear,
+            max_lateral_velocity=max_lateral,
+            max_angular_velocity=max_angular,
+        )
+
+        dt = 1.0 / float(self.control["rate_hz"])
+        if abs(yaw) > 1e-4:
+            # Store alignment in mapped-head coordinates, not chassis coordinates.
+            self.base_yaw_alignment_offset = self._wrap_angle(
+                self.base_yaw_alignment_offset
+                + yaw * dt * float(self.body_config.get("yaw_direction", 1.0))
+            )
+
+        cam_yaw = self._camera_heading_yaw()
+        forward, lateral = rotate_velocity_to_base_frame(forward, lateral, cam_yaw)
+
+        is_moving = abs(yaw) > 1e-4 or abs(forward) > 1e-4 or abs(lateral) > 1e-4
+        if is_moving:
+            if self.body_config.get("base_command_mode", "delta") == "delta":
+                period = 1.0 / float(self.control["rate_hz"])
+                yaw, forward, lateral = yaw * period, forward * period, lateral * period
+            self.base_pub.publish(Float64MultiArray(data=[yaw, forward, lateral]))
+            self.base_zero_pending = True
+        else:
+            self._stop_base_if_pending()
 
     def _stop_base_if_pending(self) -> None:
         if self.base_zero_pending:
@@ -2287,6 +2605,12 @@ class RobotArmTeleopNode(Node):
         if joy is None or len(joy.axes) <= index:
             return 0.0
         return float(np.clip(joy.axes[index], 0.0, 1.0))
+        val = float(np.clip(joy.axes[index], 0.0, 1.0))
+        if val <= 0.04:
+            return 0.0
+        if val >= 0.96:
+            return 1.0
+        return (val - 0.04) / (0.96 - 0.04)
 
     def _update_grippers(self, command: dict[str, float], now: float) -> None:
         for side in ("right", "left"):
@@ -2426,6 +2750,11 @@ class RobotArmTeleopNode(Node):
         left_base_requested = left_input_fresh and self._clutch_pressed(
             self.arms["left"]
         )
+        left_stick_active = (
+            left_input_fresh
+            and bool(self.body_config.get("left_stick_independent_base", True))
+            and self._left_stick_active()
+        )
         right_stick_active = (
             right_input_fresh
             and bool(self.body_config.get("right_stick_yaw_enabled", True))
@@ -2447,14 +2776,14 @@ class RobotArmTeleopNode(Node):
             or not arms_requested
             or bool(self.body_config.get("right_stick_with_arms", True))
         ) and bool(self.body_config.get("right_stick_independent_base", True))
-        base_requested = left_base_requested or right_stick_base
+        base_requested = left_base_requested or left_stick_active or right_stick_base
 
-        base_requested, arms_requested = self._apply_collision_latch(
+        base_allowed, arms_requested = self._apply_collision_latch(
             base_requested, arms_requested
         )
         body_requested = (
             left_base_requested
-            and base_requested
+            and base_allowed
             and bool(self.body_config.get("enabled", True))
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
         )
@@ -2488,13 +2817,20 @@ class RobotArmTeleopNode(Node):
         self.generic_aux_command.update(body_command)
         self.last_command.update(body_command)
 
-        if base_requested:
+        neck_command: dict[str, float] = {}
+        self._update_neck_joints(neck_command, now)
+        if neck_command:
+            self.generic_aux_command.update(neck_command)
+            self.last_command.update(neck_command)
+
+        if not base_allowed and self.collision_blocked:
+            self._stop_base_if_pending()
+        else:
             self._publish_base_command(
-                track_head_yaw=body_requested,
+                now,
+                track_head_yaw=True,
                 left_clutch_active=left_base_requested,
             )
-        else:
-            self._stop_base_if_pending()
 
         arm_was_active = any(arm.active for arm in self.arms.values())
         for side in ("right", "left"):
@@ -2575,6 +2911,11 @@ class RobotArmTeleopNode(Node):
         left_base_requested = left_input_fresh and self._clutch_pressed(
             self.arms["left"]
         )
+        left_stick_active = (
+            left_input_fresh
+            and bool(self.body_config.get("left_stick_independent_base", True))
+            and self._left_stick_active()
+        )
         right_stick_active = (
             right_input_fresh
             and bool(self.body_config.get("right_stick_yaw_enabled", True))
@@ -2587,14 +2928,14 @@ class RobotArmTeleopNode(Node):
             or not arms_requested
             or bool(self.body_config.get("right_stick_with_arms", True))
         ) and bool(self.body_config.get("right_stick_independent_base", True))
-        base_requested = left_base_requested or right_stick_base
+        base_requested = left_base_requested or left_stick_active or right_stick_base
 
-        base_requested, arms_requested = self._apply_collision_latch(
+        base_allowed, arms_requested = self._apply_collision_latch(
             base_requested, arms_requested
         )
         body_requested = (
             left_base_requested
-            and base_requested
+            and base_allowed
             and bool(self.body_config.get("enabled", True))
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
         )
@@ -2613,13 +2954,20 @@ class RobotArmTeleopNode(Node):
             self.body.target_head_local = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
 
-        if base_requested:
+        neck_command: dict[str, float] = {}
+        self._update_neck_joints(neck_command, now)
+        if neck_command:
+            command.update(neck_command)
+            any_active = True
+
+        if not base_allowed and self.collision_blocked:
+            self._stop_base_if_pending()
+        else:
             self._publish_base_command(
-                track_head_yaw=body_requested,
+                now,
+                track_head_yaw=True,
                 left_clutch_active=left_base_requested,
             )
-        else:
-            self._stop_base_if_pending()
 
         arm_was_active = any(arm.active for arm in self.arms.values())
         for side in ("right", "left"):

@@ -51,6 +51,11 @@ class CameraService:
             "webrtc_send_fps": 0.0,
             "webrtc_frames_sent": 0,
             "peers": 0,
+            "webrtc_state": "idle",
+            "ice_state": "new",
+            "webrtc_error": None,
+            "remote_ice_candidates": 0,
+            "local_ice_candidates": 0,
             "error": None,
             "id": str(config.get("id", "main")),
             "name": str(config.get("name", "主相机")),
@@ -430,6 +435,17 @@ class CameraService:
                     camera._record_webrtc_frame()
                     return frame
 
+        # Only exchange complete SDP: there is no trickle ICE endpoint.
+        remote_candidates = sum(
+            line.startswith("a=candidate:") for line in data.get("sdp", "").splitlines()
+        )
+        stream_id = self.config.get("id", "main")
+        print(f"[WebRTC {stream_id}] offer candidates={remote_candidates}", flush=True)
+        if remote_candidates == 0:
+            message = "Offer has no ICE candidates; wait for ICE gathering before sending"
+            self._set_status(webrtc_error=message, remote_ice_candidates=0)
+            raise ValueError(message)
+
         # 清理旧连接，避免多会话冲突
         for old_pc in list(self._pcs):
             try:
@@ -442,14 +458,26 @@ class CameraService:
         pc = RTCPeerConnection()
         self._pcs.add(pc)
         self._reset_webrtc_rate()
+        self._set_status(
+            webrtc_state="connecting", ice_state="new", webrtc_error=None,
+            remote_ice_candidates=remote_candidates, local_ice_candidates=0,
+        )
 
         @pc.on("iceconnectionstatechange")
         def on_ice_state():
-            print(f"[WebRTC ICE] State -> {pc.iceConnectionState}", flush=True)
+            print(f"[WebRTC {stream_id}] ICE -> {pc.iceConnectionState}", flush=True)
+            if pc in self._pcs:
+                self._set_status(ice_state=pc.iceConnectionState)
+                if pc.iceConnectionState == "failed":
+                    self._set_status(webrtc_error="ICE failed: check peer candidates and UDP connectivity")
 
         @pc.on("connectionstatechange")
         def on_conn_state():
-            print(f"[WebRTC Peer] State -> {pc.connectionState}", flush=True)
+            print(f"[WebRTC {stream_id}] peer -> {pc.connectionState}", flush=True)
+            if pc in self._pcs:
+                self._set_status(webrtc_state=pc.connectionState)
+                if pc.connectionState == "failed":
+                    self._set_status(webrtc_error="WebRTC connection failed; inspect ICE state and UDP connectivity")
 
         sender = pc.addTrack(LatestFrameTrack())
 
@@ -481,7 +509,18 @@ class CameraService:
                 if not self._pcs:
                     self._reset_webrtc_rate()
 
-        await pc.setRemoteDescription(remote)
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        try:
+            await pc.setRemoteDescription(remote)
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            local_candidates = sum(
+                line.startswith("a=candidate:") for line in pc.localDescription.sdp.splitlines()
+            )
+            self._set_status(local_ice_candidates=local_candidates)
+            print(f"[WebRTC {stream_id}] answer candidates={local_candidates}", flush=True)
+            return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        except Exception as exc:
+            self._set_status(webrtc_error=f"{type(exc).__name__}: {exc}")
+            await pc.close()
+            self._pcs.discard(pc)
+            raise

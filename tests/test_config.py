@@ -114,7 +114,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(item["max_hz"], 0.0)
             self.assertEqual(item["event_max_hz"], 20.0)
 
-    def test_default_camera_recording_avoids_raw_and_duplicate_streams(self):
+    def test_selected_isaac_camera_is_enabled_without_duplicate_legacy_topics(self):
         path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
         config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
         subscriptions = {
@@ -124,7 +124,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(subscriptions["/hc_teleop/camera_head/color/compressed"]["enabled"])
         self.assertNotIn("/io_teleop/camera_head/color", subscriptions)
         self.assertNotIn("/io_teleop/camera_head/depth", subscriptions)
-        self.assertFalse(subscriptions["/cameras/eye/color"]["enabled"])
+        self.assertTrue(subscriptions["/cameras/eye/color"]["enabled"])
         self.assertTrue(subscriptions["/hc_teleop/camera_overhead/color/compressed"]["enabled"])
         self.assertFalse(subscriptions["/cameras/Bfront/color"]["enabled"])
 

@@ -258,6 +258,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 stream_topic = "/" + stream_topic
             if not stream_topic:
                 raise ConfigError(f"camera.streams[{index}].topic is required")
+            subscription = next((s for s in normalized if s["topic"] == stream_topic), None)
+            message_type = str(item.get("type") or (subscription or {}).get("type") or (
+                "sensor_msgs/msg/CompressedImage" if stream_topic.endswith("/compressed")
+                else "sensor_msgs/msg/Image"
+            ))
+            if message_type not in {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}:
+                raise ConfigError(f"camera.streams[{index}].type must be Image or CompressedImage")
+            if subscription and subscription["type"] != message_type:
+                raise ConfigError(f"camera topic type conflicts with ROS subscription: {stream_topic}")
             stream_width = int(item.get("width", cam_config["width"]))
             stream_height = int(item.get("height", cam_config["height"]))
             stream_fps = int(item.get("fps", cam_config["fps"]))
@@ -280,6 +289,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                     "id": stream_id,
                     "name": str(item.get("name", stream_id)).strip() or stream_id,
                     "topic": stream_topic,
+                    "type": message_type,
                     "custom_topic": "",
                     "enabled": bool(item.get("enabled", True)),
                     "width": stream_width,
@@ -289,6 +299,19 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 }
             )
         cam_config["streams"] = normalized_streams
+        # Projection does not require recording or JSON/WebSocket image events.
+        # Ensure a newly selected image topic actually reaches CameraService.
+        if cam_config["enabled"] and cam_config["source"] == "ros":
+            for stream in normalized_streams:
+                if not stream["enabled"]:
+                    continue
+                subscription = next((s for s in normalized if s["topic"] == stream["topic"]), None)
+                if subscription is None:
+                    subscription = {"topic": stream["topic"], "type": stream["type"],
+                                    "enabled": True, "outputs": [], "max_hz": 0.0, "event_max_hz": 0.0}
+                    normalized.append(subscription)
+                elif subscription["type"] != stream["type"]:
+                    raise ConfigError(f"conflicting camera types for topic: {stream['topic']}")
     value["camera"] = cam_config
     return value
 

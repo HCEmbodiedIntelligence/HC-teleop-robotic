@@ -17,6 +17,8 @@ robot:
     leg_1: 0.5
     leg_2: 1.2
     zhi: -0.6
+    head_1: 0.0
+    head_2: 0.0
     Joint1_R: -1.44
     Joint2_R: -0.77
     Joint3_R: 1.44
@@ -58,32 +60,8 @@ arms:
     - Joint5_L
     - Joint6_L
     - Joint7_L
-simulation_body:
-  # 仅 run.sh sim 应用；真机腰部仍需完成标定后单独启用。
-  enabled: true
-  waist_joint_names: [leg_1, leg_2, zhi]
-  unconstrained: true
-  ik_mode: 2dof
-  target_link: camera_head
-  head_position_scale: 1.0
-  head_max_displacement: 0.0
-  head_orientation_enabled: true
-  target_position_deadband: 0.02
-  target_orientation_deadband: 0.05
-  target_filter_alpha: 0.5
-  max_joint_velocity: 0.6
-  ik_iterations: 20
-  ik_damping: 0.05
-  ik_max_update: 0.08
-  ik_posture_gain: 0.5
-  ik_forward_weight: 0.3
-  yaw_direction: 1.0
-  right_stick_yaw_enabled: true
-  right_stick_yaw_axis: 2
-  right_stick_yaw_direction: -1.0
-  right_stick_yaw_deadzone: 0.08
-  right_stick_independent_base: true
 body:
+  # 仿真与外部驱动共用此处全部参数；启动模式不再覆盖控制配置。
   # 当前腰部控制关闭；重新启用时取消下面三个腰关节注释并完成真机标定。
   # waist_joint_names:
   # - leg_1
@@ -91,30 +69,74 @@ body:
   # - zhi
   enabled: false
   waist_joint_names: []
+  # 统一的头显位姿跟随参数（启用腰部控制后使用）。
+  unconstrained: true
+  target_link: camera_head
+  head_position_scale: 1.0
+  head_max_displacement: 0.0
+  head_orientation_enabled: true
   torso_link: zhi_Link
   visualization_head_link: camera_head
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
-  # Joy.axes 下标：0=Trigger、1=Grip、2/3=主摇杆 X/Y、4/5=副摇杆 X/Y。
+  # 第一层：用户主动移动配置
+  # Joy.axes 下标：0=Trigger、1=Grip、2=主摇杆横向(左右)、3=主摇杆纵向(前后)。
   stick_x_axis: 3
   stick_y_axis: 2
-  # 摇杆死区、方向符号和底盘最大线速度（m/s）。
   stick_deadzone: 0.08
   stick_forward_direction: 1.0
   stick_lateral_direction: 1.0
   max_linear_velocity: 0.35
   max_lateral_velocity: 0.25
+  left_stick_independent_base: true   # 允许左摇杆独立推杆平移底盘，无需按住 Grip
+
   # 右手柄摇杆控制底盘旋转（Yaw）配置
   right_stick_yaw_enabled: true
   right_stick_yaw_axis: 2          # Joy.axes 下标，通常为 2（主摇杆 X 轴）
   right_stick_yaw_direction: -1.0  # -1.0 表示向左推摇杆底盘向左旋转（逆时针正方向）
   right_stick_yaw_deadzone: 0.08   # 摇杆死区
   right_stick_independent_base: true # 允许不按左手 Grip 独立拨动右手摇杆原地旋转底盘
-  # 头显偏航超过死区后控制底盘角速度（rad/s）。
-  yaw_deadzone: 0.18
-  yaw_gain: 0.6
-  yaw_direction: 1.0
-  max_angular_velocity: 0.45
+
+  # 第二层：身体意图 (Head Yaw Orientation Assist)
+  # 仅在前进/后退时自动摆正旋转角度，静止转头仅控制脖子转动
+  head_orientation_assist_enabled: true
+  head_orientation_align_on_move_only: true # 仅在前进/后退时自动旋转底盘对齐头部朝向，静止不旋转底盘
+  head_orientation_move_threshold: 0.02     # 前进/后退线速度触发阈值 (m/s)
+  head_yaw_deadzone_deg: 3.0                # 摆正死区 (< 3° 认为已摆正同向，停止自转)
+  head_yaw_active_deg: 25.0                 # 3°~25° 平滑慢速对齐，>25° 快速对齐
+  head_yaw_slow_gain: 0.50                  # 摆正平滑对齐增益
+  head_yaw_fast_gain: 0.90                  # 快速对齐增益
+  head_yaw_slow_max_vel: 0.20               # 慢速对齐上限 (rad/s)
+  head_orientation_alpha: 1.0               # 头显朝向辅助融合系数
+  yaw_direction: 1.0                        # 当前头显映射下，左转偏航为负；转换为底盘逆时针正方向
+  max_angular_velocity: 0.45                # 底盘最大角速度 (rad/s)
+
+  # 第三层：WBC 自动辅助 (Hands Reach Assist) - 已关闭
+  reach_assist_enabled: false
+  reach_assist_alpha: 1.0          # 伸展辅助融合系数 alpha
+  reach_deadzone_forward: 0.08     # 前向伸展死区 (m)
+  reach_deadzone_backward: 0.06    # 后向收缩死区 (m)
+  reach_deadzone_lateral: 0.06     # 侧向平移死区 (m)
+  reach_gain_forward: 0.6          # 前向辅助速度增益
+  reach_gain_backward: 0.5         # 后向辅助速度增益
+  reach_gain_lateral: 0.6          # 侧向辅助速度增益
+  reach_max_linear_velocity: 0.20  # 辅助移动最大线速度 (m/s)
+  reach_max_lateral_velocity: 0.18 # 辅助移动最大侧向速度 (m/s)
+
+  # 头部转动驱动脖子转动 (Pan-Tilt Neck Control)
+  neck_tracking_enabled: true
+  neck_joint_names: [head_1, head_2]
+  neck_yaw_joint: head_1
+  neck_pitch_joint: head_2
+  neck_yaw_scale: 1.0
+  neck_pitch_scale: 1.0
+  neck_max_yaw: 1.57    # rad (±90°)
+  neck_max_pitch: 0.8   # rad (±45°)
+  neck_max_velocity: 1.5 # rad/s
+  # 相机朝向底盘平移运动（前进依据相机朝向运动）
+  camera_heading_relative_base: true
+  camera_link: camera_head
+
   # 原始 VR position：+Y 向上、+Z 向前，与手柄位移映射一致。
   head_height_axis: 1
   head_pitch_position_axis: 2
@@ -250,6 +272,7 @@ control:
   # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
   backend: v23
   enabled_on_start: true
+  home_on_start: true
   rate_hz: 100.0
   # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
   vr_data_topic: /vrdata
@@ -269,11 +292,11 @@ control:
   clutch_axis: 1
   clutch_threshold: 0.55
   home_gesture_axis: 2
-  home_gesture_threshold: 0.95
-  home_gesture_release_threshold: 0.35
+  home_gesture_threshold: 0.70
+  home_gesture_release_threshold: 0.25
   # 回零速度（rad/s）、到位容差（rad）及输入/反馈超时（秒）。
   home_joint_velocity: 0.7
-  home_tolerance: 0.015
+  home_tolerance: 0.05
   pose_timeout: 0.5
   input_timeout: 0.5
   joint_state_timeout: 0.5

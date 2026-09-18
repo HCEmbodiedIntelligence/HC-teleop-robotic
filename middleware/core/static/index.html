@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=9">
+  <link rel="stylesheet" href="/static/styles.css?v=11-camera-select">
 </head>
 <body>
   <aside class="sidebar">
@@ -63,6 +63,13 @@
     </section>
 
     <section class="page hidden" id="topics">
+      <article class="panel">
+        <div class="panel-title"><div><h2>1–4号相机 · 话题配置与监控</h2><p>复用自定义话题列表，为 1–4 号相机选择投射来源并查看状态。</p></div><button class="primary" id="saveCameras">保存相机配置</button></div>
+        <label class="toggle"><input type="checkbox" data-path="camera.enabled"><span></span>启用头显视频投射</label>
+        <p id="cameraConfigError" class="error" role="status"></p>
+        <div class="table-wrap"><table class="camera-topic-table"><thead><tr><th>相机</th><th>自定义图像话题</th><th>实时监控</th></tr></thead><tbody id="cameraStreamCards"><tr><td colspan="3">正在加载 1–4 号相机…</td></tr></tbody></table></div>
+        <p class="muted">仅选择下方已配置的自定义图像话题；录制开关、消息类型和限频统一在下方管理。选择“不投射”可停用该路。</p>
+      </article>
       <article class="panel">
         <div class="panel-title">
           <div>
@@ -309,6 +316,6 @@
     </dialog>
     <div id="toast" role="status"></div>
   </main>
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=11-camera-select"></script>
 </body>
 </html>

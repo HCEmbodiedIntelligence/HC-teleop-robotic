@@ -68,9 +68,10 @@ class RightStickBaseControlTests(unittest.TestCase):
             node.arms["right"].joy_stamp = now
             node.arms["left"].joy_stamp = now
 
-            # Also deflect left stick (should be ignored because left clutch is NOT pressed)
-            left_joy.axes[2] = 1.0
-            left_joy.axes[3] = 1.0
+            # Deflect left stick with left_stick_independent_base=False (clutched mode test)
+            node.body_config["left_stick_independent_base"] = False
+            left_joy.axes[int(node.body_config["stick_x_axis"])] = 1.0
+            left_joy.axes[int(node.body_config["stick_y_axis"])] = float(node.body_config["stick_forward_direction"])
 
             node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
 
@@ -86,6 +87,20 @@ class RightStickBaseControlTests(unittest.TestCase):
             self.assertEqual(lat, 0.0)
             # Body/waist must NOT be activated!
             self.assertFalse(node.body.active)
+
+            # Test independent left stick translation when left_stick_independent_base=True
+            node.body_config["left_stick_independent_base"] = True
+            published_base_commands.clear()
+            now += 0.02
+            node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
+            self.assertTrue(len(published_base_commands) > 0)
+            _, fwd_indep, _ = published_base_commands[-1]
+            self.assertAlmostEqual(fwd_indep, 0.35, places=2)
+            self.assertFalse(node.body.active)  # Waist still not activated!
+
+            # Reset left stick for subsequent right-stick tests
+            left_joy.axes[2] = 0.0
+            left_joy.axes[3] = 0.0
 
             # 3. Independent right stick rotation to the right (axes[2] = 1.0)
             published_base_commands.clear()
@@ -107,10 +122,10 @@ class RightStickBaseControlTests(unittest.TestCase):
             published_base_commands.clear()
             now += 0.02
             left_joy.axes[1] = 1.0  # Grip pressed
-            # stick_x_axis: 3, stick_y_axis: 2 in config; give forward input
+            # Use the configured stick axes; negative Y is forward.
             x_axis = int(node.body_config["stick_x_axis"])
             y_axis = int(node.body_config["stick_y_axis"])
-            left_joy.axes[y_axis] = 1.0  # forward
+            left_joy.axes[y_axis] = -1.0  # forward
             left_joy.axes[x_axis] = 0.0
             right_joy.axes[2] = -1.0     # turn left
 
@@ -121,12 +136,13 @@ class RightStickBaseControlTests(unittest.TestCase):
             yaw, fwd, lat = latest
             self.assertAlmostEqual(yaw, 0.45, places=3)
             self.assertGreater(fwd, 0.2)  # Forward translation is active!
-            self.assertTrue(node.body.active)  # Waist is also active!
+            self.assertFalse(node.body.active)  # Shared body config keeps waist disabled.
 
             # 5. Deadzone check: right stick inside deadzone (< 0.08) produces 0 yaw
             published_base_commands.clear()
             now += 0.02
             left_joy.axes[1] = 0.0  # release left clutch
+            left_joy.axes[y_axis] = 0.0  # center left stick
             right_joy.axes[2] = 0.04  # within deadzone
             node.arms["right"].joy_stamp = now
             node.arms["left"].joy_stamp = now

@@ -1,5 +1,7 @@
 """Offline FK/IK regressions using the X1 model, without commanding a robot."""
 import os
+import tempfile
+import yaml
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,11 +30,21 @@ class WaistTrackingTests(unittest.TestCase):
     def tearDownClass(cls):
         rclpy.shutdown()
 
+    def make_enabled_waist_node(self, path):
+        # Waist tests explicitly enable the feature; launch mode is not a preset.
+        config = yaml.safe_load(path.read_text())
+        config["body"].update(enabled=True, waist_joint_names=["leg_1", "leg_2", "zhi"], ik_iterations=20)
+        config["robot"]["urdf_path"] = str(path.parent / config["robot"]["urdf_path"])
+        with tempfile.TemporaryDirectory() as directory:
+            test_path = Path(directory) / "arm_teleop.yaml"
+            test_path.write_text(yaml.safe_dump(config))
+            return RobotArmTeleopNode(str(test_path), backend="v23")
+
     def test_sim_unconstrained_3dof_head_tracking(self):
         """Test unconstrained 1:1 head target mapping and 3-DOF sagittal tracking in simulation mode."""
         path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-            node = RobotArmTeleopNode(str(path), backend="v23")
+            node = self.make_enabled_waist_node(path)
         try:
             node.body_config["ik_mode"] = "3dof"
             node.body_config["target_position_deadband"] = 0.0
@@ -120,7 +132,7 @@ class WaistTrackingTests(unittest.TestCase):
         """Test torso 2-DOF lift/pitch tracking mode with custom scales."""
         path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-            node = RobotArmTeleopNode(str(path), backend="v23")
+            node = self.make_enabled_waist_node(path)
         try:
             node.body_config["unconstrained"] = False
             node.body_config["target_link"] = "zhi_Link"
@@ -180,7 +192,7 @@ class WaistTrackingTests(unittest.TestCase):
         """Verify waist can be controlled after homing using left Grip alone while arms wait for rearm."""
         path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-            node = RobotArmTeleopNode(str(path), backend="v23")
+            node = self.make_enabled_waist_node(path)
         try:
             node.hardware_ready = True
             node.joint_state.update(node.initial_joints)
@@ -295,7 +307,7 @@ class WaistTrackingTests(unittest.TestCase):
         """Verify that micro-jitter within deadbands produces zero joint motion."""
         path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-            node = RobotArmTeleopNode(str(path), backend="v23")
+            node = self.make_enabled_waist_node(path)
         try:
             node.joint_state.update(node.initial_joints)
             node.last_command.update(node.initial_joints)
@@ -335,7 +347,7 @@ class WaistTrackingTests(unittest.TestCase):
         """Verify that natural head pitch tilt in 2-DOF mode does not cause knee collapse or solver divergence."""
         path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-            node = RobotArmTeleopNode(str(path), backend="v23")
+            node = self.make_enabled_waist_node(path)
         try:
             node.joint_state.update(node.initial_joints)
             node.last_command.update(node.initial_joints)
@@ -405,6 +417,72 @@ class WaistTrackingTests(unittest.TestCase):
                     node.initial_joints[name],
                     delta=0.08,
                     msg=f"Joint {name} did not return to home pose!",
+                )
+        finally:
+            node.destroy_node()
+
+    def test_sim_waist_initializes_and_resets_to_home(self):
+        """Verify SimRobotController initializes folding_waist to initial_joints and resets on reset_home()."""
+        from simulation.general_sim_robot_control_node_ros2 import SimRobotController
+        cfg_path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/vr_configs.yml"
+        sim_node = SimRobotController(str(cfg_path), init_debug=False)
+        try:
+            expected_home = [0.5, 1.2, -0.6]
+            self.assertEqual(len(sim_node.folding_waist.joint_pos), 3)
+            for actual, exp in zip(sim_node.folding_waist.joint_pos, expected_home):
+                self.assertAlmostEqual(actual, exp, places=3)
+
+            # Perturb waist joints
+            sim_node.reset_j(sim_node.folding_waist.joint_index, [0.0, 0.0, 0.0])
+            for actual in sim_node.folding_waist.joint_pos:
+                self.assertAlmostEqual(actual, 0.0, delta=0.05)
+
+            # Call reset_home
+            sim_node.reset_home()
+            for actual, exp in zip(sim_node.folding_waist.joint_pos, expected_home):
+                self.assertAlmostEqual(actual, exp, places=3)
+        finally:
+            sim_node.destroy_node()
+
+    def test_teleop_node_startup_homing_when_waist_deviated(self):
+        """Verify RobotArmTeleopNode triggers homing on startup if waist joints deviate from home."""
+        from std_msgs.msg import Bool
+        path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
+        with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
+            node = self.make_enabled_waist_node(path)
+        try:
+            perturbed_state = dict(node.initial_joints)
+            perturbed_state["leg_1"] = 0.0
+            perturbed_state["leg_2"] = 0.0
+            perturbed_state["zhi"] = 0.0
+
+            node.joint_state.update(perturbed_state)
+            node.last_command.update(perturbed_state)
+
+            ready_msg = Bool()
+            ready_msg.data = True
+            node._hardware_ready_callback(ready_msg)
+
+            # Homing should have been triggered
+            self.assertTrue(node.homing)
+
+            # Step control ticks until homing completes (max 200 ticks = 2.0s)
+            now = 100.0
+            for _ in range(200):
+                now += 0.01
+                cmd = node._command_seed()
+                node._generic_control_tick(now, feedback_fresh=True, command=cmd)
+                node.joint_state.update(node.last_command)
+                if not node.homing:
+                    break
+
+            self.assertFalse(node.homing)
+            for name in ["leg_1", "leg_2", "zhi"]:
+                self.assertAlmostEqual(
+                    node.last_command[name],
+                    node.initial_joints[name],
+                    delta=0.08,
+                    msg=f"Waist joint {name} did not home on startup!",
                 )
         finally:
             node.destroy_node()

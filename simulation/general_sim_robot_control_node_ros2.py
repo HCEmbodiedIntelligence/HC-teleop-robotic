@@ -106,6 +106,9 @@ class SimRobotController(Node, AssembledRobot):
             for arm in self.arms
         ]
         self.target_ee_frame_ids = [None] * len(self.arms)
+        self.plane_id = None
+        self.ground_frame_ids = None
+        self.init_ground_plane(sim_cfg, init_debug=init_debug and not headless)
         
         # ROS2 publishers and subscribers
         self.joint_state_pub = self.create_publisher(
@@ -405,6 +408,92 @@ class SimRobotController(Node, AssembledRobot):
             self.reset_j(
                 [self.dorsal.dorsal_lift_joint_index], [self.dorsal.home_j_pos]
             )
+
+        if hasattr(self, "folding_waist"):
+            self.folding_waist.reset()
+        elif hasattr(self, "waist"):
+            self.waist.reset()
+
+        if hasattr(self, "initial_joints") and isinstance(self.initial_joints, dict):
+            for name, pos in self.initial_joints.items():
+                if name in self.joint_name2id_dict:
+                    self.reset_j([self.joint_name2id_dict[name]], [float(pos)])
+
+    def init_ground_plane(self, sim_cfg, init_debug=False):
+        """Initialize reference ground plane and optional origin coordinate axes."""
+        ground_cfg = sim_cfg.get("ground", {}) if isinstance(sim_cfg, dict) else {}
+        if not isinstance(ground_cfg, dict):
+            ground_cfg = {}
+        enable_ground = ground_cfg.get("enabled", True)
+        if not enable_ground:
+            self.plane_id = None
+            return
+
+        ground_z = float(ground_cfg.get("z", 0.0))
+        self.plane_id = self.load_ground_plane(z=ground_z)
+        if init_debug and self.plane_id is not None:
+            # Draw origin reference frame on the ground plane (RGB = XYZ, length 0.4m)
+            self.ground_frame_ids = debug_draw_pose(
+                [[0.0, 0.0, ground_z], [0.0, 0.0, 0.0, 1.0]],
+                line_width=2.5,
+                line_length=0.4,
+                physics_client_id=self.physics_clent_id,
+            )
+
+    def load_ground_plane(self, z=0.0):
+        """Load a reference ground plane into the PyBullet world."""
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        candidate_paths = [
+            os.path.join(project_root, ".deps", "pybullet_data"),
+            os.path.join(os.path.expanduser("~"), ".local", "lib", "python3.10", "site-packages", "pybullet_data"),
+        ]
+        try:
+            import pybullet_data
+            candidate_paths.insert(0, pybullet_data.getDataPath())
+        except ImportError:
+            pass
+
+        for dpath in candidate_paths:
+            plane_urdf = os.path.join(dpath, "plane.urdf")
+            if os.path.isfile(plane_urdf):
+                try:
+                    p.setAdditionalSearchPath(dpath, physicsClientId=self.physics_clent_id)
+                    plane_id = p.loadURDF(
+                        "plane.urdf",
+                        basePosition=[0.0, 0.0, z],
+                        useFixedBase=True,
+                        physicsClientId=self.physics_clent_id,
+                    )
+                    self.get_logger().info(f"Loaded reference ground plane (plane.urdf) at z={z}")
+                    return plane_id
+                except Exception as exc:
+                    self.get_logger().warn(f"Failed to load plane.urdf from {dpath}: {exc}")
+
+        # Fallback: create procedural ground plane if plane.urdf is not found
+        try:
+            col_id = p.createCollisionShape(
+                p.GEOM_BOX,
+                halfExtents=[50.0, 50.0, 0.05],
+                physicsClientId=self.physics_clent_id,
+            )
+            vis_id = p.createVisualShape(
+                p.GEOM_BOX,
+                halfExtents=[50.0, 50.0, 0.05],
+                rgbaColor=[0.82, 0.82, 0.85, 1.0],
+                physicsClientId=self.physics_clent_id,
+            )
+            plane_id = p.createMultiBody(
+                baseMass=0,
+                baseCollisionShapeIndex=col_id,
+                baseVisualShapeIndex=vis_id,
+                basePosition=[0.0, 0.0, z - 0.05],
+                physicsClientId=self.physics_clent_id,
+            )
+            self.get_logger().info(f"Created procedural reference ground box at z={z}")
+            return plane_id
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to create procedural ground plane: {exc}")
+            return None
 
 
 def main(args=None):

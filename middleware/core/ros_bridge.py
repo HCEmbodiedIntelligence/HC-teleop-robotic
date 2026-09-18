@@ -15,14 +15,14 @@ EventCallback = Callable[[dict[str, Any], list[str]], None]
 
 DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
     "/hc_teleop/hardware_ready": {"target_hz": 100.0, "min_hz": 10.0},
-    "/hc_teleop/joint_states": {"target_hz": 100.0, "min_hz": 50.0},
-    "/hc_teleop/joint_cmd": {"target_hz": 100.0, "min_hz": 50.0},
-    "/hc_teleop/joint_cmd_arm": {"target_hz": 100.0, "min_hz": 50.0},
-    "/hc_teleop/sol_q": {"target_hz": 100.0, "min_hz": 50.0},
-    "/hc_teleop/controller_target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
-    "/hc_teleop/target_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
-    "/hc_teleop/actual_ee_poses": {"target_hz": 60.0, "min_hz": 30.0},
-    "/hc_teleop/target_base_move": {"target_hz": 60.0, "min_hz": 20.0},
+    "/hc_teleop/joint_states": {"target_hz": 100.0, "min_hz": 20.0},
+    "/hc_teleop/joint_cmd": {"target_hz": 100.0, "min_hz": 20.0},
+    "/hc_teleop/joint_cmd_arm": {"target_hz": 100.0, "min_hz": 20.0},
+    "/hc_teleop/sol_q": {"target_hz": 100.0, "min_hz": 20.0},
+    "/hc_teleop/controller_target_ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
+    "/hc_teleop/target_ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
+    "/hc_teleop/actual_ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
+    "/hc_teleop/target_base_move": {"target_hz": 60.0, "min_hz": 10.0},
     "/hc_teleop/joint_cmd_finger_left": {"target_hz": 10.0, "min_hz": 1.0},
     "/hc_teleop/joint_cmd_finger_right": {"target_hz": 10.0, "min_hz": 1.0},
     "/hc_teleop/hand_joint_states": {"target_hz": 10.0, "min_hz": 1.0},
@@ -435,7 +435,8 @@ class RosBridge:
                     subscription_names.append(topic)
 
             for item in self.config.get("subscriptions", []):
-                if not item.get("enabled", True):
+                # Recording enablement is independent of a headset projection.
+                if not item.get("enabled", True) and item["topic"] not in self.camera_topics:
                     continue
                 topic = item["topic"]
                 msg_type_name = item["type"]
@@ -496,11 +497,11 @@ class RosBridge:
                             payload = message_to_ordereddict(message)
                         except Exception:
                             payload = {}
-                    elif len(outputs) > 1 or "websocket" in outputs:
-                        try:
-                            payload = message_to_ordereddict(message)
-                        except Exception:
-                            payload = {}
+                    else:
+                        # Image bytes use on_frame/WebRTC and the raw-CDR recorder.
+                        # Even when websocket is selected, never expand pixels into
+                        # JSON here: this executor also forwards joint commands.
+                        payload = {}
                     event = envelope(
                         "ros_message",
                         "ros2",
