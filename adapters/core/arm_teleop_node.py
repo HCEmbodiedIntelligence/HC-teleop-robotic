@@ -2176,9 +2176,9 @@ class RobotArmTeleopNode(Node):
                 self.control.get("head_axis_mapping", self.control["axis_mapping"]),
             )
         )
-        relative_yaw = self._wrap_angle(
-            raw_relative_yaw - self.base_yaw_alignment_offset
-        )
+        # Neck targets follow only headset motion relative to its reference.
+        # Chassis alignment remains part of base following, never neck feedback.
+        relative_yaw = raw_relative_yaw
         relative_pitch = mapped_relative_pitch(
             body.head_pose[1],
             ref_pose[1],
