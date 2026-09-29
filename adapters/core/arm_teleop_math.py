@@ -140,17 +140,24 @@ def mapped_relative_pitch(
     reference_orientation: Sequence[float],
     axis_mapping: Sequence[Sequence[float]],
 ) -> float:
-    """Return relative headset pitch after mapping VR axes into robot axes."""
+    """Relative forward elevation, independent of room yaw and headset roll.
+
+    Mapping a world-frame quaternion difference mixes pitch and roll after a
+    turn. Measure each headset forward vector's elevation instead; keep the
+    existing positive-down convention and subtract the clutch reference.
+    """
     mapping = np.asarray(axis_mapping, dtype=float)
     if mapping.shape != (3, 3) or not np.all(np.isfinite(mapping)):
         raise ValueError("axis_mapping must be finite 3x3")
-    relative = quaternion_multiply(
-        orientation, quaternion_inverse(reference_orientation)
-    )
-    mapped = mapping @ quaternion_to_matrix(relative) @ mapping.T
-    x, y, z, w = matrix_to_quaternion(mapped)
-    sin_pitch = float(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
-    return math.asin(sin_pitch)
+
+    # Honor both Unity +Z-forward and OpenXR -Z-forward mappings.
+    source_forward = mapping.T @ np.array([1., 0., 0.])
+
+    def pitch(quaternion):
+        forward = mapping @ (quaternion_to_matrix(quaternion) @ source_forward)
+        return math.atan2(-float(forward[2]), float(np.linalg.norm(forward[:2])))
+
+    return pitch(orientation) - pitch(reference_orientation)
 
 
 def stabilize_pose(
@@ -555,3 +562,16 @@ def blend_three_layer_base_velocity(
     yaw = float(np.clip(u_yaw + alpha_head * h_yaw, -max_angular_velocity, max_angular_velocity))
 
     return (yaw, fwd, lat)
+
+
+def clutch_base_axis_mapping(axis_mapping, head_orientation, root_orientation, task_orientation):
+    """Capture VR horizontal heading -> physical base -> arm task coordinates."""
+    mapping = np.asarray(axis_mapping, dtype=float)
+    forward = mapping @ (quaternion_to_matrix(head_orientation) @ np.array([0., 0., 1.]))
+    if np.linalg.norm(forward[:2]) < 1e-4:
+        raise ValueError('headset forward has no usable horizontal heading')
+    yaw = math.atan2(forward[1], forward[0])
+    c, s = math.cos(yaw), math.sin(yaw)
+    heading_inverse = np.array([[c, s, 0.], [-s, c, 0.], [0., 0., 1.]])
+    base_to_task = quaternion_to_matrix(task_orientation).T @ quaternion_to_matrix(root_orientation)
+    return base_to_task @ heading_inverse @ mapping

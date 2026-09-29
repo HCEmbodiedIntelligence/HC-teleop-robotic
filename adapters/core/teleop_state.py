@@ -22,6 +22,7 @@ class ArmRuntime:
     joy_stamp: float = 0.0
     active: bool = False
     reference_vr: tuple[np.ndarray, np.ndarray] | None = None
+    reference_axis_mapping: np.ndarray | None = None
     reference_local_ee: tuple[np.ndarray, np.ndarray] | None = None
     target_local: tuple[np.ndarray, np.ndarray] | None = None
     target_world: tuple[np.ndarray, np.ndarray] | None = None

@@ -13,7 +13,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy._rclpy_pybind11 import RCLError
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseArray
+from geometry_msgs.msg import PoseArray, PoseStamped
 from std_msgs.msg import Bool, Float64MultiArray
 from std_srvs.srv import Trigger
 import argparse
@@ -114,6 +114,7 @@ class SimRobotController(Node, AssembledRobot):
         self.joint_state_pub = self.create_publisher(
             JointState, f"/io_teleop/joint_states", 1
         )
+        self.base_pose_pub = self.create_publisher(PoseStamped, "/hc_teleop/base_pose", 10)
         self.joint_cmd_sub = self.create_subscription(
             JointState,
             f"/io_teleop/joint_cmd",
@@ -228,8 +229,26 @@ class SimRobotController(Node, AssembledRobot):
         response.message = "Service successfully triggered!"
         return response
 
+    def publish_base_pose(self):
+        """Measured pose in the same local frame consumed by _move_base."""
+        position, orientation = self.base.control_pose
+        if not np.isfinite(position).all() or not np.isfinite(orientation).all():
+            return
+        norm = float(np.linalg.norm(orientation))
+        if norm < 1e-8:
+            return
+        orientation = np.asarray(orientation) / norm
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "world"
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = map(float, position)
+        (msg.pose.orientation.x, msg.pose.orientation.y,
+         msg.pose.orientation.z, msg.pose.orientation.w) = map(float, orientation)
+        self.base_pose_pub.publish(msg)
+
     def update_joint_state(self):
         self._update_base_velocity()
+        self.publish_base_pose()
         self._draw_head_tracking()
         joint_state = JointState()
         joint_state.header.stamp = self.get_clock().now().to_msg()
@@ -386,10 +405,10 @@ class SimRobotController(Node, AssembledRobot):
 
     def _move_base(self, delta_yaw, delta_pos, delta_lateral):
         tar_pose = multiply_transforms(
-            self.base.pose,
+            self.base.control_pose,
             [[delta_pos, delta_lateral, 0], p.getQuaternionFromEuler([0, 0, delta_yaw])],
         )
-        self.base.reset_base(tar_pose)
+        self.base.reset_control_pose(tar_pose)
 
     def reset_home(self):
         for i, arm in enumerate(self.arms):

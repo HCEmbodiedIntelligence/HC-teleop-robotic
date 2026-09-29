@@ -173,6 +173,14 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
+  - topic: /cameras/stereo/color/compressed
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
   recording:
     directory: ../runtime/topic_recordings
     enabled: false
@@ -197,7 +205,18 @@ camera:
   custom_topic: ''
   streams:
   - id: head
-    name: 头部相机
+    name: 头部双目相机
+    topic: /cameras/stereo/color/compressed
+    stereo: true
+    enabled: true
+    custom_topic: ''
+    width: 1280
+    height: 400
+    fps: 30
+    codec: H264
+    type: sensor_msgs/msg/CompressedImage
+  - id: overhead
+    name: 俯视相机
     topic: /cameras/eye/color
     enabled: true
     custom_topic: ''
@@ -206,16 +225,6 @@ camera:
     fps: 30
     codec: H264
     type: sensor_msgs/msg/Image
-  - id: overhead
-    name: 俯视相机
-    topic: /hc_teleop/camera_overhead/color/compressed
-    enabled: true
-    custom_topic: ''
-    width: 640
-    height: 400
-    fps: 30
-    codec: H264
-    type: sensor_msgs/msg/CompressedImage
   - id: d405_left
     name: 左腕相机
     topic: /hc_teleop/camera_d405_left/color/compressed

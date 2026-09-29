@@ -192,14 +192,10 @@ class ControllerV23:
         if not self.have_feedback:
             self.command_q = self.q.copy()
             self.have_feedback = True
-        elif self.method == "retarget":
-            # 仅在发生急停、断电或大幅度硬复位等超大脱轨偏差（>1.5 rad 范数）时同步，正常操控时绝不截断衰减
-            diff = np.linalg.norm(
-                self.interface.free_configuration(self.command_q)
-                - self.interface.free_configuration(self.q)
-            )
-            if diff > 1.5:
-                self.command_q = self.q.copy()
+        # Feedback lag must not hard-reset the retarget integrator: that would
+        # bypass step()'s velocity limits and produce a discontinuous command.
+        # Reinitialization is explicit via reset_to_feedback() and the ROS
+        # reset acknowledgement / clutch rearm handshake.
 
     def update_tf_targets(
         self, transforms: Mapping[Tuple[str, str], TargetTransform]

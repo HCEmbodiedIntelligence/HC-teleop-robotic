@@ -46,6 +46,9 @@ class WaistTrackingTests(unittest.TestCase):
         with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
             node = self.make_enabled_waist_node(path)
         try:
+            node.body_config["unconstrained"] = True
+            node.body_config["target_link"] = "camera_head"
+            node.body.target_link_index = node.link_by_name["camera_head"]
             node.body_config["ik_mode"] = "3dof"
             node.body_config["target_position_deadband"] = 0.0
             node.body_config["target_orientation_deadband"] = 0.0

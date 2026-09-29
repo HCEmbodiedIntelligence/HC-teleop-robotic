@@ -119,6 +119,25 @@ class RobotBase:
             )
         return multiply_transforms(base_pose, self.trans)
 
+    @property
+    def control_pose(self):
+        """World pose of physical base_link; +X forward, +Y left."""
+        with self.robot.bullet_lock:
+            pose = p.getBasePositionAndOrientation(
+                self.robot.robot_id, physicsClientId=self.robot.physics_clent_id)
+            inertial = p.getDynamicsInfo(
+                self.robot.robot_id, -1, physicsClientId=self.robot.physics_clent_id)[3:5]
+        return multiply_transforms(pose, invert_transform(inertial))
+
+    def reset_control_pose(self, pose):
+        with self.robot.bullet_lock:
+            inertial = p.getDynamicsInfo(
+                self.robot.robot_id, -1, physicsClientId=self.robot.physics_clent_id)[3:5]
+            world_pose = multiply_transforms(pose, inertial)
+            p.resetBasePositionAndOrientation(
+                self.robot.robot_id, world_pose[0], world_pose[1],
+                physicsClientId=self.robot.physics_clent_id)
+
     def reset_base(self, pose) -> None:
         bullet_pose = multiply_transforms(pose, invert_transform(self.trans))
         with self.robot.bullet_lock:

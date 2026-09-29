@@ -124,6 +124,36 @@ class V23ReconstructionTests(unittest.TestCase):
         controller.reset_to_feedback()
         np.testing.assert_allclose(controller.command_q, controller.q)
 
+    def test_lagging_feedback_does_not_reset_or_jump_retarget_command(self):
+        controller = self.make_controller()
+        controller.method = "retarget"
+        feedback = controller.interface.free_configuration(controller.q).copy()
+        # Reproduce the observed threshold crossing without requiring motion
+        # of the simulated robot: feedback can lag a moving IK reference.
+        velocity = np.zeros(controller.interface.nv_free)
+        velocity[controller.free_joint_names.index("Joint5_R")] = 1.6
+        controller.command_q = controller.interface.integrate_free(
+            controller.q, velocity, 1.0
+        )
+        controller.command_q = controller.interface.clip_configuration(controller.command_q)
+        previous = controller.interface.free_configuration(controller.command_q).copy()
+        self.assertGreater(np.linalg.norm(previous - feedback), 1.5)
+        for _ in range(4):
+            controller.update_joint_state(controller.free_joint_names, feedback)
+            np.testing.assert_allclose(
+                controller.interface.free_configuration(controller.command_q), previous
+            )
+            _, command = controller.step()
+            self.assertTrue(np.all(
+                np.abs(command - previous) <= controller.velocity_limits * controller.dt + 1e-9
+            ))
+            previous = command.copy()
+        # Explicit reset must still recover from a real stop/reinitialization.
+        controller.reset_to_feedback()
+        np.testing.assert_allclose(
+            controller.interface.free_configuration(controller.command_q), feedback
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

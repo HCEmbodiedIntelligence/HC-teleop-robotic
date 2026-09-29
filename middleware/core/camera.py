@@ -59,7 +59,16 @@ class CameraService:
             "error": None,
             "id": str(config.get("id", "main")),
             "name": str(config.get("name", "主相机")),
+            "is_stereo": bool(
+                config.get("stereo", False)
+                or "stereo" in str(config.get("id", "")).lower()
+                or "双目" in str(config.get("name", "")).lower()
+                or "sbs" in str(config.get("id", "")).lower()
+                or "stereo" in str(config.get("topic", "")).lower()
+            ),
         }
+        self._left_frame: np.ndarray | None = None
+        self._right_frame: np.ndarray | None = None
 
     def start(self) -> None:
         if not self.config.get("enabled", False):
@@ -157,6 +166,13 @@ class CameraService:
             height=self.config.get("height", 400),
             target_fps=self.config.get("fps", 30),
             codec=self.config.get("codec", "H264"),
+            is_stereo=bool(
+                self.config.get("stereo", False)
+                or "stereo" in str(self.config.get("id", "")).lower()
+                or "双目" in str(self.config.get("name", "")).lower()
+                or "sbs" in str(self.config.get("id", "")).lower()
+                or "stereo" in str(self.config.get("topic", "")).lower()
+            ),
             peers=len(self._pcs),
         )
         return result

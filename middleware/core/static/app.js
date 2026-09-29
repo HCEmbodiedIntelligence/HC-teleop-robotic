@@ -192,7 +192,7 @@ function renderStatus(data) {
   setState('#cameraState', cam.state);
   setText(
     '#cameraMeta',
-    cam.error || `接收 ${cam.capture_fps||0} FPS · WebRTC 发送 ${cam.webrtc_send_fps||0} FPS · ${cam.peers||0} peers`
+    cam.error || `实际帧率 ${cameraActualFps(cam,ros.topic_health?.[cam.topic]).toFixed(1)} FPS · 头显连接 ${cam.peers||0}`
   );
   setText('#wsClients',data.websocket_clients||0);
   const recording=data.recording||{};
@@ -418,11 +418,17 @@ function collectCameraStreams() {
   });
   config.camera.source='ros';
 }
+// Measure the selected image topic, independently of configured/send FPS.
+function cameraActualFps(stream,health) {
+  if(health && !health.has_data)return 0;
+  const fps=Number(health ? health.hz : stream?.capture_fps);
+  return Number.isFinite(fps)&&fps>0?fps:0;
+}
 function cameraMonitorSummary(stream,health) {
   if(!stream)return '未启用 / 尚未应用';
   if(stream.error)return `异常：${stream.error}`;
-  const receiving=health?Boolean(health.has_data):Number(stream.capture_fps)>0;
-  return `${receiving?'正在接收':'等待图像'} · 接收 ${receiving?Number(health?.hz??stream.capture_fps??0).toFixed(1):'0.0'} FPS · 投射 ${Number(stream.webrtc_send_fps||0).toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
+  const fps=cameraActualFps(stream,health);
+  return `${fps>0?'正在接收':'等待图像'} · 实际帧率 ${fps.toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
 }
 function renderCameraStatus(camera,health={}) {
   for(const element of $$('[data-camera-status]')){

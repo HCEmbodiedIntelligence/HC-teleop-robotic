@@ -62,16 +62,12 @@ arms:
     - Joint7_L
 body:
   # 仿真与外部驱动共用此处全部参数；启动模式不再覆盖控制配置。
-  # 当前腰部控制关闭；重新启用时取消下面三个腰关节注释并完成真机标定。
-  # waist_joint_names:
-  # - leg_1
-  # - leg_2
-  # - zhi
-  enabled: false
-  waist_joint_names: []
-  # 统一的头显位姿跟随参数（启用腰部控制后使用）。
-  unconstrained: true
-  target_link: camera_head
+  # 左 Grip：头显上下位移控制腰部高度，俯仰旋转控制腰部俯仰。
+  enabled: true
+  waist_joint_names: [leg_1, leg_2, zhi]
+  # 只分配高度/俯仰给腰部；水平位移与偏航由 head_pose_base 处理。
+  unconstrained: false
+  target_link: zhi_Link
   head_position_scale: 1.0
   head_max_displacement: 0.0
   head_orientation_enabled: true
@@ -79,15 +75,31 @@ body:
   visualization_head_link: camera_head
   base_command_topic: /hc_teleop/target_base_move
   base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
+  # 相对位姿闭环：按住左 Grip 建立参考；松开停止并清除参考。
+  # 开启时左摇杆优先平移，回中重新建立头显参考；不叠加旧朝向/伸展辅助。
+  head_pose_base:
+    enabled: true
+    feedback_topic: /hc_teleop/base_pose
+    feedback_timeout: 0.3
+    position_scale: 1.0       # 头显水平移动 1 m -> 底盘目标移动 1 m
+    yaw_scale: 1.0            # 头显相对偏航 -> 底盘相对偏航
+    position_gain: 2
+    yaw_gain: 2
+    position_tolerance: 0.01  # m
+    yaw_tolerance: 0.03       # rad
+    max_displacement: 0.5    # 每次 Grip 参考允许的最大目标距离 (m)
+    max_yaw: 1.57            # 每次 Grip 参考允许的最大目标偏航 (rad)
+  # 左摇杆参数也用于相对位姿模式；右摇杆和旧辅助仅用于旧模式。
+  # 速度上限和 yaw_direction 同时供两种模式使用。
   # 第一层：用户主动移动配置
   # Joy.axes 下标：0=Trigger、1=Grip、2=主摇杆横向(左右)、3=主摇杆纵向(前后)。
-  stick_x_axis: 3
-  stick_y_axis: 2
+  stick_x_axis: 2
+  stick_y_axis: 3
   stick_deadzone: 0.08
   stick_forward_direction: 1.0
-  stick_lateral_direction: 1.0
-  max_linear_velocity: 0.35
-  max_lateral_velocity: 0.25
+  stick_lateral_direction: -1.0  # 摇杆 +X 向右，底盘 +Y 向左。
+  max_linear_velocity: 0.6
+  max_lateral_velocity: 0.4
   left_stick_independent_base: true   # 允许左摇杆独立推杆平移底盘，无需按住 Grip
 
   # 右手柄摇杆控制底盘旋转（Yaw）配置
@@ -109,7 +121,7 @@ body:
   head_yaw_slow_max_vel: 0.20               # 慢速对齐上限 (rad/s)
   head_orientation_alpha: 1.0               # 头显朝向辅助融合系数
   yaw_direction: 1.0                        # 当前头显映射下，左转偏航为负；转换为底盘逆时针正方向
-  max_angular_velocity: 0.45                # 底盘最大角速度 (rad/s)
+  max_angular_velocity: 1.2                # 底盘最大角速度 (rad/s)
 
   # 第三层：WBC 自动辅助 (Hands Reach Assist) - 已关闭
   reach_assist_enabled: false
@@ -124,7 +136,7 @@ body:
   reach_max_lateral_velocity: 0.18 # 辅助移动最大侧向速度 (m/s)
 
   # 头部转动驱动脖子转动 (Pan-Tilt Neck Control)
-  neck_tracking_enabled: true
+  neck_tracking_enabled: false  # 暂停头显驱动脖子转动；底盘和腰部跟随保持启用。
   neck_joint_names: [head_1, head_2]
   neck_yaw_joint: head_1
   neck_pitch_joint: head_2
@@ -154,7 +166,7 @@ body:
   pitch_scale: 1.0
   forward_scale: 0.0
   height_direction: 1.0
-  pitch_direction: 1.0
+  pitch_direction: 1.0  # 按现场俯仰方向校正；两种仿真共用。
   forward_direction: 1.0
   max_height_delta: 0.18
   max_pitch_delta: 0.35
@@ -300,6 +312,8 @@ control:
   pose_timeout: 0.5
   input_timeout: 0.5
   joint_state_timeout: 0.5
+  # 每次右 Grip 重新对齐头显水平朝向与底座，按住期间固定参考。
+  arm_reference_frame: base_at_clutch
   # 手柄位移映射矩阵：矩阵三行依次生成机器人 X/Y/Z 位移。
   axis_mapping:
   - - 0.0

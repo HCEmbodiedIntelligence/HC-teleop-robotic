@@ -62,7 +62,10 @@ test('custom topic changes refresh selectors without losing pending choices',()=
 test('monitor distinguishes no image, receiving and failed streams',()=>{
   const {ctx}=setup();
   assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:0,peers:0})",ctx),/等待图像/);
-  assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:30,webrtc_send_fps:25,peers:1})",ctx),/正在接收.*30.0.*25.0.*连接 1/);
+  assert.strictEqual(vm.runInContext("cameraActualFps({capture_fps:60,webrtc_send_fps:30},{has_data:true,hz:16.4})",ctx),16.4);
+  assert.strictEqual(vm.runInContext("cameraActualFps({capture_fps:60},{has_data:false,hz:60})",ctx),0);
+  assert.doesNotMatch(vm.runInContext("cameraMonitorSummary({capture_fps:30,webrtc_send_fps:25,peers:1})",ctx),/投射|发送|25\.0/);
+  assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:30,webrtc_send_fps:25,peers:1})",ctx),/正在接收.*实际帧率 30.0 FPS.*连接 1/);
   assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:30},{has_data:false})",ctx),/等待图像.*0.0/);
   assert.match(vm.runInContext("cameraMonitorSummary({error:'decode failed'})",ctx),/异常.*decode failed/);
 });

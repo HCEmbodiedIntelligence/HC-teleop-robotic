@@ -26,6 +26,7 @@ from .arm_teleop_math import (
     binary_trigger_state,
     blend_three_layer_base_velocity,
     clamp_step,
+    clutch_base_axis_mapping,
     hands_reach_assist_velocity,
     head_yaw_orientation_velocity,
     joystick_base_velocity,
@@ -49,6 +50,7 @@ from .collision_safety import (
     calibrated_clearance,
     improves_collision_clearance,
 )
+from .head_base_pose import HeadBasePoseFollower
 from .solver_rearm import SolverRearmGate
 from .teleop_state import ArmRuntime, BodyRuntime, IkCandidate
 from .vr_input import decode_vr_frame
@@ -232,6 +234,18 @@ class RobotArmTeleopNode(Node):
             self.initial_joints.setdefault(name, 0.0)
         self.neck_reference_head: tuple[tuple[float, float, float], tuple[float, float, float, float]] | None = None
         self.base_yaw_alignment_offset: float = 0.0
+        pose_base_config = self.body_config.get("head_pose_base", {})
+        self.head_base_follower = (
+            HeadBasePoseFollower(
+                pose_base_config,
+                self.control.get("head_axis_mapping", self.control["axis_mapping"]),
+                self.body_config.get("yaw_direction", 1.0),
+            ) if pose_base_config.get("enabled", False) else None
+        )
+        self.base_pose_feedback = None
+        self.base_pose_stamp = float("-inf")
+        self.base_pose_frame = ""
+        self.head_base_state = "idle"
 
         if self.collision_enabled:
             self._initialize_collision_safety()
@@ -281,6 +295,12 @@ class RobotArmTeleopNode(Node):
         self.base_pub = self.create_publisher(
             Float64MultiArray, self.body_config["base_command_topic"], 10
         )
+        if self.head_base_follower is not None:
+            self.base_pose_sub = self.create_subscription(
+                PoseStamped,
+                pose_base_config.get("feedback_topic", "/hc_teleop/base_pose"),
+                self._base_pose_callback, qos_profile_sensor_data,
+            )
         self.head_visualization_pub = self.create_publisher(
             PoseArray, "/hc_teleop/head_tracking_poses", latest_reliable_qos
         )
@@ -646,6 +666,41 @@ class RobotArmTeleopNode(Node):
             arm.pose = pose
             arm.pose_stamp = self._monotonic()
 
+    def _base_pose_callback(self, message: PoseStamped) -> None:
+        pose = self._read_pose(message)
+        if pose is None or not message.header.frame_id:
+            self.base_pose_stamp = float("-inf")
+            return
+        if self.base_pose_frame and self.base_pose_frame != message.header.frame_id:
+            self.head_base_follower.reset()
+        self.base_pose_frame = message.header.frame_id
+        position, q = pose
+        x, y, z, w = q
+        yaw = math.atan2(2.0 * (w*z + x*y), 1.0 - 2.0 * (y*y + z*z))
+        self.base_pose_feedback = (float(position[0]), float(position[1]), yaw)
+        self.base_pose_stamp = self._monotonic()
+
+    def _publish_head_base_pose(self, now: float, engaged: bool) -> None:
+        follower = self.head_base_follower
+        valid_head = self.body.head_pose is not None and now - self.body.head_stamp <= float(self.control["pose_timeout"])
+        valid_base = self.base_pose_feedback is not None and now - self.base_pose_stamp <= follower.feedback_timeout
+        if not engaged or not valid_head or not valid_base:
+            follower.reset()
+            self.head_base_state = ("idle" if not engaged else
+                                    "waiting_head_pose" if not valid_head else "waiting_base_pose")
+            self._stop_base_if_pending()
+            return
+        self.head_base_state = "tracking"
+        limits = tuple(float(self.body_config.get(k, v)) for k, v in (
+            ("max_linear_velocity", .35), ("max_lateral_velocity", .25),
+            ("max_angular_velocity", .45)))
+        yaw, forward, lateral = follower.update(self.body.head_pose, self.base_pose_feedback, limits)
+        if self.body_config.get("base_command_mode", "velocity") == "delta":
+            dt = 1.0 / float(self.control["rate_hz"])
+            yaw, forward, lateral = yaw * dt, forward * dt, lateral * dt
+        self.base_pub.publish(Float64MultiArray(data=[yaw, forward, lateral]))
+        self.base_zero_pending = any(abs(v) > 1e-6 for v in (yaw, forward, lateral))
+
     def _head_pose_callback(self, message: PoseStamped) -> None:
         pose = self._read_pose(message)
         if pose is not None:
@@ -879,6 +934,9 @@ class RobotArmTeleopNode(Node):
         arm.reseed_target_orientation = None
 
     def _release_all(self, *, send_base_zero: bool) -> None:
+        if getattr(self, "head_base_follower", None) is not None:
+            self.head_base_follower.reset()
+            self.head_base_state = "idle"
         for arm in self.arms.values():
             self._release_arm(arm)
         self.body.active = False
@@ -2231,8 +2289,8 @@ class RobotArmTeleopNode(Node):
         if left.joy is None:
             return False
         axes = left.joy.axes
-        x_index = int(self.body_config.get("stick_x_axis", 3))
-        y_index = int(self.body_config.get("stick_y_axis", 2))
+        x_index = int(self.body_config.get("stick_x_axis", 2))
+        y_index = int(self.body_config.get("stick_y_axis", 3))
         deadzone = float(self.body_config.get("stick_deadzone", 0.08))
         x_val = axes[x_index] if len(axes) > x_index else 0.0
         y_val = axes[y_index] if len(axes) > y_index else 0.0
@@ -2268,8 +2326,8 @@ class RobotArmTeleopNode(Node):
         )
         if left_input_fresh and allow_left_stick and left.joy is not None:
             axes = left.joy.axes
-            x_index = int(self.body_config.get("stick_x_axis", 3))
-            y_index = int(self.body_config.get("stick_y_axis", 2))
+            x_index = int(self.body_config.get("stick_x_axis", 2))
+            y_index = int(self.body_config.get("stick_y_axis", 3))
             stick_x = axes[x_index] if len(axes) > x_index else 0.0
             stick_y = axes[y_index] if len(axes) > y_index else 0.0
             forward, lateral = joystick_base_velocity(
@@ -2279,7 +2337,7 @@ class RobotArmTeleopNode(Node):
                 float(self.body_config.get("max_linear_velocity", 0.35)),
                 float(self.body_config.get("max_lateral_velocity", 0.25)),
                 float(self.body_config.get("stick_forward_direction", 1.0)),
-                float(self.body_config.get("stick_lateral_direction", 1.0)),
+                float(self.body_config.get("stick_lateral_direction", -1.0)),
             )
 
         stick_yaw = 0.0
@@ -2424,6 +2482,25 @@ class RobotArmTeleopNode(Node):
         track_head_yaw: bool = True,
         left_clutch_active: bool = False,
     ) -> None:
+        if getattr(self, "head_base_follower", None) is not None:
+            forward, lateral, _ = self._compute_user_base_velocity(
+                now, left_clutch_active=left_clutch_active
+            )
+            if abs(forward) > 1e-6 or abs(lateral) > 1e-6:
+                # Manual translation owns the base while the left stick is held.
+                # Discard the pose target so releasing it cannot pull us back.
+                self.head_base_follower.reset()
+                self.head_base_state = "manual_stick"
+                # Joystick mapping already produces command-frame velocities.
+                # The headset displacement offset must not rotate these again.
+                if self.body_config.get("base_command_mode", "velocity") == "delta":
+                    dt = 1.0 / float(self.control["rate_hz"])
+                    forward, lateral = forward * dt, lateral * dt
+                self.base_pub.publish(Float64MultiArray(data=[0.0, forward, lateral]))
+                self.base_zero_pending = True
+            else:
+                self._publish_head_base_pose(now, left_clutch_active)
+            return
         cmd_vel_user = self._compute_user_base_velocity(
             now, left_clutch_active=left_clutch_active
         )
@@ -2484,6 +2561,19 @@ class RobotArmTeleopNode(Node):
             self.base_zero_pending = False
 
     def _engage_arm(self, arm: ArmRuntime) -> None:
+        arm.reference_axis_mapping = None
+        if self.control.get("arm_reference_frame", "fixed") == "base_at_clutch":
+            if self.body.head_pose is None or self._monotonic() - self.body.head_stamp > float(self.control["pose_timeout"]):
+                arm.active = False
+                return
+            try:
+                arm.reference_axis_mapping = clutch_base_axis_mapping(
+                    self.control["axis_mapping"], self.body.head_pose[1],
+                    self._root_pose()[1], self._link_pose(arm.base_index)[1],
+                )
+            except ValueError:
+                arm.active = False
+                return
         arm.active = True
         arm.reference_vr = arm.pose
         arm.target_local = self._relative_pose(
@@ -2505,6 +2595,8 @@ class RobotArmTeleopNode(Node):
         arm.reseed_target_orientation = None
 
     def _update_arm(self, arm: ArmRuntime, command: dict[str, float]) -> None:
+        if not arm.active:
+            return
         assert arm.pose is not None
         assert arm.reference_vr is not None
         assert arm.reference_local_ee is not None
@@ -2512,7 +2604,7 @@ class RobotArmTeleopNode(Node):
             *arm.pose,
             *arm.reference_vr,
             *arm.reference_local_ee,
-            self.control["axis_mapping"],
+            arm.reference_axis_mapping if arm.reference_axis_mapping is not None else self.control["axis_mapping"],
             float(self.control["position_scale"]),
             float(self.control["max_displacement"]),
             bool(self.control["orientation_enabled"]),
@@ -2583,7 +2675,7 @@ class RobotArmTeleopNode(Node):
             *arm.pose,
             *arm.reference_vr,
             *arm.reference_local_ee,
-            self.control["axis_mapping"],
+            arm.reference_axis_mapping if arm.reference_axis_mapping is not None else self.control["axis_mapping"],
             float(self.control["position_scale"]),
             float(self.control["max_displacement"]),
             bool(self.control["orientation_enabled"]),
@@ -2824,6 +2916,9 @@ class RobotArmTeleopNode(Node):
             self.last_command.update(neck_command)
 
         if not base_allowed and self.collision_blocked:
+            if getattr(self, "head_base_follower", None) is not None:
+                self.head_base_follower.reset()
+                self.head_base_state = "collision_blocked"
             self._stop_base_if_pending()
         else:
             self._publish_base_command(
@@ -2839,7 +2934,8 @@ class RobotArmTeleopNode(Node):
             if arms_requested and pose_fresh:
                 if not arm.active:
                     self._engage_arm(arm)
-                self._update_arm_target(arm)
+                if arm.active:
+                    self._update_arm_target(arm)
             elif arm.active:
                 arm.active = False
                 arm.reference_vr = None
@@ -2874,6 +2970,10 @@ class RobotArmTeleopNode(Node):
             self._sync_model()
             self._publish_actual_poses()
         if not self.hardware_ready:
+            if getattr(self, "head_base_follower", None) is not None:
+                self.head_base_follower.reset()
+                self.head_base_state = "hardware_not_ready"
+                self._stop_base_if_pending()
             if any(arm.active for arm in self.arms.values()) or self.body.active:
                 self._release_all(send_base_zero=self.base_zero_pending)
                 self.base_zero_pending = False
@@ -2961,6 +3061,9 @@ class RobotArmTeleopNode(Node):
             any_active = True
 
         if not base_allowed and self.collision_blocked:
+            if getattr(self, "head_base_follower", None) is not None:
+                self.head_base_follower.reset()
+                self.head_base_state = "collision_blocked"
             self._stop_base_if_pending()
         else:
             self._publish_base_command(
@@ -3165,6 +3268,11 @@ class RobotArmTeleopNode(Node):
                 "command_messages": self.generic_command_count,
                 "rearm_state": self.solver_rearm.state,
                 "hardware_ready": self.hardware_ready,
+            },
+            "head_base_pose": {
+                "enabled": getattr(self, "head_base_follower", None) is not None,
+                "state": getattr(self, "head_base_state", "idle"),
+                "target": self.head_base_follower.target if getattr(self, "head_base_follower", None) else None,
             },
             "stop_reason": self.stop_reason,
             "feedback_fresh": feedback_fresh,

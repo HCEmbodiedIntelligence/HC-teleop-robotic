@@ -208,9 +208,11 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 
 仿真底盘坐标约定为 `+X` 前进、`+Y` 向左，底盘消息顺序为 `[yaw, forward, lateral]`。PyBullet 窗口需要先点击获得焦点；按住 `Ctrl` 并拖动鼠标左键旋转视角，按住 `Ctrl` 并拖动中键平移视角，滚轮缩放。修改仿真相机或坐标配置后需要退出并重新运行脚本。
 
-按住左手柄中指 Grip 后，左主摇杆 Y 控制底盘前进/后退，X 控制左/右横移。摇杆平移直接使用左手柄 `Joy` 数据，不再依赖头显跟踪是否有效；松开 Grip、输入超时、急停或双臂与腰部回零时都会发布零命令。
+X1 默认开启 `body.head_pose_base.enabled`：按住左 Grip 时记录头显与底盘参考位姿，之后头显水平位移和偏航同时形成底盘相对位置、相对朝向目标；到位后停止。松开 Grip、输入/底盘反馈超时、急停或回零时停止并清除参考，下次按住重新定中心。头显高度与俯仰不驱动平面底盘，脖子仍独立跟随头显。开启此模式时左摇杆可独立平移（无需 Grip），推杆期间优先手动控制并清除头显底盘目标；回中后若仍按住左 Grip 则重新建立参考，否则停止，避免回拉。右摇杆和旧的朝向/伸展辅助不叠加到底盘命令；设为 `false` 恢复旧模式。
 
-X1 的 `./run.sh sim` 和 `./run.sh teleop` 共用 `arm_teleop.yaml` 中唯一的 `body` 配置。摇杆轴、方向、头显跟随、脖子与腰部参数不再随运行模式覆盖。`body.enabled` 和 `body.waist_joint_names` 统一决定是否启用腰部；当前默认关闭。启用时在此处设置 `enabled: true` 和 `waist_joint_names: [leg_1, leg_2, zhi]`。修改后重启控制器；从网页启动的仿真需点击“重启仿真”。仿真按时间积分速度命令，200 ms 未收到新底盘命令即停止。
+相对位姿模式使用 `/hc_teleop/base_pose`（`geometry_msgs/msg/PoseStamped`）真实反馈，Isaac 和 PyBullet 已发布此话题。位置使用固定 `world` 坐标，姿态 yaw 表示物理 base_link 前进轴朝向，PyBullet 与 Isaac 均使用 +X 前进、+Y 左移；硬件适配器也必须提供同样约定的实际定位反馈，无反馈时不会运动。`position_scale/yaw_scale` 控制位移/角度比例，`max_displacement/max_yaw` 限制每次参考的目标范围，现有三个 `max_*_velocity` 限速。修改后重启控制器；Isaac 同时需要重启场景加载进程以启用新反馈。
+
+X1 的 `./run.sh sim` 和 `./run.sh teleop` 共用 `arm_teleop.yaml` 中唯一的 `body` 配置。摇杆轴、方向、头显跟随、脖子与腰部参数不再随运行模式覆盖。`body.enabled` 和 `body.waist_joint_names` 统一决定是否启用腰部；当前默认开启，关节为 `[leg_1, leg_2, zhi]`，采用高度/俯仰双自由度控制。修改后重启控制器；从网页启动的仿真需点击“重启仿真”。仿真按时间积分速度命令，200 ms 未收到新底盘命令即停止。
 
 机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
 
@@ -220,4 +222,6 @@ X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TA
 
 新机器人优先从网页或 CLI 导入包含 URDF、YAML、Mesh 和 `arm_teleop.yaml` 的 ZIP 压缩包；也可手工在 `adapters/robots/<机器人名>/` 配置这些文件。默认选择来自 `middleware/config.yaml`，`HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 仍可作为启动时覆盖项。
 
-X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；`+Z`（前移）控制前倾、`-Z`（后移）控制后仰。俯仰输入采用位置增量，不使用头显低头/抬头的旋转角度。按住左 Grip 时建立参考，松开再按可重新定中心。
+X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；低头/抬头的俯仰旋转控制腰部俯仰（`pitch_source: orientation`）。水平位移交给底盘，不再重复驱动腰部。按住左 Grip 时建立参考，松开再按可重新定中心。
+
+腰部俯仰使用头显朝前方向相对水平面的仰俯角，并减去左 Grip 接管时的参考角。偏航转身（包括保持 Grip 转向）不会把俯仰转换成侧倾；升降仍使用竖直位移，`pitch_direction` 仅负责设备方向标定。
