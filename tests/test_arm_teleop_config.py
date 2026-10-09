@@ -38,10 +38,10 @@ class ArmTeleopConfigTests(unittest.TestCase):
         self.assertFalse(control["collision_check_intra_arm"])
         self.assertTrue(control["collision_check_inter_arm"])
         self.assertTrue(control["collision_check_arm_body"])
-        self.assertEqual(control["solver_reset_topic"], "/hc_teleop/solver_reset")
+        self.assertEqual(control["solver_reset_topic"], "/control/solver/reset")
         self.assertEqual(
             control["solver_reset_ack_topic"],
-            "/hc_teleop/solver_reset_ack",
+            "/status/solver/reset_ack",
         )
 
     def test_right_hand_angles_match_rs485_demo_motor_positions(self):
@@ -86,8 +86,8 @@ class ArmTeleopConfigTests(unittest.TestCase):
     def test_robot_profile_uses_only_standard_command_topics(self):
         control = self.load_config()["control"]
         self.assertNotIn("command_smoothing", control)
-        self.assertEqual(control["joint_state_topic"], "/hc_teleop/joint_states")
-        self.assertEqual(control["command_topic"], "/hc_teleop/joint_cmd_vr")
+        self.assertEqual(control["joint_state_topic"], "/observation/joint_states")
+        self.assertEqual(control["command_topic"], "/control/vr/joint_states")
 
     def test_disabled_waist_does_not_expose_controlled_joints(self):
         config = self.load_config()

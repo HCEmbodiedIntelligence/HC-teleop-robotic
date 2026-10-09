@@ -22,11 +22,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(value["ros"]["command_mux"]["source"], "vr")
         self.assertEqual(
             value["ros"]["command_mux"]["exoskeleton_topic"],
-            "/hc_teleop/joint_cmd_exoskeleton",
+            "/control/exoskeleton/joint_states",
         )
         self.assertEqual(
             value["ros"]["command_mux"]["control_source_topic"],
-            "/hc_teleop/control_source",
+            "/control/source",
         )
 
     def test_command_mux_requires_distinct_topics_and_known_source(self):
@@ -76,6 +76,18 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "ros.domain_id"):
             validate_config({"ros": {"domain_id": -1}})
 
+    def test_subscription_description_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.yaml")
+            value = store.load()
+            value["ros"]["subscriptions"] = [{
+                "topic": "/observation/test", "type": "sensor_msgs/msg/JointState",
+                "description": "左臂反馈：用于对比 <目标> 与实际动作", "outputs": ["record"]}]
+            store.save(value)
+            saved = ConfigStore(store.path).load()
+            self.assertEqual(saved["ros"]["subscriptions"][0]["description"],
+                             value["ros"]["subscriptions"][0]["description"])
+
     def test_store_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.yaml")
@@ -94,7 +106,7 @@ class ConfigTests(unittest.TestCase):
             item["topic"]: item for item in config["ros"]["subscriptions"]
         }
 
-        depth = subscriptions["/hc_teleop/camera_head/depth/compressed"]
+        depth = subscriptions["/observation/cameras/head/depth/compressed"]
         self.assertEqual(depth["type"], "sensor_msgs/msg/CompressedImage")
         self.assertTrue(depth["enabled"])
         self.assertIn("record", depth["outputs"])
@@ -107,7 +119,7 @@ class ConfigTests(unittest.TestCase):
             item["topic"]: item for item in config["ros"]["subscriptions"]
         }
 
-        for topic in ("/hc_teleop/joint_cmd", "/hc_teleop/joint_states"):
+        for topic in ("/action/joint_states", "/observation/joint_states"):
             item = subscriptions[topic]
             self.assertIn("websocket", item["outputs"])
             self.assertIn("record", item["outputs"])
@@ -121,11 +133,11 @@ class ConfigTests(unittest.TestCase):
             item["topic"]: item for item in config["ros"]["subscriptions"]
         }
 
-        self.assertTrue(subscriptions["/hc_teleop/camera_head/color/compressed"]["enabled"])
+        self.assertTrue(subscriptions["/observation/cameras/head/color/compressed"]["enabled"])
         self.assertNotIn("/io_teleop/camera_head/color", subscriptions)
         self.assertNotIn("/io_teleop/camera_head/depth", subscriptions)
         self.assertTrue(subscriptions["/cameras/eye/color"]["enabled"])
-        self.assertTrue(subscriptions["/hc_teleop/camera_overhead/color/compressed"]["enabled"])
+        self.assertTrue(subscriptions["/observation/cameras/overhead/color/compressed"]["enabled"])
         self.assertFalse(subscriptions["/cameras/Bfront/color"]["enabled"])
 
     def test_multiple_camera_streams_are_normalized(self):

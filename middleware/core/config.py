@@ -20,10 +20,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "command_mux": {
             "enabled": True,
             "source": "vr",
-            "vr_topic": "/hc_teleop/joint_cmd_vr",
-            "exoskeleton_topic": "/hc_teleop/joint_cmd_exoskeleton",
-            "output_topic": "/hc_teleop/joint_cmd",
-            "control_source_topic": "/hc_teleop/control_source",
+            "vr_topic": "/control/vr/joint_states",
+            "exoskeleton_topic": "/control/exoskeleton/joint_states",
+            "output_topic": "/action/joint_states",
+            "control_source_topic": "/control/source",
         },
         "subscriptions": [],
         "recording": {
@@ -44,12 +44,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "safety": {
         "enabled": True,
         "stop_on_startup": True,
-        "stop_topic": "/teleop/emergency_stop",
+        "stop_topic": "/control/emergency_stop",
     },
     "camera": {
         "enabled": False,
         "source": "ros",
-        "topic": "/hc_teleop/camera_head/color/compressed",
+        "topic": "/observation/cameras/head/color/compressed",
         "custom_topic": "",
         "streams": [],
         "width": 640,
@@ -155,7 +155,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         "event_topic",
     ):
         value["vr"].pop(obsolete, None)
-    value["safety"]["stop_topic"] = "/teleop/emergency_stop"
+    value["safety"]["stop_topic"] = "/control/emergency_stop"
 
     subscriptions = value["ros"].get("subscriptions", [])
     if not isinstance(subscriptions, list):
@@ -195,9 +195,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(
                 f"ros.subscriptions[{index}].event_max_hz must be >= 0"
             )
+        description = item.get("description", "")
+        if not isinstance(description, str) or len(description) > 500:
+            raise ConfigError(f"ros.subscriptions[{index}].description must be a string of at most 500 characters")
         normalized.append(
             {
                 "topic": topic,
+                "description": description,
                 "type": msg_type,
                 "enabled": bool(item.get("enabled", True)),
                 "outputs": outputs,
@@ -216,10 +220,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if isinstance(cam_config, dict):
         cam_config["enabled"] = bool(cam_config.get("enabled", False))
         cam_config["source"] = str(cam_config.get("source", "ros"))
-        cam_topic = str(cam_config.get("topic", "/hc_teleop/camera_head/color/compressed")).strip()
+        cam_topic = str(cam_config.get("topic", "/observation/cameras/head/color/compressed")).strip()
         if cam_topic and not cam_topic.startswith("/"):
             cam_topic = "/" + cam_topic
-        cam_config["topic"] = cam_topic or "/hc_teleop/camera_head/color/compressed"
+        cam_config["topic"] = cam_topic or "/observation/cameras/head/color/compressed"
         custom_topic = str(cam_config.get("custom_topic", "")).strip()
         if custom_topic and not custom_topic.startswith("/"):
             custom_topic = "/" + custom_topic
@@ -308,7 +312,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 subscription = next((s for s in normalized if s["topic"] == stream["topic"]), None)
                 if subscription is None:
                     subscription = {"topic": stream["topic"], "type": stream["type"],
-                                    "enabled": True, "outputs": [], "max_hz": 0.0, "event_max_hz": 0.0}
+                                    "enabled": True, "outputs": [], "max_hz": 0.0, "event_max_hz": 0.0, "description": ""}
                     normalized.append(subscription)
                 elif subscription["type"] != stream["type"]:
                     raise ConfigError(f"conflicting camera types for topic: {stream['topic']}")

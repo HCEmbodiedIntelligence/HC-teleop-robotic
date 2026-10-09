@@ -1,0 +1,26 @@
+schema: hc-teleop-hardware-interface/v2
+namespaces: [/action, /observation, /control, /status]
+default_ros_domain_id: 14
+hardware_publishes:
+  - {topic: /status/hardware/ready, type: std_msgs/msg/Bool, required: true, target_hz: 100, min_hz: 10}
+  - {topic: /observation/joint_states, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, min_hz: 50}
+  - {topic: /observation/hands/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, min_hz: 1}
+  - {topic: /observation/hands/triggers, type: geometry_msgs/msg/PoseArray, required: false, target_hz: 10, min_hz: 1}
+  - {topic: /status/base, type: std_msgs/msg/String, required: false, target_hz: 10, min_hz: 1}
+  - {topic: /observation/cameras/head/color/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+  - {topic: /observation/cameras/head/depth/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+  - {topic: /observation/cameras/overhead/color/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+  - {topic: /observation/cameras/d405_left/color/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+  - {topic: /observation/cameras/d405_left/depth/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+  - {topic: /observation/cameras/d405_right/color/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+  - {topic: /observation/cameras/d405_right/depth/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
+hardware_subscribes:
+  - {topic: /action/joint_states, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, timeout_ms: 150}
+  - {topic: /action/base/command, type: std_msgs/msg/Float64MultiArray, required: false, target_hz: 60, timeout_ms: 200}
+  - {topic: /action/left_hand/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, timeout_ms: 500}
+  - {topic: /action/right_hand/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, timeout_ms: 500}
+rules:
+  joint_names: Names in joint_states and joint_cmd must exactly match the imported URDF.
+  command_owner: Exactly one hardware-side node may publish to the physical joint command channel.
+  watchdog: Stop command output and hold safely after timeout; never replay a stale command.
+  images: Publish compressed color/depth for recording; raw streams are optional diagnostics only.

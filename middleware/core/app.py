@@ -54,6 +54,8 @@ class MiddlewareRuntime:
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
+        self._safety_sync_task = None
+        self._safety_reason = ""
         self._last_x_held = False
         self._last_y_held = False
         self._last_a_held = False
@@ -149,7 +151,7 @@ class MiddlewareRuntime:
                     "topic": base_camera_config.get(
                         "custom_topic", ""
                     ) or base_camera_config.get(
-                        "topic", "/hc_teleop/camera_head/color/compressed"
+                        "topic", "/observation/cameras/head/color/compressed"
                     ),
                     "enabled": base_camera_config.get("enabled", False),
                 }
@@ -169,12 +171,16 @@ class MiddlewareRuntime:
             active_topic = str(
                 stream_config.get("custom_topic", "")
                 or stream_config.get(
-                    "topic", "/hc_teleop/camera_head/color/compressed"
+                    "topic", "/observation/cameras/head/color/compressed"
                 )
             )
             self._cameras_by_topic.setdefault(active_topic, []).append(service)
 
         self.camera = next(iter(self.cameras.values()), None)
+        dataset_config = self.config["ros"].get("dataset_topics", {})
+        if dataset_config.get("enabled", False):
+            from .dataset_topics import load_joint_groups
+            dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
         self.ros = RosBridge(
             self.config["ros"],
             self.emit,
@@ -193,8 +199,16 @@ class MiddlewareRuntime:
         self._log("info", "runtime started")
         if self.config["safety"].get("stop_on_startup", True):
             self._on_safety_event("middleware startup")
+        self._safety_sync_task = asyncio.create_task(self._sync_safety_state())
 
     async def stop(self) -> None:
+        if self._safety_sync_task is not None:
+            self._safety_sync_task.cancel()
+            try:
+                await self._safety_sync_task
+            except asyncio.CancelledError:
+                pass
+            self._safety_sync_task = None
         if self.player is not None:
             await asyncio.to_thread(self.player.stop, False)
         if self.vr is not None:
@@ -504,21 +518,45 @@ class MiddlewareRuntime:
                 ["websocket", "udp"],
             )
 
+    def _send_safety_snapshot(self) -> None:
+        """Repair lost UDP events / headset reconnects without changing actuator state."""
+        if self.ros is None or self.vr is None:
+            return
+        status = self.ros.status()
+        if status.get("state") != "running":
+            return  # Unknown state must never clear the headset latch.
+        enabled = status.get("command_mux", {}).get("output_enabled")
+        if not isinstance(enabled, bool):
+            return
+        self.vr.send_event(envelope(
+            "safety_resume" if enabled else "safety_stop", "middleware",
+            {"reason": "middleware state synchronization" if enabled else
+             (self._safety_reason or "command output disabled; explicit resume required"),
+             "state_snapshot": True},
+        ))
+
+    async def _sync_safety_state(self) -> None:
+        while True:
+            self._send_safety_snapshot()
+            await asyncio.sleep(0.5)
+
     def _on_safety_event(self, reason: str) -> None:
+        self._safety_reason = reason
         if self.ros is not None and self.config["safety"].get("enabled", True):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
         self.emit(envelope("safety_stop", "middleware", {"reason": reason}), ["websocket", "udp"])
 
     def _on_safety_resume(self, reason: str) -> None:
+        self._safety_reason = ""
         if self.ros is not None:
-            stop_topic = self.config["safety"].get("stop_topic", "/teleop/emergency_stop")
+            stop_topic = self.config["safety"].get("stop_topic", "/control/emergency_stop")
             self.ros.set_command_output_enabled(True)
             self.ros.publish(stop_topic, "std_msgs/msg/Bool", {"data": False})
             source = self.config.get("ros", {}).get("command_mux", {}).get(
                 "source", "vr"
             )
             self.ros.publish(
-                "/teleop/arm/enabled",
+                "/control/teleop/enabled",
                 "std_msgs/msg/Bool",
                 {"data": source == "vr"},
             )
@@ -722,7 +760,7 @@ def create_app(store: ConfigStore) -> web.Application:
         runtime.config = saved
         accepted = runtime.ros.set_control_source(source)
         runtime.ros.publish(
-            "/teleop/arm/enabled",
+            "/control/teleop/enabled",
             "std_msgs/msg/Bool",
             {"data": source == "vr"},
         )

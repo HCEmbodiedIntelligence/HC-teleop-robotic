@@ -1,3 +1,43 @@
+const DEFAULT_TOPIC_DESCRIPTIONS={
+  "/status/hardware/ready": "硬件就绪信号，供控制器判断是否允许下发命令",
+  "/status/teleop": "遥操作状态，包括离合、反馈有效性及控制状态",
+  "/tf": "各坐标系之间的动态变换，用于位姿转换与回放",
+  "/clock": "仿真时钟，用于区分仿真时间与实际录制时间",
+  "/vrdata": "原始头显和双手位姿、按键、跟踪状态及 VR 时间戳",
+  "/observation/base/pose": "底盘实际位置与朝向，用于轨迹和移动距离分析",
+  "/action/base/velocity": "底盘命令的结构化速度：前向、横向及偏航角速度",
+  "/observation/headset/pose": "头显在 VR 跟踪坐标系中的位姿，不是机器人头部反馈",
+  "/action/base/command": "最终底盘速度命令，顺序为偏航、前向、横向",
+  "/observation/joint_states": "机器人整机关节反馈",
+  "/action/joint_states": "最终下发给机器人的整机关节目标",
+  "/control/solver/joint_targets": "逆解控制器输出的关节目标，尚未经过最终命令仲裁",
+  "/control/solver/ee_targets": "发送到求解器任务坐标系的末端目标位姿",
+  "/action/ee_poses": "双臂末端目标位姿，顺序为右臂、左臂",
+  "/observation/ee_poses": "本地模型计算的双臂末端反馈位姿，顺序为右臂、左臂",
+  "/observation/left_arm/joint_states": "左机械臂实际关节反馈，按关节名称排列",
+  "/action/left_arm/joint_states": "左机械臂最终下发的关节目标，按关节名称排列",
+  "/observation/left_arm/ee_pose": "左臂末端反馈位姿，由控制节点本地模型计算",
+  "/action/left_arm/ee_pose": "左臂末端目标位姿，与末端反馈使用相同参考坐标系",
+  "/action/left_hand/joint_states": "左手夹爪或灵巧手的关节控制目标",
+  "/observation/right_arm/joint_states": "右机械臂实际关节反馈，按关节名称排列",
+  "/action/right_arm/joint_states": "右机械臂最终下发的关节目标，按关节名称排列",
+  "/observation/right_arm/ee_pose": "右臂末端反馈位姿，由控制节点本地模型计算",
+  "/action/right_arm/ee_pose": "右臂末端目标位姿，与末端反馈使用相同参考坐标系",
+  "/action/right_hand/joint_states": "右手夹爪或灵巧手的关节控制目标",
+  "/observation/waist/joint_states": "腰部实际关节反馈，X1 对应 leg_1、leg_2、zhi",
+  "/action/waist/joint_states": "腰部最终关节控制目标，X1 对应 leg_1、leg_2、zhi",
+  "/observation/cameras/head/color/compressed": "头部相机彩色图像压缩流，用于观察与录制",
+  "/observation/cameras/head/depth/compressed": "头部相机深度图像压缩流，用于观察与录制",
+  "/observation/cameras/overhead/color/compressed": "俯视相机彩色图像压缩流，用于观察与录制",
+  "/observation/cameras/overhead/depth/compressed": "俯视相机深度图像压缩流，用于观察与录制",
+  "/observation/cameras/d405_left/color/compressed": "左侧 D405相机彩色图像压缩流，用于观察与录制",
+  "/observation/cameras/d405_left/depth/compressed": "左侧 D405相机深度图像压缩流，用于观察与录制",
+  "/observation/cameras/d405_right/color/compressed": "右侧 D405相机彩色图像压缩流，用于观察与录制",
+  "/observation/cameras/d405_right/depth/compressed": "右侧 D405相机深度图像压缩流，用于观察与录制",
+  "/cameras/eye/color": "Isaac 头部相机原始彩色图像，用于头显投射与录制",
+  "/cameras/Bfront/color": "Bfront 相机原始彩色图像",
+  "/cameras/stereo/color/compressed": "双目相机拼接彩色压缩图像，用于双目观察与录制"
+};
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 let config = null;
@@ -123,10 +163,9 @@ function renderCommandMux(ros) {
   for(const button of $$('.source-switch button')) {
     button.classList.toggle('active',button.dataset.source===source);
   }
-  if($('#homeButton'))$('#homeButton').disabled=source!=='vr';
-  setText('#vrCommandTopic',mux.vr_topic||'/hc_teleop/joint_cmd_vr');
-  setText('#exoCommandTopic',mux.exoskeleton_topic||'/hc_teleop/joint_cmd_exoskeleton');
-  setText('#outputCommandTopic',mux.output_topic||'/hc_teleop/joint_cmd');
+  setText('#vrCommandTopic',mux.vr_topic||'/control/vr/joint_states');
+  setText('#exoCommandTopic',mux.exoskeleton_topic||'/control/exoskeleton/joint_states');
+  setText('#outputCommandTopic',mux.output_topic||'/action/joint_states');
   setText('#muxForwarded',String(mux.forwarded||0));
   const sourceStatus=(name,label)=>{
     const age=mux.last_received_age?.[name];
@@ -180,12 +219,55 @@ function updateJointMonitor(event,kind) {
   renderJointMonitor();
 }
 
+let safetyOutputEnabled=null;
+let safetyRequestPending=false;
+let safetyStatusReceivedAt=0;
+
+function renderSafetyButton(ros) {
+  const button=$('#stopButton');
+  if(!button)return;
+  const enabled=ros?.command_mux?.output_enabled;
+  safetyOutputEnabled=ros?.state==='running'&&typeof enabled==='boolean'?enabled:null;
+  safetyStatusReceivedAt=Date.now();
+  button.disabled=safetyRequestPending||safetyOutputEnabled===null;
+  button.textContent=safetyRequestPending?'正在处理…':safetyOutputEnabled===null?'急停状态未知':safetyOutputEnabled?'急停':'解除急停';
+  button.className=safetyOutputEnabled===false?'primary':'danger';
+  button.title='状态来自中间件命令输出开关，不代表实体硬件急停按钮状态';
+}
+
+async function toggleSafety() {
+  if(safetyRequestPending)return;
+  if(safetyOutputEnabled===null||Date.now()-safetyStatusReceivedAt>3000) {
+    renderSafetyButton({});
+    try {renderStatus(await api('/api/status'));}catch(error){toast(error.message,true);}
+    return;
+  }
+  const resume=safetyOutputEnabled===false;
+  safetyRequestPending=true;
+  const button=$('#stopButton'); button.disabled=true; button.textContent='正在处理…';
+  try {
+    await api(resume?'/api/safety/resume':'/api/safety/stop',{
+      method:'POST',body:JSON.stringify({reason:resume?'dashboard safety resume':'dashboard emergency stop'})});
+  } catch(error) {toast(error.message,true);}
+  finally {
+    // Never infer the new state from the click or a successful POST.
+    try {
+      const status=await api('/api/status');
+      safetyRequestPending=false;
+      renderStatus(status);
+    } catch(error) {
+      safetyRequestPending=false; renderSafetyButton({}); toast(error.message,true);
+    }
+  }
+}
+
 function renderStatus(data) {
   const ros=data.ros||{}, vr=data.vr||{}, cam=data.camera||{};
   const domain = ros.domain_id ?? config?.ros?.domain_id ?? 0;
   setState('#rosState',ros.state);
   setText('#rosMeta',`${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`);
   renderCommandMux(ros);
+  renderSafetyButton(ros);
   setState('#vrState', vr.state);
   setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
   renderCameraStatus(cam,ros.topic_health||{});
@@ -215,12 +297,12 @@ function renderStatus(data) {
   }
   if (ros.topic_health) {
     latestTopicHealth = ros.topic_health;
-    const commandInfo=messageState(ros.topic_health['/hc_teleop/joint_cmd']);
-    const feedbackInfo=messageState(ros.topic_health['/hc_teleop/joint_states']);
+    const commandInfo=messageState(ros.topic_health['/action/joint_states']);
+    const feedbackInfo=messageState(ros.topic_health['/observation/joint_states']);
     setState('#jointCommandState',commandInfo[0]);
-    setText('#jointCommandMeta',commandInfo[1]+' · /hc_teleop/joint_cmd');
+    setText('#jointCommandMeta',commandInfo[1]+' · /action/joint_states');
     setState('#jointFeedbackState',feedbackInfo[0]);
-    setText('#jointFeedbackMeta',feedbackInfo[1]+' · /hc_teleop/joint_states');
+    setText('#jointFeedbackMeta',feedbackInfo[1]+' · /observation/joint_states');
     updateReadinessBanner();
     if (window.location.hash === '#topics' || (!window.location.hash && $('#topics')?.classList.contains('active'))) {
       renderStandardTopics();
@@ -319,18 +401,18 @@ function connectWebSocket() {
   ws=new WebSocket(`${scheme}://${location.host}/ws`);
   ws.onopen=()=>{
     $('#connectionDot').className='online';
-    $('#connectionText').textContent='实时状态已连接';
+    $('#connectionText').textContent='网页已连接中间件';
   };
   ws.onmessage=event=>{
     try {
       const value=JSON.parse(event.data);
       if(value.kind==='connected')renderStatus(value.payload);
       else if(value.kind==='vr_pose')queueVrPose(value.payload||{});
-      else if(value.kind==='ros_message'&&value.topic==='/teleop/arm/status')renderTeleopStatus(value);
-      else if(value.kind==='ros_message'&&value.topic==='/hc_teleop/joint_cmd')updateJointMonitor(value,'command');
-      else if(value.kind==='ros_message'&&value.topic==='/hc_teleop/joint_states')updateJointMonitor(value,'feedback');
+      else if(value.kind==='ros_message'&&value.topic==='/status/teleop')renderTeleopStatus(value);
+      else if(value.kind==='ros_message'&&value.topic==='/action/joint_states')updateJointMonitor(value,'command');
+      else if(value.kind==='ros_message'&&value.topic==='/observation/joint_states')updateJointMonitor(value,'feedback');
       else if(value.kind==='control_source')api('/api/status').then(renderStatus).catch(()=>{});
-      else if(String(value.kind||'').startsWith('replay_') || value.kind==='safety_resume') {
+      else if(String(value.kind||'').startsWith('replay_') || value.kind==='safety_resume' || value.kind==='safety_stop') {
         api('/api/status').then(renderStatus).catch(()=>{});
         if(value.payload?.message) toast(value.payload.message, value.kind==='replay_error');
       }
@@ -368,7 +450,7 @@ function cameraStreams() {
   if(existing.length>=4)return existing;
   const defaults=headsetCameraSlots.map(([id,name],index)=>({
     id,name,enabled:index===0&&Boolean(camera.enabled),
-    topic:index===0?(camera.custom_topic||camera.topic||'/hc_teleop/camera_head/color/compressed'):`/hc_teleop/camera_${id}/color/compressed`,
+    topic:index===0?(camera.custom_topic||camera.topic||'/observation/cameras/head/color/compressed'):`/observation/cameras/${id}/color/compressed`,
     width:camera.width||640,height:camera.height||400,fps:camera.fps||30,codec:camera.codec||'H264',
   }));
   return [...existing,...defaults.filter(item=>!existing.some(stream=>stream.id===item.id))].slice(0,4);
@@ -464,7 +546,7 @@ function customRecordingRules() {
   return (config?.ros?.subscriptions||[]).filter(item=>(item.outputs||[]).includes('record') && !standard.has(item.topic));
 }
 
-function setTopicRecording(topic,type,enabled,maxHz=0) {
+function setTopicRecording(topic,type,enabled,maxHz=0,description=undefined) {
   const subscriptions=config.ros.subscriptions||(config.ros.subscriptions=[]);
   let item=subscriptions.find(value=>value.topic===topic);
   if(enabled) {
@@ -472,6 +554,7 @@ function setTopicRecording(topic,type,enabled,maxHz=0) {
       item={enabled:true,topic,type,max_hz:Number(maxHz)||0,outputs:[]};
       subscriptions.push(item);
     }
+    if(description!==undefined)item.description=description;
     item.type=type||item.type;
     item.enabled=true;
     item.max_hz=Number(maxHz)||0;
@@ -571,6 +654,51 @@ function updateReadinessBanner() {
   }
 }
 
+let editingRecordingItem=null;
+
+function openRecordingEditor(item=null) {
+  editingRecordingItem=item;
+  $('#recordingEditTitle').textContent=item?'修改自定义消息':'添加自定义消息';
+  $('#recordTopic').value=item?.topic||'';
+  $('#recordDescription').value=item?.description||'';
+  $('#recordMaxHz').value=item?String(item.max_hz||0):'';
+  renderRecordTypeOptions(item?.type||'');
+  if(!item)$('#recordType').value='';
+  $('#recordingEditError').textContent='';
+  $('#recordingEditDialog').showModal();
+}
+
+function saveRecordingEditor(event) {
+  event.preventDefault();
+  const topic=$('#recordTopic').value.trim(), type=$('#recordType').value;
+  const maxHz=Number($('#recordMaxHz').value), description=$('#recordDescription').value.trim();
+  const fail=message=>{$('#recordingEditError').textContent=message;};
+  if(!topic.startsWith('/')||/\s/.test(topic))return fail('消息名称必须以 / 开头，不能包含空格');
+  if(!type)return fail('请选择消息类型');
+  if(!Number.isFinite(maxHz)||maxHz<0)return fail('限频必须是非负数');
+  const subscriptions=config.ros.subscriptions||(config.ros.subscriptions=[]);
+  if(subscriptions.some(item=>item!==editingRecordingItem&&item.topic===topic))return fail('该消息已存在，请修改已有条目');
+  if(editingRecordingItem) {
+    const oldTopic=editingRecordingItem.topic;
+    const streams=config.camera?.streams||[];
+    if(streams.some(stream=>(stream.custom_topic||stream.topic)===oldTopic)&&
+       !['sensor_msgs/msg/Image','sensor_msgs/msg/CompressedImage'].includes(type))
+      return fail('该话题用于相机投射，消息类型必须是图像');
+    Object.assign(editingRecordingItem,{topic,type,max_hz:maxHz,description});
+    for(const stream of streams) {
+      if(stream.topic===oldTopic)stream.topic=topic;
+      if(stream.custom_topic===oldTopic)stream.custom_topic=topic;
+    }
+    // Preserve pending camera choices when refreshing the topic selector.
+    document.querySelectorAll('[data-camera-select]').forEach(select=>{
+      if(select.value===oldTopic)select.options[select.selectedIndex].value=topic;
+    });
+    renderRecordingRules(); renderStandardTopics(); renderCameraTopicOptions();
+  } else setTopicRecording(topic,type,true,maxHz,description);
+  $('#recordingEditDialog').close();
+  toast('已更新；点击“保存录制配置”写入文件');
+}
+
 function renderRecordingRules() {
   const body=$('#recordingRows');
   if(!body||!config)return;
@@ -582,22 +710,24 @@ function renderRecordingRules() {
     enabled.onchange=()=>{item.enabled=enabled.checked;};
     enabledCell.append(enabled);
     const topic=document.createElement('td'), topicCode=document.createElement('code');
-    topicCode.textContent=item.topic; topic.append(topicCode);
+    topicCode.textContent=item.topic; topicCode.title=item.topic; topic.append(topicCode);
+    const descriptionCell=document.createElement('td');
+    descriptionCell.textContent=item.description||'—';
     const type=document.createElement('td'); type.textContent=item.type;
 
     const { rateCell, stdCell } = renderTopicHealthBadge(item.topic, Number(item.min_hz)||5, Number(item.target_hz)||10);
 
-    const rateCellInput=document.createElement('td'), rate=document.createElement('input');
-    rate.type='number'; rate.min='0'; rate.value=item.max_hz||0;
-    rate.onchange=()=>{item.max_hz=Number(rate.value)||0;}; rateCellInput.append(rate);
-    const action=document.createElement('td'), remove=document.createElement('button');
+    const rateCellInput=document.createElement('td'); rateCellInput.textContent=item.max_hz||0;
+    const action=document.createElement('td'), edit=document.createElement('button'), remove=document.createElement('button');
+    edit.textContent='修改'; edit.onclick=()=>openRecordingEditor(item);
     remove.className='remove'; remove.textContent='删除';
     remove.onclick=()=>setTopicRecording(item.topic,item.type,false);
-    action.append(remove); row.append(enabledCell,topic,type,rateCell,stdCell,rateCellInput,action); body.append(row);
+    const actions=document.createElement('div'); actions.className='recording-row-actions';
+    edit.type=remove.type='button'; actions.append(edit,remove); action.append(actions); row.append(enabledCell,topic,descriptionCell,type,rateCell,stdCell,rateCellInput,action); body.append(row);
   }
   if(!body.children.length) {
     const row=document.createElement('tr'), cell=document.createElement('td');
-    cell.colSpan=7; cell.textContent='暂无自定义录制消息，可从下方添加。'; row.append(cell); body.append(row);
+    cell.colSpan=8; cell.textContent='暂无自定义录制消息，可从下方添加。'; row.append(cell); body.append(row);
   }
 }
 
@@ -637,7 +767,7 @@ function renderStandardTopics() {
     const purpose=document.createElement('td');
     purpose.textContent=labels[key]||key;
     const value=document.createElement('td'), code=document.createElement('code');
-    code.textContent=topic;
+    code.textContent=topic; code.title=topic;
     value.append(code);
     const typeCell=document.createElement('td');
     typeCell.textContent=type;
@@ -662,7 +792,7 @@ function renderConfigInterface() {
     const purpose=document.createElement('td');
     purpose.textContent=labels[key]||key;
     const value=document.createElement('td'), code=document.createElement('code');
-    code.textContent=topic;
+    code.textContent=topic; code.title=topic;
     value.append(code);
     const typeCell=document.createElement('td');
     typeCell.textContent=standardTopicTypes[key]||'std_msgs/msg/String';
@@ -743,22 +873,26 @@ async function loadProfiles(preselect='') {
   }
 }
 
-function renderRecordTypeOptions(selectedType='') {
+function renderRecordTypeOptions(selectedType=undefined) {
   const select=$('#recordType');
   if(!select)return;
-  const current=selectedType||select.value||STANDARD_ROS_TYPES[0];
+  const current=selectedType===undefined?(select.value||''):selectedType;
   const types=new Set(STANDARD_ROS_TYPES);
+  if(current)types.add(current);
   for(const item of discoveredTopics) {
     for(const type of item.types||[])types.add(type);
   }
   select.textContent='';
+  const placeholder=document.createElement('option');
+  placeholder.value=''; placeholder.textContent='请选择消息类型';
+  select.append(placeholder);
   for(const type of [...types].sort()) {
     const option=document.createElement('option');
     option.value=type;
     option.textContent=type;
     select.append(option);
   }
-  if(types.has(current))select.value=current;
+  select.value=types.has(current)?current:'';
 }
 
 async function loadTopics() {
@@ -1112,6 +1246,9 @@ async function init() {
   window.addEventListener('hashchange',route);
   try {
     config=await api('/api/config');
+    for(const item of config.ros?.subscriptions||[]) {
+      if(!item.description&&DEFAULT_TOPIC_DESCRIPTIONS[item.topic])item.description=DEFAULT_TOPIC_DESCRIPTIONS[item.topic];
+    }
     renderConfig();
     renderRecordTypeOptions();
     setText('#cameraConfigError','');
@@ -1119,7 +1256,7 @@ async function init() {
   try {profilesData=await api('/api/robot-profiles');renderProfiles();renderStandardTopics();renderRecordingRules();}
   catch(error){toast(error.message,true);}
   connectWebSocket();
-  const update=async()=>{try{renderStatus(await api('/api/status'));}catch(_){} };
+  const update=async()=>{try{renderStatus(await api('/api/status'));}catch(_){renderSafetyButton({});} };
   update();
   setInterval(update,1000);
   $('#refreshTopics').onclick=loadTopics;
@@ -1127,16 +1264,9 @@ async function init() {
     const match=discoveredTopics.find(item=>item.topic===$('#recordTopic').value.trim());
     if(match?.types?.length)renderRecordTypeOptions(match.types[0]);
   };
-  $('#addRecording').onclick=()=>{
-    const topic=$('#recordTopic').value.trim();
-    const type=$('#recordType').value.trim();
-    const maxHz=Number($('#recordMaxHz').value)||0;
-    if(!topic.startsWith('/'))return toast('消息名称必须以 / 开头',true);
-    if(!type)return toast('请选择有效的消息类型',true);
-    setTopicRecording(topic,type,true,maxHz);
-    $('#recordTopic').value=''; $('#recordMaxHz').value='0';
-    toast('已添加；点击“保存录制配置”写入文件');
-  };
+  $('#addRecording').onclick=()=>openRecordingEditor();
+  $('#closeRecordingEdit').onclick=$('#cancelRecordingEdit').onclick=()=>$('#recordingEditDialog').close();
+  $('#recordingEditForm').onsubmit=saveRecordingEditor;
   $('#refreshProfiles').onclick=()=>loadProfiles($('#robotProfileSelect').value);
   $('#robotProfileSelect').onchange=renderProfileDetail;
   $('#deleteProfile').onclick=async()=>{
@@ -1408,31 +1538,7 @@ async function init() {
     };
   }
 
-  if($('#stopButton')) {
-    $('#stopButton').onclick=async()=>{
-      if(!confirm('确认向机器人发送急停信号？'))return;
-      try {
-        await api('/api/safety/stop',{method:'POST',body:JSON.stringify({reason:'dashboard emergency stop'})});
-        toast('急停信号已发送');
-      }catch(error){toast(error.message,true);}
-    };
-  }
-  if($('#resumeButton')) {
-    $('#resumeButton').onclick=async()=>{
-      try {
-        await api('/api/safety/resume',{method:'POST',body:JSON.stringify({reason:'dashboard safety resume'})});
-        toast('急停已解除，当前控制源的关节命令输出已恢复');
-      }catch(error){toast(error.message,true);}
-    };
-  }
-  if($('#homeButton')) {
-    $('#homeButton').onclick=async()=>{
-      try {
-        await api('/api/teleop/home',{method:'POST'});
-        toast('双臂与腰部开始平滑回零至标准初始姿态...');
-      }catch(error){toast(error.message,true);}
-    };
-  }
+  if($('#stopButton'))$('#stopButton').onclick=toggleSafety;
   const setControlSource=async source=>{
     try {
       const label=source==='exoskeleton'?'外骨骼':'VR / IK';

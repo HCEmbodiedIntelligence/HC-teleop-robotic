@@ -23,3 +23,22 @@
 #simulationError {color:var(--muted);white-space:pre-wrap;}
 
 .camera-topic-table select{width:100%;min-width:220px}.camera-topic-table .camera-status{min-width:230px;white-space:normal;font-size:12px}.camera-active-topic{color:var(--muted);overflow-wrap:anywhere;margin-top:6px}
+
+.recording-row-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}.recording-row-actions button{box-sizing:border-box;min-width:56px;height:36px;padding:6px 12px;font-size:13px;line-height:20px;margin:0}
+
+/* Fixed column geometry: live values must not participate in table sizing. */
+.stable-topic-table{table-layout:fixed;width:100%;min-width:1480px}
+.stable-topic-table th,.stable-topic-table td{vertical-align:middle;overflow:hidden}
+.stable-topic-table td code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stable-topic-table .topic-rate{display:inline-block;width:10ch;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.stable-topic-table .topic-target-rate,.stable-topic-table .topic-status-badge{white-space:nowrap;font-variant-numeric:tabular-nums}
+.stable-topic-table .topic-status-badge{width:156px;overflow:hidden}
+.custom-topic-table th:nth-child(5),.custom-topic-table td:nth-child(5),
+.standard-topic-table th:nth-child(5),.standard-topic-table td:nth-child(5){text-align:right}
+.custom-topic-table td:nth-child(3){overflow-wrap:anywhere;line-height:1.5}
+.custom-topic-table td:nth-child(4),.standard-topic-table td:nth-child(4){overflow-wrap:anywhere}
+.custom-topic-table td:nth-child(7){white-space:nowrap;font-variant-numeric:tabular-nums}
+.camera-topic-table{table-layout:fixed;width:100%;min-width:850px}
+.camera-topic-table th:nth-child(1){width:100px}
+.camera-topic-table th:nth-child(2){width:48%}
+.camera-topic-table .camera-status{font-variant-numeric:tabular-nums}

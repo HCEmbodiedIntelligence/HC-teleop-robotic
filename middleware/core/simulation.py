@@ -143,9 +143,8 @@ class SimulationService:
         if options['debug_joints']:
             command.append('--init_debug')
         command += ['--ros-args']
-        for topic in ('joint_states','joint_cmd','target_joint_from_vr','target_finger_joints',
-                      'target_ee_poses','target_gripper_status','target_base_move','hardware_ready'):
-            command += ['-r', f'/io_teleop/{topic}:=/hc_teleop/{topic}']
+        for topic, public_topic in {'joint_states': '/observation/joint_states', 'joint_cmd': '/action/joint_states', 'target_ee_poses': '/action/ee_poses', 'target_base_move': '/action/base/command', 'hardware_ready': '/status/hardware/ready', 'target_finger_joints': '/action/hands/joint_targets', 'target_gripper_status': '/action/hands/gripper_status', 'target_joint_from_vr': '/control/solver/target_joint_from_vr'}.items():
+            command += ['-r', f'/io_teleop/{topic}:={public_topic}']
         try:
             await self._spawn('PyBullet', command, env)
             if options['with_control']:

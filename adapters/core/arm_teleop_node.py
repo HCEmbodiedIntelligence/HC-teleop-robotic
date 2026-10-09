@@ -272,7 +272,7 @@ class RobotArmTeleopNode(Node):
         )
         self.solver_reset_pub = self.create_publisher(
             Bool,
-            self.control.get("solver_reset_topic", "/hc_teleop/solver_reset"),
+            self.control.get("solver_reset_topic", "/control/solver/reset"),
             latest_reliable_qos,
         )
         self.solver_reset_ack_sub = None
@@ -283,13 +283,13 @@ class RobotArmTeleopNode(Node):
             PoseArray,
             self.control.get(
                 "controller_target_pose_topic",
-                "/hc_teleop/controller_target_ee_poses",
+                "/control/solver/ee_targets",
             ),
             latest_reliable_qos,
         )
         self.actual_pub = self.create_publisher(
             PoseArray,
-            self.control.get("actual_pose_topic", "/hc_teleop/actual_ee_poses"),
+            self.control.get("actual_pose_topic", "/observation/ee_poses"),
             latest_reliable_qos,
         )
         self.base_pub = self.create_publisher(
@@ -298,11 +298,11 @@ class RobotArmTeleopNode(Node):
         if self.head_base_follower is not None:
             self.base_pose_sub = self.create_subscription(
                 PoseStamped,
-                pose_base_config.get("feedback_topic", "/hc_teleop/base_pose"),
+                pose_base_config.get("feedback_topic", "/observation/base/pose"),
                 self._base_pose_callback, qos_profile_sensor_data,
             )
         self.head_visualization_pub = self.create_publisher(
-            PoseArray, "/hc_teleop/head_tracking_poses", latest_reliable_qos
+            PoseArray, "/status/head/tracking_poses", latest_reliable_qos
         )
         self.status_pub = self.create_publisher(
             String, self.control["status_topic"], 10
@@ -322,14 +322,14 @@ class RobotArmTeleopNode(Node):
         if self.external_ik:
             self.create_subscription(
                 JointState,
-                self.control.get("solver_topic", "/hc_teleop/sol_q"),
+                self.control.get("solver_topic", "/status/solver/joint_states"),
                 self._solver_callback,
                 latest_reliable_qos,
             )
             self.solver_reset_ack_sub = self.create_subscription(
                 Header,
                 self.control.get(
-                    "solver_reset_ack_topic", "/hc_teleop/solver_reset_ack"
+                    "solver_reset_ack_topic", "/status/solver/reset_ack"
                 ),
                 self._solver_reset_ack_callback,
                 latest_reliable_qos,
@@ -337,7 +337,7 @@ class RobotArmTeleopNode(Node):
             self.create_subscription(
                 JointState,
                 self.control.get(
-                    "generic_command_topic", "/hc_teleop/joint_cmd_arm"
+                    "generic_command_topic", "/control/solver/joint_targets"
                 ),
                 self._generic_command_callback,
                 latest_reliable_qos,
@@ -355,7 +355,7 @@ class RobotArmTeleopNode(Node):
             10,
         )
         self.hardware_ready_topic = self.control.get(
-            "hardware_ready_topic", "/hc_teleop/hardware_ready"
+            "hardware_ready_topic", "/status/hardware/ready"
         )
         self.create_subscription(
             Bool,

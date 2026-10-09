@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=11-camera-select">
+  <link rel="stylesheet" href="/static/styles.css?v=14-safety-toggle">
 </head>
 <body>
   <aside class="sidebar">
@@ -15,16 +15,14 @@
       <a href="#datasets" data-page="datasets">数据集管理</a>
       <a href="#config" data-page="config">系统配置</a>
     </nav>
-    <div class="connection"><i id="connectionDot"></i><span id="connectionText">正在连接</span></div>
+    <div class="connection" title="仅表示网页与中间件连接正常；消息是否到达请查看话题实时频率。"><i id="connectionDot"></i><span id="connectionText">正在连接中间件</span></div>
   </aside>
 
   <main>
     <header>
       <div><p class="eyebrow">ROBOT CONTROL MONITOR</p><h1 id="pageTitle">状态监控</h1></div>
       <div style="display: flex; gap: 10px; align-items: center;">
-        <button class="secondary" id="homeButton" title="双臂与腰部平滑回零至标准初始姿态">双臂与腰部回零</button>
-        <button id="resumeButton">解除急停</button>
-        <button class="danger" id="stopButton">急停</button>
+        <button class="danger" id="stopButton" disabled>获取急停状态…</button>
       </div>
     </header>
 
@@ -32,8 +30,8 @@
       <div class="metrics">
         <article><label>ROS 2</label><strong id="rosState">--</strong><span id="rosMeta">等待数据</span></article>
         <article><label>当前控制源</label><strong id="controlSourceState">--</strong><span id="controlSourceMeta">等待选择器</span></article>
-        <article><label>关节命令</label><strong id="jointCommandState">--</strong><span id="jointCommandMeta">等待 /hc_teleop/joint_cmd</span></article>
-        <article><label>关节反馈</label><strong id="jointFeedbackState">--</strong><span id="jointFeedbackMeta">等待 /hc_teleop/joint_states</span></article>
+        <article><label>关节命令</label><strong id="jointCommandState">--</strong><span id="jointCommandMeta">等待 /action/joint_states</span></article>
+        <article><label>关节反馈</label><strong id="jointFeedbackState">--</strong><span id="jointFeedbackMeta">等待 /observation/joint_states</span></article>
       </div>
       <div class="grid two">
         <article class="panel source-panel">
@@ -42,7 +40,7 @@
             <button id="sourceVr" data-source="vr"><strong>VR / IK</strong><small id="vrSourceStatus">未检测</small></button>
             <button id="sourceExoskeleton" data-source="exoskeleton"><strong>外骨骼</strong><small id="exoSourceStatus">未检测</small></button>
           </div>
-          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/hc_teleop/joint_cmd_vr</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/hc_teleop/joint_cmd_exoskeleton</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/hc_teleop/joint_cmd</code></dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
+          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
         </article>
         <article class="panel system-panel">
           <div class="panel-title"><div><h2>链路状态</h2><p>VR、控制器、相机和网页连接状态</p></div><span id="vrPeer" class="tag">VR 未连接</span></div>
@@ -94,20 +92,17 @@
         <div class="topic-section">
           <h3>机器人标准接口话题 (Profile Standard Topics)</h3>
           <p>勾选需要录制的通用机器人控制与反馈话题，系统将实时监测其消息连通性与接收频率</p>
-          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>用途</th><th>Topic</th><th>消息类型</th><th>实时频率</th><th>标准要求</th><th>检测状态</th></tr></thead><tbody id="standardTopicRows"></tbody></table></div>
+          <div class="table-wrap"><table class="stable-topic-table standard-topic-table"><colgroup><col style="width:80px"><col style="width:150px"><col style="width:28%"><col><col style="width:110px"><col style="width:180px"><col style="width:180px"></colgroup><thead><tr><th>是否录制</th><th>用途</th><th>Topic</th><th>消息类型</th><th>实时频率</th><th>标准要求</th><th>检测状态</th></tr></thead><tbody id="standardTopicRows"></tbody></table></div>
         </div>
 
         <div class="topic-section" style="margin-top:20px;">
           <h3>自定义录制规则</h3>
           <p>已添加的自定义消息录制列表</p>
-          <div class="table-wrap"><table><thead><tr><th>是否录制</th><th>消息名称</th><th>消息类型</th><th>实时频率</th><th>标准要求</th><th>限频 Hz</th><th></th></tr></thead><tbody id="recordingRows"></tbody></table></div>
+          <div class="table-wrap"><table class="stable-topic-table custom-topic-table"><colgroup><col style="width:80px"><col style="width:27%"><col><col style="width:220px"><col style="width:110px"><col style="width:180px"><col style="width:80px"><col style="width:152px"></colgroup><thead><tr><th>是否录制</th><th>消息名称</th><th>备注</th><th>消息类型</th><th>实时频率</th><th>标准要求</th><th>限频 Hz</th><th></th></tr></thead><tbody id="recordingRows"></tbody></table></div>
+          <button id="addRecording" type="button" aria-label="添加自定义消息" style="margin-top:12px;">＋ 添加消息</button>
         </div>
       </article>
-      <article class="panel publish-panel">
-        <div class="panel-title"><div><h2>添加自定义录制消息</h2><p>从当前 ROS_DOMAIN_ID 发现话题，或选择标准 ROS 2 消息类型</p></div><button id="refreshTopics">刷新 ROS Graph</button></div>
-        <div class="form-grid"><label>消息名称<input id="recordTopic" list="rosTopicOptions" placeholder="/hc_teleop/joint_states"><datalist id="rosTopicOptions"></datalist></label><label>消息类型<select id="recordType"></select></label><label>最大录制频率（0 = 不限）<input id="recordMaxHz" type="number" min="0" value="0"></label></div>
-        <button class="primary" id="addRecording">添加自定义消息</button>
-      </article>
+
     </section>
 
     <section class="page hidden" id="datasets">
@@ -217,12 +212,25 @@
       </article>
     </section>
 
+    <dialog id="recordingEditDialog">
+      <form id="recordingEditForm">
+        <div class="dialog-title"><h2 id="recordingEditTitle">添加自定义消息</h2><button type="button" class="dialog-close" id="closeRecordingEdit" aria-label="关闭">×</button></div>
+        <div class="form-grid">
+          <label>消息名称<input id="recordTopic" list="rosTopicOptions" required placeholder="/topic"><datalist id="rosTopicOptions"></datalist></label>
+          <label>消息类型<select id="recordType" required></select></label>
+          <label>备注<input id="recordDescription" maxlength="500" placeholder="描述消息用途"></label>
+          <label>限频 Hz（0 = 不限）<input id="recordMaxHz" type="number" min="0" step="any" placeholder="0 = 不限"></label>
+        </div>
+        <div id="recordingEditError" class="dialog-error" role="alert"></div>
+        <div class="dialog-actions"><button type="button" id="refreshTopics">刷新话题</button><button type="button" id="cancelRecordingEdit">取消</button><button class="primary" type="submit">确定</button></div>
+      </form>
+    </dialog>
     <dialog id="importProfileDialog">
       <form id="importProfileForm">
         <div class="dialog-title"><div><h2>导入机器人配置包</h2><p>上传包含 URDF、YAML 及网格（Mesh）的 .zip 压缩包</p></div><button type="button" class="dialog-close" id="closeImportProfile" aria-label="关闭">×</button></div>
         <div class="form-grid"><label>配置 ID（可选）<input name="id" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" placeholder="留空则自动提取"></label><label>显示名称（可选）<input name="display_name" maxlength="80" placeholder="留空则使用配置ID"></label></div>
         <label>机器人压缩包 (.zip)<input name="archive" type="file" accept=".zip" required><small>支持包含 URDF、YAML（如 vr_configs.yml 或 controller_v23.yml）及 mesh/ 网格目录的 .zip 压缩包</small></label>
-        <p class="form-help">系统会自动解析 ZIP 内的 URDF 与控制器配置并解压 3D 模型网格。ROS 2 话题会自动归一化到 /hc_teleop。</p>
+        <p class="form-help">系统会自动解析 ZIP 内的 URDF 与控制器配置并解压 3D 模型网格。ROS 2 话题会自动归一化到 /action、/observation、/control、/status。</p>
         <div id="importProfileError" class="dialog-error hidden"></div>
         <div class="dialog-actions"><button type="button" id="cancelImportProfile">取消</button><button class="primary" type="submit" id="submitImportProfile">校验并导入</button></div>
       </form>
@@ -316,6 +324,6 @@
     </dialog>
     <div id="toast" role="status"></div>
   </main>
-  <script src="/static/app.js?v=11-camera-select"></script>
+  <script src="/static/app.js?v=14-safety-toggle"></script>
 </body>
 </html>

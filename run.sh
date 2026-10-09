@@ -198,14 +198,14 @@ if [[ "${MODE}" == sim ]]; then
   [[ "${HEADLESS}" == false ]] || SIM_ARGS+=(--headless)
   SIM_ROS_ARGS=(
     --ros-args
-    -r /io_teleop/joint_states:=/hc_teleop/joint_states
-    -r /io_teleop/joint_cmd:=/hc_teleop/joint_cmd
-    -r /io_teleop/target_joint_from_vr:=/hc_teleop/target_joint_from_vr
-    -r /io_teleop/target_finger_joints:=/hc_teleop/target_finger_joints
-    -r /io_teleop/target_ee_poses:=/hc_teleop/target_ee_poses
-    -r /io_teleop/target_gripper_status:=/hc_teleop/target_gripper_status
-    -r /io_teleop/target_base_move:=/hc_teleop/target_base_move
-    -r /io_teleop/hardware_ready:=/hc_teleop/hardware_ready
+    -r /io_teleop/joint_states:=/observation/joint_states
+    -r /io_teleop/joint_cmd:=/action/joint_states
+    -r /io_teleop/target_joint_from_vr:=/control/solver/target_joint_from_vr
+    -r /io_teleop/target_finger_joints:=/action/hands/joint_targets
+    -r /io_teleop/target_ee_poses:=/action/ee_poses
+    -r /io_teleop/target_gripper_status:=/action/hands/gripper_status
+    -r /io_teleop/target_base_move:=/action/base/command
+    -r /io_teleop/hardware_ready:=/status/hardware/ready
   )
 fi
 

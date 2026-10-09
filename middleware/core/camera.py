@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from fractions import Fraction
 import os
 import threading
 import time
@@ -22,13 +23,18 @@ class CameraService:
       1. ROS 2 topic subscription (CompressedImage / Image, default or custom topics)
       2. Direct Intel RealSense USB pipeline fallback
       3. Real-time H.264 WebRTC streaming to PICO / Meta Quest VR headsets
-      4. Dynamic fallback test pattern frame when awaiting video signal
+      4. Fresh-frame-only WebRTC output with monotonic arrival timestamps
     """
 
     def __init__(self, config: dict[str, Any], domain_id: int = 14):
         self.config = config
         self.domain_id = int(domain_id)
         self._latest: Any = None
+        self._frame_sequence = 0
+        self._frame_arrival_ns = 0
+        self._encoded_arrival_ns = 0
+        self._last_capture_at = 0.0
+        self._last_send_at = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -45,7 +51,7 @@ class CameraService:
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", False) else "starting",
             "source": config.get("source", "ros"),
-            "topic": config.get("topic", "/hc_teleop/camera_head/color/compressed"),
+            "topic": config.get("topic", "/observation/cameras/head/color/compressed"),
             "custom_topic": config.get("custom_topic", ""),
             "capture_fps": 0.0,
             "webrtc_send_fps": 0.0,
@@ -91,8 +97,9 @@ class CameraService:
     def handle_ros_message(self, topic: str, msg: Any) -> None:
         if not self.config.get("enabled", False):
             return
+        arrival_ns = time.monotonic_ns()
         try:
-            active_topic = self.config.get("custom_topic", "") or self.config.get("topic", "/hc_teleop/camera_head/color/compressed")
+            active_topic = self.config.get("custom_topic", "") or self.config.get("topic", "/observation/cameras/head/color/compressed")
             if active_topic and topic != active_topic and not topic.endswith(
                 active_topic.lstrip("/")
             ):
@@ -107,6 +114,7 @@ class CameraService:
                     return
                 with self._lock:
                     self._encoded_latest = bytes(msg.data)
+                    self._encoded_arrival_ns = arrival_ns
                 self._decode_event.set()
                 return
             elif hasattr(msg, "data") and hasattr(msg, "encoding"):
@@ -124,7 +132,7 @@ class CameraService:
                         frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
 
             if frame is not None:
-                self._accept_frame(frame, topic, count_capture=False)
+                self._accept_frame(frame, topic, count_capture=False, arrival_ns=arrival_ns)
         except Exception as exc:
             self._set_status(error=f"decode error: {exc}")
 
@@ -156,11 +164,16 @@ class CameraService:
     def status(self) -> dict[str, Any]:
         with self._lock:
             result = dict(self._status)
+        now = time.monotonic()
+        if now - self._last_capture_at > 1.8:
+            result["capture_fps"] = 0.0
+        if now - self._last_send_at > 1.8:
+            result["webrtc_send_fps"] = 0.0
         result.update(
             id=str(self.config.get("id", "main")),
             name=str(self.config.get("name", "主相机")),
             source=self.config.get("source", "ros"),
-            topic=self.config.get("topic", "/hc_teleop/camera_head/color/compressed"),
+            topic=self.config.get("topic", "/observation/cameras/head/color/compressed"),
             custom_topic=self.config.get("custom_topic", ""),
             width=self.config.get("width", 640),
             height=self.config.get("height", 400),
@@ -179,10 +192,8 @@ class CameraService:
 
     def set_frame(self, image: Any) -> None:
         """Manually push a BGR numpy image frame."""
-        image = self._normalize_frame(image)
-        with self._lock:
-            self._latest = image
-            self._frames_received += 1
+        self._accept_frame(image, str(self.config.get("topic", "manual")),
+                           arrival_ns=time.monotonic_ns())
 
     def latest(self) -> Any:
         with self._lock:
@@ -198,7 +209,7 @@ class CameraService:
         img = np.zeros((h, w, 3), dtype=np.uint8)
         img[:] = (25, 25, 30)
         if cv2 is not None:
-            topic = self.config.get("topic", "/hc_teleop/camera_head/color/compressed")
+            topic = self.config.get("topic", "/observation/cameras/head/color/compressed")
             custom_topic = self.config.get("custom_topic", "")
             active_topic = custom_topic if custom_topic else topic
             fps = self.config.get("fps", 30)
@@ -249,6 +260,7 @@ class CameraService:
         now = time.monotonic()
         with self._lock:
             self._frames_received += 1
+            self._last_capture_at = now
             self._fps_counter += 1
             elapsed = now - self._last_fps_calc
             if elapsed < 1.0:
@@ -269,10 +281,18 @@ class CameraService:
         topic: str,
         *,
         count_capture: bool = True,
+        arrival_ns: int | None = None,
     ) -> None:
+        arrival_ns = time.monotonic_ns() if arrival_ns is None else arrival_ns
         frame = self._normalize_frame(frame)
+        if frame is None:
+            return
         with self._lock:
+            if arrival_ns < self._frame_arrival_ns:
+                return  # A late decoder must not overwrite a newer frame.
             self._latest = frame
+            self._frame_sequence += 1
+            self._frame_arrival_ns = arrival_ns
         if count_capture:
             self._record_capture_frame(topic)
 
@@ -301,6 +321,7 @@ class CameraService:
         """Count frames actually requested by the active WebRTC sender."""
         now = time.monotonic()
         with self._lock:
+            self._last_send_at = now
             self._webrtc_fps_counter += 1
             self._webrtc_frames_sent += 1
             elapsed = now - self._webrtc_last_fps_calc
@@ -322,13 +343,14 @@ class CameraService:
 
     def _decode_loop_ros(self) -> None:
         active_topic = self.config.get("custom_topic", "") or self.config.get(
-            "topic", "/hc_teleop/camera_head/color/compressed"
+            "topic", "/observation/cameras/head/color/compressed"
         )
         while not self._stop.is_set():
             self._decode_event.wait(0.5)
             self._decode_event.clear()
             with self._lock:
                 payload = self._encoded_latest
+                arrival_ns = self._encoded_arrival_ns
                 self._encoded_latest = None
             if not payload or np is None or cv2 is None:
                 continue
@@ -340,6 +362,7 @@ class CameraService:
                         frame,
                         str(active_topic),
                         count_capture=False,
+                        arrival_ns=arrival_ns,
                     )
             except Exception as exc:
                 self._set_status(error=f"decode error: {exc}")
@@ -370,10 +393,9 @@ class CameraService:
                 color = frame_set.get_color_frame()
                 if not color:
                     continue
+                arrival_ns = time.monotonic_ns()
                 image = np.ascontiguousarray(np.asanyarray(color.get_data())).copy()
-                with self._lock:
-                    self._latest = image
-                    self._frames_received += 1
+                self._accept_frame(image, "realsense", arrival_ns=arrival_ns)
                 frames += 1
                 elapsed = time.perf_counter() - window_start
                 if elapsed >= 1.0:
@@ -390,6 +412,54 @@ class CameraService:
                     pass
             if self.status()["state"] != "error":
                 self._set_status(state="stopped")
+
+    def _create_video_track(self):
+        import av
+        from aiortc import VideoStreamTrack
+        from aiortc.mediastreams import MediaStreamError
+
+        camera = self
+
+        class LatestFrameTrack(VideoStreamTrack):
+            def __init__(self):
+                super().__init__()
+                self._sequence = 0
+                self._origin_ns = None
+                self._last_pts = -1
+                self._dimensions = None
+
+            async def recv(self):
+                # Each peer keeps its own cursor. No placeholders or repeated
+                # frames; slow encoders skip to the newest image, never backlog.
+                while self.readyState == "live" and not camera._stop.is_set():
+                    with camera._lock:
+                        sequence = camera._frame_sequence
+                        arrival_ns = camera._frame_arrival_ns
+                        image = camera._latest
+                    if image is not None and sequence != self._sequence:
+                        self._sequence = sequence
+                        if time.monotonic_ns() - arrival_ns <= 1_800_000_000:
+                            break
+                    await asyncio.sleep(0.005)
+                else:
+                    raise MediaStreamError
+                if self._origin_ns is None:
+                    self._origin_ns = arrival_ns
+                pts = max(self._last_pts + 1,
+                          (arrival_ns - self._origin_ns) * 90000 // 1_000_000_000)
+                self._last_pts = pts
+                h, w = image.shape[:2]
+                if self._dimensions is None:
+                    self._dimensions = (w, h)
+                elif self._dimensions != (w, h):
+                    image = cv2.resize(image, self._dimensions)
+                frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(image), format="bgr24")
+                frame.pts = pts
+                frame.time_base = Fraction(1, 90000)
+                camera._record_webrtc_frame()
+                return frame
+
+        return LatestFrameTrack()
 
     async def offer(self, data: dict[str, Any]) -> dict[str, str]:
         if self.status()["state"] not in ("running", "starting"):
@@ -408,48 +478,6 @@ class CameraService:
         from .fast_h264 import install_fast_h264_encoder
 
         install_fast_h264_encoder()
-
-        camera = self
-
-        class LatestFrameTrack(VideoStreamTrack):
-            kind = "video"
-
-            def __init__(self):
-                super().__init__()
-                self._fixed_w = None
-                self._fixed_h = None
-
-            async def recv(self):
-                pts, time_base = await self.next_timestamp()
-                image = camera.latest()
-                if image is None:
-                    image = camera._generate_placeholder()
-                try:
-                    image = camera._normalize_frame(image)
-                    h, w = image.shape[:2]
-                    if self._fixed_w is None or self._fixed_h is None:
-                        self._fixed_w = w
-                        self._fixed_h = h
-                    elif w != self._fixed_w or h != self._fixed_h:
-                        if cv2 is not None:
-                            image = cv2.resize(image, (self._fixed_w, self._fixed_h))
-                    if not image.flags.c_contiguous:
-                        image = np.ascontiguousarray(image)
-                    frame = av.VideoFrame.from_ndarray(image, format="bgr24")
-                    frame.pts = pts
-                    frame.time_base = time_base
-                    camera._record_webrtc_frame()
-                    return frame
-                except Exception as exc:
-                    # In case of any encoding exception, return a safe blank frame matching fixed dimensions
-                    target_w = self._fixed_w or 640
-                    target_h = self._fixed_h or 480
-                    blank = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-                    frame = av.VideoFrame.from_ndarray(blank, format="bgr24")
-                    frame.pts = pts
-                    frame.time_base = time_base
-                    camera._record_webrtc_frame()
-                    return frame
 
         # Only exchange complete SDP: there is no trickle ICE endpoint.
         remote_candidates = sum(
@@ -495,7 +523,7 @@ class CameraService:
                 if pc.connectionState == "failed":
                     self._set_status(webrtc_error="WebRTC connection failed; inspect ICE state and UDP connectivity")
 
-        sender = pc.addTrack(LatestFrameTrack())
+        sender = pc.addTrack(self._create_video_track())
 
         try:
             transceiver = next(item for item in pc.getTransceivers() if item.sender == sender)

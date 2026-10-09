@@ -29,7 +29,11 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.camera.status()['webrtc_error'])
 
     async def test_complete_offer_delivers_camera_pixels(self):
-        self.camera.set_frame(np.full((48, 64, 3), 180, dtype=np.uint8))
+        async def source():
+            while True:
+                self.camera.set_frame(np.full((48, 64, 3), 180, dtype=np.uint8))
+                await asyncio.sleep(.05)
+        producer = asyncio.create_task(source())
         client = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         track_ready = asyncio.get_running_loop().create_future()
 
@@ -53,4 +57,6 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(status['local_ice_candidates'], 0)
             self.assertIsNone(status['webrtc_error'])
         finally:
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
             await client.close()

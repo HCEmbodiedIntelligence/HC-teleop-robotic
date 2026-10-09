@@ -65,7 +65,7 @@ class ControllerNode(Node):
         )
         self.reset_ack_pub = self.create_publisher(
             Header,
-            publications.get("reset_ack", "/hc_teleop/solver_reset_ack"),
+            publications.get("reset_ack", "/status/solver/reset_ack"),
             latest_reliable_qos,
         )
         self.create_subscription(

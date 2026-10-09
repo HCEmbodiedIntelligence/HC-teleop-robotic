@@ -63,7 +63,7 @@ v2.3 的 URDF、任务权重和速度限制来自 `adapters/robots/<机器人名
 
 双臂末端目标统一保存在胸部 `zhi_Link` 坐标系中。腰部运动时，末端目标会随躯干整体运动，不会反向补偿成世界坐标不动。
 
-`/hc_teleop/target_ee_poses` 与 `/hc_teleop/actual_ee_poses` 都使用胸部坐标，供仿真 marker 和诊断直接比较。VR 节点另将目标转换到左右肩基，并通过 `/hc_teleop/controller_target_ee_poses` 送入控制器；显示和 IK 坐标不能混用。
+`/action/ee_poses` 与 `/observation/ee_poses` 都使用胸部坐标，供仿真 marker 和诊断直接比较。VR 节点另将目标转换到左右肩基，并通过 `/control/solver/ee_targets` 送入控制器；显示和 IK 坐标不能混用。
 
 ## 启动
 
@@ -110,24 +110,24 @@ cd /home/maple/test/HC_X1
 输入：
 
 - `/vrdata`（`std_msgs/msg/String` JSON，包含头显/双手位姿、摇杆、Trigger、Grip 和按键边沿）
-- `/hc_teleop/joint_states`
-- `/hc_teleop/sol_q`（求解器健康/关节目标；原版后端也用它连接 PID）
-- `/teleop/emergency_stop`
-- `/teleop/arm/enabled`（`Bool`，网页或 ROS 命令使能/停用）
+- `/observation/joint_states`
+- `/status/solver/joint_states`（求解器健康/关节目标；原版后端也用它连接 PID）
+- `/control/emergency_stop`
+- `/control/teleop/enabled`（`Bool`，网页或 ROS 命令使能/停用）
 
 输出：
 
-- `/hc_teleop/joint_cmd_vr`（VR/IK 内部命令源）
-- `/hc_teleop/joint_cmd_exoskeleton`（外骨骼 `sensor_msgs/msg/JointState` 输入）
-- `/hc_teleop/control_source`（当前控制源，`std_msgs/msg/String`，瞬态本地持久化；值为 `vr` 或 `exoskeleton`）
-- `/hc_teleop/joint_cmd`（中间件选择后的唯一标准机器人命令）
-- `/hc_teleop/joint_cmd_arm`（v2.3 或原版 PID 的内部输出，由 VR 适配器合并夹爪）
-- `/hc_teleop/target_base_move`
-- `/hc_teleop/target_ee_poses`
-- `/hc_teleop/controller_target_ee_poses`（内部肩基任务目标）
-- `/hc_teleop/actual_ee_poses`
-- `/hc_teleop/joint_cmd_finger_left`、`/hc_teleop/joint_cmd_finger_right`
-- `/teleop/arm/status`
+- `/control/vr/joint_states`（VR/IK 内部命令源）
+- `/control/exoskeleton/joint_states`（外骨骼 `sensor_msgs/msg/JointState` 输入）
+- `/control/source`（当前控制源，`std_msgs/msg/String`，瞬态本地持久化；值为 `vr` 或 `exoskeleton`）
+- `/action/joint_states`（中间件选择后的唯一标准机器人命令）
+- `/control/solver/joint_targets`（v2.3 或原版 PID 的内部输出，由 VR 适配器合并夹爪）
+- `/action/base/command`
+- `/action/ee_poses`
+- `/control/solver/ee_targets`（内部肩基任务目标）
+- `/observation/ee_poses`
+- `/action/left_hand/joint_states`、`/action/right_hand/joint_states`
+- `/status/teleop`
 
 控制服务：
 

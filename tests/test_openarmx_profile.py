@@ -28,10 +28,10 @@ class OpenArmXProfileTests(unittest.TestCase):
         self.assertEqual(controller["model"]["free_joints"], expected)
         self.assertEqual(
             controller["ros_interface"]["sub_topic"]["joint_state"],
-            "/hc_teleop/joint_states",
+            "/observation/joint_states",
         )
         self.assertEqual(
-            teleop["control"]["command_topic"], "/hc_teleop/joint_cmd_vr"
+            teleop["control"]["command_topic"], "/control/vr/joint_states"
         )
 
     def test_urdf_meshes_are_self_contained(self):

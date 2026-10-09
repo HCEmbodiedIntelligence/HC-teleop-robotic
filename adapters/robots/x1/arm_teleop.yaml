@@ -73,13 +73,13 @@ body:
   head_orientation_enabled: true
   torso_link: zhi_Link
   visualization_head_link: camera_head
-  base_command_topic: /hc_teleop/target_base_move
+  base_command_topic: /action/base/command
   base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
   # 相对位姿闭环：按住左 Grip 建立参考；松开停止并清除参考。
   # 开启时左摇杆优先平移，回中重新建立头显参考；不叠加旧朝向/伸展辅助。
   head_pose_base:
     enabled: true
-    feedback_topic: /hc_teleop/base_pose
+    feedback_topic: /observation/base/pose
     feedback_timeout: 0.3
     position_scale: 1.0       # 头显水平移动 1 m -> 底盘目标移动 1 m
     yaw_scale: 1.0            # 头显相对偏航 -> 底盘相对偏航
@@ -204,7 +204,7 @@ grippers:
     sim_joint: R_ban
     binary_state_joint: R_ban
     sim_closed_position: 1.5707
-    finger_topic: /hc_teleop/joint_cmd_finger_right
+    finger_topic: /action/right_hand/joint_states
     finger_joint_names:
     - R_thumb_roll_joint
     - R_thumb_abad_joint
@@ -246,7 +246,7 @@ grippers:
     sim_joint: L_ban
     binary_state_joint: L_ban
     sim_closed_position: 1.5707
-    finger_topic: /hc_teleop/joint_cmd_finger_left
+    finger_topic: /action/left_hand/joint_states
     finger_joint_names:
     - L_thumb_roll_joint
     - L_thumb_abad_joint
@@ -288,18 +288,18 @@ control:
   rate_hz: 100.0
   # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
   vr_data_topic: /vrdata
-  joint_state_topic: /hc_teleop/joint_states
-  command_topic: /hc_teleop/joint_cmd_vr
-  generic_command_topic: /hc_teleop/joint_cmd_arm
-  solver_topic: /hc_teleop/sol_q
-  solver_reset_topic: /hc_teleop/solver_reset
-  solver_reset_ack_topic: /hc_teleop/solver_reset_ack
-  target_pose_topic: /hc_teleop/target_ee_poses
-  controller_target_pose_topic: /hc_teleop/controller_target_ee_poses
-  actual_pose_topic: /hc_teleop/actual_ee_poses
-  status_topic: /teleop/arm/status
-  safety_stop_topic: /teleop/emergency_stop
-  enable_topic: /teleop/arm/enabled
+  joint_state_topic: /observation/joint_states
+  command_topic: /control/vr/joint_states
+  generic_command_topic: /control/solver/joint_targets
+  solver_topic: /status/solver/joint_states
+  solver_reset_topic: /control/solver/reset
+  solver_reset_ack_topic: /status/solver/reset_ack
+  target_pose_topic: /action/ee_poses
+  controller_target_pose_topic: /control/solver/ee_targets
+  actual_pose_topic: /observation/ee_poses
+  status_topic: /status/teleop
+  safety_stop_topic: /control/emergency_stop
+  enable_topic: /control/teleop/enabled
   # Joy.axes[1] 是 Grip 离合；左右主摇杆 X（axes[2]）同时向外触发回零。
   clutch_axis: 1
   clutch_threshold: 0.55

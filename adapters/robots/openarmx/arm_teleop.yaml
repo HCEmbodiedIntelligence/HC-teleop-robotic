@@ -54,7 +54,7 @@ body:
   enabled: false
   waist_joint_names: []
   torso_link: openarmx_body_link0
-  base_command_topic: /hc_teleop/target_base_move
+  base_command_topic: /action/base/command
   base_command_mode: velocity
   # Joy.axes 下标：0=Trigger、1=Grip、2/3=主摇杆 X/Y、4/5=副摇杆 X/Y。
   stick_x_axis: 2
@@ -95,14 +95,14 @@ grippers:
     # 0.044 m 为张开，0.0 m 为闭合；真机和仿真均使用同名主指关节。
     sim_joint: openarmx_right_finger_joint1
     sim_closed_position: 0.0
-    finger_topic: /hc_teleop/joint_cmd_finger_right
+    finger_topic: /action/right_hand/joint_states
     finger_joint_names: [openarmx_right_finger_joint1]
     finger_open: [0.044]
     finger_closed: [0.0]
   left:
     sim_joint: openarmx_left_finger_joint1
     sim_closed_position: 0.0
-    finger_topic: /hc_teleop/joint_cmd_finger_left
+    finger_topic: /action/left_hand/joint_states
     finger_joint_names: [openarmx_left_finger_joint1]
     finger_open: [0.044]
     finger_closed: [0.0]
@@ -113,18 +113,18 @@ control:
   rate_hz: 100.0
   # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
   vr_data_topic: /vrdata
-  joint_state_topic: /hc_teleop/joint_states
-  command_topic: /hc_teleop/joint_cmd_vr
-  generic_command_topic: /hc_teleop/joint_cmd_arm
-  solver_topic: /hc_teleop/sol_q
-  solver_reset_topic: /hc_teleop/solver_reset
-  solver_reset_ack_topic: /hc_teleop/solver_reset_ack
-  target_pose_topic: /hc_teleop/target_ee_poses
-  controller_target_pose_topic: /hc_teleop/controller_target_ee_poses
-  actual_pose_topic: /hc_teleop/actual_ee_poses
-  status_topic: /teleop/arm/status
-  safety_stop_topic: /teleop/emergency_stop
-  enable_topic: /teleop/arm/enabled
+  joint_state_topic: /observation/joint_states
+  command_topic: /control/vr/joint_states
+  generic_command_topic: /control/solver/joint_targets
+  solver_topic: /status/solver/joint_states
+  solver_reset_topic: /control/solver/reset
+  solver_reset_ack_topic: /status/solver/reset_ack
+  target_pose_topic: /action/ee_poses
+  controller_target_pose_topic: /control/solver/ee_targets
+  actual_pose_topic: /observation/ee_poses
+  status_topic: /status/teleop
+  safety_stop_topic: /control/emergency_stop
+  enable_topic: /control/teleop/enabled
   # Joy.axes[1] 是 Grip 离合；左右主摇杆 X（axes[2]）同时向外触发回零。
   clutch_axis: 1
   clutch_threshold: 0.55

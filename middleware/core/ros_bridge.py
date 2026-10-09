@@ -14,26 +14,26 @@ from .protocol import envelope
 EventCallback = Callable[[dict[str, Any], list[str]], None]
 
 DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
-    "/hc_teleop/hardware_ready": {"target_hz": 100.0, "min_hz": 10.0},
-    "/hc_teleop/joint_states": {"target_hz": 100.0, "min_hz": 20.0},
-    "/hc_teleop/joint_cmd": {"target_hz": 100.0, "min_hz": 20.0},
-    "/hc_teleop/joint_cmd_arm": {"target_hz": 100.0, "min_hz": 20.0},
-    "/hc_teleop/sol_q": {"target_hz": 100.0, "min_hz": 20.0},
-    "/hc_teleop/controller_target_ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
-    "/hc_teleop/target_ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
-    "/hc_teleop/actual_ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
-    "/hc_teleop/target_base_move": {"target_hz": 60.0, "min_hz": 10.0},
-    "/hc_teleop/joint_cmd_finger_left": {"target_hz": 10.0, "min_hz": 1.0},
-    "/hc_teleop/joint_cmd_finger_right": {"target_hz": 10.0, "min_hz": 1.0},
-    "/hc_teleop/hand_joint_states": {"target_hz": 10.0, "min_hz": 1.0},
-    "/hc_teleop/camera_head/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/hc_teleop/camera_head/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/hc_teleop/camera_overhead/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/hc_teleop/camera_d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/hc_teleop/camera_d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/hc_teleop/camera_d405_left/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/hc_teleop/camera_d405_right/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
-    "/teleop/arm/status": {"target_hz": 10.0, "min_hz": 2.0},
+    "/status/hardware/ready": {"target_hz": 100.0, "min_hz": 10.0},
+    "/observation/joint_states": {"target_hz": 100.0, "min_hz": 20.0},
+    "/action/joint_states": {"target_hz": 100.0, "min_hz": 20.0},
+    "/control/solver/joint_targets": {"target_hz": 100.0, "min_hz": 20.0},
+    "/status/solver/joint_states": {"target_hz": 100.0, "min_hz": 20.0},
+    "/control/solver/ee_targets": {"target_hz": 60.0, "min_hz": 20.0},
+    "/action/ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
+    "/observation/ee_poses": {"target_hz": 60.0, "min_hz": 20.0},
+    "/action/base/command": {"target_hz": 60.0, "min_hz": 10.0},
+    "/action/left_hand/joint_states": {"target_hz": 10.0, "min_hz": 1.0},
+    "/action/right_hand/joint_states": {"target_hz": 10.0, "min_hz": 1.0},
+    "/observation/hands/joint_states": {"target_hz": 10.0, "min_hz": 1.0},
+    "/observation/cameras/head/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/observation/cameras/head/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/observation/cameras/overhead/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/observation/cameras/d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/observation/cameras/d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/observation/cameras/d405_left/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/observation/cameras/d405_right/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/status/teleop": {"target_hz": 10.0, "min_hz": 2.0},
     "/vrdata": {"target_hz": 60.0, "min_hz": 30.0},
     "/tf": {"target_hz": 20.0, "min_hz": 5.0},
 }
@@ -190,15 +190,15 @@ class RosBridge:
                 "hardware_ready": self._hardware_ready,
                 "replay_active": self._replay_active,
                 "source": self._command_source,
-                "vr_topic": mux_config.get("vr_topic", "/hc_teleop/joint_cmd_vr"),
+                "vr_topic": mux_config.get("vr_topic", "/control/vr/joint_states"),
                 "exoskeleton_topic": mux_config.get(
-                    "exoskeleton_topic", "/hc_teleop/joint_cmd_exoskeleton"
+                    "exoskeleton_topic", "/control/exoskeleton/joint_states"
                 ),
                 "output_topic": mux_config.get(
-                    "output_topic", "/hc_teleop/joint_cmd"
+                    "output_topic", "/action/joint_states"
                 ),
                 "control_source_topic": mux_config.get(
-                    "control_source_topic", "/hc_teleop/control_source"
+                    "control_source_topic", "/control/source"
                 ),
                 "received": dict(self._mux_received),
                 "last_received_age": {
@@ -260,7 +260,7 @@ class RosBridge:
     def _is_final_joint_command(self, topic: str) -> bool:
         mux_config = self.config.get("command_mux", {})
         return str(topic) in {
-            str(mux_config.get("output_topic", "/hc_teleop/joint_cmd")),
+            str(mux_config.get("output_topic", "/action/joint_states")),
             "/io_teleop/joint_cmd",
         }
 
@@ -331,6 +331,12 @@ class RosBridge:
             trackers: dict[str, TopicHealthTracker] = {}
             last_emit: dict[str, float] = {}
 
+            dataset_config = self.config.get("dataset_topics", {})
+            if dataset_config.get("enabled", False):
+                from .dataset_topics import DatasetTopics
+                dataset_topics = DatasetTopics(node, dataset_config)
+
+
             mux_config = self.config.get("command_mux", {})
             if self._mux_enabled:
                 from sensor_msgs.msg import JointState
@@ -338,7 +344,7 @@ class RosBridge:
 
                 hardware_ready_topic = str(
                     mux_config.get(
-                        "hardware_ready_topic", "/hc_teleop/hardware_ready"
+                        "hardware_ready_topic", "/status/hardware/ready"
                     )
                 )
                 def hardware_ready_cb(msg: Any) -> None:
@@ -355,7 +361,7 @@ class RosBridge:
 
                 control_source_topic = str(
                     mux_config.get(
-                        "control_source_topic", "/hc_teleop/control_source"
+                        "control_source_topic", "/control/source"
                     )
                 )
                 control_source_qos = QoSProfile(
@@ -373,7 +379,7 @@ class RosBridge:
                 control_source_publisher.publish(String(data=self._command_source))
 
                 output_topic = str(
-                    mux_config.get("output_topic", "/hc_teleop/joint_cmd")
+                    mux_config.get("output_topic", "/action/joint_states")
                 )
                 output_publisher = self._publisher(
                     node,
@@ -384,13 +390,13 @@ class RosBridge:
                 )
 
                 for source, topic in (
-                    ("vr", str(mux_config.get("vr_topic", "/hc_teleop/joint_cmd_vr"))),
+                    ("vr", str(mux_config.get("vr_topic", "/control/vr/joint_states"))),
                     (
                         "exoskeleton",
                         str(
                             mux_config.get(
                                 "exoskeleton_topic",
-                                "/hc_teleop/joint_cmd_exoskeleton",
+                                "/control/exoskeleton/joint_states",
                             )
                         ),
                     ),
@@ -629,7 +635,7 @@ class RosBridge:
                     mux_config = self.config.get("command_mux", {})
                     topic = str(
                         mux_config.get(
-                            "control_source_topic", "/hc_teleop/control_source"
+                            "control_source_topic", "/control/source"
                         )
                     )
                     from std_msgs.msg import String

@@ -106,7 +106,7 @@ setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --
   >"${LOG_DIR}/teleop_controller.log" 2>&1 &
 PIDS+=("$!")
 
-log "通用控制层已启动，只使用 /hc_teleop 标准话题。"
+log "通用控制层已启动，只使用 /action、/observation、/control、/status 标准话题。"
 set +e
 wait -n "${PIDS[@]}"
 status=$?

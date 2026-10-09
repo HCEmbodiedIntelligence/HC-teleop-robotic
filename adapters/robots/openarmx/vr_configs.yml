@@ -52,8 +52,8 @@ grippers:
   - joint_index: [23, 24]
 # OpenArmX 遥操作适配器分别发布左右夹爪命令，仿真器额外订阅这两个话题。
 finger_command_topics:
-  - /hc_teleop/joint_cmd_finger_right
-  - /hc_teleop/joint_cmd_finger_left
+  - /action/right_hand/joint_states
+  - /action/left_hand/joint_states
 
 # target_ee_poses 使用共同机身 Link 作为参考坐标系。
 controller_indices:

@@ -114,7 +114,7 @@ class SimRobotController(Node, AssembledRobot):
         self.joint_state_pub = self.create_publisher(
             JointState, f"/io_teleop/joint_states", 1
         )
-        self.base_pose_pub = self.create_publisher(PoseStamped, "/hc_teleop/base_pose", 10)
+        self.base_pose_pub = self.create_publisher(PoseStamped, "/observation/base/pose", 10)
         self.joint_cmd_sub = self.create_subscription(
             JointState,
             f"/io_teleop/joint_cmd",
@@ -172,7 +172,7 @@ class SimRobotController(Node, AssembledRobot):
         self.head_text_ids = [-1, -1]
         self.head_error_id = -1
         self.head_tracking_sub = self.create_subscription(
-            PoseArray, "/hc_teleop/head_tracking_poses",
+            PoseArray, "/status/head/tracking_poses",
             self.head_tracking_callback, 1,
         )
         self.hardware_ready_pub.publish(Bool(data=True))

@@ -9,7 +9,7 @@ def stream(topic='/new/color', **kw):
 def test_projection_creates_subscription_without_recording_or_json():
     cfg = validate_config({'camera': {'enabled': True, 'streams': [stream()]}})
     assert cfg['ros']['subscriptions'] == [{'topic': '/new/color', 'type': 'sensor_msgs/msg/Image',
-        'enabled': True, 'outputs': [], 'max_hz': 0., 'event_max_hz': 0.}]
+        'enabled': True, 'outputs': [], 'max_hz': 0., 'event_max_hz': 0., 'description': ''}]
     assert validate_config(cfg) == cfg
 
 

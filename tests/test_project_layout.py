@@ -57,7 +57,7 @@ class ProjectLayoutTests(unittest.TestCase):
             "target_base_move",
         ):
             self.assertIn(
-                f"/io_teleop/{topic}:=/hc_teleop/{topic}", launcher
+                "/io_teleop/" + topic + ":=" + {'joint_states': '/observation/joint_states', 'joint_cmd': '/action/joint_states', 'target_ee_poses': '/action/ee_poses', 'target_base_move': '/action/base/command', 'hardware_ready': '/status/hardware/ready', 'target_finger_joints': '/action/hands/joint_targets', 'target_gripper_status': '/action/hands/gripper_status', 'target_joint_from_vr': '/control/solver/target_joint_from_vr'}[topic], launcher
             )
 
     def test_single_product_launcher_has_sim_and_teleop_modes(self):
@@ -92,11 +92,11 @@ class ProjectLayoutTests(unittest.TestCase):
         self.assertIn("/api/teleop/source", javascript)
         self.assertEqual(
             config["ros"]["command_mux"]["output_topic"],
-            "/hc_teleop/joint_cmd",
+            "/action/joint_states",
         )
         self.assertEqual(
             config["ros"]["command_mux"]["control_source_topic"],
-            "/hc_teleop/control_source",
+            "/control/source",
         )
 
     def test_simulator_updates_actual_flange_markers(self):

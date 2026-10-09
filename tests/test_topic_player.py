@@ -51,10 +51,10 @@ class TopicPlayerTests(unittest.TestCase):
                 "sensor_msgs/msg/JointState", SchemaEncoding.ROS2, schema_data
             )
             chan_state = writer.register_channel(
-                "/hc_teleop/joint_states", MessageEncoding.CDR, schema_id
+                "/observation/joint_states", MessageEncoding.CDR, schema_id
             )
             chan_cmd = writer.register_channel(
-                "/hc_teleop/joint_cmd", MessageEncoding.CDR, schema_id
+                "/action/joint_states", MessageEncoding.CDR, schema_id
             )
 
             t0 = 1_000_000_000
@@ -89,13 +89,13 @@ class TopicPlayerTests(unittest.TestCase):
         self.assertFalse(reset["requires_reset"])
 
     def test_player_topic_remapping(self) -> None:
-        # Remap /hc_teleop/joint_states -> /hc_teleop/target_joint
-        remap = {"/hc_teleop/joint_states": "/hc_teleop/target_joint"}
+        # Remap /observation/joint_states -> /control/solver/target_joint
+        remap = {"/observation/joint_states": "/control/solver/target_joint"}
         self.player.play(
             "test_recording.mcap",
             speed=10.0,
             topic_remap=remap,
-            selected_topics=["/hc_teleop/target_joint"],
+            selected_topics=["/control/solver/target_joint"],
         )
 
         for _ in range(50):
@@ -106,7 +106,7 @@ class TopicPlayerTests(unittest.TestCase):
 
         self.assertEqual(len(self.published_messages), 5)
         for topic, msg_type, raw in self.published_messages:
-            self.assertEqual(topic, "/hc_teleop/target_joint")
+            self.assertEqual(topic, "/control/solver/target_joint")
 
     def test_player_pause_resume_and_stop(self) -> None:
         self.player.play("test_recording.mcap", speed=0.1)

@@ -18,16 +18,16 @@ import yaml
 
 STANDARD_TOPICS = {
     "vr_frame": "/vrdata",
-    "joint_state": "/hc_teleop/joint_states",
-    "joint_target": "/hc_teleop/joint_cmd_arm",
-    "joint_command": "/hc_teleop/joint_cmd",
-    "ee_target": "/hc_teleop/controller_target_ee_poses",
-    "ee_visual_target": "/hc_teleop/target_ee_poses",
-    "ee_actual": "/hc_teleop/actual_ee_poses",
-    "solver_state": "/hc_teleop/sol_q",
-    "solver_reset": "/hc_teleop/solver_reset",
-    "solver_reset_ack": "/hc_teleop/solver_reset_ack",
-    "base_move": "/hc_teleop/target_base_move",
+    "joint_state": "/observation/joint_states",
+    "joint_target": "/control/solver/joint_targets",
+    "joint_command": "/action/joint_states",
+    "ee_target": "/control/solver/ee_targets",
+    "ee_visual_target": "/action/ee_poses",
+    "ee_actual": "/observation/ee_poses",
+    "solver_state": "/status/solver/joint_states",
+    "solver_reset": "/control/solver/reset",
+    "solver_reset_ack": "/status/solver/reset_ack",
+    "base_move": "/action/base/command",
 }
 
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")

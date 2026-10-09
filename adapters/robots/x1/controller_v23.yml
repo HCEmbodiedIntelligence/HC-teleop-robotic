@@ -6,14 +6,14 @@ ros_interface:
   rate: 100
   sub_topic:
     # 关节反馈、双臂末端目标以及积分器复位请求。
-    joint_state: /hc_teleop/joint_states
-    ee_target: /hc_teleop/controller_target_ee_poses
-    reset: /hc_teleop/solver_reset
+    joint_state: /observation/joint_states
+    ee_target: /control/solver/ee_targets
+    reset: /control/solver/reset
   pub_topic:
     # 机械臂求解结果、诊断状态以及复位完成确认。
-    joint_target: /hc_teleop/joint_cmd_arm
-    solver_state: /hc_teleop/sol_q
-    reset_ack: /hc_teleop/solver_reset_ack
+    joint_target: /control/solver/joint_targets
+    solver_state: /status/solver/joint_states
+    reset_ack: /status/solver/reset_ack
 control:
   # retarget 会连续积分关节目标；dt=0.01 s 对应 100 Hz。
   method: retarget
@@ -56,7 +56,7 @@ model:
   - Joint7_L
 task:
   # pose 单项格式：[[参考坐标系, TCP 坐标系], 位置权重, 姿态权重, 误差增益]。
-  # 两项顺序必须与 /hc_teleop/controller_target_ee_poses 中右、左目标一致。
+  # 两项顺序必须与 /control/solver/ee_targets 中右、左目标一致。
   pose:
   - - - R_arm_0_Link
       - io_teleop_ee_link_right

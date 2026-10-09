@@ -17,7 +17,7 @@
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
-真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/hc_teleop/joint_cmd_vr`，外骨骼发布 `/hc_teleop/joint_cmd_exoskeleton`；中间件通过可锁存的 `/hc_teleop/control_source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/hc_teleop/joint_cmd`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
+真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/control/vr/joint_states`，外骨骼发布 `/control/exoskeleton/joint_states`；中间件通过可锁存的 `/control/source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/action/joint_states`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
 
 原有的 `d435_webrtc_server.py` 与手动 UDP 调试工具
 `tools/diagnostics/udp_receiver.py` 仍然保留。新服务兼容它们的关键协议：
@@ -71,7 +71,7 @@ ROS_DOMAIN_ID=14 ./run.sh teleop
 
 点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。真机模式退出并重新执行 `./run.sh teleop`；仿真模式重新执行 `./run.sh sim`。机器人型号以 Dashboard/`middleware/config.yaml` 中当前激活的 profile 为准。
 
-导入接口对齐当前遥操作链路的标准话题：`/hc_teleop/joint_states`、`/hc_teleop/joint_cmd_arm`、`/hc_teleop/joint_cmd`、`/hc_teleop/controller_target_ee_poses`、`/hc_teleop/target_ee_poses`、`/hc_teleop/actual_ee_poses`、`/hc_teleop/sol_q` 和 `/hc_teleop/target_base_move`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
+导入接口对齐当前遥操作链路的标准话题：`/observation/joint_states`、`/control/solver/joint_targets`、`/action/joint_states`、`/control/solver/ee_targets`、`/action/ee_poses`、`/observation/ee_poses`、`/status/solver/joint_states` 和 `/action/base/command`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
 
 ### 话题录制
 
@@ -132,7 +132,7 @@ ROS 转发到 VR 的 UDP 消息是 UTF-8 JSON，最大为一个 UDP 数据报。
 
 `/vrdata` 使用 `std_msgs/msg/String`，每条 JSON 同时包含 `tracking`、头显/左右手柄 `poses`、左右手柄 `inputs`、序号和 VR 时间戳。`inputs` 内含 Trigger、Grip、两个摇杆、`held`、`pressed`、`released` 及对应位掩码，因此位姿、连续状态和按键边沿不再拆成多个 ROS 话题。
 
-位姿中断超过 `vr.pose_timeout_ms`（当前配置为 600 ms）、VR 时间戳停止推进或头显跟踪失效时，服务向 `/teleop/emergency_stop` 发布 `std_msgs/msg/Bool(data=true)`。启动和配置热重载是否急停由 `safety.stop_on_startup` 控制。
+位姿中断超过 `vr.pose_timeout_ms`（当前配置为 600 ms）、VR 时间戳停止推进或头显跟踪失效时，服务向 `/control/emergency_stop` 发布 `std_msgs/msg/Bool(data=true)`。启动和配置热重载是否急停由 `safety.stop_on_startup` 控制。
 
 ## HTTP / WebSocket 接口
 
@@ -210,13 +210,13 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 
 X1 默认开启 `body.head_pose_base.enabled`：按住左 Grip 时记录头显与底盘参考位姿，之后头显水平位移和偏航同时形成底盘相对位置、相对朝向目标；到位后停止。松开 Grip、输入/底盘反馈超时、急停或回零时停止并清除参考，下次按住重新定中心。头显高度与俯仰不驱动平面底盘，脖子仍独立跟随头显。开启此模式时左摇杆可独立平移（无需 Grip），推杆期间优先手动控制并清除头显底盘目标；回中后若仍按住左 Grip 则重新建立参考，否则停止，避免回拉。右摇杆和旧的朝向/伸展辅助不叠加到底盘命令；设为 `false` 恢复旧模式。
 
-相对位姿模式使用 `/hc_teleop/base_pose`（`geometry_msgs/msg/PoseStamped`）真实反馈，Isaac 和 PyBullet 已发布此话题。位置使用固定 `world` 坐标，姿态 yaw 表示物理 base_link 前进轴朝向，PyBullet 与 Isaac 均使用 +X 前进、+Y 左移；硬件适配器也必须提供同样约定的实际定位反馈，无反馈时不会运动。`position_scale/yaw_scale` 控制位移/角度比例，`max_displacement/max_yaw` 限制每次参考的目标范围，现有三个 `max_*_velocity` 限速。修改后重启控制器；Isaac 同时需要重启场景加载进程以启用新反馈。
+相对位姿模式使用 `/observation/base/pose`（`geometry_msgs/msg/PoseStamped`）真实反馈，Isaac 和 PyBullet 已发布此话题。位置使用固定 `world` 坐标，姿态 yaw 表示物理 base_link 前进轴朝向，PyBullet 与 Isaac 均使用 +X 前进、+Y 左移；硬件适配器也必须提供同样约定的实际定位反馈，无反馈时不会运动。`position_scale/yaw_scale` 控制位移/角度比例，`max_displacement/max_yaw` 限制每次参考的目标范围，现有三个 `max_*_velocity` 限速。修改后重启控制器；Isaac 同时需要重启场景加载进程以启用新反馈。
 
 X1 的 `./run.sh sim` 和 `./run.sh teleop` 共用 `arm_teleop.yaml` 中唯一的 `body` 配置。摇杆轴、方向、头显跟随、脖子与腰部参数不再随运行模式覆盖。`body.enabled` 和 `body.waist_joint_names` 统一决定是否启用腰部；当前默认开启，关节为 `[leg_1, leg_2, zhi]`，采用高度/俯仰双自由度控制。修改后重启控制器；从网页启动的仿真需点击“重启仿真”。仿真按时间积分速度命令，200 ms 未收到新底盘命令即停止。
 
 机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
 
-X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TARGET`（橙色标签、长坐标轴），橙色连线表示位置误差。实际位姿由关节反馈和 `camera_head` FK 得到，目标是头显输入映射到腰部升降/俯仰后对应的机器人头部位姿，并非 VR 房间中的原始绝对位置。松开左 Grip 或停用控制时目标回到实际位姿；数据断流 0.5 s 后隐藏标记。话题 `/hc_teleop/head_tracking_poses` 使用 `geometry_msgs/msg/PoseArray`，顺序为 `[actual, target]`，`header.frame_id=robot_base` 表示 PyBullet 模型根部位姿坐标系。需要带 GUI 启动仿真才能看到标记。
+X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TARGET`（橙色标签、长坐标轴），橙色连线表示位置误差。实际位姿由关节反馈和 `camera_head` FK 得到，目标是头显输入映射到腰部升降/俯仰后对应的机器人头部位姿，并非 VR 房间中的原始绝对位置。松开左 Grip 或停用控制时目标回到实际位姿；数据断流 0.5 s 后隐藏标记。话题 `/status/head/tracking_poses` 使用 `geometry_msgs/msg/PoseArray`，顺序为 `[actual, target]`，`header.frame_id=robot_base` 表示 PyBullet 模型根部位姿坐标系。需要带 GUI 启动仿真才能看到标记。
 
 默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd_vr → Command Mux → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `adapters/v23/`，X1 参数位于 `adapters/robots/x1/controller_v23.yml`。
 
@@ -225,3 +225,5 @@ X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TA
 X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；低头/抬头的俯仰旋转控制腰部俯仰（`pitch_source: orientation`）。水平位移交给底盘，不再重复驱动腰部。按住左 Grip 时建立参考，松开再按可重新定中心。
 
 腰部俯仰使用头显朝前方向相对水平面的仰俯角，并减去左 Grip 接管时的参考角。偏航转身（包括保持 Grip 转向）不会把俯仰转换成侧倾；升降仍使用竖直位移，`pitch_direction` 仅负责设备方向标定。
+
+相机 WebRTC 仅在收到新图像后发送，不再以固定 30 FPS 重发缓存图像或占位图。视频时间戳使用图像到达中间件的单调时钟（压缩图像在解码前记录），因此表示实际接收节奏而非传感器硬件曝光时间；不直接使用可能暂停/回退的 ROS 仿真时间。编码较慢时只取最新帧，允许丢帧但不补帧；源断流时等待恢复。修改后重启中间件并让头显重新连接。

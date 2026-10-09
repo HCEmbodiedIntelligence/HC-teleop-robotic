@@ -14,10 +14,10 @@ class ReplaySafetyTests(unittest.TestCase):
                 "command_mux": {
                     "enabled": True,
                     "source": "vr",
-                    "vr_topic": "/hc_teleop/joint_cmd_vr",
-                    "exoskeleton_topic": "/hc_teleop/joint_cmd_exoskeleton",
-                    "output_topic": "/hc_teleop/joint_cmd",
-                    "control_source_topic": "/hc_teleop/control_source",
+                    "vr_topic": "/control/vr/joint_states",
+                    "exoskeleton_topic": "/control/exoskeleton/joint_states",
+                    "output_topic": "/action/joint_states",
+                    "control_source_topic": "/control/source",
                 },
                 "subscriptions": [],
             },
@@ -27,7 +27,7 @@ class ReplaySafetyTests(unittest.TestCase):
     def test_final_command_rejects_generic_publish(self):
         self.assertFalse(
             self.bridge.publish(
-                "/hc_teleop/joint_cmd",
+                "/action/joint_states",
                 "sensor_msgs/msg/JointState",
                 {"name": ["joint1"], "position": [0.1]},
             )
@@ -39,7 +39,7 @@ class ReplaySafetyTests(unittest.TestCase):
         self.assertTrue(self.bridge.begin_replay())
         self.assertTrue(
             self.bridge.publish_raw(
-                "/hc_teleop/joint_cmd",
+                "/action/joint_states",
                 "sensor_msgs/msg/JointState",
                 b"serialized",
             )
@@ -52,7 +52,7 @@ class ReplaySafetyTests(unittest.TestCase):
         self.assertFalse(status["output_enabled"])
         self.assertFalse(
             self.bridge.publish_raw(
-                "/hc_teleop/joint_cmd",
+                "/action/joint_states",
                 "sensor_msgs/msg/JointState",
                 b"serialized",
             )

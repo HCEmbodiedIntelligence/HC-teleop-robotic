@@ -3,7 +3,7 @@
 这一部分是与厂商硬件无关的控制和解算层：
 
 - 启动 Pinocchio v2.3 逆解和 VR 遥操作控制器；
-- 只读写 `/hc_teleop` 标准接口；
+- 只读写 `/action、/observation、/control、/status` 标准接口；
 - 可执行节点位于 `nodes/`，运动控制实现位于 `core/`，v2.3 逆解位于 `v23/`；
 - X1 与网页导入的机器人资料统一位于 `robots/<配置ID>/`，每个目录自包含 URDF、Meshes 和控制参数。
 
@@ -18,6 +18,6 @@
 双臂命令链路固定为：
 
 ```text
-controller_target_ee_poses -> v23 sol_q -> /hc_teleop/joint_cmd
+controller_target_ee_poses -> v23 sol_q -> /action/joint_states
   -> 独立机型项目固定频率执行器 -> 厂商驱动
 ```

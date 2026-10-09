@@ -145,11 +145,13 @@ class TopicPlayer:
                 # In drive mode, we isolate robot actuator commands + visualization target markers,
                 # ensuring the simulator or real robot executes the joints and tracks the end-effector marker.
                 drive_passthrough = {
-                    "/hc_teleop/target_ee_poses",
-                    "/hc_teleop/controller_target_ee_poses",
-                    "/hc_teleop/actual_ee_poses",
-                    "/hc_teleop/target_base_move",
-                    "/hc_teleop/target_finger_joints",
+                    "/action/ee_poses",
+                    "/control/solver/ee_targets",
+                    "/observation/ee_poses",
+                    "/action/base/command",
+                    "/action/hands/joint_targets",
+                    "/action/left_hand/joint_states",
+                    "/action/right_hand/joint_states",
                     "/io_teleop/target_ee_poses",
                     "/io_teleop/controller_target_ee_poses",
                     "/io_teleop/actual_ee_poses",
@@ -163,12 +165,12 @@ class TopicPlayer:
                         if t in drive_passthrough or t == "/io_teleop/joint_cmd"
                     ]
                     self._topic_remap = {
-                        "/io_teleop/joint_cmd": "/hc_teleop/joint_cmd"
+                        "/io_teleop/joint_cmd": "/action/joint_states"
                     }
-                elif "/hc_teleop/joint_cmd" in avail_topics:
+                elif "/action/joint_states" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
-                        if t in drive_passthrough or t == "/hc_teleop/joint_cmd"
+                        if t in drive_passthrough or t == "/action/joint_states"
                     ]
                     self._topic_remap = {}
                 elif "/io_teleop/joint_cmd_arm" in avail_topics:
@@ -177,10 +179,10 @@ class TopicPlayer:
                         if t in drive_passthrough or t == "/io_teleop/joint_cmd_arm"
                     ]
                     self._topic_remap = {}
-                elif "/hc_teleop/joint_cmd_arm" in avail_topics:
+                elif "/control/solver/joint_targets" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
-                        if t in drive_passthrough or t == "/hc_teleop/joint_cmd_arm"
+                        if t in drive_passthrough or t == "/control/solver/joint_targets"
                     ]
                     self._topic_remap = {}
                 elif "/io_teleop/joint_states" in avail_topics:
@@ -189,12 +191,12 @@ class TopicPlayer:
                         if t in drive_passthrough or t == "/io_teleop/joint_states"
                     ]
                     self._topic_remap = {"/io_teleop/joint_states": "/io_teleop/joint_cmd"}
-                elif "/hc_teleop/joint_states" in avail_topics:
+                elif "/observation/joint_states" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
-                        if t in drive_passthrough or t == "/hc_teleop/joint_states"
+                        if t in drive_passthrough or t == "/observation/joint_states"
                     ]
-                    self._topic_remap = {"/hc_teleop/joint_states": "/hc_teleop/joint_cmd"}
+                    self._topic_remap = {"/observation/joint_states": "/action/joint_states"}
                 else:
                     self._selected_topics = []
                     self._topic_remap = {}
@@ -202,7 +204,7 @@ class TopicPlayer:
                 self._selected_topics = []
                 self._topic_remap = {}
 
-            # Pause live teleop controller to prevent conflict over /hc_teleop/joint_cmd
+            # Pause live teleop controller to prevent conflict over /action/joint_states
             ros = self._get_ros()
             if ros is not None and hasattr(ros, "begin_replay"):
                 armed = ros.begin_replay()
@@ -212,7 +214,7 @@ class TopicPlayer:
                     )
                 self._replay_interlock_armed = True
             if ros is not None and hasattr(ros, "publish"):
-                ros.publish("/teleop/arm/enabled", "std_msgs/msg/Bool", {"data": False})
+                ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
 
             self._stop_event.clear()
             self._pause_event.set()

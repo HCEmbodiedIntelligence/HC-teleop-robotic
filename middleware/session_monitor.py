@@ -48,7 +48,7 @@ class TeleopSessionMonitor(Node):
         # 1. 遥操作控制器状态
         self.create_subscription(
             String,
-            "/teleop/arm/status",
+            "/status/teleop",
             self.on_arm_status,
             10,
         )
@@ -64,7 +64,7 @@ class TeleopSessionMonitor(Node):
         # 3. 底盘速度指令
         self.create_subscription(
             Float64MultiArray,
-            "/hc_teleop/target_base_move",
+            "/action/base/command",
             self.on_base_cmd,
             qos_profile_sensor_data,
         )
@@ -72,13 +72,13 @@ class TeleopSessionMonitor(Node):
         # 4. 灵巧手/手爪指令
         self.create_subscription(
             JointState,
-            "/hc_teleop/joint_cmd_finger_right",
+            "/action/right_hand/joint_states",
             self.on_r_finger_cmd,
             qos_profile_sensor_data,
         )
         self.create_subscription(
             JointState,
-            "/hc_teleop/joint_cmd_finger_left",
+            "/action/left_hand/joint_states",
             self.on_l_finger_cmd,
             qos_profile_sensor_data,
         )
@@ -86,8 +86,8 @@ class TeleopSessionMonitor(Node):
         # 5. 相机图像流监控
         self.create_subscription(
             CompressedImage,
-            "/hc_teleop/camera_head/color/compressed",
-            lambda msg: self.on_cam_frame("/hc_teleop/camera_head/color/compressed"),
+            "/observation/cameras/head/color/compressed",
+            lambda msg: self.on_cam_frame("/observation/cameras/head/color/compressed"),
             qos_profile_sensor_data,
         )
         # 周期性检查相机状态 (每 3 秒)
