@@ -128,7 +128,7 @@ function route() {
   $$('nav a').forEach(el => el.classList.toggle('active', el.dataset.page === page));
   $('#pageTitle').textContent = titles[page];
   if (page === 'topics') loadTopics();
-  if (page === 'datasets') loadDatasets();
+  updateDatasetPolling(page);
   if (page === 'config') loadProfiles($('#robotProfileSelect')?.value);
 }
 
@@ -290,6 +290,7 @@ function renderStatus(data) {
       ? `正在录制：已写入 ${recording.messages||0} 条消息到 ${recording.path||''}`
       : `未录制 · 保存目录：${config?.ros?.recording?.directory || 'runtime/topic_recordings'}`;
   }
+  renderRecordingExport(recording.status || recording);
   setText('#vrPeer',vr.peer ? `${vr.peer[0]}:${vr.peer[1]}` : 'VR 未连接');
   for (const name of ['Head','Left','Right']) {
     const indicator=$('#track'+name);
@@ -418,7 +419,7 @@ function connectWebSocket() {
       }
       else if(value.kind==='recording_marked' || value.kind==='recording_mark_error') {
         if(value.payload?.message) toast(value.payload.message, value.kind==='recording_mark_error');
-        if($('#datasetRows')) loadDatasets().catch(()=>{});
+        if(datasetPageVisible()) loadDatasets().catch(()=>{});
       }
     } catch (_) {}
   };
@@ -531,10 +532,72 @@ function renderConfig() {
   if($('#topicRecordingDirectory')) {
     $('#topicRecordingDirectory').value = config?.ros?.recording?.directory || 'runtime/topic_recordings';
   }
+  const recordingConfig=config?.ros?.recording || {};
+  if($('#topicRecordingFormat')) $('#topicRecordingFormat').value=recordingConfig.format || 'mcap';
+  if($('#topicRecordingLerobotFps')) $('#topicRecordingLerobotFps').value=recordingConfig.lerobot_fps ?? 15;
+  if($('#topicRecordingLerobotTask')) $('#topicRecordingLerobotTask').value=recordingConfig.lerobot_task || '遥操作';
+  updateRecordingFormatFields();
   renderCameraStreams();
   renderRecordingRules();
   renderStandardTopics();
   renderConfigInterface();
+}
+
+function updateRecordingFormatFields() {
+  const usesLeRobot=['lerobot','both'].includes($('#topicRecordingFormat')?.value);
+  for(const id of ['#topicRecordingLerobotFps','#topicRecordingLerobotTask']) {
+    if($(id)) $(id).disabled=!usesLeRobot;
+  }
+}
+
+function exportProgressText(progress={}) {
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const count = Number.isFinite(Number(progress.current)) && Number(progress.total) > 0
+    ? ` · ${Number(progress.current).toLocaleString()} / ${Number(progress.total).toLocaleString()} ${progress.unit || ''}` : '';
+  return `${progress.stage || '正在生成'} · ${percent.toFixed(0)}%${count}`;
+}
+
+function datasetUnavailable(file) {
+  return Boolean(file.is_current) || (isLeRobotDataset(file) && ['pending','queued','running','exporting','error','failed'].includes(file.export_state));
+}
+
+function renderDatasetExportProgress(cell, file) {
+  const progress = file.export_progress || {};
+  const failed = ['error','failed'].includes(file.export_state) || progress.state === 'error';
+  const box = document.createElement('div');
+  box.className = `dataset-export-progress${failed ? ' failed' : ''}`;
+  const label = document.createElement('span');
+  label.textContent = failed ? `导出失败：${file.export_error || progress.error || '请检查录制状态'}` : exportProgressText(progress);
+  box.append(label);
+  if (!failed) {
+    const bar = document.createElement('progress');
+    bar.max = 100;
+    bar.value = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+    bar.setAttribute('aria-label', progress.stage || 'LeRobot 导出进度');
+    box.append(bar);
+  }
+  cell.append(box);
+}
+
+function recordingExportSummary(status={}) {
+  const state=status.export_progress?.state || status.export_state;
+  const error=status.export_progress?.state ? status.export_progress.error : status.export_error;
+  if(error) return `LeRobot 导出失败：${error}`;
+  if(!state || state==='idle' || state==='disabled') return '';
+  const labels={pending:'等待生成',queued:'等待生成',running:'正在生成',exporting:'正在生成',completed:'已生成',complete:'已生成',done:'已生成',failed:'导出失败',error:'导出失败'};
+  const progress = status.export_progress ? ` · ${exportProgressText(status.export_progress)}` : '';
+  return `LeRobot ${labels[state] || state}${progress}${status.lerobot_path ? ` · ${status.lerobot_path}` : ''}`;
+}
+
+function renderRecordingExport(status) {
+  const element=$('#recordingExportStatus');
+  if(!element) return;
+  const text=recordingExportSummary(status);
+  element.textContent=text;
+  element.hidden=!text;
+  const state=status.export_progress?.state || status.export_state;
+  const error=status.export_progress?.state ? status.export_progress.error : status.export_error;
+  element.className=error || ['failed','error'].includes(state) ? 'dialog-error' : 'muted';
 }
 
 function standardTopicSet() {
@@ -741,6 +804,13 @@ function collectConfig() {
     if(!config.ros) config.ros = {};
     if(!config.ros.recording) config.ros.recording = {};
     config.ros.recording.directory = $('#topicRecordingDirectory').value.trim() || 'runtime/topic_recordings';
+    if($('#topicRecordingFormat')) config.ros.recording.format=$('#topicRecordingFormat').value;
+    if($('#topicRecordingLerobotFps')) {
+      const fps=Number($('#topicRecordingLerobotFps').value);
+      if(!Number.isInteger(fps) || fps<1 || fps>60) throw new Error('LeRobot 帧率需为 1–60 的整数');
+      config.ros.recording.lerobot_fps=fps;
+    }
+    if($('#topicRecordingLerobotTask')) config.ros.recording.lerobot_task=$('#topicRecordingLerobotTask').value.trim() || '遥操作';
   }
   collectCameraStreams();
   return config;
@@ -912,6 +982,80 @@ async function loadTopics() {
 }
 
 let datasetsData = { files: [] };
+let datasetLoading = false;
+let datasetPollTimer = null;
+
+function datasetPageVisible() {
+  return typeof location !== 'undefined' && location.hash === '#datasets' && document.visibilityState === 'visible';
+}
+
+function updateDatasetPolling(page) {
+  if (datasetPollTimer !== null) clearInterval(datasetPollTimer);
+  datasetPollTimer = null;
+  if (page !== 'datasets' || document.visibilityState !== 'visible') return;
+  loadDatasets();
+  datasetPollTimer = setInterval(() => {
+    if (datasetPageVisible()) loadDatasets();
+  }, 2000);
+}
+
+
+function isLeRobotDataset(file) {
+  return String(file.format || '').toLowerCase().startsWith('lerobot');
+}
+
+function datasetIdentifier(file) {
+  return file.id || file.filename;
+}
+
+function datasetSummaryValues(file) {
+  const profile = file.profile_display_name || file.profile_id || file.robot_name || '未知（旧数据）';
+  if (isLeRobotDataset(file)) return [
+    ['机器人', profile], ['数据大小', file.size_human || '--'],
+    ['时长', file.duration_human || '--'], ['总帧数', String(file.frames ?? file.total_frames ?? 0)],
+    ['Episode', String(file.total_episodes ?? 0)], ['采样帧率', `${file.fps || 0} FPS`],
+    ['相机', `${file.camera_count || 0} 路`],
+    ['任务', (file.tasks || (file.task ? [file.task] : [])).join('；') || '--'],
+  ];
+  return [
+    ['机器人', profile], ['文件大小', file.size_human || '--'],
+    ['录制时长', file.duration_human || '--'],
+    ['总消息数', file.message_count ? `${file.message_count.toLocaleString()} 条` : '--'],
+    ['总平均吞吐', file.avg_rate_hz ? `${file.avg_rate_hz} msg/s` : '--'],
+  ];
+}
+
+function renderDatasetVideos(file) {
+  const panel = $('#datasetDetailVideos');
+  if (!panel) return;
+  const previousVideo = panel.querySelector?.('video');
+  previousVideo?.pause();
+  panel.textContent = '';
+  const videos = file.videos || [];
+  panel.hidden = !isLeRobotDataset(file) || !videos.length;
+  if (panel.hidden) return;
+  const label = document.createElement('label');
+  label.textContent = '相机视频';
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', '选择相机视频');
+  for (const item of videos) {
+    const option = document.createElement('option');
+    option.value = item.url;
+    option.textContent = item.feature;
+    select.append(option);
+  }
+  const video = document.createElement('video');
+  video.controls = true;
+  video.preload = 'metadata';
+  video.style.cssText = 'display:block;width:100%;max-height:320px;margin-top:12px;background:#111;';
+  video.src = videos[0].url;
+  select.onchange = () => { video.pause(); video.src = select.value; video.load(); };
+  label.append(select);
+  panel.append(label, video);
+  const dialog = $('#datasetDetailDialog');
+  if (dialog) dialog.onclose = () => video.pause();
+}
+
 
 function updateSelectedDatasetCount() {
   const checked = $$('#datasetRows input[type=checkbox]:checked');
@@ -928,11 +1072,13 @@ function updateSelectedDatasetCount() {
 async function loadDatasets() {
   const body = $('#datasetRows');
   const summary = $('#datasetsSummary');
-  if (!body) return;
-  body.textContent = '';
+  if (!body || datasetLoading) return;
+  datasetLoading = true;
   try {
     datasetsData = await api('/api/recordings');
     const files = datasetsData.files || [];
+    const selected = new Set($$('#datasetRows input[type=checkbox]:checked').map(check => check.dataset.filename));
+    body.textContent = '';
     if (summary) {
       summary.textContent = `共 ${datasetsData.total_count || 0} 个数据集 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''}`;
     }
@@ -946,7 +1092,7 @@ async function loadDatasets() {
       cell.style.textAlign = 'center';
       cell.style.color = 'var(--muted)';
       cell.style.padding = '24px 0';
-      cell.textContent = '暂无录制数据集文件。可在“话题录制”页面点击“开始录制”生成 MCAP 数据集。';
+      cell.textContent = '暂无录制数据集文件。可在“话题录制”页面点击“开始录制”生成 MCAP 或 LeRobot 数据集。';
       row.append(cell);
       body.append(row);
       return;
@@ -958,8 +1104,9 @@ async function loadDatasets() {
       const selectCell = document.createElement('td');
       const check = document.createElement('input');
       check.type = 'checkbox';
-      check.dataset.filename = file.filename;
-      check.disabled = Boolean(file.is_current);
+      check.dataset.filename = datasetIdentifier(file);
+      check.disabled = datasetUnavailable(file);
+      check.checked = !check.disabled && selected.has(datasetIdentifier(file));
       check.onchange = updateSelectedDatasetCount;
       selectCell.append(check);
 
@@ -967,6 +1114,11 @@ async function loadDatasets() {
       const nameCode = document.createElement('code');
       nameCode.textContent = `${file.marked ? '★ ' : ''}${file.filename}`;
       nameCell.append(nameCode);
+      const formatTag = document.createElement('span');
+      formatTag.className = 'tag';
+      formatTag.style.cssText = 'margin-left:8px;font-size:11px;';
+      formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : 'MCAP';
+      nameCell.append(formatTag);
 
       const profileCell = document.createElement('td');
       const profileTag = document.createElement('span');
@@ -992,11 +1144,13 @@ async function loadDatasets() {
       const msgCountCell = document.createElement('td');
       msgCountCell.style.font = '12px monospace';
       msgCountCell.style.color = 'var(--cyan)';
-      msgCountCell.textContent = file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : '--');
+      msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : '--');
 
       const topicsCell = document.createElement('td');
       topicsCell.style.fontSize = '12px';
-      if (file.topic_count) {
+      if (isLeRobotDataset(file)) {
+        topicsCell.textContent = `${file.camera_count || 0} 路相机 · ${file.fps || 0} FPS`;
+      } else if (file.topic_count) {
         topicsCell.textContent = `${file.topic_count} 个话题 (${file.avg_rate_hz || 0} Hz)`;
       } else {
         topicsCell.textContent = file.is_current ? '录制中…' : '--';
@@ -1007,7 +1161,9 @@ async function loadDatasets() {
       timeCell.textContent = file.created_at || file.modified_at;
 
       const statusCell = document.createElement('td');
-      if (file.is_current) {
+      if (isLeRobotDataset(file) && datasetUnavailable(file)) {
+        renderDatasetExportProgress(statusCell, file);
+      } else if (file.is_current) {
         statusCell.innerHTML = `<span class="recording-badge active" style="padding:2px 6px;font-size:10px;"><i></i>${file.marked ? '已标记 · ' : ''}正在写入</span>`;
       } else if (file.marked) {
         statusCell.innerHTML = '<span class="tag" style="border-color:#f5a344;color:#f5a344;">★ 已标记</span>';
@@ -1020,12 +1176,14 @@ async function loadDatasets() {
       const group = document.createElement('div');
       group.className = 'btn-group';
 
-      if (!file.is_current && (file.channels?.length || file.message_count)) {
-        const replayBtn = document.createElement('button');
-        replayBtn.className = 'primary btn-sm';
-        replayBtn.textContent = '重放';
-        replayBtn.onclick = () => openStartReplayDialog(file);
-        group.append(replayBtn);
+      if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.channels?.length || file.message_count)) {
+        if (!isLeRobotDataset(file)) {
+          const replayBtn = document.createElement('button');
+          replayBtn.className = 'primary btn-sm';
+          replayBtn.textContent = '重放';
+          replayBtn.onclick = () => openStartReplayDialog(file);
+          group.append(replayBtn);
+        }
 
         const detailBtn = document.createElement('button');
         detailBtn.className = 'btn-sm';
@@ -1034,20 +1192,26 @@ async function loadDatasets() {
         group.append(detailBtn);
       }
 
-      const downloadLink = document.createElement('a');
+      const downloadLink = document.createElement(datasetUnavailable(file) ? 'button' : 'a');
       downloadLink.className = 'btn-sm';
-      downloadLink.href = `/api/recordings/${encodeURIComponent(file.filename)}/download`;
-      downloadLink.setAttribute('download', file.filename);
+      if (datasetUnavailable(file)) {
+        downloadLink.disabled = true;
+        downloadLink.title = '数据集生成完成后可下载';
+      } else {
+        downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download`;
+        downloadLink.setAttribute('download', isLeRobotDataset(file) ? `${file.filename}.zip` : file.filename);
+      }
       downloadLink.textContent = '下载';
 
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'danger btn-sm';
       deleteBtn.textContent = '删除';
-      deleteBtn.disabled = Boolean(file.is_current);
+      deleteBtn.disabled = datasetUnavailable(file);
       deleteBtn.onclick = async () => {
-        if (!confirm(`确认删除数据集文件 “${file.filename}”？`)) return;
+        if (datasetUnavailable(file)) return;
+        if (!confirm(`确认删除数据集 “${file.filename}”${isLeRobotDataset(file) ? ' 及其全部视频和数据' : ''}？`)) return;
         try {
-          await api(`/api/recordings/${encodeURIComponent(file.filename)}`, { method: 'DELETE' });
+          await api(`/api/recordings/${encodeURIComponent(datasetIdentifier(file))}`, { method: 'DELETE' });
           toast(`已删除数据集：${file.filename}`);
           await loadDatasets();
         } catch (err) {
@@ -1061,9 +1225,12 @@ async function loadDatasets() {
       row.append(selectCell, nameCell, profileCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
       body.append(row);
     }
+    updateSelectedDatasetCount();
   } catch (error) {
     if (summary) summary.textContent = `读取数据集列表失败: ${error.message}`;
     toast(`加载数据集失败：${error.message}`, true);
+  } finally {
+    datasetLoading = false;
   }
 }
 
@@ -1076,13 +1243,7 @@ function showDatasetDetails(file) {
 
   const summary = $('#datasetDetailSummary');
   summary.textContent = '';
-  const values = [
-    ['机器人', profileLabel],
-    ['文件大小', file.size_human || '--'],
-    ['录制时长', file.duration_human || '--'],
-    ['总消息数', file.message_count ? `${file.message_count.toLocaleString()} 条` : '--'],
-    ['总平均吞吐', file.avg_rate_hz ? `${file.avg_rate_hz} msg/s` : '--'],
-  ];
+  const values = datasetSummaryValues(file);
   for (const [label, val] of values) {
     const span = document.createElement('span');
     const small = document.createElement('small'); small.textContent = label;
@@ -1114,7 +1275,7 @@ function showDatasetDetails(file) {
       tdType.textContent = ch.type;
       const tdCount = document.createElement('td');
       tdCount.style.font = '12px monospace';
-      tdCount.textContent = `${(ch.count || 0).toLocaleString()} 条`;
+      tdCount.textContent = `${(ch.count || 0).toLocaleString()} ${isLeRobotDataset(file) ? '帧' : '条'}`;
       const tdRate = document.createElement('td');
       tdRate.className = 'topic-rate ok';
       tdRate.textContent = `${Number(ch.rate_hz || 0).toFixed(1)} Hz`;
@@ -1123,10 +1284,12 @@ function showDatasetDetails(file) {
     }
   }
 
+  renderDatasetVideos(file);
   dialog.showModal();
 }
 
 function openStartReplayDialog(file) {
+  if (isLeRobotDataset(file)) return;
   const dialog = $('#startReplayDialog');
   if (!dialog) return;
   $('#startReplayFilename').value = file.filename;
@@ -1321,6 +1484,7 @@ async function init() {
       toast('录制配置已写入 middleware/config.yaml 并应用');
     }catch(error){toast(error.message,true);}
   };
+  if($('#topicRecordingFormat')) $('#topicRecordingFormat').onchange=updateRecordingFormatFields;
   async function triggerStartRecording(force = false) {
     try {
       const result = await api('/api/recording/start', {
@@ -1549,6 +1713,7 @@ async function init() {
   };
   if($('#sourceVr'))$('#sourceVr').onclick=()=>setControlSource('vr');
   if($('#sourceExoskeleton'))$('#sourceExoskeleton').onclick=()=>setControlSource('exoskeleton');
+  document.addEventListener('visibilitychange', () => updateDatasetPolling(location.hash.slice(1)));
   configureProfileDialog();
 }
 

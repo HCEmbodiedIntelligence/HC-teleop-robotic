@@ -158,7 +158,7 @@ def _raw_recording_process(
         import rclpy
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
-        from rclpy.qos import qos_profile_sensor_data
+        from .ros_qos import subscription_qos
         from rosidl_runtime_py.utilities import get_message
 
         domain_id = int(config.get("domain_id", 14))
@@ -215,7 +215,7 @@ def _raw_recording_process(
                     message_type,
                     topic,
                     callback,
-                    qos_profile_sensor_data,
+                    subscription_qos(item),
                     raw=True,
                 )
             )

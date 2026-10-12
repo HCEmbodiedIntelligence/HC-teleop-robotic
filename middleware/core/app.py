@@ -1003,11 +1003,14 @@ def create_app(store: ConfigStore) -> web.Application:
 
         if runtime.recording_ros is not None:
             runtime.recording_ros.prepare_recording()
-        path = await asyncio.to_thread(
-            runtime.recorder.start,
-            filename,
-            runtime.session_profile_metadata,
-        )
+        try:
+            path = await asyncio.to_thread(
+                runtime.recorder.start,
+                filename,
+                runtime.session_profile_metadata,
+            )
+        except (ValueError, RuntimeError, FileExistsError, ImportError) as exc:
+            return web.json_response({"ok": False, "reason": str(exc)}, status=400)
         if runtime.ros is not None:
             runtime.ros.publish(
                 "/teleop/recording_state",
@@ -1087,23 +1090,58 @@ def create_app(store: ConfigStore) -> web.Application:
             "total_size_human": human,
         })
 
-    async def download_recording(request: web.Request) -> web.FileResponse:
-        filename = Path(request.match_info["filename"]).name
+    async def download_recording(request: web.Request) -> web.StreamResponse:
+        from .recording_datasets import resolve_dataset, archive_dataset
+        from urllib.parse import quote
+        identifier = request.match_info["filename"]
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
-        target = (runtime.recorder.directory / filename).resolve()
-        if not target.is_relative_to(runtime.recorder.directory) or not target.is_file():
-            raise web.HTTPNotFound(text=f"recording not found: {filename}")
-        return web.FileResponse(
-            target,
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
+        try:
+            target = resolve_dataset(runtime.recorder.directory, identifier)
+        except (ValueError, FileNotFoundError) as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        if target.is_file():
+            if runtime.recorder.is_recording() and runtime.recorder.path == target:
+                raise web.HTTPConflict(text="recording is still being written")
+            return web.FileResponse(target, headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name)}",
                 "Content-Type": "application/octet-stream",
-            },
-        )
+            })
+        try:
+            archive = await asyncio.to_thread(archive_dataset, target)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        try:
+            response = web.StreamResponse(headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name + '.zip')}",
+                "Content-Type": "application/zip",
+                "Content-Length": str(archive.stat().st_size),
+            })
+            await response.prepare(request)
+            with archive.open('rb') as handle:
+                while chunk := await asyncio.to_thread(handle.read, 256 * 1024):
+                    await response.write(chunk)
+            await response.write_eof()
+            return response
+        finally:
+            archive.unlink(missing_ok=True)
+
+    async def get_dataset_video(request: web.Request) -> web.FileResponse:
+        from .recording_datasets import resolve_dataset, dataset_video
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        identifier = request.match_info["filename"]
+        if not identifier.startswith("lerobot:"):
+            raise web.HTTPNotFound(text="not a LeRobot dataset")
+        try:
+            target = resolve_dataset(runtime.recorder.directory, identifier)
+            video = dataset_video(target, request.query.get("path", ""))
+        except (ValueError, FileNotFoundError) as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.FileResponse(video, headers={"Content-Type": "video/mp4"})
 
     async def delete_recording(request: web.Request) -> web.Response:
-        filename = Path(request.match_info["filename"]).name
+        filename = request.match_info["filename"]
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
         try:
@@ -1247,6 +1285,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/recordings", get_recordings)
     app.router.add_post("/api/recordings/upload", import_mcap_file)
     app.router.add_get("/api/recordings/{filename}/download", download_recording)
+    app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)
     app.router.add_delete("/api/recordings/{filename}", delete_recording)
     app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
     app.router.add_post("/api/replay/start", start_replay)

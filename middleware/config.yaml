@@ -24,11 +24,21 @@ ros:
   - topic: /observation/cameras/wrist_left/color
     description: 左腕部相机彩色图像，随第 7 关节运动
     type: sensor_msgs/msg/Image
+    enabled: false
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    qos_reliability: reliable
+  - topic: /observation/cameras/wrist_left/color/compressed
+    description: 左腕部相机彩色图像，随第 7 关节运动（仿真进程内 JPEG 压缩，保留采集时间）
+    type: sensor_msgs/msg/CompressedImage
     enabled: true
     outputs:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
+    qos_reliability: best_effort
   - topic: /observation/cameras/wrist_left/camera_info
     description: 左腕部相机内参与光学坐标系
     type: sensor_msgs/msg/CameraInfo
@@ -40,11 +50,21 @@ ros:
   - topic: /observation/cameras/wrist_right/color
     description: 右腕部相机彩色图像，随第 7 关节运动
     type: sensor_msgs/msg/Image
+    enabled: false
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    qos_reliability: reliable
+  - topic: /observation/cameras/wrist_right/color/compressed
+    description: 右腕部相机彩色图像，随第 7 关节运动（仿真进程内 JPEG 压缩，保留采集时间）
+    type: sensor_msgs/msg/CompressedImage
     enabled: true
     outputs:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
+    qos_reliability: best_effort
   - topic: /observation/cameras/wrist_right/camera_info
     description: 右腕部相机内参与光学坐标系
     type: sensor_msgs/msg/CameraInfo
@@ -292,12 +312,23 @@ ros:
   - topic: /cameras/eye/color
     description: Isaac 头部相机原始彩色图像，用于头显投射与录制
     type: sensor_msgs/msg/Image
-    enabled: true
+    enabled: false
     outputs:
     - websocket
     - record
     max_hz: 30.0
     event_max_hz: 0.0
+    qos_reliability: reliable
+  - topic: /cameras/eye/color/compressed
+    description: Isaac 头部相机原始彩色图像，用于头显投射与录制（仿真进程内 JPEG 压缩，保留采集时间）
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    qos_reliability: best_effort
   - topic: /observation/cameras/overhead/color/compressed
     description: 俯视相机彩色图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
@@ -357,6 +388,9 @@ ros:
     event_max_hz: 0.0
   recording:
     directory: ../runtime/topic_recordings
+    format: both
+    lerobot_fps: 15
+    lerobot_task: 遥操作
     enabled: false
   dataset_topics:
     enabled: true
@@ -393,34 +427,34 @@ camera:
     type: sensor_msgs/msg/CompressedImage
   - id: overhead
     name: 俯视相机
-    topic: /cameras/eye/color
+    topic: /cameras/eye/color/compressed
     enabled: true
     custom_topic: ''
     width: 640
     height: 400
     fps: 30
     codec: H264
-    type: sensor_msgs/msg/Image
+    type: sensor_msgs/msg/CompressedImage
   - id: d405_left
     name: 左腕相机
-    topic: /observation/cameras/wrist_left/color
+    topic: /observation/cameras/wrist_left/color/compressed
     enabled: true
     custom_topic: ''
     width: 640
     height: 400
     fps: 30
     codec: H264
-    type: sensor_msgs/msg/Image
+    type: sensor_msgs/msg/CompressedImage
   - id: d405_right
     name: 右腕相机
-    topic: /observation/cameras/wrist_right/color
+    topic: /observation/cameras/wrist_right/color/compressed
     enabled: true
     custom_topic: ''
     width: 640
     height: 400
     fps: 30
     codec: H264
-    type: sensor_msgs/msg/Image
+    type: sensor_msgs/msg/CompressedImage
   width: 640
   height: 400
   fps: 30

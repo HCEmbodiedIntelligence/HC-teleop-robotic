@@ -4,6 +4,8 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -330,6 +332,14 @@ class TopicRecorder:
         if not directory.is_absolute():
             directory = config_dir / directory
         self.directory = directory.resolve()
+        self.save_format = str(config.get("format", "mcap"))
+        self.lerobot_fps = int(config.get("lerobot_fps", 15))
+        self.lerobot_task = str(config.get("lerobot_task", "遥操作"))
+        self._export_process = None
+        self._export_state = "idle"
+        self._export_error = None
+        self._export_log = None
+        self._lerobot_path = ""
         self.path: Path | None = None
         self._mp = mp.get_context("spawn")
         self._queue = self._mp.Queue(maxsize=8192)
@@ -360,12 +370,24 @@ class TopicRecorder:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         self.stop()
+        if self.status()["export_state"] == "exporting":
+            raise RuntimeError("LeRobot 数据正在保存，请等待完成后再开始下一次录制")
+        if self.save_format != "mcap":
+            from .lerobot_export import ensure_export_available
+            ensure_export_available()
+        self._export_state, self._export_error, self._lerobot_path = "idle", None, ""
         self.directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = filename.strip() if filename else f"ros2_{stamp}.mcap"
         if not fname.endswith(".mcap"):
             fname += ".mcap"
-        self.path = self.directory / fname
+        # Keep the complete source, including /vrdata, for recovery and audit.
+        source_dir = self.directory / ".lerobot_sources" if self.save_format == "lerobot" else self.directory
+        source_dir.mkdir(parents=True, exist_ok=True)
+        fname = Path(fname).name
+        self.path = source_dir / fname
+        if self.path.exists():
+            raise FileExistsError(f"录制文件已存在: {self.path}")
         self._active_metadata = {
             str(key): str(value)
             for key, value in (metadata or {}).items()
@@ -426,7 +448,72 @@ class TopicRecorder:
         if process.is_alive():
             raise TimeoutError("MCAP writer did not finish within 30 seconds")
         self._process = None
+        self.status()  # Drain writer errors before exporting a closed source.
+        if self.save_format != "mcap" and not self._last_error:
+            self._start_lerobot_export()
         return self.status()
+
+    def _start_lerobot_export(self) -> None:
+        assert self.path is not None
+        destination = self.directory / "lerobot" / self.path.stem
+        self._lerobot_path = str(destination)
+        self._export_state = "exporting"
+        self._export_error = None
+        log_path = self.path.with_suffix(".lerobot-export.log")
+        from .export_progress import ExportProgress, progress_path
+        ExportProgress(progress_path(destination)).update('等待转换', 0, force=True, reset=True)
+        self._export_log = log_path.open("w", encoding="utf-8")
+        command = [sys.executable, "-m", "middleware.core.lerobot_export",
+                   str(self.path), str(destination), "--fps", str(self.lerobot_fps),
+                   "--task", self.lerobot_task, "--robot-type",
+                   self._active_metadata.get("profile_id", "robot")]
+        try:
+            # Export runs outside the ROS and video workers at lower priority.
+            if sys.platform.startswith("linux"):
+                command = ["nice", "-n", "10", *command]
+            self._export_process = subprocess.Popen(
+                command, cwd=Path(__file__).resolve().parents[2],
+                stdout=self._export_log, stderr=subprocess.STDOUT,
+            )
+        except Exception as exc:
+            self._export_log.close()
+            self._export_log = None
+            self._export_state, self._export_error = "error", str(exc)
+            ExportProgress(progress_path(destination)).update('转换失败', 0, state='error', error=str(exc), force=True)
+
+    def _poll_export(self) -> None:
+        process = self._export_process
+        if process is None:
+            # A preserved source can be retried by the export CLI. Its progress
+            # must replace the cached failure from the original managed worker.
+            progress = self.export_progress()
+            state = progress.get('state')
+            if state == 'completed' and (Path(self._lerobot_path) / 'meta/info.json').is_file():
+                self._export_state, self._export_error = 'completed', None
+            elif state == 'exporting':
+                self._export_state, self._export_error = 'exporting', None
+            elif state == 'error':
+                self._export_state, self._export_error = 'error', progress.get('error')
+            return
+        if process.poll() is None:
+            return
+        self._export_process = None
+        if self._export_log is not None:
+            log_path = Path(self._export_log.name)
+            self._export_log.close()
+            self._export_log = None
+        else:
+            log_path = self.path.with_suffix(".lerobot-export.log")
+        if process.returncode == 0 and (Path(self._lerobot_path) / "meta" / "info.json").is_file():
+            self._export_state = "completed"
+            from .export_progress import ExportProgress, progress_path
+            ExportProgress(progress_path(Path(self._lerobot_path))).update('转换完成', 100, state='completed', force=True)
+        else:
+            self._export_state = "error"
+            detail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:] if log_path.exists() else ""
+            self._export_error = f"LeRobot 保存失败，原始 MCAP 已保留。{detail}"
+            from .export_progress import ExportProgress, progress_path
+            ExportProgress(progress_path(Path(self._lerobot_path))).update('转换失败', 0, state='error', error=self._export_error, force=True)
 
     def is_recording(self) -> bool:
         process = self._process
@@ -445,6 +532,7 @@ class TopicRecorder:
             return False
 
     def status(self) -> dict[str, Any]:
+        self._poll_export()
         while True:
             try:
                 self._last_error = self._error_queue.get_nowait()
@@ -461,8 +549,19 @@ class TopicRecorder:
                 "dropped": _counter_get(self._dropped),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",
+                "format": self.save_format,
+                "export_state": self._export_state,
+                "export_progress": self.export_progress(),
+                "export_error": self._export_error,
+                "lerobot_path": self._lerobot_path,
                 "error": self._last_error,
             }
+
+    def export_progress(self) -> dict:
+        if not self._lerobot_path:
+            return {}
+        from .export_progress import read_progress, progress_path
+        return read_progress(progress_path(Path(self._lerobot_path)))
 
     def _mark_path(self, recording_path: Path) -> Path:
         return self.directory / f".{recording_path.name}.mark.json"
@@ -513,6 +612,7 @@ class TopicRecorder:
         return result
 
     def list_recordings(self) -> list[dict[str, Any]]:
+        self._poll_export()
         self.directory.mkdir(parents=True, exist_ok=True)
         files = []
         active_path = (
@@ -557,6 +657,7 @@ class TopicRecorder:
             mark = self._read_mark(p)
 
             files.append({
+                "id": p.name,
                 "filename": p.name,
                 "size_bytes": size,
                 "size_human": human_size,
@@ -580,14 +681,31 @@ class TopicRecorder:
                 "marked_at": str(mark.get("marked_at", "")),
                 "mark_source": str(mark.get("mark_source", "")),
             })
+        from .recording_datasets import inspect_dataset
+        datasets_dir = self.directory / "lerobot"
+        if datasets_dir.is_dir() and not datasets_dir.is_symlink():
+            for dataset in datasets_dir.iterdir():
+                if dataset.is_dir() and not dataset.is_symlink() and not dataset.name.startswith("."):
+                    try:
+                        files.append(inspect_dataset(dataset))
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue  # Incomplete/invalid exports are not ready datasets.
+            from .recording_datasets import pending_datasets
+            files.extend(pending_datasets(datasets_dir, {item.get('id') for item in files}))
         files.sort(key=lambda x: x["timestamp"], reverse=True)
         return files
 
     def delete_recording(self, filename: str) -> None:
-        filename = Path(filename).name
-        target = (self.directory / filename).resolve()
-        if not target.is_relative_to(self.directory) or not target.is_file():
-            raise FileNotFoundError(f"recording not found: {filename}")
+        from .recording_datasets import resolve_dataset
+        target = resolve_dataset(self.directory, filename)
+        if filename.startswith("lerobot:"):
+            if self._export_state == "exporting" and target.resolve() == Path(self._lerobot_path).resolve():
+                raise ValueError("cannot delete dataset while exporting")
+            from .recording_datasets import dataset_files
+            dataset_files(target)  # Refuse symlink-containing trees.
+            import shutil
+            shutil.rmtree(target)
+            return
         active_path = (
             self.path.resolve()
             if (self.path and self.is_recording())

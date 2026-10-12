@@ -8,6 +8,14 @@ from middleware.core.config import ConfigError, ConfigStore, validate_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_image_transport_qos_is_preserved_and_validated(self):
+        item = {"topic": "/camera", "type": "sensor_msgs/msg/Image", "qos_reliability": "reliable"}
+        value = validate_config({"ros": {"subscriptions": [item]}})
+        self.assertEqual(value["ros"]["subscriptions"][0]["qos_reliability"], "reliable")
+        item["qos_reliability"] = "invalid"
+        with self.assertRaisesRegex(ConfigError, "qos_reliability"):
+            validate_config({"ros": {"subscriptions": [item]}})
+
     def test_defaults_are_added(self):
         value = validate_config({"server": {"port": 9000}})
         self.assertEqual(value["server"]["port"], 9000)
@@ -136,9 +144,24 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(subscriptions["/observation/cameras/head/color/compressed"]["enabled"])
         self.assertNotIn("/io_teleop/camera_head/color", subscriptions)
         self.assertNotIn("/io_teleop/camera_head/depth", subscriptions)
-        self.assertTrue(subscriptions["/cameras/eye/color"]["enabled"])
+        for topic in ("/cameras/eye/color", "/observation/cameras/wrist_left/color", "/observation/cameras/wrist_right/color"):
+            self.assertFalse(subscriptions[topic]["enabled"])
+            compressed = subscriptions[topic + "/compressed"]
+            self.assertTrue(compressed["enabled"])
+            self.assertEqual(compressed["type"], "sensor_msgs/msg/CompressedImage")
+            self.assertIn("record", compressed["outputs"])
         self.assertTrue(subscriptions["/observation/cameras/overhead/color/compressed"]["enabled"])
         self.assertFalse(subscriptions["/cameras/Bfront/color"]["enabled"])
+
+    def test_recording_save_modes_and_lerobot_options(self):
+        for mode in ("mcap", "lerobot", "both"):
+            cfg = validate_config({"ros": {"recording": {"format": mode, "lerobot_fps": 15, "lerobot_task": "夹取箱子"}}})
+            self.assertEqual(cfg["ros"]["recording"]["format"], mode)
+            self.assertEqual(cfg["ros"]["recording"]["lerobot_task"], "夹取箱子")
+        for settings in ({"format": "csv"}, {"lerobot_fps": 0}, {"lerobot_fps": 61},
+                         {"lerobot_fps": 15.5}, {"lerobot_fps": True}, {"lerobot_task": " "}):
+            with self.assertRaises(ConfigError):
+                validate_config({"ros": {"recording": settings}})
 
     def test_multiple_camera_streams_are_normalized(self):
         value = validate_config(

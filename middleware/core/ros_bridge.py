@@ -310,6 +310,7 @@ class RosBridge:
                 ReliabilityPolicy,
                 qos_profile_sensor_data,
             )
+            from .ros_qos import subscription_qos
             from rosidl_runtime_py.convert import message_to_ordereddict
             from rosidl_runtime_py.set_message import set_message_fields
             from rosidl_runtime_py.utilities import get_message
@@ -522,7 +523,7 @@ class RosBridge:
 
                 subscriptions.append(
                     node.create_subscription(
-                        message_type, topic, callback, qos_profile_sensor_data
+                        message_type, topic, callback, subscription_qos(item)
                     )
                 )
                 subscription_names.append(topic)

@@ -28,6 +28,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "subscriptions": [],
         "recording": {
             "directory": "runtime/topic_recordings",
+            "format": "mcap",
+            "lerobot_fps": 15,
+            "lerobot_task": "遥操作",
         },
     },
     "vr": {
@@ -195,6 +198,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(
                 f"ros.subscriptions[{index}].event_max_hz must be >= 0"
             )
+        qos_reliability = item.get("qos_reliability")
+        if qos_reliability is not None and qos_reliability not in ("best_effort", "reliable"):
+            raise ConfigError(f"ros.subscriptions[{index}].qos_reliability must be best_effort or reliable")
         description = item.get("description", "")
         if not isinstance(description, str) or len(description) > 500:
             raise ConfigError(f"ros.subscriptions[{index}].description must be a string of at most 500 characters")
@@ -209,6 +215,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 "event_max_hz": float(event_max_hz),
             }
         )
+        if qos_reliability is not None:
+            normalized[-1]["qos_reliability"] = qos_reliability
     value["ros"]["subscriptions"] = normalized
     recording = value["ros"].get("recording")
     if not isinstance(recording, dict):
@@ -216,6 +224,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     directory = recording.get("directory")
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
+    recording_format = recording.get("format", "mcap")
+    if recording_format not in ("mcap", "lerobot", "both"):
+        raise ConfigError("ros.recording.format must be mcap, lerobot or both")
+    lerobot_fps = recording.get("lerobot_fps", 15)
+    if isinstance(lerobot_fps, bool) or not isinstance(lerobot_fps, int) or not 1 <= lerobot_fps <= 60:
+        raise ConfigError("ros.recording.lerobot_fps must be an integer from 1 to 60")
+    lerobot_task = recording.get("lerobot_task", "遥操作")
+    if not isinstance(lerobot_task, str) or not lerobot_task.strip() or len(lerobot_task) > 500:
+        raise ConfigError("ros.recording.lerobot_task must be a non-empty string of at most 500 characters")
+    recording.update(format=recording_format, lerobot_fps=lerobot_fps, lerobot_task=lerobot_task.strip())
     cam_config = value.get("camera", {})
     if isinstance(cam_config, dict):
         cam_config["enabled"] = bool(cam_config.get("enabled", False))

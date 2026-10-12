@@ -31,3 +31,6 @@ adapters/robots/*
 !adapters/robots/.gitkeep
 !adapters/robots/*.md
 
+
+# Isolated optional LeRobot export environment
+.venv-lerobot/
