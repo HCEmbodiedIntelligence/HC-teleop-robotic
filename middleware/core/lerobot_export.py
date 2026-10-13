@@ -23,6 +23,85 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from middleware.core.export_progress import ExportProgress, progress_path
 
+BOX_NUDGE_TOPIC = '/dataset/box_nudge/sample'
+BOX_NUDGE_FIELDS = {
+    'observation': {'joint_pos_abs': 17, 'eef_pos_b': 6, 'eef_pose_b': 14,
+                    'target_box_top_pose_9d': 9, 'horizontal_neighbor_edge_b': 6,
+                    'target_box_pose_b': 7, 'box_size': 3, 'target_box_id': 1,
+                    'last_action': 14},
+    'action': {'ee_pose_b': 14, 'delta_pose_b': 14, 'policy_raw': 14,
+               'valid': 1, 'representable': 1},
+}
+
+
+def parse_box_nudge_sample(data: str) -> tuple[dict, dict, dict]:
+    """Validate atomic, pre-step simulator truth; preserve raw training features.
+
+    No perception noise/delay or joint-history preprocessing is injected here.
+    Poses use robot_root, left then right, xyz + quaternion wxyz.
+    """
+    try:
+        sample = json.loads(data)
+    except (TypeError, ValueError) as error:
+        raise ValueError('Invalid box_nudge JSON') from error
+    if not isinstance(sample, dict) or sample.get('schema') != 'box_nudge.pico.v1':
+        raise ValueError('Unsupported box_nudge sample schema')
+    if sample.get('frame_id') != 'robot_root':
+        raise ValueError('box_nudge requires robot_root coordinates')
+    values, names = {}, {}
+    for category, fields in BOX_NUDGE_FIELDS.items():
+        group = sample.get(category)
+        if not isinstance(group, dict):
+            raise ValueError(f'Missing box_nudge {category}')
+        for field, size in fields.items():
+            vector = group.get(field)
+            if (not isinstance(vector, list) or len(vector) != size or
+                    any(isinstance(x, bool) or not isinstance(x, (int, float)) or
+                        not math.isfinite(x) for x in vector)):
+                raise ValueError(f'Invalid box_nudge {category}.{field}: expected {size} finite numbers')
+            if field in ('valid', 'representable') and vector[0] not in (0, 1):
+                raise ValueError(f'Invalid box_nudge action.{field}: expected binary flag')
+            key = f'{category}.box_nudge.{field}'
+            values[key] = [float(x) for x in vector]
+            if size == 14:
+                names[key] = [f'{side}_{axis}' for side in ('left', 'right')
+                              for axis in ('x', 'y', 'z', 'qw', 'qx', 'qy', 'qz')]
+            else:
+                names[key] = [f'{field}_{i}' for i in range(size)]
+    for field in ('sim_time', 'action_age_s'):
+        value = sample.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f'Invalid box_nudge {field}')
+        values['observation.box_nudge.' + field] = [float(value)]
+        names['observation.box_nudge.' + field] = [field]
+    # Optional single-active-arm projection, used by the default nudge task.
+    for category, field, size in [('observation', 'active_arm_is_right', 1),
+                                  ('action', 'policy_raw_active', 14)]:
+        if field not in sample[category]:
+            continue
+        vector = sample[category][field]
+        if (not isinstance(vector, list) or len(vector) != size or
+                any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in vector)):
+            raise ValueError(f'Invalid box_nudge {category}.{field}')
+        if size == 1 and vector[0] not in (0, 1):
+            raise ValueError('Invalid active-arm mask')
+        key = f'{category}.box_nudge.{field}'
+        values[key] = list(map(float, vector))
+        names[key] = ([field] if size == 1 else [f'{side}_{axis}' for side in ('left', 'right')
+                      for axis in ('x', 'y', 'z', 'qw', 'qx', 'qy', 'qz')])
+    metadata = {'schema': sample['schema'], 'frame_id': sample['frame_id'],
+                'pose_order': 'left then right; xyz,qw,qx,qy,qz',
+                'preprocessing': 'raw pre-step simulator truth; no noise, delay, or joint history added'}
+    for field, size in (('joint_names', 17), ('tcp_frames', 2)):
+        if field in sample:
+            items = sample[field]
+            if not isinstance(items, list) or len(items) != size or any(not isinstance(x, str) or not x for x in items) or len(set(items)) != size:
+                raise ValueError(f'Invalid box_nudge {field}')
+            metadata[field] = items
+    if 'joint_names' in metadata:
+        names['observation.box_nudge.joint_pos_abs'] = metadata['joint_names']
+    return values, names, metadata
+
 
 def writer_python() -> Path:
     return Path(os.environ.get("LEROBOT_PYTHON", str(ROOT / ".venv-lerobot/bin/python")))
@@ -60,7 +139,7 @@ def latest_sample(samples: list[tuple[int, Any]], stamp: int, max_age_ns: int | 
 
 
 def required_stream(key: str) -> bool:
-    return key in ('observation.state', 'action') or key.startswith('observation.images.')
+    return key in ('observation.state', 'action', 'observation.box_nudge.eef_pose_b') or key.startswith('observation.images.')
 
 
 def sample_max_age(key: str) -> int:
@@ -142,6 +221,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     source_frame_ids = {}
     message_classes = {}
     numeric_names = {}
+    box_nudge_metadata = None
     numeric_topics = {
         '/observation/left_arm/ee_pose': 'observation.left_arm.ee_pose',
         '/observation/right_arm/ee_pose': 'observation.right_arm.ee_pose',
@@ -172,13 +252,29 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             joint_key = {'/observation/joint_states': 'observation.state', '/action/joint_states': 'action'}.get(topic)
             is_camera = kind in ('sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage') and 'depth' not in topic.lower()
             numeric_key = numeric_topics.get(topic)
-            if joint_key is None and not is_camera and numeric_key is None:
+            is_box_nudge = topic == BOX_NUDGE_TOPIC
+            if joint_key is None and not is_camera and numeric_key is None and not is_box_nudge:
                 continue
             if is_camera and topic + '/compressed' in topics:
                 continue
             if kind not in message_classes:
                 message_classes[kind] = get_message(kind)
             decoded = deserialize_message(message.data, message_classes[kind])
+            if is_box_nudge:
+                if kind != 'std_msgs/msg/String':
+                    raise ValueError('box_nudge sample requires std_msgs/msg/String')
+                atomic_values, atomic_names, metadata = parse_box_nudge_sample(decoded.data)
+                if box_nudge_metadata is not None and box_nudge_metadata != metadata:
+                    raise ValueError('box_nudge metadata changed during recording')
+                box_nudge_metadata = metadata
+                atomic_values['observation.box_nudge.freshness_valid'] = [1.0]
+                atomic_names['observation.box_nudge.freshness_valid'] = ['fresh_sample_within_0.2s']
+                for key, values in atomic_values.items():
+                    streams.setdefault(key, []).append((message.log_time, values))
+                    numeric_names[key] = atomic_names[key]
+                    source_topics[key] = topic
+                source_frame_ids[topic] = 'robot_root'
+                continue
             header = getattr(decoded, 'header', None)
             if header is not None:
                 frame_id = str(header.frame_id)
@@ -226,10 +322,11 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                     raise RuntimeError(f'Cannot save staging image {filename}')
                 streams.setdefault(key, []).append((message.log_time, str(filename)))
                 source_topics[key] = topic
-    if not names or not raw_cameras.get('action'):
+    if (not names or not raw_cameras.get('action')) and box_nudge_metadata is None:
         raise ValueError('LeRobot requires recorded /observation/joint_states and /action/joint_states; missing grid samples are explicitly masked')
-    first_action_names = list(raw_cameras['action'][0][1].name)
-    if not first_action_names:
+    names = names or []
+    first_action_names = list(raw_cameras['action'][0][1].name) if raw_cameras.get('action') else []
+    if raw_cameras.get('action') and not first_action_names:
         raise ValueError('Action has no joint names')
     # A command may intentionally omit passive/free joints in the feedback.
     # Keep common joints in feedback order, with command-only joints appended.
@@ -262,6 +359,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             values = {key: sample[1] if sample is not None else placeholders[key]
                       for key, sample in selected.items()}
             ages = [(stamp - selected[key][0]) / 1e9 if selected[key] is not None else -1.0 for key in keys]
+            freshness_key = 'observation.box_nudge.freshness_valid'
+            if freshness_key in values:
+                sample = selected[freshness_key]
+                values[freshness_key] = [float(sample is not None and stamp - sample[0] <= sample_max_age(freshness_key))]
             rows.append({'values': values,
                          'source_times': [(selected[key][0] - origin) / 1e9 if selected[key] is not None else -1.0 for key in keys],
                          'source_available': [float(selected[key] is not None) for key in keys],
@@ -271,6 +372,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     if not episodes:
         raise ValueError('No recording timeline samples; check recorded topics')
     manifest = {'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
+    if box_nudge_metadata is not None:
+        manifest['box_nudge'] = box_nudge_metadata
     path = staging / 'manifest.json'
     path.write_text(json.dumps(manifest), encoding='utf-8')
     progress.update("对齐完成", 30, sum(map(len, episodes)), sum(map(len, episodes)), "帧", force=True)
@@ -335,7 +438,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     joint_names = {'observation.state': manifest['joint_names'],
                    'action': manifest.get('action_joint_names', manifest['joint_names'])}
     features = {key: {'dtype': 'float32', 'shape': (len(names),), 'names': names}
-                for key, names in joint_names.items()}
+                for key, names in joint_names.items() if names}
     for key, names in manifest.get('numeric_names', {}).items():
         features[key] = {'dtype': 'float32', 'shape': (len(names),), 'names': names}
     for key, shape in manifest['dimensions'].items():
@@ -400,6 +503,8 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     synchronization['task'] = manifest['task']
     synchronization['source_frame_ids'] = manifest.get('source_frame_ids', {})
     synchronization['sync_audit'] = manifest.get('sync_audit', {})
+    if 'box_nudge' in manifest:
+        synchronization['box_nudge'] = manifest['box_nudge']
     synchronization['missing_policy'] = 'all sources: hold last observed value when stale, source_valid=0; before first sample use zero numeric/black image placeholders with source_available=0, source_valid=0 and source_time/source_age=-1; no future samples used'
     synchronization['auxiliary_policy'] = 'causal last observed value; never gates row selection; source_available=0 and value=0/source_time=-1/source_age=-1 before first sample; source_valid=0 when missing or stale; stale velocity is not asserted to remain active'
     synchronization.update({'clock': 'MCAP log_time (wall receive time), not ROS header time', 'selection': 'one recording is one episode, full MCAP log_time span on fixed FPS grid; causal last sample, no rows deleted for missing/stale values', 'state_action_max_age_seconds': 0.2, 'camera_max_age_seconds': 0.25, 'source_mcap_preserved': True, 'images': 'H.264 MP4 with no B frames, CRF 23; short episodes stream-concatenated without padding or dropping frames', 'joint_position_units': 'source ROS JointState units (revolute radians, prismatic meters)' })
