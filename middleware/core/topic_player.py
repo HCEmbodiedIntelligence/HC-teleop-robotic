@@ -1,0 +1,406 @@
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from mcap.reader import make_reader
+
+from .topic_recorder import read_recording_metadata
+
+
+logger = logging.getLogger("hc_teleop_middleware.player")
+
+
+class TopicPlayer:
+    """MCAP dataset player for replaying ROS 2 messages to drive simulation or real robot."""
+
+    def __init__(
+        self,
+        directory: Path,
+        ros_bridge_provider: Callable[[], Any],
+        state_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        active_profile_provider: Callable[[], str] | None = None,
+    ):
+        self.directory = directory
+        self._get_ros = ros_bridge_provider
+        self._state_callback = state_callback
+        self._get_active_profile = active_profile_provider or (lambda: "")
+        self._lock = threading.RLock()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+
+        self._state = "idle"
+        self._filename = ""
+        self._speed = 1.0
+        self._loop = False
+        self._selected_topics: list[str] = []
+        self._topic_remap: dict[str, str] = {}
+        self._current_time_sec = 0.0
+        self._duration_sec = 0.0
+        self._current_message_index = 0
+        self._total_messages = 0
+        self._progress = 0.0
+        self._error: str | None = None
+        self._requires_reset = False
+        self._replay_interlock_armed = False
+        self._recorded_profile_id = ""
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            is_active = self._thread is not None and self._thread.is_alive()
+            return {
+                "state": self._state,
+                "is_active": is_active,
+                "requires_reset": self._requires_reset,
+                "filename": self._filename,
+                "speed": self._speed,
+                "loop": self._loop,
+                "progress": round(self._progress, 1),
+                "current_time_sec": round(self._current_time_sec, 2),
+                "duration_sec": round(self._duration_sec, 2),
+                "current_message": self._current_message_index,
+                "total_messages": self._total_messages,
+                "selected_topics": list(self._selected_topics),
+                "topic_remap": dict(self._topic_remap),
+                "error": self._error,
+                "recorded_profile_id": self._recorded_profile_id,
+            }
+
+    def _notify_state(self, event_type: str) -> None:
+        callback = self._state_callback
+        if callback is None:
+            return
+        try:
+            callback(event_type, self.status())
+        except Exception:
+            logger.exception("Replay state callback failed for %s", event_type)
+
+    def play(
+        self,
+        filename: str,
+        speed: float = 1.0,
+        loop: bool = False,
+        mode: str = "drive",
+        selected_topics: list[str] | None = None,
+        topic_remap: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if self._requires_reset:
+                raise RuntimeError("acknowledge replay reset before starting another replay")
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("a replay is already active")
+            self._stop_locked()
+            filename = Path(filename).name
+            target = (self.directory / filename).resolve()
+            if not target.is_file() or not target.is_relative_to(self.directory):
+                raise FileNotFoundError(f"MCAP file not found: {filename}")
+
+            recording_metadata = read_recording_metadata(target)
+            recorded_profile = str(recording_metadata.get("profile_id", "")).strip()
+            active_profile = str(self._get_active_profile() or "").strip()
+            if (
+                mode == "drive"
+                and recorded_profile
+                and active_profile
+                and recorded_profile != active_profile
+            ):
+                raise ValueError(
+                    "drive replay profile mismatch: recording="
+                    f"{recorded_profile}, active={active_profile}"
+                )
+
+            self._filename = filename
+            self._recorded_profile_id = recorded_profile
+            self._speed = max(0.1, min(10.0, float(speed)))
+            self._loop = bool(loop)
+            self._state = "playing"
+            self._requires_reset = False
+            self._error = None
+            self._current_time_sec = 0.0
+            self._current_message_index = 0
+            self._progress = 0.0
+
+            with target.open("rb") as stream:
+                reader = make_reader(stream)
+                summary = reader.get_summary()
+                if not summary or not summary.statistics:
+                    raise ValueError(f"invalid or empty MCAP file: {filename}")
+                stats = summary.statistics
+                self._total_messages = stats.message_count
+                start_ns = stats.message_start_time
+                end_ns = stats.message_end_time
+                self._duration_sec = (end_ns - start_ns) / 1e9 if end_ns > start_ns else 0.0
+
+                avail_topics = {c.topic for c in summary.channels.values()}
+
+            if selected_topics is not None:
+                self._selected_topics = list(selected_topics)
+                self._topic_remap = dict(topic_remap or {})
+            elif mode == "drive":
+                # In drive mode, we isolate robot actuator commands + visualization target markers,
+                # ensuring the simulator or real robot executes the joints and tracks the end-effector marker.
+                drive_passthrough = {
+                    "/action/ee_poses",
+                    "/control/solver/ee_targets",
+                    "/observation/ee_poses",
+                    "/action/base/command",
+                    "/action/hands/joint_targets",
+                    "/action/left_hand/joint_states",
+                    "/action/right_hand/joint_states",
+                    "/io_teleop/target_ee_poses",
+                    "/io_teleop/controller_target_ee_poses",
+                    "/io_teleop/actual_ee_poses",
+                    "/io_teleop/target_base_move",
+                    "/io_teleop/joint_cmd_finger_left",
+                    "/io_teleop/joint_cmd_finger_right",
+                }
+                if "/io_teleop/joint_cmd" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/io_teleop/joint_cmd"
+                    ]
+                    self._topic_remap = {
+                        "/io_teleop/joint_cmd": "/action/joint_states"
+                    }
+                elif "/action/joint_states" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/action/joint_states"
+                    ]
+                    self._topic_remap = {}
+                elif "/io_teleop/joint_cmd_arm" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/io_teleop/joint_cmd_arm"
+                    ]
+                    self._topic_remap = {}
+                elif "/control/solver/joint_targets" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/control/solver/joint_targets"
+                    ]
+                    self._topic_remap = {}
+                elif "/io_teleop/joint_states" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/io_teleop/joint_states"
+                    ]
+                    self._topic_remap = {"/io_teleop/joint_states": "/io_teleop/joint_cmd"}
+                elif "/observation/joint_states" in avail_topics:
+                    self._selected_topics = [
+                        t for t in avail_topics
+                        if t in drive_passthrough or t == "/observation/joint_states"
+                    ]
+                    self._topic_remap = {"/observation/joint_states": "/action/joint_states"}
+                else:
+                    self._selected_topics = []
+                    self._topic_remap = {}
+            else:
+                self._selected_topics = []
+                self._topic_remap = {}
+
+            # Pause live teleop controller to prevent conflict over /action/joint_states
+            ros = self._get_ros()
+            if ros is not None and hasattr(ros, "begin_replay"):
+                armed = ros.begin_replay()
+                if armed is False:
+                    raise RuntimeError(
+                        "replay requires hardware_ready=true and an enabled command output"
+                    )
+                self._replay_interlock_armed = True
+            if ros is not None and hasattr(ros, "publish"):
+                ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
+
+            self._stop_event.clear()
+            self._pause_event.set()
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(target,),
+                name=f"TopicPlayer-{filename}",
+                daemon=True,
+            )
+            self._thread.start()
+            status = self.status()
+        self._notify_state("replay_started")
+        return status
+
+    def pause(self) -> dict[str, Any]:
+        changed = False
+        with self._lock:
+            if self._state == "playing":
+                self._pause_event.clear()
+                self._state = "paused"
+                changed = True
+            status = self.status()
+        if changed:
+            self._notify_state("replay_paused")
+        return status
+
+    def resume(self) -> dict[str, Any]:
+        changed = False
+        with self._lock:
+            if self._state == "paused":
+                self._pause_event.set()
+                self._state = "playing"
+                changed = True
+            status = self.status()
+        if changed:
+            self._notify_state("replay_resumed")
+        return status
+
+    def set_speed(self, speed: float) -> dict[str, Any]:
+        with self._lock:
+            self._speed = max(0.1, min(10.0, float(speed)))
+            return self.status()
+
+    def stop(self, require_reset: bool = True) -> dict[str, Any]:
+        with self._lock:
+            was_active = self._state in {"playing", "paused"}
+            was_waiting_for_reset = self._requires_reset
+            self._stop_locked()
+            needs_reset = was_active or was_waiting_for_reset
+            self._state = "stopped" if needs_reset and require_reset else "idle"
+            self._requires_reset = bool(require_reset and needs_reset)
+            self._release_replay_interlock(require_reset=self._requires_reset)
+            status = self.status()
+        if was_active or was_waiting_for_reset:
+            self._notify_state("replay_stopped")
+        return status
+
+    def acknowledge_reset(self) -> dict[str, Any]:
+        with self._lock:
+            changed = self._requires_reset
+            self._requires_reset = False
+            if self._state in {"completed", "stopped", "error"}:
+                self._state = "idle"
+            status = self.status()
+        if changed:
+            self._notify_state("replay_reset")
+        return status
+
+    def _stop_locked(self) -> None:
+        self._stop_event.set()
+        self._pause_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread = None
+
+    def _release_replay_interlock(self, *, require_reset: bool) -> None:
+        if not self._replay_interlock_armed:
+            return
+        ros = self._get_ros()
+        if ros is not None and hasattr(ros, "end_replay"):
+            ros.end_replay(require_reset=require_reset)
+        self._replay_interlock_armed = False
+
+    def _run(self, target_path: Path) -> None:
+        try:
+            while not self._stop_event.is_set():
+                with target_path.open("rb") as stream:
+                    reader = make_reader(stream)
+                    summary = reader.get_summary()
+                    if not summary or not summary.statistics:
+                        raise ValueError(f"invalid or empty MCAP file: {target_path.name}")
+
+                    stats = summary.statistics
+                    total_msgs = stats.message_count
+                    start_ns = stats.message_start_time
+                    end_ns = stats.message_end_time
+                    duration_sec = (end_ns - start_ns) / 1e9 if end_ns > start_ns else 0.0
+
+                    schemas = {s_id: s.name for s_id, s in summary.schemas.items()}
+                    channels = {
+                        c_id: (c.topic, schemas.get(c.schema_id, "std_msgs/msg/String"))
+                        for c_id, c in summary.channels.items()
+                    }
+
+                    with self._lock:
+                        self._total_messages = total_msgs
+                        self._duration_sec = duration_sec
+
+                    t0_log: int | None = None
+                    t0_mono = time.monotonic()
+                    msg_idx = 0
+
+                    for schema, channel, message in reader.iter_messages():
+                        if self._stop_event.is_set():
+                            break
+
+                        if not self._pause_event.is_set():
+                            pause_start = time.monotonic()
+                            self._pause_event.wait()
+                            if self._stop_event.is_set():
+                                break
+                            pause_duration = time.monotonic() - pause_start
+                            t0_mono += pause_duration
+
+                        if t0_log is None:
+                            t0_log = message.log_time
+                            t0_mono = time.monotonic()
+
+                        log_offset = (message.log_time - t0_log) / 1e9
+                        with self._lock:
+                            current_speed = self._speed
+
+                        target_mono = t0_mono + (log_offset / current_speed if current_speed > 0 else 0)
+                        now = time.monotonic()
+                        if target_mono > now:
+                            sleep_duration = target_mono - now
+                            while sleep_duration > 0 and not self._stop_event.is_set() and self._pause_event.is_set():
+                                chunk = min(sleep_duration, 0.02)
+                                time.sleep(chunk)
+                                sleep_duration -= chunk
+
+                        if self._stop_event.is_set():
+                            break
+
+                        chan_info = channels.get(channel.id)
+                        if chan_info:
+                            orig_topic, msg_type = chan_info
+                            with self._lock:
+                                remap = dict(self._topic_remap)
+                                selected = set(self._selected_topics)
+
+                            target_topic = remap.get(orig_topic, orig_topic)
+                            if not selected or (orig_topic in selected) or (target_topic in selected):
+                                ros = self._get_ros()
+                                if ros is not None and hasattr(ros, "publish_raw"):
+                                    ros.publish_raw(target_topic, msg_type, message.data)
+
+                        msg_idx += 1
+                        cur_time = log_offset
+                        progress = (msg_idx / total_msgs * 100.0) if total_msgs > 0 else 0.0
+
+                        if msg_idx % 10 == 0 or msg_idx == total_msgs:
+                            with self._lock:
+                                self._current_message_index = msg_idx
+                                self._current_time_sec = cur_time
+                                self._progress = progress
+
+                with self._lock:
+                    if not self._loop or self._stop_event.is_set():
+                        break
+                    self._current_message_index = 0
+                    self._current_time_sec = 0.0
+                    self._progress = 0.0
+
+            with self._lock:
+                if not self._stop_event.is_set():
+                    self._state = "completed"
+                    self._progress = 100.0
+                    self._requires_reset = True
+                    self._release_replay_interlock(require_reset=True)
+            if not self._stop_event.is_set():
+                self._notify_state("replay_completed")
+        except Exception as exc:
+            logger.exception("Playback failed: %s", exc)
+            with self._lock:
+                self._state = "error"
+                self._error = str(exc)
+                self._requires_reset = True
+                self._release_replay_interlock(require_reset=True)
+            self._notify_state("replay_error")

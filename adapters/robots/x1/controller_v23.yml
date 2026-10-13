@@ -1,0 +1,107 @@
+# X1 的 ControllerV23（Pinocchio/CasADi 差分 IK）配置。
+# 本文件只定义求解器；VR 按键、坐标映射和安全状态机见 arm_teleop.yaml。
+ros_interface:
+  # ROS 2 节点名和求解频率，rate 应与 control.dt 互为倒数。
+  node_name: controller_v2_3_x1
+  rate: 100
+  sub_topic:
+    # 关节反馈、双臂末端目标以及积分器复位请求。
+    joint_state: /observation/joint_states
+    ee_target: /control/solver/ee_targets
+    reset: /control/solver/reset
+  pub_topic:
+    # 机械臂求解结果、诊断状态以及复位完成确认。
+    joint_target: /control/solver/joint_targets
+    solver_state: /status/solver/joint_states
+    reset_ack: /status/solver/reset_ack
+control:
+  # retarget 会连续积分关节目标；dt=0.01 s 对应 100 Hz。
+  method: retarget
+  dt: 0.01
+  # 阻尼用于抑制奇异位形附近的数值放大。
+  damping: 2.0e-03
+  # 机械臂初始参考姿态，同时用于零空间姿态偏好目标；留空时自动从同目录 arm_teleop.yaml 继承。
+  joints_init:
+    Joint1_R: -1.44
+    Joint2_R: -0.77
+    Joint3_R: 1.44
+    Joint4_R: -1.57
+    Joint5_R: 0.0
+    Joint6_R: 0.0
+    Joint7_R: 0.0
+    Joint1_L: 1.44
+    Joint2_L: -0.77
+    Joint3_L: -1.44
+    Joint4_L: -1.57
+    Joint5_L: 0.0
+    Joint6_L: 0.0
+    Joint7_L: 0.0
+model:
+  # free_joints 的顺序必须与 limit.velocity 一一对应：右臂 7 轴在前，左臂 7 轴在后。
+  urdf: urdf/hc_tj_robot.urdf
+  free_joints:
+  - Joint1_R
+  - Joint2_R
+  - Joint3_R
+  - Joint4_R
+  - Joint5_R
+  - Joint6_R
+  - Joint7_R
+  - Joint1_L
+  - Joint2_L
+  - Joint3_L
+  - Joint4_L
+  - Joint5_L
+  - Joint6_L
+  - Joint7_L
+task:
+  # pose 单项格式：[[参考坐标系, TCP 坐标系], 位置权重, 姿态权重, 误差增益]。
+  # 两项顺序必须与 /control/solver/ee_targets 中右、左目标一致。
+  pose:
+  - - - R_arm_0_Link
+      - io_teleop_ee_link_right
+    - 10.0
+    - 3.0
+    - 15.0
+  - - - L_arm_0_Link
+      - io_teleop_ee_link_left
+    - 10.0
+    - 3.0
+    - 15.0
+  axis: []   # 不额外约束某一工具轴方向。
+  # 零空间关节姿态任务格式：[[关节名称列表], 权重, 增益[, 目标关节角]]。
+  # 若省略目标关节角，则自动继承 control.joints_init，在不影响末端精度的前提下持续吸引肘部/肩部回归初始自然屈臂位姿。
+  joint:
+  - - - Joint1_R
+      - Joint2_R
+      - Joint3_R
+      - Joint4_R
+      - Joint5_R
+      - Joint6_R
+      - Joint7_R
+      - Joint1_L
+      - Joint2_L
+      - Joint3_L
+      - Joint4_L
+      - Joint5_L
+      - Joint6_L
+      - Joint7_L
+    - 0.5
+    - 2.0
+limit:
+  # 各自由关节最大速度，单位为 degree/s，运行时转换为 rad/s。
+  velocity:
+  - 85.0
+  - 85.0
+  - 95.0
+  - 95.0
+  - 130.0
+  - 130.0
+  - 130.0
+  - 85.0
+  - 85.0
+  - 95.0
+  - 95.0
+  - 130.0
+  - 130.0
+  - 130.0

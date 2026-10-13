@@ -1,0 +1,32 @@
+# Separate left/right channels permit simultaneous independent arm control.
+channels:
+- name: teleop_left_servo_p
+  kind: servo_p
+  endpoint: /control/motion/left_arm/servo_p
+  priority: 100
+  group: left_arm
+  base_frame: zhi_Link
+  tip_frame: io_teleop_ee_link_left
+  fk_pose_topic: /observation/motion/left_arm/ee_pose
+- name: teleop_left_servo_j
+  kind: servo_j
+  endpoint: /control/motion/left_arm/servo_j
+  priority: 110
+  group: left_arm
+  base_frame: zhi_Link
+  tip_frame: io_teleop_ee_link_left
+- name: teleop_right_servo_p
+  kind: servo_p
+  endpoint: /control/motion/right_arm/servo_p
+  priority: 100
+  group: right_arm
+  base_frame: zhi_Link
+  tip_frame: io_teleop_ee_link_right
+  fk_pose_topic: /observation/motion/right_arm/ee_pose
+- name: teleop_right_servo_j
+  kind: servo_j
+  endpoint: /control/motion/right_arm/servo_j
+  priority: 110
+  group: right_arm
+  base_frame: zhi_Link
+  tip_frame: io_teleop_ee_link_right

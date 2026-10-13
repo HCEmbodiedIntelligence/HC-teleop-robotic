@@ -1,0 +1,365 @@
+# X1 的 VR 遥操作适配配置：描述模型、双臂/腰部/夹爪、输入映射和安全限制。
+# ControllerV23 的任务权重与关节速度上限在 controller_v23.yml 中配置。
+robot:
+  # URDF 路径以及模型根节点在世界坐标系中的位姿；四元数顺序为 XYZW。
+  urdf_path: urdf/hc_tj_robot.urdf
+  base_position:
+  - 0.0
+  - 0.0
+  - 0.07
+  base_orientation:
+  - 0.0
+  - 0.0
+  - 0.70710678
+  - 0.70710678
+  # 回零手势使用的目标关节角，单位为 rad；同时作为缺少反馈时的初始参考。
+  initial_joints:
+    leg_1: 0.5
+    leg_2: 1.2
+    zhi: -0.6
+    head_1: 0.0
+    head_2: 0.0
+    Joint1_R: -1.44
+    Joint2_R: -0.77
+    Joint3_R: 1.44
+    Joint4_R: -1.57
+    Joint5_R: 0.0
+    Joint6_R: 0.0
+    Joint7_R: 0.0
+    Joint1_L: 1.44
+    Joint2_L: -0.77
+    Joint3_L: -1.44
+    Joint4_L: -1.57
+    Joint5_L: 0.0
+    Joint6_L: 0.0
+    Joint7_L: 0.0
+arms:
+  # base_link 用于统一显示目标；generic_task_base_link 是 v23 求解器的肩部任务基座；
+  # ee_link 是受控 TCP。关节列表顺序必须与反馈和求解器配置一致。
+  right:
+    base_link: zhi_Link
+    generic_task_base_link: R_arm_0_Link
+    ee_link: io_teleop_ee_link_right
+    joint_names:
+    - Joint1_R
+    - Joint2_R
+    - Joint3_R
+    - Joint4_R
+    - Joint5_R
+    - Joint6_R
+    - Joint7_R
+  left:
+    base_link: zhi_Link
+    generic_task_base_link: L_arm_0_Link
+    ee_link: io_teleop_ee_link_left
+    joint_names:
+    - Joint1_L
+    - Joint2_L
+    - Joint3_L
+    - Joint4_L
+    - Joint5_L
+    - Joint6_L
+    - Joint7_L
+body:
+  # 仿真与外部驱动共用此处全部参数；启动模式不再覆盖控制配置。
+  # 左 Grip：头显上下位移控制腰部高度，俯仰旋转控制腰部俯仰。
+  enabled: true
+  waist_joint_names: [leg_1, leg_2, zhi]
+  # 只分配高度/俯仰给腰部；水平位移与偏航由 head_pose_base 处理。
+  unconstrained: false
+  target_link: zhi_Link
+  head_position_scale: 1.0
+  head_max_displacement: 0.0
+  head_orientation_enabled: true
+  torso_link: zhi_Link
+  visualization_head_link: camera_head
+  base_command_topic: /action/base/command
+  base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
+  # 相对位姿闭环：按住左 Grip 建立参考；松开停止并清除参考。
+  # 开启时左摇杆优先平移，回中重新建立头显参考；不叠加旧朝向/伸展辅助。
+  head_pose_base:
+    enabled: true
+    feedback_topic: /observation/base/pose
+    feedback_timeout: 0.3
+    position_scale: 1.0       # 头显水平移动 1 m -> 底盘目标移动 1 m
+    yaw_scale: 1.0            # 头显相对偏航 -> 底盘相对偏航
+    position_gain: 2
+    yaw_gain: 2
+    position_tolerance: 0.01  # m
+    yaw_tolerance: 0.03       # rad
+    max_displacement: 0.5    # 每次 Grip 参考允许的最大目标距离 (m)
+    max_yaw: 1.57            # 每次 Grip 参考允许的最大目标偏航 (rad)
+  # 左摇杆参数也用于相对位姿模式；右摇杆和旧辅助仅用于旧模式。
+  # 速度上限和 yaw_direction 同时供两种模式使用。
+  # 第一层：用户主动移动配置
+  # Joy.axes 下标：0=Trigger、1=Grip、2=主摇杆横向(左右)、3=主摇杆纵向(前后)。
+  stick_x_axis: 2
+  stick_y_axis: 3
+  stick_deadzone: 0.08
+  stick_forward_direction: 1.0
+  stick_lateral_direction: -1.0  # 摇杆 +X 向右，底盘 +Y 向左。
+  max_linear_velocity: 0.6
+  max_lateral_velocity: 0.4
+  left_stick_independent_base: true   # 允许左摇杆独立推杆平移底盘，无需按住 Grip
+
+  # 右手柄摇杆控制底盘旋转（Yaw）配置
+  right_stick_yaw_enabled: true
+  right_stick_yaw_axis: 2          # Joy.axes 下标，通常为 2（主摇杆 X 轴）
+  right_stick_yaw_direction: -1.0  # -1.0 表示向左推摇杆底盘向左旋转（逆时针正方向）
+  right_stick_yaw_deadzone: 0.08   # 摇杆死区
+  right_stick_independent_base: true # 允许不按左手 Grip 独立拨动右手摇杆原地旋转底盘
+
+  # 第二层：身体意图 (Head Yaw Orientation Assist)
+  # 仅在前进/后退时自动摆正旋转角度，静止转头仅控制脖子转动
+  head_orientation_assist_enabled: true
+  head_orientation_align_on_move_only: true # 仅在前进/后退时自动旋转底盘对齐头部朝向，静止不旋转底盘
+  head_orientation_move_threshold: 0.02     # 前进/后退线速度触发阈值 (m/s)
+  head_yaw_deadzone_deg: 3.0                # 摆正死区 (< 3° 认为已摆正同向，停止自转)
+  head_yaw_active_deg: 25.0                 # 3°~25° 平滑慢速对齐，>25° 快速对齐
+  head_yaw_slow_gain: 0.50                  # 摆正平滑对齐增益
+  head_yaw_fast_gain: 0.90                  # 快速对齐增益
+  head_yaw_slow_max_vel: 0.20               # 慢速对齐上限 (rad/s)
+  head_orientation_alpha: 1.0               # 头显朝向辅助融合系数
+  yaw_direction: 1.0                        # 当前头显映射下，左转偏航为负；转换为底盘逆时针正方向
+  max_angular_velocity: 1.2                # 底盘最大角速度 (rad/s)
+
+  # 第三层：WBC 自动辅助 (Hands Reach Assist) - 已关闭
+  reach_assist_enabled: false
+  reach_assist_alpha: 1.0          # 伸展辅助融合系数 alpha
+  reach_deadzone_forward: 0.08     # 前向伸展死区 (m)
+  reach_deadzone_backward: 0.06    # 后向收缩死区 (m)
+  reach_deadzone_lateral: 0.06     # 侧向平移死区 (m)
+  reach_gain_forward: 0.6          # 前向辅助速度增益
+  reach_gain_backward: 0.5         # 后向辅助速度增益
+  reach_gain_lateral: 0.6          # 侧向辅助速度增益
+  reach_max_linear_velocity: 0.20  # 辅助移动最大线速度 (m/s)
+  reach_max_lateral_velocity: 0.18 # 辅助移动最大侧向速度 (m/s)
+
+  # 头部转动驱动脖子转动 (Pan-Tilt Neck Control)
+  neck_tracking_enabled: false  # 暂停头显驱动脖子转动；底盘和腰部跟随保持启用。
+  neck_joint_names: [head_1, head_2]
+  neck_yaw_joint: head_1
+  neck_pitch_joint: head_2
+  neck_yaw_scale: 1.0
+  neck_pitch_scale: 1.0
+  neck_max_yaw: 1.57    # rad (±90°)
+  neck_max_pitch: 0.8   # rad (±45°)
+  neck_max_velocity: 1.5 # rad/s
+  # 相机朝向底盘平移运动（前进依据相机朝向运动）
+  camera_heading_relative_base: true
+  camera_link: camera_head
+
+  # 原始 VR position：+Y 向上、+Z 向前，与手柄位移映射一致。
+  head_height_axis: 1
+  head_pitch_position_axis: 2
+  head_forward_axis: 2
+  # 头显位姿死区与滤波
+  target_position_deadband: 0.02
+  target_orientation_deadband: 0.05
+  target_filter_alpha: 0.5
+  # 腰部逆解模式：2dof（放开平移硬约束，仅约束世界高度和俯仰角，自然随动前伸）或 4dof
+  ik_mode: 2dof
+  # 俯仰源：orientation（由头显姿态俯仰角直接驱动）、position（前后位移）或 auto
+  pitch_source: orientation
+  # 头部位移到腰部高度/俯仰/前后位移的缩放、方向和最大变化量。
+  height_scale: 0.5
+  pitch_scale: 1.0
+  forward_scale: 0.0
+  height_direction: 1.0
+  pitch_direction: 1.0  # 按现场俯仰方向校正；两种仿真共用。
+  forward_direction: 1.0
+  max_height_delta: 0.18
+  max_pitch_delta: 0.35
+  max_forward_delta: 0.15
+  # 腰部俯仰在世界坐标系中的旋转轴。
+  pitch_axis_world:
+  - -1.0
+  - 0.0
+  - 0.0
+  # 三个腰关节的软件位置上下限，单位为 rad，顺序与 waist_joint_names 一致。
+  joint_lower:
+  - -0.628319
+  - -0.418879
+  - -1.832596
+  joint_upper:
+  - 1.082104
+  - 2.356194
+  - 1.117011
+  # 腰部最大关节速度及兼容内置 IK 的迭代参数。
+  max_joint_velocity: 0.6
+  ik_iterations: 15
+  ik_damping: 0.05
+  ik_max_update: 0.08
+  ik_posture_gain: 0.5
+  ik_forward_weight: 0.3
+grippers:
+  # Trigger 连续量控制夹爪；axes[0] 是 Trigger，阈值用于生成二值抓握状态。
+  trigger_axis: 0
+  binary_trigger_threshold: 0.5
+  max_velocity: 3.5
+  # true 时把 R_ban/L_ban 仿真夹爪关节合并进最终关节命令。
+  include_sim_joints: true
+  right:
+    # sim_joint 用于 PyBullet；finger_topic/finger_joint_names 用于真实灵巧手。
+    sim_joint: R_ban
+    binary_state_joint: R_ban
+    sim_closed_position: 1.5707
+    finger_topic: /action/right_hand/joint_states
+    finger_joint_names:
+    - R_thumb_roll_joint
+    - R_thumb_abad_joint
+    - R_thumb_mcp_joint
+    - R_index_abad_joint
+    - R_index_pip_joint
+    - R_middle_pip_joint
+    - R_ring_abad_joint
+    - R_ring_pip_joint
+    - R_pinky_abad_joint
+    - R_pinky_pip_joint
+    # 由 /home/niic/hc_human/demo_rs485_hand_ctrl.py 的右手标定电机位
+    # 反算得到。对应 raw open=[3800,4096,4096,1899,4096,4096,4096,4096,0,4096]。
+    finger_open:
+    - 0.46475
+    - -1.642
+    - 0.0
+    - -0.08708984375
+    - 0.0
+    - 0.0
+    - 0.13
+    - 0.0
+    - 0.13
+    - 0.0
+    # 对应 raw fist=[3800,4096,66,1899,2300,2300,1932,604,2094,408]。
+    finger_closed:
+    - 0.46475
+    - -1.642
+    - 0.98388671875
+    - -0.08708984375
+    - 1.09619140625
+    - 1.09619140625
+    - 0.087734375
+    - 2.13134765625
+    - 0.0891015625
+    - 2.2509765625
+  left:
+    # 左手数组顺序必须与 finger_joint_names 严格一致，角度单位为 rad。
+    sim_joint: L_ban
+    binary_state_joint: L_ban
+    sim_closed_position: 1.5707
+    finger_topic: /action/left_hand/joint_states
+    finger_joint_names:
+    - L_thumb_roll_joint
+    - L_thumb_abad_joint
+    - L_thumb_mcp_joint
+    - L_index_abad_joint
+    - L_index_pip_joint
+    - L_middle_pip_joint
+    - L_ring_abad_joint
+    - L_ring_pip_joint
+    - L_pinky_abad_joint
+    - L_pinky_pip_joint
+    finger_open:
+    - -0.4
+    - -0.045
+    - 0.0
+    - 0.05
+    - 0.0
+    - 0.0
+    - -0.13
+    - 0.0
+    - -0.13
+    - 0.0
+    finger_closed:
+    - -1.121
+    - 1.642
+    - -1.0
+    - 0.13
+    - 2.5
+    - 2.5
+    - -0.05
+    - 2.5
+    - 0.05
+    - 2.5
+control:
+  # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
+  backend: v23
+  enabled_on_start: true
+  home_on_start: true
+  rate_hz: 100.0
+  # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
+  vr_data_topic: /vrdata
+  joint_state_topic: /observation/joint_states
+  command_topic: /control/vr/joint_states
+  generic_command_topic: /control/solver/joint_targets
+  solver_topic: /status/solver/joint_states
+  solver_reset_topic: /control/solver/reset
+  solver_reset_ack_topic: /status/solver/reset_ack
+  target_pose_topic: /action/ee_poses
+  controller_target_pose_topic: /control/solver/ee_targets
+  actual_pose_topic: /observation/ee_poses
+  status_topic: /status/teleop
+  safety_stop_topic: /control/emergency_stop
+  enable_topic: /control/teleop/enabled
+  # Joy.axes[1] 是 Grip 离合；左右主摇杆 X（axes[2]）同时向外触发回零。
+  clutch_axis: 1
+  clutch_threshold: 0.55
+  home_gesture_axis: 2
+  home_gesture_threshold: 0.70
+  home_gesture_release_threshold: 0.25
+  # 回零速度（rad/s）、到位容差（rad）及输入/反馈超时（秒）。
+  home_joint_velocity: 0.7
+  home_tolerance: 0.05
+  pose_timeout: 0.5
+  input_timeout: 0.5
+  joint_state_timeout: 0.5
+  # 每次右 Grip 重新对齐头显水平朝向与底座，按住期间固定参考。
+  arm_reference_frame: base_at_clutch
+  # 手柄位移映射矩阵：矩阵三行依次生成机器人 X/Y/Z 位移。
+  axis_mapping:
+  - - 0.0
+    - 0.0
+    - 1.0
+  - - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  # 头显方向映射矩阵，主要用于偏航跟随。
+  head_axis_mapping:
+  - - 0.0
+    - 0.0
+    - 1.0
+  - - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  # VR 位移缩放、最大末端位移、姿态开关以及目标滤波参数。
+  position_scale: 0.85
+  max_displacement: 0.9
+  orientation_enabled: true
+  orientation_weight: 0.35
+  target_position_deadband: 0.0
+  target_orientation_deadband: 0.0
+  target_filter_alpha: 0.75
+  command_joint_deadband: 0.0
+  # 抓取数据采集需要连续通过贴近本体与折腕姿态；按现场要求完全关闭
+  # 几何碰撞拦截。关节位置/速度限位和急停仍由控制链路保留。
+  collision_avoidance_enabled: false
+  collision_min_distance: 0.02
+  # 肩根在标准初始位的 URDF 几何间隙只有约 7 mm；8 mm 容差使这两个
+  # 天然近邻只拦截实际穿透，避免在 3 mm 数值边界反复启停。
+  collision_home_tolerance: 0.008
+  collision_ignore_graph_distance: 2
+  # 与艾欧 HC-TJ 原版控制器一致，不对单条机械臂内部连杆做几何拦截。
+  # 仍保留左右臂互撞以及机械臂碰撞躯干/底座的硬保护。
+  collision_check_intra_arm: false
+  collision_check_inter_arm: true
+  collision_check_arm_body: true
+  # 一次碰撞拦截后保持最后安全位置，必须松开对应 Grip 才重新接管，
+  # 防止保持按压时每帧重新接管形成边界抖动。
+  collision_latch_until_release: true
+  # 已经处于禁区时，允许安全间隙每帧至少增加 0.01 mm 的退出指令。
+  collision_escape_epsilon: 0.00001

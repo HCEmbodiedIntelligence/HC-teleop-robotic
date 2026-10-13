@@ -9,10 +9,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-build/
-install/
-log/
-*.egg-info/
 
 # Runtime-generated diagnostics and logs
 runtime/
@@ -23,3 +19,24 @@ runtime/
 .idea/
 .DS_Store
 *~
+
+# Runtime supervisor is source code, not generated session data.
+!tools/runtime/
+!tools/runtime/**
+
+# User-imported robot profiles in adapters/robots/ (keep built-in profiles)
+adapters/robots/*
+!adapters/robots/openarmx/
+!adapters/robots/x1/
+!adapters/robots/.gitkeep
+!adapters/robots/*.md
+
+
+# Isolated optional LeRobot export environment
+.venv-lerobot/
+
+# Optional two-package motion workspace
+build_motion/
+install_motion/
+log_motion/
+log/
