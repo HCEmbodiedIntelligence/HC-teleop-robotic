@@ -51,4 +51,4 @@ def test_service_both_publishes_verified_independent_artifacts(tmp_path):
     except ImportError:
         return  # Standalone B tests also work before C's package is installed.
     for path in service.artifact_state_dir.glob('*.json'):
-        inspect_ready(json.loads(path.read_text()), {'data_directory': str(service.directory), 'read_bytes_per_second': 0})
+        inspect_ready(json.loads(path.read_text()), {'data_directory': str(service.directory), 'read_bytes_per_second': 100_000_000})
