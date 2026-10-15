@@ -1,0 +1,128 @@
+{
+  "$id": "urn:openarm:source-mapping:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action_source_ns": {
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "action_valid": {
+      "items": {
+        "type": "boolean"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "cameras": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "capture_ns": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pts": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "receive_ns": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_frame": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "time_base": {
+            "const": [
+              1,
+              30
+            ]
+          }
+        },
+        "required": [
+          "source_frame",
+          "capture_ns",
+          "receive_ns",
+          "pts",
+          "time_base"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "clock_epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "episode_index": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "frame_index": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "receive_ns": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_episode_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_frame": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "state_brackets_ns": {
+      "items": {
+        "items": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 2,
+        "minItems": 2,
+        "type": "array"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "state_valid": {
+      "items": {
+        "type": "boolean"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "target_ns": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "session_id",
+    "source_episode_id",
+    "source_frame",
+    "episode_index",
+    "frame_index",
+    "clock_epoch",
+    "target_ns",
+    "receive_ns",
+    "action_source_ns",
+    "action_valid",
+    "state_brackets_ns",
+    "state_valid",
+    "cameras"
+  ],
+  "type": "object"
+}

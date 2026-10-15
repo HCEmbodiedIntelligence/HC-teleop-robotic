@@ -123,13 +123,17 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(command_mux, dict):
         raise ConfigError("ros.command_mux must be an object")
     source = str(command_mux.get("source", "vr")).strip().lower()
-    if source not in {"vr", "exoskeleton"}:
-        raise ConfigError("ros.command_mux.source must be vr or exoskeleton")
+    if source not in {"vr", "exoskeleton", "motion"}:
+        raise ConfigError("ros.command_mux.source must be vr, exoskeleton or motion")
     command_mux["source"] = source
     command_mux["enabled"] = bool(command_mux.get("enabled", True))
+    command_mux.setdefault("motion_topic", "/control/motion/joint_targets")
+    command_mux.setdefault("motion_permit_topic", "/control/motion/permit")
     mux_topics = []
     for key in (
         "vr_topic",
+        "motion_topic",
+        "motion_permit_topic",
         "exoskeleton_topic",
         "output_topic",
         "control_source_topic",
@@ -204,9 +208,14 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         description = item.get("description", "")
         if not isinstance(description, str) or len(description) > 500:
             raise ConfigError(f"ros.subscriptions[{index}].description must be a string of at most 500 characters")
+        mode = item.get("recording_mode", "event" if topic.startswith(("/action/", "/control/", "/status/")) else "continuous")
+        if mode not in ("continuous", "event") or not isinstance(item.get("required", True), bool):
+            raise ConfigError("invalid recording_mode/required")
         normalized.append(
             {
                 "topic": topic,
+                "recording_mode": mode,
+                "required": item.get("required", True),
                 "description": description,
                 "type": msg_type,
                 "enabled": bool(item.get("enabled", True)),
@@ -218,12 +227,63 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if qos_reliability is not None:
             normalized[-1]["qos_reliability"] = qos_reliability
     value["ros"]["subscriptions"] = normalized
+    mux = value["ros"].setdefault("command_mux", {})
+    mux.setdefault("motion_topic", "/control/motion/joint_targets")
+    timeout = mux.setdefault("hardware_ready_timeout_sec", 0.5)
+    import math
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ConfigError("hardware_ready_timeout_sec must be positive and finite")
+    if not isinstance(mux["motion_topic"], str) or not mux["motion_topic"].startswith("/"):
+        raise ConfigError("motion_topic must be an absolute ROS topic")
     recording = value["ros"].get("recording")
     if not isinstance(recording, dict):
         raise ConfigError("ros.recording must be an object")
     directory = recording.get("directory")
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
+    workflow = recording.setdefault("workflow", "hc")
+    if workflow not in ("hc", "platform_raw"):
+        raise ConfigError("ros.recording.workflow must be hc or platform_raw")
+    for key, default in (("capture_config_file", ""), ("job_state_dir", "../runtime/recording_jobs"),
+                         ("artifact_state_dir", "../runtime/artifact_ready")):
+        value_path = recording.setdefault(key, default)
+        if not isinstance(value_path, str) or (key != "capture_config_file" and not value_path.strip()):
+            raise ConfigError("ros.recording." + key + " must be a path")
+    if workflow == "platform_raw" and not recording["capture_config_file"].strip():
+        raise ConfigError("platform_raw requires capture_config_file")
+    for key, default in (("max_pending_jobs", 8), ("min_free_bytes", 268435456)):
+        number = recording.setdefault(key, default)
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise ConfigError("ros.recording." + key + " must be a positive integer")
+    gap_rules = recording.setdefault("gap_rules", [])
+    if not isinstance(gap_rules, list):
+        raise ConfigError("recording.gap_rules must be a list")
+    for rule in gap_rules:
+        if not isinstance(rule, dict) or set(rule) != {"topic", "max_gap_seconds"}:
+            raise ConfigError("gap_rules requires topic and max_gap_seconds")
+        gap = rule["max_gap_seconds"]
+        if not isinstance(rule["topic"], str) or not rule["topic"].startswith("/") or isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(gap) or gap <= 0:
+            raise ConfigError("gap_rules requires an absolute topic and positive finite gap")
+    sources = recording.setdefault("action_sources", [])
+    if not isinstance(sources, list):
+        raise ConfigError("action_sources must be a list")
+    used_topics, used_names = set(), set()
+    for item in sources:
+        if not isinstance(item, dict) or set(item) != {"topic", "names", "units", "max_age_sec"}:
+            raise ConfigError("action_sources requires topic, names, units, max_age_sec")
+        if not isinstance(item['topic'], str) or not item['topic'].startswith('/') or item['topic'] in used_topics | {'/action/joint_states', '/observation/joint_states'}:
+            raise ConfigError("invalid or duplicate action topic")
+        if not isinstance(item['names'], list) or not item['names'] or any(not isinstance(n,str) or not n for n in item['names']):
+            raise ConfigError("action source names must be nonempty strings")
+        if len(set(item['names'])) != len(item['names']) or used_names.intersection(item['names']):
+            raise ConfigError("duplicate action joint names")
+        if not isinstance(item['units'], list) or len(item['units']) != len(item['names']) or any(u not in {'rad', 'm', 'unitless'} for u in item['units']):
+            raise ConfigError("action source units must match names")
+        age = item['max_age_sec']
+        if isinstance(age, bool) or not isinstance(age, (int,float)) or not math.isfinite(age) or age <= 0:
+            raise ConfigError("action source max_age_sec must be positive and finite")
+        used_topics.add(item['topic'])
+        used_names.update(item['names'])
     recording_format = recording.get("format", "mcap")
     if recording_format not in ("mcap", "lerobot", "both"):
         raise ConfigError("ros.recording.format must be mcap, lerobot or both")
@@ -334,6 +394,17 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                     normalized.append(subscription)
                 elif subscription["type"] != stream["type"]:
                     raise ConfigError(f"conflicting camera types for topic: {stream['topic']}")
+    uploads = value.setdefault('uploads', {})
+    if not isinstance(uploads, dict):
+        raise ConfigError('uploads must be an object')
+    for key in ('enabled', 'auto_enqueue'):
+        if not isinstance(uploads.setdefault(key, False), bool):
+            raise ConfigError('uploads.' + key + ' must be boolean')
+    for key, default in (('queue_directory','../runtime/upload_queue'), ('platform_base_url',''), ('credential_ref',''), ('robot_id',''), ('local_robot_id',''), ('task_id','')):
+        if not isinstance(uploads.setdefault(key, default), str):
+            raise ConfigError('uploads.' + key + ' must be string')
+    if uploads['credential_ref'] and not uploads['credential_ref'].startswith(('env:', 'file:')):
+        raise ConfigError('uploads credentials must use env: or file: reference')
     value["camera"] = cam_config
     return value
 

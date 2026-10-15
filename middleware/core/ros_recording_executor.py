@@ -134,6 +134,7 @@ def _raw_recording_process(
     timestamps = {str(item["topic"]): deque(maxlen=120) for item in subscriptions}
     message_counts = {str(item["topic"]): 0 for item in subscriptions}
     gate = RateGate()
+    capture_subscriptions = []
 
     def publish_status(state: str, error: str | None = None) -> None:
         now = time.monotonic()
@@ -149,6 +150,7 @@ def _raw_recording_process(
                 ),
                 "pid": __import__("os").getpid(),
                 "priority": "low",
+                "receiver_qos": {sub.topic: sub.state() for sub in capture_subscriptions},
                 "error": error,
                 **counters,
             },
@@ -210,15 +212,19 @@ def _raw_recording_process(
                     counters["rejected"] += 1
                     _counter_add(dropped_counter)
 
-            ros_subscriptions.append(
-                node.create_subscription(
-                    message_type,
-                    topic,
-                    callback,
-                    subscription_qos(item),
-                    raw=True,
-                )
-            )
+            capture_type = msg_type in {
+                'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage', 'sensor_msgs/msg/PointCloud2',
+                'realsense2_camera_msgs/msg/RGBD', 'realsense2_camera_msgs/msg/Metadata',
+                'realsense2_camera_msgs/msg/ImageMetadata', 'realsense2_camera_msgs/msg/RGBDMetadata',
+            }
+            if capture_type and not item.get('qos_reliability'):
+                from humanoid_camera.transport import CaptureSubscription
+                capture_subscriptions.append(CaptureSubscription(
+                    node, message_type, topic, callback,
+                    depth=2 if msg_type == 'sensor_msgs/msg/PointCloud2' else 10, raw=True))
+            else:
+                ros_subscriptions.append(node.create_subscription(
+                    message_type, topic, callback, subscription_qos(item), raw=True))
 
         publish_status("running")
         last_status = time.monotonic()
@@ -231,6 +237,8 @@ def _raw_recording_process(
             executor.spin_once(timeout_sec=0.02)
             now = time.monotonic()
             if now - last_status >= 0.5:
+                for subscription in capture_subscriptions:
+                    subscription.refresh()
                 publish_status("running")
                 last_status = now
     except Exception as exc:

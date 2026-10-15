@@ -431,3 +431,35 @@ for camera,key in enumerate(keys):
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_explicit_gripper_sources_keep_independent_age_masks(tmp_path):
+    import json
+    from mcap.writer import Writer
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import JointState
+    from middleware.core.lerobot_export import prepare_mcap
+    source=tmp_path/'grasp.mcap';staging=tmp_path/'stage';staging.mkdir()
+    mappings=[dict(topic='/action/left_hand/joint_states',names=['finger'],units=['m'],max_age_sec=.3),
+              dict(topic='/action/right_hand/joint_states',names=['missing_finger'],units=['m'],max_age_sec=.3)]
+    with source.open('wb') as stream:
+        writer=Writer(stream);writer.start()
+        schema=writer.register_schema('sensor_msgs/msg/JointState','ros2msg',b'')
+        for topic,names,stamps in [('/observation/joint_states',['arm'],[0,500_000_000]),
+                                   ('/action/joint_states',['arm'],[0,500_000_000]),
+                                   (mappings[0]['topic'],['finger'],[100_000_000])]:
+            channel=writer.register_channel(topic,'cdr',schema)
+            for stamp in stamps:
+                writer.add_message(channel,1_000_000_000+stamp,serialize_message(JointState(name=names,position=[.02])),1_000_000_000+stamp)
+        writer.finish()
+    manifest=json.loads(prepare_mcap(source,staging,10,'grasp','test',action_sources=mappings).read_text())
+    assert manifest['action_joint_names']==['arm','finger','missing_finger']
+    rows=manifest['episodes'][0]
+    index=manifest['source_keys'].index('action.source.0')
+    missing=manifest['source_keys'].index('action.source.1')
+    assert rows[0]['values']['action']==[.02,0,0]
+    assert rows[-1]['values']['action']==[.02,.02,0]
+    assert rows[1]['source_valid'][index]==1
+    assert rows[-1]['source_valid'][index]==0
+    assert all(row['source_available'][missing]==0 for row in rows)
+    assert manifest['action_semantics']=='upstream_command_not_execution'

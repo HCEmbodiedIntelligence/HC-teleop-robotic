@@ -1,0 +1,120 @@
+{
+  "clock": {
+    "domain": "ros",
+    "jump_tolerance_ms": 5
+  },
+  "dataset": {
+    "fps": 30,
+    "duration_seconds": null
+  },
+  "alignment": {
+    "camera_validation": "timestamps",
+    "strict": true,
+    "delay_ms": 80,
+    "camera_max_error_ms": 1,
+    "rgbd_max_midpoint_skew_ms": 1,
+    "camera_pair_max_skew_ms": 1,
+    "joint_max_bracket_gap_ms": 30,
+    "allow_camera_repeat": false,
+    "causal": false,
+    "primary_camera": "front",
+    "max_catchup_rows": 8
+  },
+  "buffers": {
+    "ros_assembly_bytes": 67108864,
+    "retention_ms": 250,
+    "cache_items_per_source": 256,
+    "working_bytes": 67108864,
+    "cache_bytes": 67108864,
+    "ingress_items": 512,
+    "ingress_bytes": 134217728,
+    "writer_items": 4096,
+    "writer_bytes": 134217728,
+    "video_frames_per_camera": 30,
+    "video_bytes_per_camera": 67108864,
+    "total_bytes": 1073741824
+  },
+  "storage": {
+    "directory": "sessions",
+    "video_segment_seconds": 60,
+    "numeric_flush_seconds": 1,
+    "fsync_on_commit": true,
+    "minimum_free_bytes": 536870912,
+    "encoder_threads": 1
+  },
+  "sources": {
+    "front": {
+      "kind": "rgbd",
+      "transport": "ros_rgbd",
+      "topic": "/front/normalized/rgbd",
+      "metadata_topic": "/front/normalized/metadata",
+      "fps": 30,
+      "exposure": {
+        "max_actual_us": 5000,
+        "auto": true,
+        "auto_exposure_limit_us": 4500,
+        "auto_gain_limit": 64
+      },
+      "sync_mode": "shared_stereo_free_run",
+      "required": true,
+      "trigger_origin": null,
+      "temporal_fusion": false
+    },
+    "front_cloud": {
+      "kind": "pointcloud",
+      "transport": "ros_pointcloud",
+      "topic": "/front/normalized/points",
+      "metadata_topic": "/front/normalized/points_metadata",
+      "camera_source_id": "front",
+      "required": false,
+      "persist": true
+    },
+    "joints": {
+      "kind": "state",
+      "transport": "ros_joint_state",
+      "topic": "/hc_teleop/joint_states",
+      "timestamp_semantics": "read",
+      "required": true,
+      "timestamp_uncertainty_ns": null,
+      "timestamp_evidence": "",
+      "fields": {
+        "position": {
+          "semantics": "continuous",
+          "units": "rad",
+          "coordinate_frame": "joint"
+        }
+      }
+    },
+    "commands": {
+      "kind": "action",
+      "transport": "ros_joint_state",
+      "topic": "/hc_teleop/joint_cmd",
+      "timestamp_semantics": "send",
+      "action_stage": "sent",
+      "required": true,
+      "timestamp_uncertainty_ns": null,
+      "timestamp_evidence": "",
+      "fields": {
+        "position": {
+          "semantics": "continuous",
+          "units": "rad",
+          "coordinate_frame": "joint"
+        }
+      },
+      "pairing": "active_at_target",
+      "semantics": "absolute_hold"
+    }
+  },
+  "requirement_status": {
+    "exposure_max_actual_us": {
+      "value": 5000,
+      "status": "required"
+    },
+    "synchronization_and_grid_limits": "provisional_engineering_targets_pending_device_validation"
+  },
+  "versions": {
+    "alignment": "humanoid-alignment/1.2.0",
+    "schema": "humanoid-session/1.2.0",
+    "lerobot": "0.4.4"
+  }
+}

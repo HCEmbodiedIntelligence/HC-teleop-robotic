@@ -1,0 +1,165 @@
+{
+  "$id": "urn:openarm:profile:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action_stage": {
+      "const": "sent"
+    },
+    "axes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "group": {
+            "enum": [
+              "arm",
+              "gripper"
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "unit": {
+            "enum": [
+              "rad",
+              "m"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "unit",
+          "group"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "cameras": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "calibration_ref": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "height": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "width": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "width",
+          "height",
+          "calibration_ref"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "command_boundary": {
+      "const": "motion_or_teleop_to_driver_request"
+    },
+    "fps": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "profile_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "robot_type": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "validity": {
+      "additionalProperties": false,
+      "properties": {
+        "arm": {
+          "additionalProperties": false,
+          "properties": {
+            "invalidate_on": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "max_age_ms": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mode": {
+              "enum": [
+                "periodic"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "max_age_ms",
+            "invalidate_on"
+          ],
+          "type": "object"
+        },
+        "gripper": {
+          "additionalProperties": false,
+          "properties": {
+            "invalidate_on": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "max_age_ms": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mode": {
+              "enum": [
+                "periodic"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "max_age_ms",
+            "invalidate_on"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "arm",
+        "gripper"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "profile_version",
+    "robot_type",
+    "fps",
+    "axes",
+    "cameras",
+    "action_stage",
+    "command_boundary",
+    "validity"
+  ],
+  "type": "object"
+}
