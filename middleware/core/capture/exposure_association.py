@@ -74,4 +74,3 @@ def associate_exposure_states(aligner, row, deadline, epoch):
             if group["required"] and not result["valid"]:
                 row["invalid_reasons"].extend(
                     camera + ":" + stream + ":" + error for error in result["invalid_reasons"])
-

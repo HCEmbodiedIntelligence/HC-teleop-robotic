@@ -200,7 +200,11 @@ class RecordingService:
             if job['workflow'] == 'hc':
                 quality = self.quality.get(job['recording_id'])
                 if quality and quality.active_segment:
-                    quality.mark('segment', source='stop')
+                    try:
+                        quality.mark('segment', source='stop')
+                    except Exception as exc:
+                        # A full or failed writer must never prevent stopping ingress.
+                        job['annotation_error'] = str(exc)
                 self.readers[job['recording_id']][0]._accepting_event.clear()
             else:
                 self.raw.request_stop()

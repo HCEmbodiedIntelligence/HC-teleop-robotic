@@ -209,3 +209,19 @@ def test_backlog_blocks_new_segment_without_reusing_source(tmp_path):
     finally:
         gate.set()
         recorder.shutdown()
+
+
+def test_marker_write_failure_cannot_prevent_stop(tmp_path):
+    recorder = service(tmp_path)
+    try:
+        recorder.start(metadata={'profile_id': 'test'})
+        recorder.record({'kind': 'event', 'payload': {'synthetic': True}})
+        job = recorder.active
+        quality = recorder.quality[job['recording_id']]
+        quality.active_segment = 'segment'
+        with patch.object(quality, 'mark', side_effect=RuntimeError('queue full')):
+            recorder.stop()
+        assert not recorder.is_recording()
+        assert job['annotation_error'] == 'queue full'
+    finally:
+        recorder.shutdown()

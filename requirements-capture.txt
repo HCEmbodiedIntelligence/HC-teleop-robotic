@@ -1,8 +1,9 @@
 # Raw capture and data audit dependencies; ROS/custom messages are deployed separately.
-mcap>=1.1,<2
-av>=12
-pyarrow>=14
-jsonschema>=4.18
+mcap==1.4.0
+av==16.1.0
+pyarrow==20.0.0
+jsonschema>=4.18,<5
 numpy>=1.24,<2
 PyYAML>=5.4
 aiohttp>=3.8,<4
+Pillow>=9,<13
