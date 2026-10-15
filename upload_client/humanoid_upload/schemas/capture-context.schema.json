@@ -1,0 +1,311 @@
+{
+  "$id": "urn:openarm:capture-context:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capture_ended_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "capture_started_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "collection_task_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "configuration_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "contract_version": {
+      "const": "openarm-capture/v1"
+    },
+    "episodes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "end_frame": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "episode_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "export_qualified": {
+            "type": "boolean"
+          },
+          "outcome": {
+            "enum": [
+              "success",
+              "failure",
+              "unknown"
+            ]
+          },
+          "source_episode_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_frame": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "task": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "episode_index",
+          "source_episode_id",
+          "start_frame",
+          "end_frame",
+          "task",
+          "outcome",
+          "export_qualified"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "export_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "invalid_intervals": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "end_frame": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start_frame": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_frame",
+          "end_frame",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "local_robot_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "model_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "physical_sync": {
+      "enum": [
+        "unknown",
+        "verified"
+      ]
+    },
+    "profile": {
+      "additionalProperties": false,
+      "properties": {
+        "action_stage": {
+          "const": "sent"
+        },
+        "axes": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "group": {
+                "enum": [
+                  "arm",
+                  "gripper"
+                ]
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "unit": {
+                "enum": [
+                  "rad",
+                  "m"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "unit",
+              "group"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "cameras": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "calibration_ref": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "height": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "width": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "width",
+              "height",
+              "calibration_ref"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "command_boundary": {
+          "const": "motion_or_teleop_to_driver_request"
+        },
+        "fps": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "profile_version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "robot_type": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "validity": {
+          "additionalProperties": false,
+          "properties": {
+            "arm": {
+              "additionalProperties": false,
+              "properties": {
+                "invalidate_on": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "max_age_ms": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "mode": {
+                  "enum": [
+                    "periodic"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "max_age_ms",
+                "invalidate_on"
+              ],
+              "type": "object"
+            },
+            "gripper": {
+              "additionalProperties": false,
+              "properties": {
+                "invalidate_on": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "max_age_ms": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "mode": {
+                  "enum": [
+                    "periodic"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "max_age_ms",
+                "invalidate_on"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "arm",
+            "gripper"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "profile_version",
+        "robot_type",
+        "fps",
+        "axes",
+        "cameras",
+        "action_stage",
+        "command_boundary",
+        "validity"
+      ],
+      "type": "object"
+    },
+    "robot_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "synthetic": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "contract_version",
+    "profile",
+    "synthetic",
+    "local_robot_id",
+    "robot_id",
+    "collection_task_id",
+    "session_id",
+    "export_id",
+    "capture_started_at",
+    "capture_ended_at",
+    "configuration_sha256",
+    "model_sha256",
+    "physical_sync",
+    "episodes",
+    "invalid_intervals"
+  ],
+  "type": "object"
+}

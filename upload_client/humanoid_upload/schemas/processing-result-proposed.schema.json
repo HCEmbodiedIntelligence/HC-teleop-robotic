@@ -1,0 +1,128 @@
+{
+  "$id": "urn:openarm:processing-result-proposed:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "episodes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_action": {
+            "enum": [
+              "wait",
+              "open_episode",
+              "retry_processing",
+              "repair_export",
+              "review_quality"
+            ]
+          },
+          "quality_status": {
+            "enum": [
+              "PENDING",
+              "PASS",
+              "RISK",
+              "REJECT"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "source_episode_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_episode_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "READY",
+              "FAILED"
+            ]
+          }
+        },
+        "required": [
+          "source_episode_id",
+          "source_episode_index",
+          "episode_id",
+          "dataset_id",
+          "status",
+          "quality_status",
+          "error_code",
+          "retryable",
+          "next_action"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "poll_after_seconds": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "processing_status": {
+      "enum": [
+        "PENDING",
+        "DISCOVERING_EPISODES",
+        "PROCESSING",
+        "READY",
+        "PARTIALLY_FAILED",
+        "FAILED"
+      ]
+    },
+    "quality_status": {
+      "enum": [
+        "PENDING",
+        "PASS",
+        "RISK",
+        "REJECT"
+      ]
+    },
+    "raw_source_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "openarm-processing-result/v1"
+    },
+    "terminal": {
+      "type": "boolean"
+    },
+    "upload_id": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "upload_id",
+    "raw_source_id",
+    "processing_status",
+    "quality_status",
+    "terminal",
+    "poll_after_seconds",
+    "episodes"
+  ],
+  "type": "object"
+}
