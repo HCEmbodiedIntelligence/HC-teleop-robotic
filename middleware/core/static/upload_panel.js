@@ -14,22 +14,29 @@ window.mountUploadPanel = function (element) {
     <button data-refresh>刷新</button><p data-error role="alert"></p>
     <div class="upload-table"><table><thead><tr><th>产物 / 任务</th><th>采集</th><th>产物</th><th>上传</th><th>进度</th><th>平台处理</th><th>质检</th><th>操作</th></tr></thead><tbody></tbody></table></div>`;
   let disposed = false;
+  let refreshing = false;
+  let refreshAgain = false;
+  const controller = new AbortController();
   const error = element.querySelector('[data-error]');
   async function call(operation, body) {
     const response = await fetch('/api/uploads' + (operation ? '/' + operation : ''),
-      body === undefined ? {} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      body === undefined ? {signal: controller.signal} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), signal: controller.signal});
     const result = await response.json();
     if (!response.ok) throw new Error([result.code, result.action].filter(Boolean).join('：'));
     return result;
   }
   async function run(operation, body) {
     try { error.textContent = ''; await call(operation, body); await refresh(); }
-    catch (e) { error.textContent = e.message; }
+    catch (e) { if (!disposed) error.textContent = e.message; }
   }
   async function refresh() {
     if (disposed) return;
+    if (refreshing) { refreshAgain = true; return; }
+    refreshing = true;
     try {
       const value = await call('');
+      if (disposed) return;
+      error.textContent = '';
       element.querySelector('[data-status]').textContent = !value.enabled ? '上传未启用，本地录制可继续使用' :
         `${value.running ? '上传服务运行中' : '上传服务未运行'}；自动入队${value.auto_enqueue ? '开启' : '关闭'}`;
       const binding = value.default_binding;
@@ -39,7 +46,8 @@ window.mountUploadPanel = function (element) {
       const tbody = element.querySelector('tbody'); tbody.replaceChildren();
       for (const job of value.jobs) {
         const row = document.createElement('tr');
-        const progress = Math.min(100, Math.floor(100 * (job.upload_state === 'submitted' ? job.total_bytes : (job.uploaded_bytes || 0)) / job.total_bytes));
+        const progress = job.upload_state === 'submitted' ? 100 :
+          (job.total_bytes > 0 ? Math.max(0, Math.min(100, Math.floor(100 * (job.uploaded_bytes || 0) / job.total_bytes))) : 0);
         for (const value of [ `${job.artifact_id || job.export_id} / ${job.task_id}`, job.capture_state, job.artifact_state, job.upload_state,
                               `${progress}%`, job.processing_state, job.quality_state ]) {
           const td = document.createElement('td'); td.textContent = value; row.append(td);
@@ -56,7 +64,11 @@ window.mountUploadPanel = function (element) {
         td.append(detail); row.append(td); tbody.append(row);
       }
       if (value.error || Object.keys(value.scan_errors).length) error.textContent = JSON.stringify({service: value.error, scan: value.scan_errors});
-    } catch (e) { error.textContent = e.message; }
+    } catch (e) { if (!disposed) error.textContent = e.message; }
+    finally {
+      refreshing = false;
+      if (refreshAgain && !disposed) { refreshAgain = false; refresh(); }
+    }
   }
   for (const [selector, operation] of [['data-binding', 'binding'], ['data-enqueue', 'enqueue'], ['data-seal', 'seal-raw']]) {
     const form = element.querySelector(`[${selector}]`);
@@ -64,5 +76,5 @@ window.mountUploadPanel = function (element) {
   }
   element.querySelector('[data-refresh]').onclick = refresh;
   refresh(); const timer = setInterval(refresh, 5000);
-  return () => {disposed = true; clearInterval(timer);};
+  return () => {disposed = true; clearInterval(timer); controller.abort();};
 };
