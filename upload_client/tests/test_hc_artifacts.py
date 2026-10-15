@@ -263,3 +263,44 @@ def test_artifact_binding_cannot_be_reassigned(hc_cfg):
     with pytest.raises(UploadError,match='TASK_BINDING_MISMATCH'):
         q.enqueue_artifact(d,dict(hc_cfg,task_id='task-2',binding_id='binding-2'))
     assert len(q.jobs())==1
+
+
+@pytest.mark.parametrize('key,value', [('scan_seconds',0),('poll_seconds',-1),('read_bytes_per_second',0),('bandwidth_bytes_per_second',float('nan'))])
+def test_restart_validates_settings_before_worker(hc_cfg,key,value):
+    service(hc_cfg)  # Persist a binding so this exercises the restore branch.
+    with pytest.raises(UploadError):
+        service(dict(hc_cfg,**{key:value}))
+
+
+def test_binding_save_failure_does_not_change_live_default(hc_cfg,monkeypatch):
+    svc=service(hc_cfg); before=svc.binding_snapshot()
+    def fail(*args): raise OSError('disk full')
+    monkeypatch.setattr('core.upload_service.atomic_json',fail)
+    with pytest.raises(OSError):
+        svc.set_binding({**svc.bindings[before['binding_id']],'task_id':'not-persisted'})
+    assert svc.binding_snapshot()==before
+
+
+def test_queue_upgrade_backfills_frozen_artifact_identity(hc_cfg):
+    d=ready(hc_cfg); d['binding_id']=None
+    q=Queue(hc_cfg['queue_directory']); job=q.enqueue_artifact(d,hc_cfg)
+    with q.connect() as db: db.execute('DROP TABLE artifact_jobs')
+    upgraded=Queue(hc_cfg['queue_directory'])
+    assert upgraded.enqueue_artifact(d,hc_cfg)['id']==job['id']
+    with pytest.raises(UploadError,match='TASK_BINDING_MISMATCH'):
+        upgraded.enqueue_artifact(d,dict(hc_cfg,task_id='new-task',binding_id='new-binding'))
+
+
+def test_raw_native_identity_cannot_alias_two_artifacts(hc_cfg):
+    d=ready(hc_cfg,'platform_raw'); q=Queue(hc_cfg['queue_directory']); q.enqueue_artifact(d,hc_cfg)
+    d['artifact_id']='alias-of-same-raw'
+    with pytest.raises(UploadError,match='ARTIFACT_IDENTITY_CONFLICT'):
+        q.enqueue_artifact(d,hc_cfg)
+
+
+def test_deleted_artifact_is_not_reported_ready(hc_cfg):
+    svc=service(hc_cfg); hc_cfg['binding_id']=svc.binding_snapshot()['binding_id']; d=ready(hc_cfg)
+    svc.scan()
+    with ArtifactLocks(hc_cfg['artifact_state_dir']).delete(d['artifact_id']):
+        shutil.rmtree(d['root'])
+    assert svc.jobs()[0]['artifact_state']=='deleted'

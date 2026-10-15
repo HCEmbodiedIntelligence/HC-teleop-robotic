@@ -30,6 +30,14 @@ class Queue:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cancellations (job_id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS artifact_jobs (artifact_id TEXT PRIMARY KEY, job_id TEXT NOT NULL)")
+            # Earlier HC queues predate the artifact index. Rebuild without changing jobs or bindings.
+            for row in db.execute("SELECT id,payload FROM jobs"):
+                job = json.loads(row['payload'])
+                if job.get('artifact_id'):
+                    old = db.execute("SELECT job_id FROM artifact_jobs WHERE artifact_id=?", (job['artifact_id'],)).fetchone()
+                    if old and old[0] != row['id']:
+                        raise UploadError('ARTIFACT_IDENTITY_CONFLICT', '旧队列存在重复产物身份；保留现场并人工核对')
+                    db.execute("INSERT OR IGNORE INTO artifact_jobs VALUES(?,?)", (job['artifact_id'], row['id']))
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -83,8 +91,13 @@ class Queue:
             if descriptor is not None:
                 bound = db.execute("SELECT j.payload FROM artifact_jobs a JOIN jobs j ON j.id=a.job_id WHERE a.artifact_id=?",
                                    (descriptor['artifact_id'],)).fetchone()
-                if bound and json.loads(bound[0])['frozen'].get('binding_id') != cfg.get('binding_id'):
-                    raise UploadError('TASK_BINDING_MISMATCH', '产物已经冻结绑定；新归属需要新的产物身份')
+                if bound:
+                    old_job = json.loads(bound[0])
+                    if any(old_job['frozen'].get(k) != frozen.get(k) for k in
+                           ('binding_id', 'platform_base_url', 'robot_id', 'local_robot_id', 'task_id')):
+                        raise UploadError('TASK_BINDING_MISMATCH', '产物已经冻结绑定；新归属需要新的产物身份')
+                    if old_job['export_id'] != marker['export_id']:
+                        raise UploadError('EXPORT_ID_REUSED', '产物的原生身份已改变；需要新的产物身份')
             old = db.execute("SELECT * FROM jobs WHERE export_key=?", (export_key,)).fetchone()
             if old:
                 if old["dedup"] != dedup:
@@ -92,6 +105,8 @@ class Queue:
                 previous = json.loads(old['payload'])
                 if descriptor is not None and not previous.get('artifact_id'):
                     raise UploadError('LEGACY_JOB_REQUIRES_MIGRATION', '旧 CLI 队列没有产物读取锁；停旧 worker 后人工迁移，不能自动接管')
+                if descriptor is not None and previous.get('artifact_id') != descriptor['artifact_id']:
+                    raise UploadError('ARTIFACT_IDENTITY_CONFLICT', '同一原生封存不能使用两个 artifact_id')
                 return previous
             db.execute("INSERT INTO jobs(id,dedup,export_key,payload,state) VALUES(?,?,?,?,?)",
                        (client_id, dedup, export_key, canonical(job).decode(), "queued"))

@@ -48,3 +48,59 @@ def test_b_produced_artifacts(tmp_path, monkeypatch):
             transport='offline in-process mock',restart_reconciled=True))
     if os.environ.get('HC_HANDOFF_RECEIPTS'):
         atomic_json(os.environ['HC_HANDOFF_RECEIPTS'],receipts)
+
+
+@pytest.mark.parametrize('delete_entry',['delete_recording','delete_artifact'])
+def test_b_recorder_to_uploader_delete_lease(tmp_path,monkeypatch,delete_entry):
+    """Development smoke against B's selected source; no ROS initialization or platform HTTP."""
+    import threading
+    import time
+    from humanoid_upload.common import UploadError
+    from core.upload_service import UploadService
+    if not os.environ.get('HC_RECORDING_WORKTREE'):
+        pytest.skip('B recording worktree not provided')
+    worktree=Path(os.environ['HC_RECORDING_WORKTREE']).resolve()
+    monkeypatch.syspath_prepend(str(worktree))
+    from middleware.core import recording_service
+    assert Path(recording_service.__file__).resolve().is_relative_to(worktree)
+    recorder=recording_service.RecordingService(dict(directory=str(tmp_path/'data'),
+        job_state_dir=str(tmp_path/'jobs'),artifact_state_dir=str(tmp_path/'ready'),
+        min_free_bytes=1,format='mcap',max_pending_jobs=4),tmp_path,
+        {'enabled':False,'subscriptions':[{'topic':'/observation/joint_states',
+         'type':'sensor_msgs/msg/JointState','outputs':['record']}]},
+        lambda:{'/observation/joint_states':{'state':'ok'}})
+    cfg=dict(DEFAULTS,enabled=True,auto_enqueue=True,platform_base_url='https://example.invalid',
+        credential_ref='env:NEVER_USED',robot_id='synthetic-robot',local_robot_id='synthetic-local',task_id='synthetic-task',
+        queue_directory=str(tmp_path/'queue'),read_bytes_per_second=1e9,bandwidth_bytes_per_second=1e9)
+    svc=UploadService(cfg,artifact_state_dir=recorder.artifact_state_dir,data_directory=recorder.directory,
+                      request_raw_seal=recorder.request_raw_seal)
+    recorder.upload_service=svc; recorder.binding_snapshot=svc.binding_snapshot
+    entered=threading.Event(); release=threading.Event(); worker=None
+    try:
+        source=Path(recorder.start(metadata={'profile_id':'synthetic-local'}))
+        recorder.record({'kind':'event','payload':{'test':'upload-delete-race'}})
+        recorder.stop()
+        deadline=time.monotonic()+15
+        while not list(recorder.artifact_state_dir.glob('*.json')):
+            assert time.monotonic()<deadline
+            time.sleep(.02)
+        svc.scan(); jobs=svc.queue.jobs(); assert len(jobs)==1
+        job=jobs[0]; api=OfflinePlatform(); api.put_hook=lambda:(entered.set(),release.wait(10))
+        monkeypatch.setattr('humanoid_upload.worker.Http',lambda _cfg:api)
+        worker=threading.Thread(target=Worker(svc.queue,svc._config()).tick); worker.start()
+        assert entered.wait(5)
+        argument=source.name if delete_entry=='delete_recording' else job['artifact_id']
+        with pytest.raises(UploadError,match='ARTIFACT_BUSY'):
+            getattr(recorder,delete_entry)(argument)
+        assert source.is_file() and svc.artifact_usage(job['artifact_id'])['reading']
+        release.set(); worker.join(5); assert not worker.is_alive()
+        assert svc.queue.jobs()[0]['state']=='cancelled'
+        getattr(recorder,delete_entry)(argument)
+        assert not source.exists() and svc.jobs()[0]['artifact_state']=='deleted'
+        svc.queue.retry(job['id']); Worker(svc.queue,svc._config()).tick()
+        assert svc.queue.jobs()[0]['code']=='ARTIFACT_DELETED'
+        assert api.upload['state']!='COMMITTED'
+    finally:
+        release.set()
+        if worker: worker.join(5)
+        recorder.shutdown()

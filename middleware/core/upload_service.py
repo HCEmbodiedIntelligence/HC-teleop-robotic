@@ -13,7 +13,9 @@ from humanoid_upload.worker import Worker
 
 class UploadService:
     def __init__(self, config, *, artifact_state_dir, data_directory, request_raw_seal=None):
-        self.enabled = bool(config.get('enabled', False))
+        if not isinstance(config, dict) or type(config.get('enabled', False)) is not bool:
+            raise UploadError('CONFIG_INVALID')
+        self.enabled = config.get('enabled', False)
         self.state_dir = Path(artifact_state_dir).resolve()
         self.data_directory = str(Path(data_directory).resolve())
         self.request_raw_seal = request_raw_seal
@@ -29,6 +31,12 @@ class UploadService:
         self.default_binding_id = None
         if not self.enabled:
             return
+        # Validate scheduling/rates even when no binding exists or bindings are restored.
+        # Placeholders only satisfy config structure; they never enter the active config.
+        unbound = dict(platform_base_url='https://unbound.invalid', credential_ref='env:UNBOUND',
+                       robot_id='unbound', local_robot_id='unbound', task_id='unbound')
+        checked = validate_config({**self.cfg, **{k: self.cfg.get(k) or v for k, v in unbound.items()}})
+        self.cfg.update({k: v for k, v in checked.items() if k not in self.binding_fields})
         queue_path = Path(self.cfg['queue_directory']).resolve()
         data_path = Path(self.data_directory)
         if queue_path == data_path or queue_path.is_relative_to(data_path) or data_path.is_relative_to(queue_path):
@@ -38,7 +46,20 @@ class UploadService:
         self.binding_file = self.queue.directory / 'bindings.json'
         if self.binding_file.exists():
             state = read_json(self.binding_file)
-            self.bindings, self.default_binding_id = state['bindings'], state['default_binding_id']
+            try:
+                bindings, default = state['bindings'], state['default_binding_id']
+                if not isinstance(bindings, dict) or default not in bindings:
+                    raise ValueError()
+                for identity, binding in bindings.items():
+                    if not isinstance(binding, dict) or set(binding) != set(self.binding_fields):
+                        raise ValueError()
+                    normalized = validate_config({**self.cfg, **binding})
+                    if (hashlib.sha256(canonical(binding)).hexdigest() != identity or
+                            any(normalized[k] != binding[k] for k in self.binding_fields)):
+                        raise ValueError()
+            except (KeyError, TypeError, ValueError):
+                raise UploadError('BINDING_STORE_INVALID', '检查持久绑定文件；保留旧队列，不自动重绑') from None
+            self.bindings, self.default_binding_id = bindings, default
         elif all(self.cfg.get(k) for k in ('platform_base_url', 'credential_ref', 'robot_id', 'local_robot_id', 'task_id')):
             self.set_binding({k: self.cfg[k] for k in self.binding_fields})
 
@@ -56,9 +77,9 @@ class UploadService:
             cfg = validate_config({k: v for k, v in {**self.cfg, **values}.items() if k != 'artifact_state_dir'})
             binding = {k: cfg[k] for k in self.binding_fields}
             identity = hashlib.sha256(canonical(binding)).hexdigest()
-            self.bindings[identity] = binding
-            self.default_binding_id = identity
-            atomic_json(self.binding_file, {'bindings': self.bindings, 'default_binding_id': identity})
+            bindings = {**self.bindings, identity: binding}
+            atomic_json(self.binding_file, {'bindings': bindings, 'default_binding_id': identity})
+            self.bindings, self.default_binding_id = bindings, identity
             return self.binding_snapshot()
 
     def binding_snapshot(self, binding_id=None):
@@ -184,7 +205,10 @@ class UploadService:
         for job in self.queue.jobs():
             item = public_job(job)
             committed = job.get('server_state') == 'COMMITTED'
-            item.update(capture_state='completed', artifact_state='ready',
+            deleted = bool(job.get('artifact_id') and self.locks.tombstone(job['artifact_id']).exists())
+            invalid = job.get('code') in {'ASSET_INTEGRITY', 'ASSET_MISSING', 'LOCAL_CONTENT_CHANGED',
+                                        'EXPORT_OUTSIDE_DATA_DIRECTORY', 'SYMLINK_ASSET', 'UNSAFE_PATH'}
+            item.update(capture_state='completed', artifact_state='deleted' if deleted else 'invalid' if invalid else 'ready',
                         upload_state='submitted' if committed else job['state'],
                         processing_state=job.get('recording_status') or job.get('processing_status') or 'UNKNOWN',
                         quality_state=('NOT_EVALUATED' if job.get('recording_status') in {'AWAITING_SLICE', 'SLICED'}
