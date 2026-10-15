@@ -12,4 +12,4 @@
 
 OpenArmX 原生启动、输出 adapter、控制器顺序、执行占用和 fake 模式见 hc_openarmx/docs/hc-control.md。通用接入见 humanoid_driver_runtime/docs/hc-integration.md；相机启动基础来自 robot_bringup，不再依赖 manager。公共 app/config/UI 由 B 接入，字段需求在交接 requests/A.md。
 
-旧pin差异审计见 motion子模块 docs/hc-baseline-audit.md。旧 registered_robot.launch.py 与 registering_robot.md 已原样恢复，仅作为可选原生入口；start_teleop=true 需另行安装 teleop_vr_recv。
+旧pin差异审计见 motion子模块 docs/hc-baseline-audit.md。用户已取消旧 registered_robot 入口及说明，后续提交将它们移除，不再引入旧 manager/teleop_vr_recv 启动依赖。
