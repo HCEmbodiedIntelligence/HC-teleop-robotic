@@ -44,9 +44,9 @@ test('MCAP keeps replay and plain file download',async()=>{
   const {ctx,fields}=setup([{filename:'test.mcap',format:'MCAP',message_count:12,channels:[{topic:'/clock'}]}]);
   await vm.runInContext('loadDatasets()',ctx);
   const actions=fields['#datasetRows'].children[0].children[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','下载','删除']);
-  assert.equal(actions[2].href,'/api/recordings/test.mcap/download');
-  assert.equal(actions[2].download,'test.mcap');
+  assert.deepEqual(actions.map(el=>el.textContent),['重放','编辑 / 预览','详情','下载','删除']);
+  assert.equal(actions[3].href,'/api/recordings/test.mcap/download');
+  assert.equal(actions[3].download,'test.mcap');
 });
 
 test('pending export appears immediately with stage, percentage and counters; operations disabled',async()=>{

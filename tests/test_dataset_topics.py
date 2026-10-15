@@ -105,7 +105,10 @@ def test_groups_follow_every_bundled_profile():
     from middleware.core.dataset_topics import load_joint_groups
     root = Path(__file__).parents[1]
     config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
-    for profile in ('x1', 'openarmx', 'baxter', 'fr3_duo', 'g1_dual_arm'):
+    bundled = sorted((root / 'adapters/robots').glob('*/arm_teleop.yaml'))
+    assert bundled
+    for adapter in bundled:
+        profile = adapter.parent.name
         config['robot_profiles']['active'] = profile
         groups = load_joint_groups(config, root / 'middleware')
         source = yaml.safe_load((root / 'adapters/robots' / profile / 'arm_teleop.yaml').read_text())

@@ -39,9 +39,10 @@
           <div class="panel-title"><div><h2>控制源切换</h2><p>只有选中的来源能够转发到机器人标准关节命令</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
           <div class="source-switch">
             <button id="sourceVr" data-source="vr"><strong>VR / IK</strong><small id="vrSourceStatus">未检测</small></button>
+            <button id="sourceMotion" data-source="motion"><strong>Move / Servo</strong><small>独立运动入口</small></button>
             <button id="sourceExoskeleton" data-source="exoskeleton"><strong>外骨骼</strong><small id="exoSourceStatus">未检测</small></button>
           </div>
-          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
+          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>硬件 ready</dt><dd id="hardwareReadyState">未知</dd></div><div><dt>ready 年龄</dt><dd id="hardwareReadyAge">未知</dd></div><div><dt>累计拒绝</dt><dd id="muxRejected">0</dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
         </article>
         <article class="panel system-panel">
           <div class="panel-title"><div><h2>链路状态</h2><p>VR、控制器、相机和网页连接状态</p></div><span id="vrPeer" class="tag">VR 未连接</span></div>
@@ -259,11 +260,11 @@
         </div>
         <p class="form-help" style="margin-top:14px;border-color:var(--orange);">
           如果相关机器人驱动节点或控制器刚启动尚未输出数据，强行录制可能会导致数据集缺失该话题数据。<br>
-          如确认无需等待，可点击<b>“强制开始录制”</b>。
+          请修复必需的连续源后重试；事件源无需先产生运动。
         </p>
         <div class="dialog-actions">
           <button type="button" onclick="document.getElementById('precheckWarningDialog').close()">取消</button>
-          <button type="button" class="danger" id="confirmForceStartBtn">强制开始录制</button>
+          <button type="button" id="confirmForceStartBtn">返回检查</button>
         </div>
       </form>
     </dialog>
@@ -329,8 +330,34 @@
       </form>
     </dialog>
     <div id="toast" role="status"></div>
+    <section id="uploadPanel" class="data-workbench"><h2>上传</h2><p>上传模块未加载时，本地录制仍可使用。</p></section>
+    <section class="data-workbench" id="dataWorkbench">
+      <h2>录制作业与数据工具</h2>
+      <label>工作流 <select id="recordWorkflow"><option value="hc">HC MCAP / LeRobot / both</option><option value="platform_raw">平台 raw MCAP + MP4</option></select></label>
+      <label>raw 采集配置文件 <input id="captureConfigFile" placeholder="相对 middleware 配置目录或绝对路径"></label>
+      <button id="saveRecordWorkflow">保存下次录制配置</button>
+      <button id="refreshRecordingJobs">刷新作业</button>
+      <pre id="recordingJobsStatus" aria-live="polite"></pre>
+      <h3>单 MCAP 数据预览与编辑</h3>
+      <p>数据预览只向浏览器输出消息。raw 整包由平台切片；恢复副本可能缺失数据。</p>
+      <label>源文件 <input id="dataSource" placeholder="从文件列表点击编辑 / 预览，或输入 MCAP 文件名"></label>
+      <button data-data-action="overview">读取详情</button>
+      <button data-data-action="play">数据预览</button><button data-data-action="pause">暂停预览</button><button data-data-action="stop">停止预览</button>
+      <label>位置（秒）<input id="dataPosition" type="number" value="0" min="0"></label>
+      <label>速度 <input id="dataSpeed" type="number" min="0.1" max="4" step="0.1" value="1"></label>
+      <label>备注<textarea id="dataNotes"></textarea></label>
+      <label>裁剪起点（秒）<input id="dataTrimStart" type="number" min="0" value="0"></label>
+      <label>裁剪终点（秒）<input id="dataTrimEnd" type="number" min="0" value="0"></label>
+      <label>标记（JSON 数组，label 为 valid / invalid / note）<textarea id="dataAnnotations">[]</textarea></label>
+      <button data-data-action="edit">保存标记与备注</button>
+      <label>副本文件名 <input id="dataOutput" placeholder="新文件.mcap"></label>
+      <button data-data-action="export">另存裁剪副本</button><button data-data-action="audit">检查数据</button><button data-data-action="recover">恢复副本</button>
+      <pre id="dataResult" aria-live="polite"></pre>
+    </section>
   </main>
   <script src="/static/table_columns.js?v=3"></script>
+  <link rel="stylesheet" href="/static/upload_panel.css">
+  <script src="/static/upload_panel.js"></script>
   <script src="/static/app.js?v=20-export-recovery"></script>
 </body>
 </html>

@@ -68,7 +68,7 @@ def sample_max_age(key: str) -> int:
 
 
 def synchronized_episodes(streams: dict[str, list], fps: int, audit: dict | None = None,
-                          time_range: tuple[int, int] | None = None):
+                          time_range: tuple[int, int] | None = None, max_ages: dict | None = None):
     """One recording, one episode: retain every grid point, with causal values.
 
     Missing and stale values are represented by validity/availability/age fields
@@ -92,7 +92,7 @@ def synchronized_episodes(streams: dict[str, list], fps: int, audit: dict | None
         stamp = start + round(index * 1_000_000_000 / fps)
         selected = {key: latest_sample(samples, stamp, None) for key, samples in streams.items()}
         invalid = [key for key, sample in selected.items()
-                   if sample is None or stamp - sample[0] > sample_max_age(key)]
+                   if sample is None or stamp - sample[0] > (max_ages or {}).get(key, sample_max_age(key))]
         if audit is not None:
             audit['candidate_frames'] += 1
             audit['retained_frames'] += 1
@@ -127,7 +127,7 @@ def decode_rgb(message: Any, compressed: bool):
     return image[:, :, :3]
 
 
-def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: str, progress: ExportProgress | None = None) -> Path:
+def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: str, progress: ExportProgress | None = None, action_sources: list | None = None) -> Path:
     import cv2
     from mcap.reader import make_reader
     from rclpy.serialization import deserialize_message
@@ -135,6 +135,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
 
     progress = progress or ExportProgress(None)
     progress.update("读取 MCAP", 0, force=True)
+    action_sources = action_sources or []
+    action_map = {item["topic"]: item for item in action_sources}
+    extra_keys = {topic: "action.source." + str(index) for index, topic in enumerate(action_map)}
+    max_ages = {extra_keys[topic]: int(item["max_age_sec"]*1e9) for topic, item in action_map.items()}
     streams: dict[str, list] = {}
     names = None
     dimensions = {}
@@ -169,7 +173,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             if channel.message_encoding != 'cdr' or schema is None:
                 continue
             kind = schema.name
-            joint_key = {'/observation/joint_states': 'observation.state', '/action/joint_states': 'action'}.get(topic)
+            joint_key = {'/observation/joint_states': 'observation.state', '/action/joint_states': 'action', **extra_keys}.get(topic)
             is_camera = kind in ('sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage') and 'depth' not in topic.lower()
             numeric_key = numeric_topics.get(topic)
             if joint_key is None and not is_camera and numeric_key is None:
@@ -236,11 +240,19 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     action_names = [name for name in names if name in first_action_names]
     action_names.extend(name for name in first_action_names if name not in names)
     for key, samples in raw_cameras.items():
-        stream_names = names if key == 'observation.state' else action_names
+        stream_names = (names if key == 'observation.state' else action_names if key == 'action'
+                        else action_map[source_topics[key]]['names'])
+        if key.startswith('action.source.'):
+            numeric_names[key] = stream_names
         try:
             streams[key] = [(stamp, joint_vector(message, stream_names)) for stamp, message in samples]
         except ValueError as error:
             raise ValueError(f"{source_topics[key]}: {error}") from error
+    for topic, key in extra_keys.items():
+        if key not in streams:
+            streams[key] = []
+            source_topics[key] = topic
+            numeric_names[key] = action_map[topic]['names']
     progress.update("对齐时间轴", 25, force=True)
     episodes = []
     origin = recording_start
@@ -256,21 +268,25 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     for key in streams:
         if key not in placeholders:
             placeholders[key] = [0.0] * (len(names) if key == 'observation.state' else len(action_names) if key == 'action' else len(numeric_names[key]))
-    for episode in synchronized_episodes(streams, fps, audit, (recording_start, recording_end)):
+    for episode in synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages):
         rows = []
         for stamp, selected in episode:
             values = {key: sample[1] if sample is not None else placeholders[key]
                       for key, sample in selected.items()}
+            values['action'] = list(values['action']) + [v for key in extra_keys.values() for v in values[key]]
             ages = [(stamp - selected[key][0]) / 1e9 if selected[key] is not None else -1.0 for key in keys]
             rows.append({'values': values,
                          'source_times': [(selected[key][0] - origin) / 1e9 if selected[key] is not None else -1.0 for key in keys],
                          'source_available': [float(selected[key] is not None) for key in keys],
-                         'source_valid': [float(selected[key] is not None and ages[i] <= sample_max_age(key) / 1e9) for i, key in enumerate(keys)],
+                         'source_valid': [float(selected[key] is not None and ages[i] <= max_ages.get(key, sample_max_age(key)) / 1e9) for i, key in enumerate(keys)],
                          'source_age': ages, 'grid_time': (stamp - origin) / 1e9})
         episodes.append(rows)
     if not episodes:
         raise ValueError('No recording timeline samples; check recorded topics')
-    manifest = {'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
+    action_names = action_names + [name for item in action_sources for name in item['names']]
+    if len(set(action_names)) != len(action_names):
+        raise ValueError('action source joint names overlap')
+    manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
     path = staging / 'manifest.json'
     path.write_text(json.dumps(manifest), encoding='utf-8')
     progress.update("对齐完成", 30, sum(map(len, episodes)), sum(map(len, episodes)), "帧", force=True)
@@ -396,6 +412,8 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
         progress.update('校验数据集', 96 + 3 * offset / max(1, total_frames), offset, total_frames, '帧')
     synchronization = {key: manifest[key] for key in ('source_topics', 'origin_log_time_ns', 'source_keys', 'joint_names')}
     synchronization['action_joint_names'] = joint_names['action']
+    synchronization['action_sources'] = manifest.get('action_sources', [])
+    synchronization['action_semantics'] = manifest.get('action_semantics', 'upstream_command_not_execution')
     synchronization['joint_alignment'] = 'observation.state uses feedback joints; action uses commanded joints; ordered by joint name, no feedback substituted for absent commands'
     synchronization['task'] = manifest['task']
     synchronization['source_frame_ids'] = manifest.get('source_frame_ids', {})
@@ -407,7 +425,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     return {'path': str(destination), 'format': 'lerobot', 'frames': len(loaded), 'episodes': len(manifest['episodes']), 'fps': manifest['fps'], 'cameras': list(manifest['dimensions']), 'episode_lengths': [len(episode) for episode in manifest['episodes']], 'image_storage': 'mp4_h264', 'sync_audit': manifest.get('sync_audit', {})}
 
 
-def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x1') -> dict:
+def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x1', action_sources=None) -> dict:
     executable = ensure_export_available()
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 120:
@@ -418,7 +436,7 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
     progress = ExportProgress(progress_path(destination))
     progress.update('等待转换', 0, force=True, reset=True)
     with tempfile.TemporaryDirectory(prefix='.lerobot-staging-', dir=destination.parent) as directory:
-        manifest = prepare_mcap(source, Path(directory), fps, task, robot_type, progress)
+        manifest = prepare_mcap(source, Path(directory), fps, task, robot_type, progress, action_sources)
         staged_dataset = Path(directory) / 'dataset'
         writer_env = {key: value for key, value in os.environ.items() if key not in ('PYTHONPATH', 'PYTHONHOME')}
         process = subprocess.run([executable, str(Path(__file__).resolve()), '--write-manifest', str(manifest), str(staged_dataset)], capture_output=True, text=True, env=writer_env)
@@ -429,6 +447,8 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
             raise FileExistsError(f'Destination was created during export: {destination}')
         staged_dataset.rename(destination)
         result['path'] = str(destination)
+        from middleware.core.artifact_state import atomic_json
+        atomic_json(destination / '.hc-export-complete.json', {'source':str(source), 'frames':result['frames'], 'complete':True})
         progress.update('转换完成', 100, result['frames'], result['frames'], '帧', state='completed', force=True)
         return result
 
@@ -440,10 +460,11 @@ def main():
     parser.add_argument('--fps', type=int, default=20)
     parser.add_argument('--task', default='teleoperation')
     parser.add_argument('--robot-type', default='x1')
+    parser.add_argument('--action-sources', default='[]', help='JSON action topic/name/unit/age mappings')
     parser.add_argument('--write-manifest', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        result = write_dataset(Path(args.source), Path(args.destination)) if args.write_manifest else export_mcap(args.source, args.destination, args.fps, args.task, args.robot_type)
+        result = write_dataset(Path(args.source), Path(args.destination)) if args.write_manifest else export_mcap(args.source, args.destination, args.fps, args.task, args.robot_type, json.loads(args.action_sources))
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:
         if not args.write_manifest:

@@ -38,7 +38,7 @@ class ConfigTests(unittest.TestCase):
         )
 
     def test_command_mux_requires_distinct_topics_and_known_source(self):
-        with self.assertRaisesRegex(ConfigError, "source must be vr or exoskeleton"):
+        with self.assertRaisesRegex(ConfigError, "source must be vr, exoskeleton or motion"):
             validate_config({"ros": {"command_mux": {"source": "unknown"}}})
         with self.assertRaisesRegex(ConfigError, "topics must be different"):
             validate_config(

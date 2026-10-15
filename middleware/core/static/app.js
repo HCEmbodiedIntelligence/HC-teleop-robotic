@@ -155,7 +155,7 @@ function messageState(info) {
 function renderCommandMux(ros) {
   const mux=ros.command_mux||{};
   const source=mux.source||'vr';
-  const sourceLabel=source==='exoskeleton'?'外骨骼':'VR / IK';
+  const sourceLabel=source==='motion'?'Move / Servo':source==='exoskeleton'?'外骨骼':'VR / IK';
   setText('#controlSourceState',sourceLabel);
   setText('#controlSourceMeta',mux.output_enabled===false?'急停门控已关闭':'命令输出已使能');
   const sourceState=$('#controlSourceState');
@@ -167,6 +167,9 @@ function renderCommandMux(ros) {
   setText('#exoCommandTopic',mux.exoskeleton_topic||'/control/exoskeleton/joint_states');
   setText('#outputCommandTopic',mux.output_topic||'/action/joint_states');
   setText('#muxForwarded',String(mux.forwarded||0));
+  setText('#hardwareReadyState',mux.hardware_ready===true?'就绪':mux.hardware_ready===false?'未就绪':'未知');
+  setText('#hardwareReadyAge',Number.isFinite(mux.hardware_ready_age)?mux.hardware_ready_age.toFixed(3)+' s':'未知');
+  setText('#muxRejected',String(mux.rejected||0));
   const sourceStatus=(name,label)=>{
     const age=mux.last_received_age?.[name];
     const count=mux.received?.[name]||0;
@@ -412,6 +415,10 @@ function connectWebSocket() {
       else if(value.kind==='ros_message'&&value.topic==='/status/teleop')renderTeleopStatus(value);
       else if(value.kind==='ros_message'&&value.topic==='/action/joint_states')updateJointMonitor(value,'command');
       else if(value.kind==='ros_message'&&value.topic==='/observation/joint_states')updateJointMonitor(value,'feedback');
+      else if(value.kind==='data_preview_message') {
+        const output=document.getElementById('dataResult');
+        if(output) output.textContent=JSON.stringify(value,null,2);
+      }
       else if(value.kind==='control_source')api('/api/status').then(renderStatus).catch(()=>{});
       else if(String(value.kind||'').startsWith('replay_') || value.kind==='safety_resume' || value.kind==='safety_stop') {
         api('/api/status').then(renderStatus).catch(()=>{});
@@ -533,6 +540,8 @@ function renderConfig() {
     $('#topicRecordingDirectory').value = config?.ros?.recording?.directory || 'runtime/topic_recordings';
   }
   const recordingConfig=config?.ros?.recording || {};
+  if($('#recordWorkflow')) $('#recordWorkflow').value=recordingConfig.workflow || 'hc';
+  if($('#captureConfigFile')) $('#captureConfigFile').value=recordingConfig.capture_config_file || '';
   if($('#topicRecordingFormat')) $('#topicRecordingFormat').value=recordingConfig.format || 'mcap';
   if($('#topicRecordingLerobotFps')) $('#topicRecordingLerobotFps').value=recordingConfig.lerobot_fps ?? 15;
   if($('#topicRecordingLerobotTask')) $('#topicRecordingLerobotTask').value=recordingConfig.lerobot_task || '遥操作';
@@ -1183,6 +1192,15 @@ async function loadDatasets() {
           replayBtn.textContent = '重放';
           replayBtn.onclick = () => openStartReplayDialog(file);
           group.append(replayBtn);
+          const editBtn = document.createElement('button');
+          editBtn.className = 'btn-sm';
+          editBtn.textContent = '编辑 / 预览';
+          editBtn.onclick = () => {
+            $('#dataSource').value=file.filename;
+            $('#dataWorkbench').scrollIntoView({behavior:'smooth'});
+            $('[data-data-action="overview"]').click();
+          };
+          group.append(editBtn);
         }
 
         const detailBtn = document.createElement('button');
@@ -1402,6 +1420,7 @@ function bindSimulationControls() {
 }
 
 async function init() {
+  initDataWorkbench();
   route();
   bindSimulationControls();
   loadSimulation();
@@ -1503,7 +1522,7 @@ async function init() {
       try {
         const precheck = await api('/api/recording/precheck', { method: 'POST' });
         if (!precheck.ready) {
-          if (!precheck.topic_count) {
+          if (!precheck.topic_count && config?.ros?.recording?.workflow !== 'platform_raw') {
             toast('尚未勾选任何需要录制的话题，请先在下方勾选待录制话题', true);
             return;
           }
@@ -1516,7 +1535,7 @@ async function init() {
               const tr = document.createElement('tr');
               const tdTopic = document.createElement('td');
               const code = document.createElement('code');
-              code.textContent = iss.topic;
+              code.textContent = iss.topic || iss.source || 'capture';
               tdTopic.append(code);
               const tdHz = document.createElement('td');
               tdHz.className = 'topic-rate ' + (iss.hz > 0 ? 'low' : 'none');
@@ -1527,14 +1546,14 @@ async function init() {
               const tdDiag = document.createElement('td');
               const badge = document.createElement('span');
               badge.className = 'topic-status-badge ' + (iss.hz > 0 ? 'status-low' : 'status-none');
-              badge.textContent = iss.state === 'no_data' ? '未检测到消息' : '频率偏低';
+              badge.textContent = iss.reason || iss.message || '录制源未就绪';
               tdDiag.append(badge);
               tr.append(tdTopic, tdHz, tdStd, tdDiag);
               tbody.append(tr);
             }
             $('#confirmForceStartBtn').onclick = async () => {
               dialog.close();
-              await triggerStartRecording(true);
+              toast('请修复录制源后重试；可将事件源设为 event、非必需源设为 required: false');
             };
             dialog.showModal();
             return;
@@ -1550,7 +1569,7 @@ async function init() {
     $('#stopRecordingBtn').onclick=async()=>{
       try {
         const result=await api('/api/recording/stop',{method:'POST'});
-        toast(`话题录制已停止，本次共录制 ${result.status?.messages||0} 条消息`);
+        toast('已停止接收，后台正在完成源文件；请在录制作业中查看结果');
         renderStatus(await api('/api/status'));
       } catch(error){toast(`停止录制失败：${error.message}`,true);}
     };
@@ -1705,16 +1724,75 @@ async function init() {
   if($('#stopButton'))$('#stopButton').onclick=toggleSafety;
   const setControlSource=async source=>{
     try {
-      const label=source==='exoskeleton'?'外骨骼':'VR / IK';
+      const label=source==='motion'?'Move / Servo':source==='exoskeleton'?'外骨骼':'VR / IK';
       await api('/api/teleop/source',{method:'POST',body:JSON.stringify({source})});
       renderStatus(await api('/api/status'));
       toast(`控制源已切换为 ${label}`);
     }catch(error){toast(error.message,true);}
   };
   if($('#sourceVr'))$('#sourceVr').onclick=()=>setControlSource('vr');
+  if($('#sourceMotion'))$('#sourceMotion').onclick=()=>setControlSource('motion');
   if($('#sourceExoskeleton'))$('#sourceExoskeleton').onclick=()=>setControlSource('exoskeleton');
   document.addEventListener('visibilitychange', () => updateDatasetPolling(location.hash.slice(1)));
   configureProfileDialog();
+}
+
+
+
+// Standalone browser data tools share the application's recording registry.
+function initDataWorkbench() {
+  let detail = null;
+  const el = id => document.getElementById(id);
+  const call = async (url, data) => {
+    const response = await fetch(url, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    const text = await response.text();
+    if (!response.ok) throw new Error(text);
+    return JSON.parse(text);
+  };
+  const show = value => { el('dataResult').textContent = JSON.stringify(value, null, 2); };
+  async function refresh() {
+    try {
+      const jobs = await call('/api/recording/jobs');
+      el('recordingJobsStatus').textContent = JSON.stringify(jobs.map(j => ({recording_id:j.recording_id, workflow:j.workflow, profile:j.profile_id, binding:j.binding, capture_state:j.capture_state, artifact_state:j.artifact_state, artifacts:j.artifacts, error:j.error})), null, 2);
+      const tasks = await call('/api/data/jobs');
+      if (tasks.length) show(tasks);
+    } catch (error) { show({error:error.message}); }
+  }
+  el('refreshRecordingJobs').onclick = refresh;
+  el('saveRecordWorkflow').onclick = async () => {
+    try {
+      const current = await call('/api/config');
+      const cfg = current.config || current;
+      cfg.ros.recording.workflow = el('recordWorkflow').value;
+      cfg.ros.recording.capture_config_file = el('captureConfigFile').value;
+      const saved = await fetch('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)});
+      if (!saved.ok) throw new Error(await saved.text());
+      const result=await saved.json();
+      config=result.config; renderConfig();
+      show({saved:true, workflow:config.ros.recording.workflow});
+    } catch (error) { show({error:error.message}); }
+  };
+  document.querySelectorAll('[data-data-action]').forEach(button => button.onclick = async () => {
+    const operation = button.dataset.dataAction, filename = el('dataSource').value;
+    try {
+      if (['play','pause','stop'].includes(operation)) {
+        show(await call('/api/data-preview/'+operation, {filename, position:Number(el('dataPosition').value), speed:Number(el('dataSpeed').value)}));
+      } else if (operation === 'overview') {
+        detail = await call('/api/data/'+encodeURIComponent(filename));
+        el('dataNotes').value = detail.edit.notes;
+        el('dataTrimStart').value = detail.edit.trim.start;
+        el('dataTrimEnd').value = detail.edit.trim.end;
+        el('dataAnnotations').value = JSON.stringify(detail.edit.annotations, null, 2);
+        show(detail);
+      } else {
+        const data = {etag:detail?.etag, filename:el('dataOutput').value, notes:el('dataNotes').value, trim:{start:Number(el('dataTrimStart').value), end:Number(el('dataTrimEnd').value)}, annotations:JSON.parse(el('dataAnnotations').value)};
+        const result = await call('/api/data/'+encodeURIComponent(filename)+'/'+operation, data);
+        if (operation === 'edit') detail = result;
+        show(result);
+      }
+    } catch (error) { show({error:error.message}); }
+  });
+  if (window.mountUploadPanel) window.mountUploadPanel(document.getElementById('uploadPanel'));
 }
 
 init();

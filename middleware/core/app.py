@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import copy
 import json
 import os
@@ -23,6 +25,7 @@ from .ros_bridge import RosBridge
 from .ros_recording_executor import RosRecordingExecutor
 from .topic_player import TopicPlayer
 from .topic_recorder import TopicRecorder
+from .recording_service import RecordingService
 from .vr_gateway import VrGateway
 
 
@@ -48,6 +51,10 @@ class MiddlewareRuntime:
         self.cameras: dict[str, CameraService] = {}
         self._cameras_by_topic: dict[str, list[CameraService]] = {}
         self.recorder: TopicRecorder | None = None
+        self.uploads = None
+        self.upload_error = None
+        self._record_commands = None
+        self._record_command_slots = threading.BoundedSemaphore(8)
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
@@ -130,8 +137,23 @@ class MiddlewareRuntime:
         except Exception:
             pass
 
+        self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vr-recording")
         self.session_profile_metadata = self._load_session_profile_metadata()
-        self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
+        self.recorder = RecordingService(self.config["ros"]["recording"], self.config_dir, self.config["ros"], self.topic_health)
+        try:
+            from .upload_service import UploadService
+            upload_config = copy.deepcopy(self.config.get('uploads', {'enabled': False}))
+            queue_path = Path(upload_config.get('queue_directory', '../runtime/upload_queue')).expanduser()
+            upload_config['queue_directory'] = str((self.config_dir/queue_path).resolve() if not queue_path.is_absolute() else queue_path)
+            self.uploads = UploadService(upload_config, artifact_state_dir=self.recorder.artifact_state_dir,
+                                         data_directory=self.recorder.directory, request_raw_seal=self.recorder.request_raw_seal)
+            await asyncio.to_thread(self.uploads.start)
+            self.recorder.upload_service = self.uploads
+            if upload_config.get('auto_enqueue', False):
+                self.recorder.binding_snapshot = self.uploads.binding_snapshot
+        except Exception as exc:
+            self.upload_error = str(exc)
+            self._log('error', 'upload unavailable: ' + str(exc))
         self.player = TopicPlayer(
             self.recorder.directory,
             lambda: self.ros,
@@ -213,6 +235,9 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.player.stop, False)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
+        if self._record_commands is not None:
+            await asyncio.to_thread(self._record_commands.shutdown, wait=True)
+            self._record_commands = None
         for camera in self.cameras.values():
             await camera.stop()
         self.cameras.clear()
@@ -223,7 +248,10 @@ class MiddlewareRuntime:
         if self.ros is not None:
             await asyncio.to_thread(self.ros.stop)
         if self.recorder is not None:
-            await asyncio.to_thread(self.recorder.stop)
+            await asyncio.to_thread(self.recorder.shutdown)
+        if self.uploads is not None:
+            await asyncio.to_thread(self.uploads.stop)
+            self.uploads = None
         try:
             import rclpy
             if rclpy.ok():
@@ -311,7 +339,7 @@ class MiddlewareRuntime:
         )
         self._last_both_sticks_held = both_sticks_held
         if mark_down:
-            self._handle_vr_record_mark()
+            self._dispatch_recording(self._handle_vr_record_mark)
 
         # Replay control events use UDP and can be lost.  While replay is
         # active or waiting for the A-button acknowledgement, periodically
@@ -346,9 +374,9 @@ class MiddlewareRuntime:
             self._last_y_held = bool(left_held & 2)
 
             if x_down:
-                self._handle_vr_record_start()
+                self._dispatch_recording(self._handle_vr_record_start)
             elif y_down:
-                self._handle_vr_record_stop()
+                self._dispatch_recording(self._handle_vr_record_stop)
 
         if self.ros is None:
             return
@@ -364,6 +392,20 @@ class MiddlewareRuntime:
                     )
                 },
             )
+
+    def _dispatch_recording(self, operation):
+        if self._record_commands is None:
+            operation()
+            return
+        if not self._record_command_slots.acquire(blocking=False):
+            self._log('error', 'recording command queue is full')
+            return
+        try:
+            future = self._record_commands.submit(operation)
+        except Exception:
+            self._record_command_slots.release()
+            raise
+        future.add_done_callback(lambda _: self._record_command_slots.release())
 
     def _handle_vr_record_start(self) -> None:
         if self.recorder is None:
@@ -619,6 +661,8 @@ class MiddlewareRuntime:
         return {
             "status": "ok",
             "version": 1,
+            "runtime_profile": self.session_profile_metadata,
+            "control_backend": os.environ.get("HC_CONTROL_BACKEND") or None,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
             "ros": ros_status,
@@ -635,7 +679,15 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
     if request.method == "OPTIONS":
         response: web.StreamResponse = web.Response(status=204)
     else:
-        response = await handler(request)
+        try:
+            response = await handler(request)
+        except ValueError as exc:
+            response = web.json_response({'error': str(exc)}, status=400)
+        except Exception as exc:
+            if getattr(exc, 'code', None) in {'ARTIFACT_BUSY', 'ARTIFACT_DELETED'}:
+                response = web.json_response({'error': str(exc), 'code': exc.code}, status=409)
+            else:
+                raise
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
@@ -700,8 +752,30 @@ def create_app(store: ConfigStore) -> web.Application:
             proposed = await request.json()
             old_server = dict(store.value["server"])
             old_profile_root = store.value["robot_profiles"]["root"]
+            proposed = validate_config(proposed)
+            old_without_recording, new_without_recording = copy.deepcopy(store.value), copy.deepcopy(proposed)
+            old_without_recording['ros'].pop('recording', None)
+            new_without_recording['ros'].pop('recording', None)
+            recording_only = old_without_recording == new_without_recording
+            if not recording_only and runtime.recorder and any(j['artifact_state'] in {'pending','draining','source_complete','exporting','sealing','seal_queued'} for j in runtime.recorder.jobs.values()):
+                raise web.HTTPConflict(text="请等待录制和后台作业结束后修改运行配置")
+            paths_changed = any(store.value['ros']['recording'].get(key) != proposed['ros']['recording'].get(key) for key in ('directory','job_state_dir','artifact_state_dir','capture_config_file'))
+            if paths_changed and runtime.recorder and any(j['artifact_state'] in {'pending','draining','source_complete','exporting','sealing','seal_queued'} for j in runtime.recorder.jobs.values()):
+                raise web.HTTPConflict(text="路径变更需要所有录制作业结束")
+            if paths_changed:
+                recording_only = False
             saved = store.save(proposed)
-            await runtime.restart(saved)
+            if recording_only and runtime.recorder:
+                # Freeze active jobs; the next start reads this new recording configuration.
+                with runtime.recorder.lock:
+                    old = runtime.recorder.config
+                    for key in ('directory','job_state_dir','artifact_state_dir','capture_config_file'):
+                        if old.get(key) != saved['ros']['recording'].get(key):
+                            raise web.HTTPConflict(text="路径变更需要所有录制作业结束后重启服务")
+                    runtime.recorder.config = copy.deepcopy(saved['ros']['recording'])
+                runtime.config = saved
+            else:
+                await runtime.restart(saved)
             restart_required = (
                 saved["server"] != old_server
                 or saved["robot_profiles"]["root"] != old_profile_root
@@ -749,8 +823,8 @@ def create_app(store: ConfigStore) -> web.Application:
     async def set_control_source(request: web.Request) -> web.Response:
         data = await request.json()
         source = str(data.get("source", "")).strip().lower()
-        if source not in {"vr", "exoskeleton"}:
-            raise web.HTTPBadRequest(text="source must be vr or exoskeleton")
+        if source not in {"vr", "exoskeleton", "motion"}:
+            raise web.HTTPBadRequest(text="source must be vr, exoskeleton or motion")
         if runtime.ros is None or runtime.ros.status().get("state") != "running":
             raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
 
@@ -892,63 +966,12 @@ def create_app(store: ConfigStore) -> web.Application:
         return response
 
     async def precheck_recording(_request: web.Request) -> web.Response:
-        subs = store.value.get("ros", {}).get("subscriptions", [])
-        recording_topics = [
-            item for item in subs
-            if item.get("enabled", True) and "record" in item.get("outputs", [])
-        ]
-        topic_health = runtime.topic_health()
-
-        checked = []
-        issues = []
-        for item in recording_topics:
-            topic = item["topic"]
-            info = topic_health.get(topic)
-            if info is None:
-                from .ros_bridge import DEFAULT_TOPIC_STANDARDS
-                std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
-                target_hz = float(item.get("target_hz", 0) or std["target_hz"])
-                min_hz = float(item.get("min_hz", 0) or std["min_hz"])
-                item_stat = {
-                    "topic": topic,
-                    "type": item.get("type", "std_msgs/msg/String"),
-                    "messages": 0,
-                    "hz": 0.0,
-                    "target_hz": target_hz,
-                    "min_hz": min_hz,
-                    "has_data": False,
-                    "state": "no_data",
-                    "message": "未检测到消息发布 (0 Hz)",
-                }
-            else:
-                item_stat = dict(info)
-            checked.append(item_stat)
-            if item_stat["state"] == "no_data":
-                issues.append({
-                    "topic": topic,
-                    "state": "no_data",
-                    "hz": 0.0,
-                    "min_hz": item_stat["min_hz"],
-                    "reason": f"{topic}: 未检测到消息发布 (0 Hz，标准: ≥ {item_stat['min_hz']:.1f} Hz)",
-                })
-            elif item_stat["state"] == "low_rate":
-                issues.append({
-                    "topic": topic,
-                    "state": "low_rate",
-                    "hz": item_stat["hz"],
-                    "min_hz": item_stat["min_hz"],
-                    "reason": f"{topic}: 消息频率偏低 ({item_stat['hz']:.1f} Hz < 标准 {item_stat['min_hz']:.1f} Hz)",
-                })
-
-        ready = len(issues) == 0 and len(recording_topics) > 0
-        return web.json_response({
-            "ok": True,
-            "ready": ready,
-            "topic_count": len(recording_topics),
-            "topics": checked,
-            "issues": issues,
-            "reason": "" if ready else ("未勾选任何录制话题" if not recording_topics else f"{len(issues)} 个待录制话题未达标"),
-        })
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder is not initialized")
+        try:
+            return web.json_response(await asyncio.to_thread(runtime.recorder.precheck))
+        except (ValueError, OSError, ImportError) as exc:
+            return web.json_response({"ready": False, "reason": str(exc)}, status=400)
 
     async def start_recording(request: web.Request) -> web.Response:
         if runtime.recorder is None:
@@ -959,47 +982,7 @@ def create_app(store: ConfigStore) -> web.Application:
                 data = await request.json()
             except Exception:
                 pass
-        force = bool(data.get("force", False))
         filename = str(data.get("filename", "")).strip()
-
-        if not force:
-            subs = store.value.get("ros", {}).get("subscriptions", [])
-            recording_topics = [
-                item for item in subs
-                if item.get("enabled", True) and "record" in item.get("outputs", [])
-            ]
-            if not recording_topics:
-                return web.json_response({
-                    "ok": False,
-                    "can_force": True,
-                    "reason": "尚未勾选任何需要录制的话题，请先在下方勾选录制话题",
-                    "issues": [{"topic": "none", "reason": "未勾选录制话题"}],
-                }, status=400)
-
-            topic_health = runtime.topic_health()
-            issues = []
-            for item in recording_topics:
-                topic = item["topic"]
-                info = topic_health.get(topic)
-                if not info or info.get("state") != "ok":
-                    hz = info.get("hz", 0.0) if info else 0.0
-                    from .ros_bridge import DEFAULT_TOPIC_STANDARDS
-                    std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
-                    min_hz = float(item.get("min_hz", 0) or (info.get("min_hz") if info else std["min_hz"]))
-                    issues.append({
-                        "topic": topic,
-                        "state": info.get("state", "no_data") if info else "no_data",
-                        "hz": hz,
-                        "min_hz": min_hz,
-                        "reason": f"{topic}: 未检测到消息发布 (0 Hz)" if hz == 0 else f"{topic}: 频率不足 ({hz:.1f} Hz < 标准 {min_hz:.1f} Hz)",
-                    })
-            if issues:
-                return web.json_response({
-                    "ok": False,
-                    "can_force": True,
-                    "reason": "待录制话题未检测到消息或频率未达标",
-                    "issues": issues,
-                }, status=400)
 
         if runtime.recording_ros is not None:
             runtime.recording_ros.prepare_recording()
@@ -1100,6 +1083,10 @@ def create_app(store: ConfigStore) -> web.Application:
             target = resolve_dataset(runtime.recorder.directory, identifier)
         except (ValueError, FileNotFoundError) as exc:
             raise web.HTTPNotFound(text=str(exc)) from exc
+        try:
+            runtime.recorder.assert_file_idle(target)
+        except ValueError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
         if target.is_file():
             if runtime.recorder.is_recording() and runtime.recorder.path == target:
                 raise web.HTTPConflict(text="recording is still being written")
@@ -1180,6 +1167,8 @@ def create_app(store: ConfigStore) -> web.Application:
         selected_topics = data.get("topics")
         topic_remap = data.get("remap")
         try:
+            if runtime.recorder:
+                runtime.recorder.assert_file_idle(runtime.recorder.directory / filename)
             status = await asyncio.to_thread(
                 runtime.player.play,
                 filename,
@@ -1277,6 +1266,48 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/safety/resume", safety_resume)
     app.router.add_post("/api/teleop/home", teleop_home)
     app.router.add_post("/api/teleop/source", set_control_source)
+    try:
+        from .upload_api import register_upload_routes
+        class UploadProxy:
+            def __getattr__(self, key):
+                if runtime.uploads is None:
+                    raise web.HTTPServiceUnavailable(text=runtime.upload_error or 'upload service unavailable')
+                return getattr(runtime.uploads, key)
+        register_upload_routes(app, UploadProxy())
+    except ImportError:
+        async def upload_unavailable(request):
+            return web.json_response({'enabled': False, 'state': 'unavailable', 'error': 'upload module is not installed'}, status=503)
+        app.router.add_get('/api/uploads', upload_unavailable)
+
+    from .data_tools import register_data_routes
+    register_data_routes(app, runtime)
+
+    async def recording_jobs(request):
+        return web.json_response(runtime.recorder.status()["jobs"] if runtime.recorder else [])
+
+    async def raw_seal(request):
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable()
+        try:
+            return web.json_response(runtime.recorder.request_raw_seal(request.match_info['recording_id'], await request.json()), status=202)
+        except (ValueError, KeyError) as exc:
+            return web.json_response({'error': str(exc)}, status=409)
+
+    async def retry_recording_job(request):
+        try:
+            return web.json_response(runtime.recorder.retry(request.match_info['recording_id']), status=202)
+        except (ValueError, KeyError) as exc:
+            return web.json_response({'error': str(exc)}, status=409)
+
+    async def delete_artifact(request):
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable()
+        return web.json_response(await asyncio.to_thread(runtime.recorder.delete_artifact, request.match_info['artifact_id']))
+
+    app.router.add_delete('/api/recording/artifacts/{artifact_id}', delete_artifact)
+    app.router.add_post('/api/recording/jobs/{recording_id}/retry', retry_recording_job)
+    app.router.add_get('/api/recording/jobs', recording_jobs)
+    app.router.add_post('/api/recording/jobs/{recording_id}/seal', raw_seal)
     app.router.add_post("/api/recording/precheck", precheck_recording)
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)

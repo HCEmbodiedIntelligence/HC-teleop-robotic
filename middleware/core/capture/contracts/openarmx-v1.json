@@ -1,0 +1,135 @@
+{
+  "action_stage": "sent",
+  "axes": [
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint1",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint2",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint3",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint4",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint5",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint6",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_left_joint7",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint1",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint2",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint3",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint4",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint5",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint6",
+      "unit": "rad"
+    },
+    {
+      "group": "arm",
+      "name": "openarmx_right_joint7",
+      "unit": "rad"
+    },
+    {
+      "group": "gripper",
+      "name": "left_gripper",
+      "unit": "m"
+    },
+    {
+      "group": "gripper",
+      "name": "right_gripper",
+      "unit": "m"
+    }
+  ],
+  "cameras": [
+    {
+      "calibration_ref": "synthetic:no-physical-calibration",
+      "height": 480,
+      "id": "camera_left",
+      "width": 640
+    },
+    {
+      "calibration_ref": "synthetic:no-physical-calibration",
+      "height": 480,
+      "id": "camera_right",
+      "width": 640
+    },
+    {
+      "calibration_ref": "synthetic:no-physical-calibration",
+      "height": 480,
+      "id": "camera_hand",
+      "width": 640
+    }
+  ],
+  "command_boundary": "motion_or_teleop_to_driver_request",
+  "fps": 30,
+  "profile_version": "openarmx-v1",
+  "robot_type": "openarmx",
+  "validity": {
+    "arm": {
+      "invalidate_on": [
+        "pause",
+        "input_loss",
+        "clutch_release",
+        "rebind",
+        "clock_epoch_change",
+        "source_restart"
+      ],
+      "max_age_ms": 100,
+      "mode": "periodic"
+    },
+    "gripper": {
+      "invalidate_on": [
+        "pause",
+        "input_loss",
+        "clutch_release",
+        "rebind",
+        "clock_epoch_change",
+        "source_restart"
+      ],
+      "max_age_ms": 150,
+      "mode": "periodic"
+    }
+  }
+}

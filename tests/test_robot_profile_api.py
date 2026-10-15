@@ -1,4 +1,6 @@
+import asyncio
 import tempfile
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
@@ -15,7 +17,13 @@ from tests.test_robot_profiles import URDF, io_yaml
 @unittest.skipIf(aiohttp is None, "aiohttp is installed by install.sh")
 class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        from middleware.core.app import create_app
+        from middleware.core.app import create_app, MiddlewareRuntime
+        original_start = MiddlewareRuntime.start
+        async def start(instance):
+            self.runtime = instance
+            await original_start(instance)
+        self.start_patch = patch.object(MiddlewareRuntime, "start", start)
+        self.start_patch.start()
 
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
@@ -23,10 +31,12 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         value = self.store.load()
         value["robot_profiles"] = {"root": str(root / "profiles"), "active": ""}
         value["ros"]["enabled"] = False
+        value["ros"]["subscriptions"] = [{"topic": "/observation/joint_states", "type": "sensor_msgs/msg/JointState", "outputs": ["record"]}]
         value["vr"]["enabled"] = False
         value["camera"]["enabled"] = False
         value["safety"]["enabled"] = False
         value["safety"]["stop_on_startup"] = False
+        value["ros"]["recording"].update(directory=str(root/"data"), job_state_dir=str(root/"jobs"), artifact_state_dir=str(root/"ready"))
         self.store.save(value)
         self.client = TestClient(TestServer(create_app(self.store)))
         await self.client.start_server()
@@ -34,6 +44,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.directory.cleanup()
+        self.start_patch.stop()
 
     async def test_import_list_and_activate_profile(self):
         form = aiohttp.FormData()
@@ -139,10 +150,11 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(start_fail.status, 400)
         fail_data = await start_fail.json()
         self.assertFalse(fail_data["ok"])
-        self.assertTrue(fail_data["can_force"])
+        forced = await self.client.post("/api/recording/start", json={"force": True})
+        self.assertEqual(forced.status, 400)
 
     async def test_recording_api_start_stop(self):
-        # Start recording with force=True
+        self.runtime.recorder.health = lambda: {item["topic"]: {"state": "ok"} for item in self.runtime.config["ros"]["subscriptions"]}
         res = await self.client.post("/api/recording/start", json={"filename": "api_test.mcap", "force": True})
         self.assertEqual(res.status, 200)
         data = await res.json()
@@ -162,19 +174,30 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stop_data["ok"])
         self.assertFalse(stop_data["recording"])
 
-    async def test_dataset_management_apis(self):
-        # Start and stop recording to create a file
-        await self.client.post("/api/recording/start", json={"filename": "ds_test.mcap", "force": True})
+    async def completed_recording(self, name):
+        self.runtime.recorder.health = lambda: {item["topic"]: {"state": "ok"} for item in self.runtime.config["ros"]["subscriptions"]}
+        response = await self.client.post("/api/recording/start", json={"filename": name})
+        self.assertEqual(response.status, 200, await response.text())
+        filename = Path((await response.json())["path"]).name
+        self.runtime.recorder.record({"kind": "event", "payload": {"synthetic": True}})
         await self.client.post("/api/recording/stop")
+        for _ in range(500):
+            if all(j['artifact_state'] == 'ready' for j in self.runtime.recorder.jobs.values()):
+                return filename
+            await asyncio.sleep(.02)
+        self.fail(str(self.runtime.recorder.jobs))
+
+    async def test_dataset_management_apis(self):
+        filename = await self.completed_recording("ds_test.mcap")
 
         # List recordings
         list_res = await self.client.get("/api/recordings")
         self.assertEqual(list_res.status, 200)
         list_data = await list_res.json()
-        self.assertTrue(any(f["filename"] == "ds_test.mcap" for f in list_data["files"]))
+        self.assertTrue(any(f["filename"] == filename for f in list_data["files"]))
 
         # Download recording
-        down_res = await self.client.get("/api/recordings/ds_test.mcap/download")
+        down_res = await self.client.get(f"/api/recordings/{filename}/download")
         self.assertEqual(down_res.status, 200)
         content = await down_res.read()
         self.assertGreater(len(content), 0)
@@ -182,26 +205,24 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         # Batch delete
         del_res = await self.client.post(
             "/api/recordings/batch-delete",
-            json={"filenames": ["ds_test.mcap"]},
+            json={"filenames": [filename]},
         )
         self.assertEqual(del_res.status, 200)
         del_data = await del_res.json()
-        self.assertIn("ds_test.mcap", del_data["deleted"])
+        self.assertIn(filename, del_data["deleted"])
 
     async def test_replay_apis(self):
-        # Create an MCAP file first
-        await self.client.post("/api/recording/start", json={"filename": "replay_test.mcap", "force": True})
-        await self.client.post("/api/recording/stop")
+        filename = await self.completed_recording("replay_test.mcap")
 
         # Start replay
         res = await self.client.post(
             "/api/replay/start",
-            json={"filename": "replay_test.mcap", "speed": 2.0, "loop": False},
+            json={"filename": filename, "speed": 2.0, "loop": False},
         )
         self.assertEqual(res.status, 200)
         data = await res.json()
         self.assertTrue(data["ok"])
-        self.assertEqual(data["replay"]["filename"], "replay_test.mcap")
+        self.assertEqual(data["replay"]["filename"], filename)
 
         # Check status
         st_res = await self.client.get("/api/replay/status")

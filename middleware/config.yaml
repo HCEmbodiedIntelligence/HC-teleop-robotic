@@ -13,6 +13,9 @@ ros:
   domain_id: 14
   node_name: hc_teleop_middleware
   command_mux:
+    motion_topic: /control/motion/joint_targets
+    motion_permit_topic: /control/motion/permit
+    hardware_ready_timeout_sec: 0.5
     enabled: true
     source: vr
     vr_topic: /control/vr/joint_states
@@ -387,6 +390,12 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   recording:
+    workflow: hc
+    capture_config_file: ""
+    job_state_dir: ../runtime/recording_jobs
+    artifact_state_dir: ../runtime/artifact_ready
+    max_pending_jobs: 8
+    min_free_bytes: 268435456
     directory: ../runtime/topic_recordings
     format: both
     lerobot_fps: 15
@@ -459,3 +468,13 @@ camera:
   height: 400
   fps: 30
   codec: H264
+
+uploads:
+  enabled: false
+  auto_enqueue: false
+  queue_directory: ../runtime/upload_queue
+  platform_base_url: ""
+  credential_ref: ""
+  robot_id: ""
+  local_robot_id: ""
+  task_id: ""

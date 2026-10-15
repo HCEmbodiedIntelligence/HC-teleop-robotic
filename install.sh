@@ -24,6 +24,11 @@ install_controller_environment() {
 
 if [[ "${1:-}" == "--camera" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-camera.txt"
+elif [[ "${1:-}" == "--capture" ]]; then
+  "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-capture.txt"
+  if [[ -d "${SCRIPT_DIR}/upload_client" ]]; then
+    "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" "${SCRIPT_DIR}/upload_client"
+  fi
 elif [[ "${1:-}" == "--sim" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-sim.txt"
   install_controller_environment
