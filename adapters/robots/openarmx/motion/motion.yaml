@@ -1,0 +1,126 @@
+humanoid_motion_control:
+  ros__parameters:
+    joint_state_endpoint: /observation/joint_states
+    joint_command_endpoint: /control/motion/joint_targets
+    control_frequency_hz: 100.0
+    input_stamp_max_age_s: 0.5
+    input_stamp_future_tolerance_s: 0.1
+    feedback_max_age_ms: 200
+    servo_lease_ms: 100
+    default_move_timeout_s: 60.0
+    stable_duration_s: 0.1
+    move_j_position_tolerance_rad: 0.01
+    stopped_velocity_tolerance_rad_s: 0.02
+    cartesian_position_tolerance_m: 0.005
+    cartesian_orientation_tolerance_rad: 0.02
+    joint_max_velocity_rad_s: 0.6
+    joint_max_acceleration_rad_s2: 2.4
+    joint_max_jerk_rad_s3: 9.6
+    cartesian_max_linear_velocity_m_s: 0.1
+    cartesian_max_linear_acceleration_m_s2: 0.3
+    cartesian_max_linear_jerk_m_s3: 1.5
+    cartesian_max_angular_velocity_rad_s: 0.5
+    cartesian_max_angular_acceleration_rad_s2: 2.0
+    cartesian_max_angular_jerk_rad_s3: 10.0
+    joint_group_names:
+    - left_arm
+    - right_arm
+    - whole_body
+    channel_config_file: ''
+    sdk_config_file: ''
+    tool_config_file: ''
+    urdf_file: ''
+    groups.right_arm:
+    - openarmx_right_joint1
+    - openarmx_right_joint2
+    - openarmx_right_joint3
+    - openarmx_right_joint4
+    - openarmx_right_joint5
+    - openarmx_right_joint6
+    - openarmx_right_joint7
+    group_lower_limits.right_arm:
+    - -1.25
+    - -0.1292036732051034
+    - -1.57
+    - 0.0
+    - -1.5
+    - -0.75
+    - -1.4
+    group_upper_limits.right_arm:
+    - 3.0
+    - 3.2707963267948967
+    - 1.57
+    - 1.8
+    - 1.5
+    - 0.75
+    - 1.4
+    groups.left_arm:
+    - openarmx_left_joint1
+    - openarmx_left_joint2
+    - openarmx_left_joint3
+    - openarmx_left_joint4
+    - openarmx_left_joint5
+    - openarmx_left_joint6
+    - openarmx_left_joint7
+    group_lower_limits.left_arm:
+    - -3.344396
+    - -3.2707963267948967
+    - -1.57
+    - 0.0
+    - -1.5
+    - -0.75
+    - -1.4
+    group_upper_limits.left_arm:
+    - 0.9056039999999999
+    - 0.1292036732051034
+    - 1.57
+    - 1.8
+    - 1.5
+    - 0.75
+    - 1.4
+    groups.whole_body:
+    - openarmx_left_joint1
+    - openarmx_left_joint2
+    - openarmx_left_joint3
+    - openarmx_left_joint4
+    - openarmx_left_joint5
+    - openarmx_left_joint6
+    - openarmx_left_joint7
+    - openarmx_right_joint1
+    - openarmx_right_joint2
+    - openarmx_right_joint3
+    - openarmx_right_joint4
+    - openarmx_right_joint5
+    - openarmx_right_joint6
+    - openarmx_right_joint7
+    group_lower_limits.whole_body:
+    - -3.344396
+    - -3.2707963267948967
+    - -1.57
+    - 0.0
+    - -1.5
+    - -0.75
+    - -1.4
+    - -1.25
+    - -0.1292036732051034
+    - -1.57
+    - 0.0
+    - -1.5
+    - -0.75
+    - -1.4
+    group_upper_limits.whole_body:
+    - 0.9056039999999999
+    - 0.1292036732051034
+    - 1.57
+    - 1.8
+    - 1.5
+    - 0.75
+    - 1.4
+    - 3.0
+    - 3.2707963267948967
+    - 1.57
+    - 1.8
+    - 1.5
+    - 0.75
+    - 1.4
+    output_permit_topic: /control/motion/permit

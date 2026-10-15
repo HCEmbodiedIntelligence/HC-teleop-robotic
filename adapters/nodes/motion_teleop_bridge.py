@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge the X1 external-IK adapter to motion ServoP/ServoJ channels.
+"""Bridge a selected profile external-IK adapter to motion ServoP/ServoJ channels.
 
 The state/cache implementation is deliberately independent of ROS.  Receiving a
 motion result alone never grants authority to move an arm: a fresh enabled
@@ -29,7 +29,14 @@ def valid_stamp(stamp, wall, max_age=0.3):
 
 
 class MotionCache:
-    def __init__(self):
+    def __init__(self, arm_names=None):
+        self.arm_names = arm_names or ARM_NAMES
+        flattened = [n for names in self.arm_names.values() for n in names]
+        if not flattened or len(set(flattened)) != len(flattened):
+            raise ValueError("arm joint groups must be nonempty and disjoint")
+        self.sides = tuple(self.arm_names)
+        self.feedback_times = {}
+        self.feedback_stamp = {}
         self.feedback = {}
         self.feedback_time = float('-inf')
         self.status = {}
@@ -39,7 +46,7 @@ class MotionCache:
         self.estopped = False
         self.targets = {}
         self.lease = {}
-        self.cutoff = {side: 0.0 for side in SIDES}
+        self.cutoff = {side: 0.0 for side in self.sides}
         self.reset_pending = False
         self.reset_wall = 0.0
         self.guard_until = 0.0
@@ -47,7 +54,7 @@ class MotionCache:
     def clear(self, wall):
         self.targets.clear()
         self.lease.clear()
-        self.cutoff = {side: wall for side in SIDES}
+        self.cutoff = {side: wall for side in self.sides}
 
     def update_status(self, status, now, wall):
         if not isinstance(status, dict):
@@ -56,7 +63,7 @@ class MotionCache:
                 not isinstance(arm, dict) for arm in status.get('arms', {}).values()):
             raise ValueError('invalid arm status')
         self.status, self.status_time = status, now
-        for side in SIDES:
+        for side in self.sides:
             if not self.allowed(side, now):
                 self.targets.pop(side, None)
                 self.lease.pop(side, None)
@@ -67,21 +74,28 @@ class MotionCache:
         return (not self.estopped and now >= self.guard_until and not self.reset_pending
                 and self.hardware and now - self.hardware_time <= 0.5
                 and now - self.status_time <= 0.6 and status.get('enabled') is True
-                and now - self.feedback_time <= 0.3
-                and all(name in self.feedback for name in ARM_NAMES[side])
+                and now - self.feedback_times.get(side, float("-inf")) <= 0.3
+                and all(name in self.feedback for name in self.arm_names[side])
                 and (status.get('mode') == 'homing' if homing else
                      status.get('mode') != 'homing' and
                      status.get('arms', {}).get(side, {}).get('active') is True))
 
     def feedback_received(self, names, positions, stamp, now, wall):
         values = joint_values(names, positions)
-        if not all(name in values for arm in ARM_NAMES.values() for name in arm):
-            raise ValueError('incomplete arm feedback')
+        present = [side for side, names in self.arm_names.items() if all(n in values for n in names)]
+        if not present:
+            raise ValueError('feedback contains no complete configured arm')
         if not valid_stamp(stamp, wall):
             raise ValueError("stale feedback header")
         if self.reset_pending and stamp <= self.reset_wall:
             raise ValueError('feedback predates reset')
-        self.feedback, self.feedback_time = values, now
+        if any(stamp <= self.feedback_stamp.get(side, 0) for side in present):
+            raise ValueError('duplicate or reordered feedback')
+        self.feedback.update(values)
+        self.feedback_time = now
+        for side in present:
+            self.feedback_times[side] = now
+            self.feedback_stamp[side] = stamp
         if self.reset_pending:
             self.reset_pending = False
             self.clear(wall)
@@ -106,9 +120,9 @@ class MotionCache:
         values = joint_values(names, positions)
         if not valid_stamp(stamp, wall, 0.1):
             return
-        for side in SIDES:
+        for side in self.sides:
             lease = self.lease.get(side)
-            required = ARM_NAMES[side]
+            required = self.arm_names[side]
             if (lease is not None and now - lease[0] <= 0.2
                     and self.allowed(side, now, lease[1]) and stamp > self.cutoff[side]
                     and all(name in values for name in required)):
@@ -119,7 +133,11 @@ class MotionCache:
             self.clear(wall)
             return None
         result = dict(self.feedback)
-        for side in SIDES:
+        for side, names in self.arm_names.items():
+            if now - self.feedback_times.get(side, float('-inf')) > .3:
+                for name in names:
+                    result.pop(name, None)
+        for side in self.sides:
             lease = self.lease.get(side)
             target = self.targets.get(side)
             if (lease and target and self.allowed(side, now, lease[1])
@@ -137,7 +155,37 @@ class MotionCache:
         return result
 
 
+def profile_settings(path):
+    import yaml
+    from pathlib import Path
+    profile = yaml.safe_load(Path(path).read_text())
+    arms = profile['arms']
+    names = {side: tuple(arm['joint_names']) for side, arm in arms.items()}
+    if not names or any(not joints for joints in names.values()):
+        raise ValueError('profile requires nonempty joint groups')
+    control = profile.get('control', {})
+    channels = yaml.safe_load((Path(path).parent / 'motion/channels.yaml').read_text())['channels']
+    endpoints = {}
+    for side, arm in arms.items():
+        for kind in ('servo_p', 'servo_j'):
+            matches = [c for c in channels if c['kind'] == kind and c['group'] == side + '_arm']
+            if len(matches) != 1 or matches[0]['base_frame'] != arm['base_link'] or matches[0]['tip_frame'] != arm['ee_link']:
+                raise ValueError('motion channel frame/group does not match profile')
+            endpoints[(side, kind)] = matches[0]['endpoint']
+    bases = {arm['base_link'] for arm in arms.values()}
+    if len(bases) != 1:
+        raise ValueError('PoseArray requires a common base frame for configured arms')
+    return names, bases.pop(), endpoints, control
+
+
 def main():
+    import os
+    from pathlib import Path
+    config = os.environ.get('HC_ARM_TELEOP_CONFIG')
+    if not config:
+        config = str(Path(os.environ['HC_ROBOT_CONFIG_ROOT']) / os.environ['HC_ROBOT_NAME'] / 'arm_teleop.yaml')
+    arm_names, base_frame, endpoints, control = profile_settings(config)
+    sides = tuple(arm_names)
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
@@ -151,16 +199,16 @@ def main():
     class MotionTeleopBridge(Node):
         def __init__(self):
             super().__init__('motion_teleop_bridge')
-            self.cache = MotionCache()
+            self.cache = MotionCache(arm_names)
             qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE)
-            self.pose_pubs = {side: self.create_publisher(PoseStamped, f'/control/motion/{side}_arm/servo_p', qos) for side in SIDES}
-            self.joint_pubs = {side: self.create_publisher(JointState, f'/control/motion/{side}_arm/servo_j', qos) for side in SIDES}
-            self.command_pub = self.create_publisher(JointState, '/control/solver/joint_targets', qos)
-            self.state_pub = self.create_publisher(JointState, '/status/solver/joint_states', qos)
+            self.pose_pubs = {side: self.create_publisher(PoseStamped, endpoints[(side, 'servo_p')], qos) for side in sides}
+            self.joint_pubs = {side: self.create_publisher(JointState, endpoints[(side, 'servo_j')], qos) for side in sides}
+            self.command_pub = self.create_publisher(JointState, control.get('generic_command_topic', '/control/solver/joint_targets'), qos)
+            self.state_pub = self.create_publisher(JointState, control.get('solver_topic', '/status/solver/joint_states'), qos)
             self.ack_pub = self.create_publisher(Header, '/status/solver/reset_ack', qos)
-            self.create_subscription(JointState, '/observation/joint_states', self.feedback, qos_profile_sensor_data)
+            self.create_subscription(JointState, control.get('joint_state_topic', '/observation/joint_states'), self.feedback, qos_profile_sensor_data)
             self.create_subscription(JointState, '/control/motion/joint_targets', self.result, qos)
-            self.create_subscription(PoseArray, '/action/ee_poses', self.pose, qos)
+            self.create_subscription(PoseArray, control.get('target_pose_topic', '/action/ee_poses'), self.pose, qos)
             self.create_subscription(JointState, '/control/solver/target_joint_from_vr', self.home, qos)
             self.create_subscription(String, '/status/teleop', self.status, qos)
             self.create_subscription(Bool, '/status/hardware/ready', self.ready, qos)
@@ -168,7 +216,7 @@ def main():
             self.create_subscription(Bool, '/control/teleop/enabled', self.enable, qos)
             self.create_subscription(Bool, '/control/solver/reset', self.reset, qos)
             self.create_timer(0.01, self.tick)
-            self.get_logger().info('motion bridge ready: X1 ServoP/ServoJ, fresh measured hold at 100 Hz')
+            self.get_logger().info(f'motion bridge: {config}; groups={sides}; frame={base_frame}')
 
         def times(self):
             return time.monotonic(), self.get_clock().now().nanoseconds * 1e-9
@@ -220,9 +268,9 @@ def main():
 
         def pose(self, msg):
             now, wall = self.times()
-            if msg.header.frame_id != 'zhi_Link' or len(msg.poses) != 2 or not valid_stamp(stamp_seconds(msg), wall, 0.2):
+            if msg.header.frame_id != base_frame or len(msg.poses) != len(sides) or not valid_stamp(stamp_seconds(msg), wall, 0.2):
                 return
-            for side, pose in zip(SIDES, msg.poses):
+            for side, pose in zip(sides, msg.poses):
                 q = pose.orientation
                 numbers = [pose.position.x, pose.position.y, pose.position.z, q.x, q.y, q.z, q.w]
                 norm = math.sqrt(sum(value * value for value in numbers[3:]))
@@ -245,8 +293,8 @@ def main():
                 return
             if not valid_stamp(stamp_seconds(msg), wall, 0.2):
                 return
-            for side in SIDES:
-                names = ARM_NAMES[side]
+            for side in sides:
+                names = arm_names[side]
                 if all(name in values for name in names) and self.cache.grant(side, now, wall, homing=True):
                     target = JointState()
                     target.header = msg.header
@@ -261,7 +309,16 @@ def main():
                 msg.header.stamp = self.get_clock().now().to_msg()
                 msg.name, msg.position = list(values), list(values.values())
                 self.command_pub.publish(msg)
-                self.state_pub.publish(msg)
+                # State carries measured values and the original source stamp.
+                # Solver targets must not be presented as measured feedback.
+                measured = JointState()
+                measured_names = [n for n in values if n in self.cache.feedback]
+                measured.name = measured_names
+                measured.position = [self.cache.feedback[n] for n in measured_names]
+                stamp = min(self.cache.feedback_stamp.values())
+                measured.header.stamp.sec = int(stamp)
+                measured.header.stamp.nanosec = int((stamp - int(stamp)) * 1e9)
+                self.state_pub.publish(measured)
 
     rclpy.init()
     node = MotionTeleopBridge()

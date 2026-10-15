@@ -53,7 +53,7 @@ if [[ -f /opt/ros/humble/setup.bash ]]; then
   source /opt/ros/humble/setup.bash
   set -u
 fi
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-14}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$(PYTHONPATH="${PROJECT_ROOT}" /usr/bin/python3 -m adapters.core.runtime_config domain "${MIDDLEWARE_CONFIG}")}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
@@ -65,7 +65,9 @@ export HC_ROBOT_NAME="${ROBOT_NAME}"
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
 CONTROLLER_YML="${HC_CONTROLLER_CONFIG:-${PROFILE_DIR}/controller_v23.yml}"
 ARM_CONFIG="${HC_ARM_TELEOP_CONFIG:-${PROFILE_DIR}/arm_teleop.yaml}"
-CONTROL_BACKEND="${HC_CONTROL_BACKEND:-motion}"
+CONTROL_BACKEND="$(/usr/bin/python3 -m adapters.core.runtime_config backend "${ARM_CONFIG}")"
+export HC_ARM_TELEOP_CONFIG="${ARM_CONFIG}"
+MOTION_INSTALL="${HC_MOTION_INSTALL:-${PROJECT_ROOT}/install_motion}"
 V23_SCRIPT="${PROJECT_ROOT}/adapters/v23/script/control_v2_3_ros2.py"
 CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
 CONTROLLER_COMMAND=()
@@ -82,7 +84,7 @@ if ! /usr/bin/python3 -c 'import numpy, pybullet, rclpy, yaml' 2>/dev/null; then
 fi
 
 if [[ "${CONTROL_BACKEND}" == motion ]]; then
-  [[ -f "${PROJECT_ROOT}/install_motion/setup.bash" ]] || { err "请先运行 ./bootstrap_colcon.sh build"; exit 2; }
+  [[ -f "${MOTION_INSTALL}/setup.bash" ]] || { err "请先运行 ./bootstrap_colcon.sh build"; exit 2; }
   for file in motion.yaml sdk.yaml channels.yaml tools.yaml; do
     [[ -f "${PROFILE_DIR}/motion/${file}" ]] || { err "当前机器人缺少 motion/${file}"; exit 2; }
   done
@@ -112,7 +114,7 @@ PIDS+=("$!")
 sleep 1
 if [[ "${CONTROL_BACKEND}" == motion ]]; then
   set +u
-  source "${PROJECT_ROOT}/install_motion/setup.bash"
+  source "${MOTION_INSTALL}/setup.bash"
   set -u
   setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/motion_teleop_bridge.py" \
     >"${LOG_DIR}/motion_bridge.log" 2>&1 &

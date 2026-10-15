@@ -7,15 +7,15 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   echo 'Use --profile adapters/robots/x1 for the X1 model. Default: bundled test humanoid; feedback /observation/joint_states; output /control/motion/joint_targets.'
   exit 0
 fi
-[[ -f "${PROJECT_ROOT}/install_motion/setup.bash" ]] || { echo 'Run ./bootstrap_colcon.sh build first.' >&2; exit 2; }
+MOTION_INSTALL="${HC_MOTION_INSTALL:-${PROJECT_ROOT}/install_motion}"
+[[ -f "${MOTION_INSTALL}/setup.bash" ]] || { echo 'Run ./bootstrap_colcon.sh build first.' >&2; exit 2; }
 set +u
 source /opt/ros/humble/setup.bash
-source "${PROJECT_ROOT}/install_motion/setup.bash"
+source "${MOTION_INSTALL}/setup.bash"
 set -u
 export PATH="/usr/bin:${PATH}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-14}"
-SDK_PREFIX="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-${PROJECT_ROOT}/.deps/robo_manip}"
-export LD_LIBRARY_PATH="${SDK_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# The unified SDK runtime verifies its own pinned dependency provenance.
 ARGS=()
 if [[ "${1:-}" == --profile ]]; then
   [[ $# -ge 2 ]] || { echo '--profile requires a profile directory' >&2; exit 2; }
