@@ -1,0 +1,21 @@
+[Unit]
+Description=HC independent upload API and worker (alternative to embedded service)
+After=network.target
+
+[Service]
+Type=simple
+# Replace with the selected HC deployment; do not enable both workers.
+WorkingDirectory=/opt/hc/middleware
+ExecStart=/opt/hc/venv/bin/python -m core.upload_service --config /etc/hc/upload-service.json
+Restart=on-failure
+RestartSec=10
+Nice=10
+CPUQuota=20%
+IOWeight=10
+UMask=0077
+# JSON wrapper: uploads, artifact_state_dir, data_directory. API binds loopback:8091.
+# credential_ref=file:/... references a user-owned 0600 file, never tokens here.
+# Standalone mode has no recorder callback; embedded service supports raw sealing.
+
+[Install]
+WantedBy=default.target

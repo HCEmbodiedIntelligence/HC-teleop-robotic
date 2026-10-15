@@ -1,0 +1,20 @@
+{
+  "platform_base_url": "http://127.0.0.1:8088",
+  "credential_ref": "file:/home/hc_op/workspace/teleop_ws/upload/robot-token",
+  "robot_id": "REPLACE_WITH_PLATFORM_ROBOT_ID",
+  "local_robot_id": "openarmx_01",
+  "task_id": "REPLACE_WITH_COLLECTION_TASK_ID",
+  "data_directory": "/home/hc_op/workspace/teleop_ws/recording-data",
+  "queue_directory": "/home/hc_op/workspace/teleop_ws/upload/queue",
+  "concurrency": 1,
+  "part_size_bytes": 8388608,
+  "bandwidth_bytes_per_second": 2097152,
+  "read_bytes_per_second": 16777216,
+  "retry_base_seconds": 1,
+  "retry_max_seconds": 60,
+  "max_attempts": 0,
+  "poll_seconds": 5,
+  "scan_seconds": 30,
+  "timeout_seconds": 30,
+  "processing_endpoint": true
+}

@@ -1,0 +1,107 @@
+{
+  "session_id": "synthetic-openarm-E-raw-v3",
+  "state": "completed",
+  "recording_mode": "raw",
+  "ended_unix_ns": 1790160694894204681,
+  "t0_ns": 1790160694165376068,
+  "end_ns": 1790160694865376068,
+  "target_count": 0,
+  "source_counts": {
+    "arm_0_state": 140,
+    "arm_0_action": 140,
+    "gripper_0_state": 28,
+    "gripper_0_action": 28,
+    "camera_hand": 21,
+    "camera_right": 21,
+    "synthetic_cloud": 21,
+    "camera_left": 21
+  },
+  "committed": [
+    {
+      "path": "videos/camera_right/000000.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_right",
+      "frames": 9
+    },
+    {
+      "path": "videos/camera_left/000000.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_left",
+      "frames": 9
+    },
+    {
+      "path": "videos/camera_hand/000000.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_hand",
+      "frames": 9
+    },
+    {
+      "path": "videos/camera_right/000001.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_right",
+      "frames": 9
+    },
+    {
+      "path": "videos/camera_hand/000001.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_hand",
+      "frames": 9
+    },
+    {
+      "path": "videos/camera_left/000001.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_left",
+      "frames": 9
+    },
+    {
+      "path": "videos/camera_left/000002.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_left",
+      "frames": 3
+    },
+    {
+      "path": "videos/camera_right/000002.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_right",
+      "frames": 3
+    },
+    {
+      "path": "videos/camera_hand/000002.mp4",
+      "kind": "rgb_mp4",
+      "closed": true,
+      "fsynced": true,
+      "source_id": "camera_hand",
+      "frames": 3
+    },
+    {
+      "path": "raw.mcap",
+      "kind": "mcap",
+      "closed": true,
+      "fsynced": true
+    },
+    {
+      "path": "recording-fields.json",
+      "kind": "public_schema",
+      "closed": true,
+      "fsynced": true
+    }
+  ],
+  "errors": [],
+  "durability_policy": "closed_and_fsync"
+}

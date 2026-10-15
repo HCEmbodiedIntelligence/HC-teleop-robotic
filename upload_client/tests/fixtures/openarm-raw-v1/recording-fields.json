@@ -1,0 +1,128 @@
+{
+  "schema_version": "holobrain-recording-fields/v1",
+  "axes": [
+    {
+      "group": "arm",
+      "name": "Joint1_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint1"
+    },
+    {
+      "group": "arm",
+      "name": "Joint2_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint2"
+    },
+    {
+      "group": "arm",
+      "name": "Joint3_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint3"
+    },
+    {
+      "group": "arm",
+      "name": "Joint4_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint4"
+    },
+    {
+      "group": "arm",
+      "name": "Joint5_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint5"
+    },
+    {
+      "group": "arm",
+      "name": "Joint6_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint6"
+    },
+    {
+      "group": "arm",
+      "name": "Joint7_R",
+      "unit": "rad",
+      "source_name": "openarmx_right_joint7"
+    },
+    {
+      "group": "gripper",
+      "name": "R_ban",
+      "unit": "m",
+      "source_name": "right_gripper"
+    },
+    {
+      "group": "arm",
+      "name": "Joint1_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint1"
+    },
+    {
+      "group": "arm",
+      "name": "Joint2_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint2"
+    },
+    {
+      "group": "arm",
+      "name": "Joint3_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint3"
+    },
+    {
+      "group": "arm",
+      "name": "Joint4_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint4"
+    },
+    {
+      "group": "arm",
+      "name": "Joint5_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint5"
+    },
+    {
+      "group": "arm",
+      "name": "Joint6_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint6"
+    },
+    {
+      "group": "arm",
+      "name": "Joint7_L",
+      "unit": "rad",
+      "source_name": "openarmx_left_joint7"
+    },
+    {
+      "group": "gripper",
+      "name": "L_ban",
+      "unit": "m",
+      "source_name": "left_gripper"
+    }
+  ],
+  "cameras": [
+    {
+      "source_id": "camera_left",
+      "rgb": "observation.images.camera_left",
+      "depth": "observation.images.camera_left_depth",
+      "rgb_topic": "/io_teleop/camera_camera_left/color",
+      "depth_topic": "/io_teleop/camera_camera_left/depth"
+    },
+    {
+      "source_id": "camera_right",
+      "rgb": "observation.images.camera_right",
+      "depth": "observation.images.camera_right_depth",
+      "rgb_topic": "/io_teleop/camera_camera_right/color",
+      "depth_topic": "/io_teleop/camera_camera_right/depth"
+    },
+    {
+      "source_id": "camera_hand",
+      "rgb": "observation.images.head",
+      "depth": "observation.images.head_depth",
+      "rgb_topic": "/io_teleop/camera_head/color",
+      "depth_topic": "/io_teleop/camera_head/depth"
+    }
+  ],
+  "state_topic": "io_teleop/joint_states",
+  "action_topic": "io_teleop/joint_cmd",
+  "source_timestamp": "primary RGB source header nanoseconds; original source clock",
+  "derived_fields": "observation.holobrain.* requires actual robot calibration and preprocessing"
+}

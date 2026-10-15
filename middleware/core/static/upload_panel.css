@@ -1,0 +1,9 @@
+.upload-panel { padding: 1rem; color: inherit; }
+.upload-panel form { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; margin-block: 1rem; }
+.upload-panel label { display: grid; gap: .3rem; }
+.upload-panel input { padding: .5rem; max-width: 100%; }
+.upload-panel button { margin: .2rem; padding: .5rem .8rem; cursor: pointer; }
+.upload-panel .upload-table { overflow: auto; }
+.upload-panel table { width: 100%; border-collapse: collapse; }
+.upload-panel th, .upload-panel td { text-align: left; padding: .7rem; border-bottom: 1px solid #8885; vertical-align: top; }
+.upload-panel [data-error] { color: #c45a39; overflow-wrap: anywhere; }
