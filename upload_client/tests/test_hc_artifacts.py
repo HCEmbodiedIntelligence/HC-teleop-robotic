@@ -140,7 +140,11 @@ def test_binding_scan_restart(hc_cfg):
     svc.scan(); first=svc.jobs()[0]; svc.set_binding({**svc.bindings[snapshot['binding_id']],'task_id':'task-2'})
     svc.scan(); assert len(svc.jobs())==1 and svc.jobs()[0]['task_id']=='task-1'
     ready(dict(hc_cfg,binding_id=None),identity='historical'); svc.scan(); assert len(svc.jobs())==1
-    assert svc.enqueue('historical')['task_id']=='task-2'
+    historical = svc.enqueue('historical')
+    assert historical['task_id']=='task-2'
+    svc.set_binding({**svc.bindings[snapshot['binding_id']], 'task_id':'task-3'})
+    assert svc.enqueue('historical')['id']==historical['id']
+    svc.set_binding({**svc.bindings[snapshot['binding_id']], 'task_id':'task-2'})
     restarted=service(hc_cfg); assert restarted.jobs()[0]['id']==first['id']
     assert restarted.binding_snapshot()['collection_task_id']=='task-2'
     assert 'credential_ref' not in restarted.status()['default_binding']
@@ -251,3 +255,11 @@ def test_platform_status_separation(hc_cfg):
     svc.queue.save(job); result=svc.jobs()[0]
     assert result['upload_state']=='submitted' and result['processing_state']=='AWAITING_SLICE'
     assert result['quality_state']=='NOT_EVALUATED'
+
+
+def test_artifact_binding_cannot_be_reassigned(hc_cfg):
+    d=ready(hc_cfg); d['binding_id']=None
+    q=Queue(hc_cfg['queue_directory']); q.enqueue_artifact(d,hc_cfg)
+    with pytest.raises(UploadError,match='TASK_BINDING_MISMATCH'):
+        q.enqueue_artifact(d,dict(hc_cfg,task_id='task-2',binding_id='binding-2'))
+    assert len(q.jobs())==1

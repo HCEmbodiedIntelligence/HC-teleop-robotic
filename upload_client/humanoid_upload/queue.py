@@ -29,6 +29,7 @@ class Queue:
                        "at REAL, state TEXT, code TEXT)")
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cancellations (job_id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE IF NOT EXISTS artifact_jobs (artifact_id TEXT PRIMARY KEY, job_id TEXT NOT NULL)")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -79,13 +80,23 @@ class Queue:
                        kind=descriptor['kind'], descriptor=descriptor)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if descriptor is not None:
+                bound = db.execute("SELECT j.payload FROM artifact_jobs a JOIN jobs j ON j.id=a.job_id WHERE a.artifact_id=?",
+                                   (descriptor['artifact_id'],)).fetchone()
+                if bound and json.loads(bound[0])['frozen'].get('binding_id') != cfg.get('binding_id'):
+                    raise UploadError('TASK_BINDING_MISMATCH', '产物已经冻结绑定；新归属需要新的产物身份')
             old = db.execute("SELECT * FROM jobs WHERE export_key=?", (export_key,)).fetchone()
             if old:
                 if old["dedup"] != dedup:
                     raise UploadError("EXPORT_ID_REUSED", "内容已改变，须使用新的 export_id")
-                return json.loads(old["payload"])
+                previous = json.loads(old['payload'])
+                if descriptor is not None and not previous.get('artifact_id'):
+                    raise UploadError('LEGACY_JOB_REQUIRES_MIGRATION', '旧 CLI 队列没有产物读取锁；停旧 worker 后人工迁移，不能自动接管')
+                return previous
             db.execute("INSERT INTO jobs(id,dedup,export_key,payload,state) VALUES(?,?,?,?,?)",
                        (client_id, dedup, export_key, canonical(job).decode(), "queued"))
+            if descriptor is not None:
+                db.execute("INSERT INTO artifact_jobs VALUES(?,?)", (descriptor['artifact_id'], client_id))
             db.execute("INSERT INTO events(job_id,at,state) VALUES(?,?,?)", (client_id, time.time(), "queued"))
         return job
 

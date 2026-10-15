@@ -89,6 +89,9 @@ class UploadService:
         if descriptor.get('artifact_id') != identity:
             raise UploadError('IDENTITY_MISMATCH')
         frozen = descriptor.get('binding_id')
+        previous = next((job for job in self.queue.jobs() if job.get('artifact_id') == identity), None)
+        if previous is not None:
+            frozen = previous['frozen'].get('binding_id')
         if frozen and binding_id and frozen != binding_id:
             raise UploadError('TASK_BINDING_MISMATCH')
         cfg = self._config(frozen or binding_id)
