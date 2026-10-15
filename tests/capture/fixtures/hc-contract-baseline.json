@@ -1,0 +1,11 @@
+{
+  "source_commit": "39abb4c231d248140122dcb3872bf2f6bec2bf03",
+  "description": "HC migration baseline, not a reconstruction of unavailable G0 originals",
+  "sha256": {
+    "capture-context.schema.json": "07568e195a2642fb15dc7a296cda914ad8c5b6632cb998a23e83deaaa22de2ef",
+    "export-complete.schema.json": "9d81a1e72e8f0429db51907bb2e20ba9288b7c7a2204eb592563042be83b945e",
+    "openarmx-v1.json": "3d7dcb49b69395bb9d61685f252e65cd3fae582c5f5db37e0cc78f887b240ba0",
+    "profile.schema.json": "f4b4dd154b65be1cf5b3f6b8d1358ccf468dc38045cb573056268c18628ea860",
+    "source-mapping.schema.json": "d9cffd8b6ff86e3fe5b8eeae26415eefa40bea8fce0cc7684b758429d1b61c4c"
+  }
+}

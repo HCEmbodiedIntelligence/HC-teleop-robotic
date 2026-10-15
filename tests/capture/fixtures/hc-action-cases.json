@@ -1,0 +1,392 @@
+[
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        1.0,
+        2.0
+      ],
+      "valid": [
+        true,
+        true
+      ]
+    },
+    "name": "fresh_reordered_axes"
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 101,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        null
+      ],
+      "valid": [
+        false,
+        false
+      ]
+    },
+    "name": "future_source_is_not_used"
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 94,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        null
+      ],
+      "valid": [
+        false,
+        false
+      ]
+    },
+    "name": "not_yet_received_is_not_used"
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 111,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        null
+      ],
+      "valid": [
+        false,
+        false
+      ]
+    },
+    "name": "expired_source_is_invalid"
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 0
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        null
+      ],
+      "valid": [
+        false,
+        false
+      ]
+    },
+    "name": "previous_clock_epoch_is_invalid"
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        2.0
+      ],
+      "valid": [
+        false,
+        true
+      ]
+    },
+    "name": "pause_invalidates_only_affected_axis",
+    "invalidations": [
+      {
+        "axes": [
+          "j1"
+        ],
+        "time_ms": 95,
+        "reason": "pause"
+      }
+    ]
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        null
+      ],
+      "valid": [
+        false,
+        false
+      ]
+    },
+    "name": "on_change_requires_hold_lease",
+    "mode": "on_change"
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        1.0,
+        null
+      ],
+      "valid": [
+        true,
+        false
+      ]
+    },
+    "name": "hold_lease_covers_only_authorized_axis",
+    "mode": "on_change",
+    "hold_leases": [
+      {
+        "axis": "j1",
+        "command_sequence": 1,
+        "epoch": 1,
+        "issued_ms": 90,
+        "valid_until_ms": 100
+      }
+    ]
+  },
+  {
+    "axes": [
+      "j1",
+      "j2"
+    ],
+    "max_age_ms": {
+      "j1": 20,
+      "j2": 20
+    },
+    "epoch": 1,
+    "target_ms": 100,
+    "observed_ms": 110,
+    "messages": [
+      {
+        "names": [
+          "j2",
+          "j1"
+        ],
+        "positions": [
+          2.0,
+          1.0
+        ],
+        "source_ms": 90,
+        "received_ms": 95,
+        "sequence": 1,
+        "epoch": 1
+      }
+    ],
+    "expected": {
+      "values": [
+        null,
+        null
+      ],
+      "valid": [
+        false,
+        false
+      ]
+    },
+    "name": "hold_lease_expiry",
+    "mode": "on_change",
+    "hold_leases": [
+      {
+        "axis": "j1",
+        "command_sequence": 1,
+        "epoch": 1,
+        "issued_ms": 90,
+        "valid_until_ms": 99
+      }
+    ]
+  }
+]

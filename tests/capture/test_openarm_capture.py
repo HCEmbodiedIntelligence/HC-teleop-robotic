@@ -1,8 +1,7 @@
-"""Behavior checks against E's frozen inputs, plus the real recorder/exporter."""
+"""Self-contained HC behavior checks, plus the real recorder/exporter."""
 import copy
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
 import time
@@ -26,12 +25,12 @@ from middleware.core.capture.profile import openarm_profile
 from middleware.core.capture.ros_bridge import joint_document, validity_document
 from middleware.core.capture.synthetic import generate, header, synthetic_config
 
-G0 = Path(os.environ.get('OPENARM_G0', '/home/hc_op/workspace/openarm-data-integration-plan/g0'))
-CASES = json.loads((G0 / 'examples/action-cases.json').read_text()) if (G0 / 'examples/action-cases.json').exists() else []
+FIXTURES = Path(__file__).parent / 'fixtures'
+CASES = json.loads((FIXTURES / 'hc-action-cases.json').read_text())
 
 
 @pytest.mark.parametrize('case', CASES, ids=lambda c: c['name'])
-def test_frozen_action_cases(case):
+def test_hc_action_cases(case):
     docs = []
     for message in case['messages']:
         doc = {'joint_names': message['names'], 'payload': {'position': message['positions']},
@@ -241,15 +240,18 @@ def test_offline_realign_keeps_both_arms_and_grippers(produced):
     assert exporter.vector(original, 'action', read_json(session/'session.json')['config']) == exporter.vector(actual, 'action', read_json(session/'session.json')['config'])
 
 
-def test_crc64_xz_and_bundled_schema_are_frozen(tmp_path):
+def test_crc64_and_migrated_contract_baseline(tmp_path):
     (tmp_path / 'check').write_bytes(b'123456789')
     assert completion.inventory(tmp_path)[0]['crc64'] == str(0x995DC9BBDF1939FA)
     from middleware.core.capture.profile import CONTRACTS
-    for path in CONTRACTS.glob('*.json'):
-        expected = G0 / ('profiles' if path.name == 'openarmx-v1.json' else 'schemas') / path.name
-        if not expected.exists():
-            pytest.skip('External frozen G0 fixture is unavailable; migrated contracts remain installed')
-        assert path.read_bytes() == expected.read_bytes()
+    from jsonschema import Draft202012Validator
+    baseline = json.loads((FIXTURES / 'hc-contract-baseline.json').read_text())['sha256']
+    assert {p.name for p in CONTRACTS.glob('*.json')} == set(baseline)
+    for name, digest in baseline.items():
+        path = CONTRACTS / name
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        if name.endswith('.schema.json'):
+            Draft202012Validator.check_schema(json.loads(path.read_text()))
 
 
 def test_profile_units_dimensions_and_rate_must_agree():
