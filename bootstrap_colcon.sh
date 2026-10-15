@@ -14,40 +14,32 @@ set -u
 export PATH="/usr/bin:${PATH}"
 export COLCON_DEFAULTS_FILE="${PROJECT_ROOT}/colcon_defaults.yaml"
 PACKAGES=(humanoid_motion_interfaces humanoid_motion_server)
-if [[ -d "${PROJECT_ROOT}/.git" ]]; then
+SOURCE="${PROJECT_ROOT}/src/humanoid_motion_server"
+if [[ ! -f "${SOURCE}/package.xml" || ! -f "${PROJECT_ROOT}/src/humanoid_motion_interfaces/package.xml" ]]; then
   git -C "${PROJECT_ROOT}" submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
 fi
-SOURCE="${PROJECT_ROOT}/src/humanoid_motion_server"
-for PATCH in "${PROJECT_ROOT}"/patches/humanoid_motion_server/*.patch; do
-  if git -C "${SOURCE}" apply --check "${PATCH}" >/dev/null 2>&1; then
-    git -C "${SOURCE}" apply "${PATCH}"
-  elif ! git -C "${SOURCE}" apply --reverse --check "${PATCH}" >/dev/null 2>&1; then
-    echo "Motion compatibility patch does not match this submodule: ${PATCH}" >&2; exit 2
-  fi
-done
+# The unified source owns its pinned SDK dependencies. Do not apply patches for
+# the older HC snapshot to a different upstream tree or mutate it during builds.
+MOTION_BUILD="${HC_MOTION_BUILD:-${PROJECT_ROOT}/build_motion}"
+MOTION_INSTALL="${HC_MOTION_INSTALL:-${PROJECT_ROOT}/install_motion}"
+MOTION_LOG="${HC_MOTION_LOG:-${PROJECT_ROOT}/log_motion}"
 if [[ "${MODE}" == deps ]]; then
   # Upstream bundled full-stack launches are optional, not built in this branch.
   rosdep install --from-paths "${PROJECT_ROOT}/src/humanoid_motion_interfaces" "${SOURCE}" \
     --ignore-src --skip-keys 'humanoid_driver_runtime teleop_vr_recv' -r -y
   exit
 fi
-export HUMANOID_MOTION_SDK_DEPS_PREFIX="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-${PROJECT_ROOT}/.deps/robo_manip}"
-[[ -d "${HUMANOID_MOTION_SDK_DEPS_PREFIX}" ]] || {
-  echo 'Set HUMANOID_MOTION_SDK_DEPS_PREFIX to your qualified RoboManip SDK dependencies.' >&2; exit 2;
-}
-export CMAKE_PREFIX_PATH="${HUMANOID_MOTION_SDK_DEPS_PREFIX}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
-export LD_LIBRARY_PATH="${HUMANOID_MOTION_SDK_DEPS_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 if [[ "${MODE}" == build ]]; then
-  colcon --log-base "${PROJECT_ROOT}/log_motion" build \
-    --base-paths "${PROJECT_ROOT}/src" --packages-select "${PACKAGES[@]}" \
-    --build-base "${PROJECT_ROOT}/build_motion" --install-base "${PROJECT_ROOT}/install_motion"
+  colcon --log-base "${MOTION_LOG}" build \
+    --base-paths "${SOURCE}" "${PROJECT_ROOT}/src/humanoid_motion_interfaces" --packages-select "${PACKAGES[@]}" \
+    --build-base "${MOTION_BUILD}" --install-base "${MOTION_INSTALL}"
 else
-  [[ -f "${PROJECT_ROOT}/install_motion/setup.bash" ]] || { echo 'Run ./bootstrap_colcon.sh build first.' >&2; exit 2; }
+  [[ -f "${MOTION_INSTALL}/setup.bash" ]] || { echo 'Run ./bootstrap_colcon.sh build first.' >&2; exit 2; }
   set +u
-  source "${PROJECT_ROOT}/install_motion/setup.bash"
+  source "${MOTION_INSTALL}/setup.bash"
   set -u
-  colcon --log-base "${PROJECT_ROOT}/log_motion" test \
-    --base-paths "${PROJECT_ROOT}/src" --packages-select "${PACKAGES[@]}" \
-    --build-base "${PROJECT_ROOT}/build_motion" --install-base "${PROJECT_ROOT}/install_motion"
-  colcon test-result --test-result-base "${PROJECT_ROOT}/build_motion" --verbose
+  colcon --log-base "${MOTION_LOG}" test \
+    --base-paths "${SOURCE}" "${PROJECT_ROOT}/src/humanoid_motion_interfaces" --packages-select "${PACKAGES[@]}" \
+    --build-base "${MOTION_BUILD}" --install-base "${MOTION_INSTALL}"
+  colcon test-result --test-result-base "${MOTION_BUILD}" --verbose
 fi

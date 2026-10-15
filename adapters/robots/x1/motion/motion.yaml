@@ -1,4 +1,3 @@
-# X1 motion server: ROS joint positions are radians; targets go through middleware.
 humanoid_motion_control:
   ros__parameters:
     joint_state_endpoint: /observation/joint_states
@@ -124,3 +123,4 @@ humanoid_motion_control:
     sdk_config_file: ''
     tool_config_file: ''
     urdf_file: ''
+    output_permit_topic: /control/motion/permit
