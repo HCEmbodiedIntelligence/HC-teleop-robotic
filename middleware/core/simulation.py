@@ -14,6 +14,7 @@ import yaml
 from aiohttp import web
 
 from .config import ConfigError
+from .runtime_mode import configure_environment
 from .robot_profiles import RobotProfileError, UrdfModel
 
 
@@ -35,6 +36,9 @@ class SimulationService:
         self.logs = deque(maxlen=100)
         self.options = None
         self.log_dir = None
+        self.viewers = set()
+        self.latest_frame = None
+        self.display_mode = "server"
 
     def status(self):
         active = self.store.value['robot_profiles'].get('active', '')
@@ -43,8 +47,8 @@ class SimulationService:
         if not configured_root.is_absolute():
             configured_root = self.store.path.parent / configured_root
 
-        if os.environ.get('HC_EXTERNAL_STACK'):
-            reason = '当前由 run.sh sim/teleop 管理控制进程；请使用 ./run.sh middleware 启动后在此管理仿真。'
+        if os.environ.get('HC_RUNTIME_MODE') == 'teleop' or os.environ.get('HC_EXTERNAL_STACK'):
+            reason = '当前为真机遥操或命令行托管模式，禁止从网页启动仿真；请停止后使用 ./run.sh middleware。'
         elif configured_root.resolve() != self.profiles.root:
             reason = '机器人配置目录已变更，请先重启中间件。'
         elif not active:
@@ -63,6 +67,10 @@ class SimulationService:
                     pass
         return dict(state=self.state, profile_id=self.profile_id, active_profile=active,
                     options=self.options, error=self.error, logs=logs,
+                    runtime_mode=os.environ.get('HC_RUNTIME_MODE', 'simulation'),
+                    ros_domain_id=int(os.environ.get('ROS_DOMAIN_ID', self.store.value['ros']['domain_id'])),
+                    hardware_domain_id=os.environ.get('HC_HARDWARE_DOMAIN_ID'),
+                    display_mode=self.display_mode, viewer_clients=len(self.viewers),
                     available=not reason, unavailable_reason=reason,
                     pids=[p.pid for p in self.processes if p.returncode is None])
 
@@ -72,6 +80,12 @@ class SimulationService:
             if not line:
                 break
             text = line.decode(errors='replace').rstrip()
+            if text.startswith('HC_SIMULATION_FRAME '):
+                try:
+                    self.latest_frame = json.loads(text.split(' ', 1)[1])
+                except (ValueError, TypeError):
+                    pass
+                continue
             self.logs.append(f'[{label}] {text}'[-2000:])
             if 'HC_SIMULATION_READY' in text and self.state == 'starting':
                 self.state = 'running'
@@ -122,25 +136,31 @@ class SimulationService:
                         raise SimulationError(f'当前机器人包缺少 {filename}')
         except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
             raise SimulationError(f'机器人仿真配置无效：{exc}') from exc
-        if not options['headless'] and not os.environ.get('DISPLAY'):
-            raise SimulationError('中间件没有可用的桌面 DISPLAY，请选择无窗口模式，或从桌面终端启动中间件。')
+        native_viewer = bool(self.viewers) and not options['headless']
+        if not options['headless'] and not native_viewer and not os.environ.get('DISPLAY'):
+            raise SimulationError('没有本机显示客户端或桌面 DISPLAY；请先在本机运行 tools/runtime/simulation_viewer.py，或选择无窗口模式。')
         self.profile_id, self.options = name, options
+        self.latest_frame = None
+        self.display_mode = 'local_viewer' if native_viewer else ('headless' if options['headless'] else 'server')
         self.state, self.error = 'starting', ''
         self.logs.clear()
         self.log_dir = self.project / 'runtime/simulation_logs' / uuid.uuid4().hex
         self.log_dir.mkdir(parents=True, mode=0o700)
+        domain_id = configure_environment(self.store.value['ros']['domain_id'])
         env = os.environ.copy()
         for key in ('HC_CONTROLLER_CONFIG', 'HC_ARM_TELEOP_CONFIG'):
             env.pop(key, None)
         env.update(HC_ROBOT_CONFIG_ROOT=str(self.profiles.root), HC_ROBOT_NAME=name,
                    HC_MIDDLEWARE_CONFIG=str(self.store.path.resolve()), HC_TELEOP_MODE='sim',
-                   # Runtime honors the launcher's domain override; its children must too.
-                   ROS_DOMAIN_ID=os.environ.get('ROS_DOMAIN_ID', str(self.store.value['ros']['domain_id'])), PYTHONUNBUFFERED='1',
+                   # The gateway and both children share the isolated simulation domain.
+                   ROS_DOMAIN_ID=str(domain_id), ROS_LOCALHOST_ONLY='1', HC_RUNTIME_MODE='simulation', PYTHONUNBUFFERED='1',
                    PYTHONPATH=f'{self.project}:{self.project / ".deps"}:' + env.get('PYTHONPATH', ''))
         command = ['/usr/bin/python3', str(self.project / 'simulation/general_sim_robot_control_node_ros2.py'),
                    '--profile', str(profile)]
-        if options['headless']:
+        if options['headless'] or native_viewer:
             command.append('--headless')
+        if native_viewer:
+            command.append('--stream-viewer')
         if options['debug_joints']:
             command.append('--init_debug')
         command += ['--ros-args']
@@ -171,6 +191,8 @@ class SimulationService:
                 await self.stop()
                 self.state = 'failed'
                 self.error = f'仿真或控制进程已退出（退出码 {code}），请查看日志后重新启动。'
+                if any('X connection to ' in line and 'broken' in line for line in self.logs):
+                    self.error = 'PyBullet 的 X11 显示连接已断开。请保持本机 ssh -Y 会话连接，从该会话重新启动网页服务后再启动仿真。'
         finally:
             for wait in waits:
                 wait.cancel()

@@ -24,6 +24,7 @@ from .ros_recording_executor import RosRecordingExecutor
 from .topic_player import TopicPlayer
 from .topic_recorder import TopicRecorder
 from .vr_gateway import VrGateway
+from .runtime_mode import configure_environment
 
 
 def local_ip() -> str:
@@ -39,7 +40,7 @@ def local_ip() -> str:
 
 class MiddlewareRuntime:
     def __init__(self, config: dict[str, Any], config_dir: Path):
-        self.config = config
+        self.config = copy.deepcopy(config)
         self.config_dir = config_dir
         self.ros: RosBridge | None = None
         self.recording_ros: RosRecordingExecutor | None = None
@@ -117,12 +118,10 @@ class MiddlewareRuntime:
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 14))
-        domain_id = int(os.environ.get("ROS_DOMAIN_ID", configured_domain_id))
-        # Keep all contexts created below (bridge, recorder and cameras) on the
-        # launcher's effective domain. Previously only the parent process used
-        # ROS_DOMAIN_ID while child contexts silently returned to config.yaml.
+        domain_id = configure_environment(configured_domain_id)
+        # Every ROS context (VR, safety, recording and camera) uses the selected
+        # runtime domain, including after a Dashboard configuration reload.
         self.config.setdefault("ros", {})["domain_id"] = domain_id
-        os.environ["ROS_DOMAIN_ID"] = str(domain_id)
         try:
             import rclpy
             if not rclpy.ok():
@@ -239,7 +238,7 @@ class MiddlewareRuntime:
     async def restart(self, config: dict[str, Any]) -> None:
         async with self._restart_lock:
             await self.stop()
-            self.config = config
+            self.config = copy.deepcopy(config)
             await self.start()
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
@@ -758,7 +757,7 @@ def create_app(store: ConfigStore) -> web.Application:
         proposed = copy.deepcopy(store.value)
         proposed["ros"]["command_mux"]["source"] = source
         saved = store.save(proposed)
-        runtime.config = saved
+        runtime.config["ros"]["command_mux"]["source"] = source
         accepted = runtime.ros.set_control_source(source)
         runtime.ros.publish(
             "/control/teleop/enabled",
@@ -793,6 +792,12 @@ def create_app(store: ConfigStore) -> web.Application:
                         continue
                     if data.get("kind") == "ping":
                         await ws.send_json(envelope("pong", "middleware", {}))
+                    elif data.get("type") == "simulation_viewer":
+                        if data.get("data", {}).get("enabled", True):
+                            simulation.viewers.add(ws)
+                        else:
+                            simulation.viewers.discard(ws)
+                        await ws.send_json({"type": "simulation_viewer_ack", "data": {"registered": ws in simulation.viewers}})
                     elif data.get("kind") == "ros_publish":
                         accepted = bool(
                             runtime.ros
@@ -807,6 +812,7 @@ def create_app(store: ConfigStore) -> web.Application:
                     break
         finally:
             runtime.websockets.discard(ws)
+            simulation.viewers.discard(ws)
         return ws
 
     def camera_for_request(request: web.Request) -> tuple[str, CameraService | None]:
@@ -1251,10 +1257,36 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPBadRequest(text="no file uploaded")
         return web.json_response({"ok": True, "filename": uploaded_name}, status=201)
 
+    async def stream_simulation_frames():
+        last_frame = None
+        while True:
+            await asyncio.sleep(1.0 / 30.0)
+            frame = simulation.latest_frame
+            if frame is last_frame or frame is None or simulation.state != 'running':
+                continue
+            last_frame = frame
+            event = {'type': 'simulation_frame', 'data': {**frame, 'profile_id': simulation.profile_id}}
+            for viewer in tuple(simulation.viewers):
+                try:
+                    await asyncio.wait_for(viewer.send_json(event), timeout=0.5)
+                except (ConnectionError, RuntimeError, asyncio.TimeoutError):
+                    simulation.viewers.discard(viewer)
+                    try:
+                        await asyncio.wait_for(viewer.close(), timeout=0.2)
+                    except (ConnectionError, RuntimeError, asyncio.TimeoutError):
+                        pass
+
+    viewer_sender = None
+
     async def startup(_app: web.Application) -> None:
+        nonlocal viewer_sender
         await runtime.start()
+        viewer_sender = asyncio.create_task(stream_simulation_frames())
 
     async def shutdown(_app: web.Application) -> None:
+        if viewer_sender is not None:
+            viewer_sender.cancel()
+            await asyncio.gather(viewer_sender, return_exceptions=True)
         for ws in tuple(runtime.websockets):
             await ws.close(code=1001, message=b"server shutdown")
         async with simulation.lock:

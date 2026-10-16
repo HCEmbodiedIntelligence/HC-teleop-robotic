@@ -86,13 +86,17 @@ fi
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
-if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
-  export HC_MIDDLEWARE_DOMAIN_CONFIG="${CONFIG_PATH}"
-  export ROS_DOMAIN_ID="$(/usr/bin/python3 -c 'import os, yaml; cfg=yaml.safe_load(open(os.environ["HC_MIDDLEWARE_DOMAIN_CONFIG"])) or {}; print(cfg.get("ros", {}).get("domain_id", 14))')"
-  unset HC_MIDDLEWARE_DOMAIN_CONFIG
+export HC_RUNTIME_MODE="${HC_RUNTIME_MODE:-simulation}"
+DOMAIN_VALUES="$(/usr/bin/python3 -m middleware.core.runtime_mode "${CONFIG_PATH}" --shell-values)"
+read -r ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID <<< "${DOMAIN_VALUES}"
+export ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID
+if [[ "${HC_RUNTIME_MODE}" == simulation ]]; then
+  export HC_SIMULATION_DOMAIN_ID="${ROS_DOMAIN_ID}" ROS_LOCALHOST_ONLY=1
+else
+  unset HC_SIMULATION_DOMAIN_ID
 fi
 
-log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+log "mode=${HC_RUNTIME_MODE} ROS_DOMAIN_ID=${ROS_DOMAIN_ID} hardware_domain=${HC_HARDWARE_DOMAIN_ID}"
 log "配置: ${CONFIG_PATH}"
 log "中间件日志目录: ${LOG_DIR}"
 

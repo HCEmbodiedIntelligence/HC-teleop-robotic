@@ -1356,7 +1356,7 @@ async function loadSimulation() {
     const value=await api('/api/simulation');
     const states={stopped:'已停止',starting:'启动中',running:'运行中',stopping:'停止中',failed:'启动失败 / 已退出'};
     if(!simulationBusy)$('#simulationState').textContent=states[value.state]||value.state;
-    $('#simulationProfile').textContent=`当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
+    $('#simulationProfile').textContent=`运行模式：${value.runtime_mode==='teleop'?'真机遥操':'隔离仿真'} · 显示：${value.display_mode==='local_viewer'?'本机原生窗口':value.display_mode==='headless'?'无窗口':'服务器 DISPLAY'} · ROS 域：${value.ros_domain_id??'—'} · 当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
     $('#simulationError').textContent=simulationActionError||value.error||value.unavailable_reason||'';
     $('#simulationLogs').textContent=value.logs.join('\n')||'暂无日志';
     const active=['starting','running','stopping'].includes(value.state);

@@ -127,7 +127,7 @@ def register_profile_routes(
                 proposed = copy.deepcopy(store.value)
                 proposed["robot_profiles"]["active"] = ""
                 saved = store.save(proposed)
-                runtime.config = saved
+                runtime.config["robot_profiles"]["active"] = ""
             return web.json_response(
                 {"ok": True, "deleted": profile_id, "cleared_active": cleared}
             )

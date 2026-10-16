@@ -78,8 +78,15 @@ HTTP 控制网关；两个项目使用相同的 `ROS_DOMAIN_ID`。
 ROS_DOMAIN_ID=14 ./run.sh
 ```
 
-该命令只启动网页和 VR 网关。在网页应用机器人包后，从 PyBullet 面板选择是否
-同时启动解算与 VR 遥操控制，再点击启动。`run.sh` 的默认模式保持 `middleware`。
+该命令只启动网页和 VR 网关，不启动控制器。默认模式下，网关、网页启动的
+PyBullet 和控制器统一使用自动分配的本机专用 ROS 域，并强制 localhost 通信；
+传入的域 14 不会用于仿真，也不会连接同域的 HC_X1。有效仿真域会显示在网页。
+在网页应用机器人包后，从 PyBullet 面板勾选同时启动解算与 VR 仿真控制，再点击启动。
+VR 数据、关节反馈与动作均在同一个仿真域内流转。`run.sh` 的默认模式保持 `middleware`。
+
+控制真机必须显式启动 `ROS_DOMAIN_ID=14 ./run.sh teleop`，此时使用指定的域与
+HC_X1 通信，网页禁止启动 PyBullet。切换模式时先停止当前入口，再启动另一种模式。
+`./run.sh sim` 仍可从命令行启动完整隔离仿真，同样不会使用真机域。
 旧的 `--config middleware/config.x1_jetson.yaml` 用法仍兼容，但不再承载另一份机器人配置。
 
 每个包中的 `middleware.yaml` 统一保存 `camera`、`safety`、ROS 订阅/命令话题和
@@ -88,20 +95,30 @@ ROS_DOMAIN_ID=14 ./run.sh
 ZIP 不带 `middleware.yaml` 时导入器生成安全默认值（相机关闭、标准关节话题、启动软件停止）；
 需要相机的机器人包应填写自己的流和话题。应用或重新应用包会停止当前仿真，之后按需重新启动。
 
-真机网页启动、窗口显示在本机时，从本机有桌面的终端连接真机：
+真机网页启动、本机流畅显示时，分别运行两个入口：
 
 ```bash
-ssh -Y niic@192.168.2.33
+# 真机终端：只启动网页和 VR 网关，不需要 SSH X11 转发
 cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./run.sh
 ```
 
-保持 SSH 连接，在浏览器打开真机的 `http://192.168.2.33:7876`，关闭“无窗口模式”后启动。
-窗口通过 SSH 的 `DISPLAY` 显示到本机；不要将它覆盖为 `:0`。
-X11 转发可能使用软件渲染，启动等待默认 120 秒，可在主配置的
-`simulation.startup_timeout_sec` 调整（上限 600 秒）。
-仅验证仿真时使用独立 ROS 域，例如 `ROS_DOMAIN_ID=229 ./run.sh`，
-避免与域 14 的真机驱动同时收发控制话题。网页启动的仿真和控制器继承启动域。
+```bash
+# 本机桌面终端：仅显示，不连接 ROS、不发送动作
+cd /path/to/HC-teleop-robotic
+PYTHONPATH="$PWD/.deps:$PYTHONPATH" /usr/bin/python3 tools/runtime/simulation_viewer.py \
+  --server http://192.168.2.33:7876
+```
+
+本机显示客户端连接后，在真机网页关闭“无窗口模式”，勾选“同时启动逆解与 VR 仿真控制”，
+点击启动。真机以无窗口方式运行物理仿真和控制器，本机用原生 OpenGL 显示最新状态；
+停止仿真时本机窗口自动关闭，客户端继续等待下次启动。无需转发 X11，窗口渲染不会阻塞控制。
+客户端默认使用本机内置 X1 模型；其他机器人用 `--profile /path/to/profile` 指定
+与真机相同的机器人包目录（包含 URDF 和 meshes）。型号不匹配时客户端会拒绝显示。
+手动关闭本机窗口会退出显示客户端，但不会改变机器人控制状态。
+
+没有本机显示客户端时，仍支持服务器原生桌面或 SSH X11 的 `DISPLAY`；
+SSH X11 软件渲染可能卡顿，不建议用于交互遥操。
 
 X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/base/pose`。
 `run.sh teleop` 使用 `body.head_pose_base.teleop_mode: yaw_velocity`：按住左 Grip

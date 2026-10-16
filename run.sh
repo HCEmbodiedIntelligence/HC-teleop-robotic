@@ -117,6 +117,10 @@ done
   exit 2
 }
 
+# The command selects the mode, never a stale parent-shell setting.
+export HC_RUNTIME_MODE=simulation
+[[ "${MODE}" != teleop ]] || export HC_RUNTIME_MODE=teleop
+
 if [[ "${MODE}" == middleware ]]; then
   [[ "${HEADLESS}" == false ]] || { echo "Configure headless mode in Dashboard." >&2; exit 2; }
   unset HC_EXTERNAL_STACK HC_ROBOT_NAME HC_ROBOT_CONFIG_ROOT HC_TELEOP_MODE
@@ -129,22 +133,19 @@ if [[ "${MODE}" == middleware ]]; then
 fi
 export HC_EXTERNAL_STACK=1
 
-if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
-  export ROS_DOMAIN_ID
-  ROS_DOMAIN_ID="$(/usr/bin/python3 - "${MIDDLEWARE_CONFIG}" <<'PY'
-import sys, yaml
-with open(sys.argv[1], encoding="utf-8") as stream:
-    config = yaml.safe_load(stream) or {}
-print(config.get("ros", {}).get("domain_id", 14))
-PY
-)"
-fi
-
 set +u
 source /opt/ros/humble/setup.bash
 set -u
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
+DOMAIN_VALUES="$(/usr/bin/python3 -m middleware.core.runtime_mode "${MIDDLEWARE_CONFIG}" --shell-values)"
+read -r ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID <<< "${DOMAIN_VALUES}"
+export ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID
+if [[ "${HC_RUNTIME_MODE}" == simulation ]]; then
+  export HC_SIMULATION_DOMAIN_ID="${ROS_DOMAIN_ID}" ROS_LOCALHOST_ONLY=1
+else
+  unset HC_SIMULATION_DOMAIN_ID
+fi
 
 ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-}"
 ROBOT_NAME="${HC_ROBOT_NAME:-}"

@@ -192,11 +192,11 @@
         </details>
       </article>
       <article class="panel" id="simulationPanel">
-        <div class="panel-title"><div><h2>PyBullet 仿真</h2><p>使用上方已应用的机器人 ZIP 配置，独立启动或停止仿真。</p></div><span id="simulationState" class="tag">正在加载控制界面</span></div>
+        <div class="panel-title"><div><h2>PyBullet 仿真</h2><p>使用上方已应用的机器人 ZIP 配置，独立启动或停止仿真；默认使用隔离的本机 ROS 域，不能控制真机。</p></div><span id="simulationState" class="tag">正在加载控制界面</span></div>
         <p id="simulationProfile">正在读取活动配置…</p>
         <div class="form-grid">
-          <label class="toggle"><input type="checkbox" data-path="simulation.headless"><span></span>无窗口模式（关闭时在服务器桌面打开 PyBullet）</label>
-          <label class="toggle"><input type="checkbox" data-path="simulation.with_control"><span></span>同时启动逆解与 VR 遥操作控制</label>
+          <label class="toggle"><input type="checkbox" data-path="simulation.headless"><span></span>无窗口模式（关闭时在本机显示客户端或 DISPLAY 桌面打开 PyBullet）</label>
+          <label class="toggle"><input type="checkbox" data-path="simulation.with_control"><span></span>同时启动逆解与 VR 仿真控制（不连接真机）</label>
           <label class="toggle"><input type="checkbox" data-path="simulation.debug_joints"><span></span>启用关节调试</label>
         </div>
         <p class="muted">初始姿态和相机参数使用 ZIP 内的 vr_configs.yml。启动、重启会保存上述选项；停止仿真保留中间件运行。导入、切换机器人或修改仿真选项、ROS Domain ID 会停止当前仿真。</p>
@@ -209,7 +209,7 @@
         <div class="form-grid">
           <label>HTTP Host<input data-path="server.host"></label>
           <label>HTTP Port<input type="number" data-path="server.port"></label>
-          <label>ROS 2 Domain ID<input type="number" min="0" max="232" data-path="ros.domain_id" placeholder="0"><small>ROS_DOMAIN_ID（0~232），隔离局域网内不同机器人的通信</small></label>
+          <label>ROS 2 Domain ID<input type="number" min="0" max="232" data-path="ros.domain_id" placeholder="0"><small>真机 teleop 使用的域（0~232）；默认仿真自动使用另一个本机专用域</small></label>
           <label>ROS 2 节点名称<input data-path="ros.node_name" placeholder="hc_teleop_middleware"></label>
         </div>
         <label class="toggle"><input type="checkbox" data-path="vr.enabled"><span></span>启用 VR UDP 网关</label>

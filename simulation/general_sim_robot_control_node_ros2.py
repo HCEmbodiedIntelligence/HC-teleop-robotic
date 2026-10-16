@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 import time
+import json
 import threading
 import yaml
 import numpy as np
@@ -29,7 +30,7 @@ from robot_utils.utils import (
 
 
 class SimRobotController(Node, AssembledRobot):
-    def __init__(self, config_path, init_debug=True, headless=False):
+    def __init__(self, config_path, init_debug=True, headless=False, stream_viewer=False):
         # Initialize ROS2 node
         Node.__init__(self, "sim_robot_controller_node")
 
@@ -44,6 +45,9 @@ class SimRobotController(Node, AssembledRobot):
             sim_cfg = {}
         opengl2 = self.configs.get("sim_opengl2", sim_cfg.get("sim_opengl2", True))
         options = "--opengl2" if opengl2 and not headless else ""
+        forwarded_display = not headless and os.environ.get("DISPLAY", "").startswith("localhost:")
+        if forwarded_display:
+            options += " --width=640 --height=480"
         started = time.monotonic()
         self.get_logger().info(
             f"PyBullet connect starting: DISPLAY={os.environ.get('DISPLAY', '<unset>')} "
@@ -55,6 +59,11 @@ class SimRobotController(Node, AssembledRobot):
         self.physics_clent_id = client_id
         self.physics_stop = threading.Event()
         self.physics_thread = None
+        self.manual_rendering = forwarded_display
+        self.visualization_enabled = bool(init_debug and not headless)
+        self.target_ee_poses = None
+        self.stream_viewer = stream_viewer
+        self.next_viewer_frame = 0.0
         self.get_logger().info(f"PyBullet connect finished in {time.monotonic() - started:.3f}s")
         try:
             # Mesh uploads and intermediate resets must not trigger individual
@@ -115,21 +124,15 @@ class SimRobotController(Node, AssembledRobot):
         # Keep persistent IDs for every visual frame. The old implementation
         # drew the flange frames only once here, so they remained at the home
         # pose after the arm moved and looked like unrelated floating markers.
-        self.base_frame_ids = debug_draw_pose(
-            self.base.pose,
-            line_width=2.0,
-            line_length=0.16,
-            physics_client_id=self.physics_clent_id,
-        )
-        self.actual_ee_frame_ids = [
-            debug_draw_pose(
-                arm.abs_ee_pose,
-                line_width=3.0,
-                line_length=0.18,
-                physics_client_id=self.physics_clent_id,
-            )
-            for arm in self.arms
-        ]
+        self.base_frame_ids = None
+        self.actual_ee_frame_ids = [None] * len(self.arms)
+        self.feedback_joint_indices = []
+        self.feedback_joint_names = []
+        for index in range(p.getNumJoints(self.robot_id, physicsClientId=self.physics_clent_id)):
+            info = p.getJointInfo(self.robot_id, index, physicsClientId=self.physics_clent_id)
+            if info[2] != p.JOINT_FIXED:
+                self.feedback_joint_indices.append(index)
+                self.feedback_joint_names.append(info[1].decode("utf-8"))
         self.target_ee_frame_ids = [None] * len(self.arms)
         self.plane_id = None
         self.ground_frame_ids = None
@@ -221,11 +224,25 @@ class SimRobotController(Node, AssembledRobot):
         # Start physics after rendering has been restored successfully.
         def physics_sim():
             try:
+                next_frame = next_debug = 0.0
                 while rclpy.ok() and not self.physics_stop.is_set():
                     with self.bullet_lock:
                         if not p.isConnected(self.physics_clent_id):
                             break
                         p.stepSimulation(physicsClientId=self.physics_clent_id)
+                        now = time.monotonic()
+                        if self.visualization_enabled and now >= next_debug:
+                            self._draw_visualizations()
+                            next_debug = now + 0.2
+                        if self.manual_rendering and now >= next_frame:
+                            # Forwarded software rendering must not run continuously
+                            # or on the ROS executor handling control and feedback.
+                            p.configureDebugVisualizer(
+                                p.COV_ENABLE_SINGLE_STEP_RENDERING, 1,
+                                physicsClientId=self.physics_clent_id)
+                            # Measure the quiet period after the frame completes;
+                            # a slow X11 frame must not cause continuous rendering.
+                            next_frame = time.monotonic() + 0.2
                     self.physics_stop.wait(1.0 / 240.0)
             except p.error:
                 pass
@@ -276,19 +293,26 @@ class SimRobotController(Node, AssembledRobot):
     def update_joint_state(self):
         self._update_base_velocity()
         self.publish_base_pose()
-        self._draw_head_tracking()
         joint_state = JointState()
         joint_state.header.stamp = self.get_clock().now().to_msg()
-        joint_state.name = []
-        joint_state.position = []
-        for i in range(p.getNumJoints(self.robot_id)):
-            joint_info = p.getJointInfo(self.robot_id, i)
-            if joint_info[2] == p.JOINT_FIXED:
-                continue
-            joint_state.name.append(joint_info[1].decode("utf-8"))
-            joint_state.position.append(p.getJointState(self.robot_id, i)[0])
+        joint_state.name = list(self.feedback_joint_names)
+        with self.bullet_lock:
+            states = p.getJointStates(
+                self.robot_id, self.feedback_joint_indices,
+                physicsClientId=self.physics_clent_id)
+        joint_state.position = [state[0] for state in states]
         self.joint_state_pub.publish(joint_state)
         self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
+        if getattr(self, 'stream_viewer', False) and time.monotonic() >= self.next_viewer_frame:
+            with self.bullet_lock:
+                root_pose = p.getBasePositionAndOrientation(self.robot_id, physicsClientId=self.physics_clent_id)
+            frame = {'positions': dict(zip(joint_state.name, joint_state.position)), 'base_pose': root_pose}
+            print('HC_SIMULATION_FRAME ' + json.dumps(frame, separators=(',', ':'), allow_nan=False), flush=True)
+            self.next_viewer_frame = time.monotonic() + 1.0 / 30.0
+
+    def _draw_visualizations(self):
+        """Optional markers at 5 Hz in the physics worker, outside ROS callbacks."""
+        self._draw_head_tracking()
         self.base_frame_ids = debug_draw_pose(
             self.base.pose,
             self.base_frame_ids,
@@ -304,6 +328,7 @@ class SimRobotController(Node, AssembledRobot):
                 line_length=0.18,
                 physics_client_id=self.physics_clent_id,
             )
+        self._draw_target_ee()
 
     def target_finger_joints_callback(self, msg):
         joint_pos = msg.position
@@ -335,9 +360,16 @@ class SimRobotController(Node, AssembledRobot):
             gripper.reset(gripper_status[i])
 
     def target_ee_callback(self, msg):
+        # Visualization never competes with incoming control on the ROS executor.
+        if self.visualization_enabled and len(msg.poses) >= len(self.arms):
+            self.target_ee_poses = list(msg.poses)
+
+    def _draw_target_ee(self):
+        if self.target_ee_poses is None:
+            return
         if "controller_indices" in self.configs:
             for i in range(len(self.arms)):
-                pose = msg.poses[i]
+                pose = self.target_ee_poses[i]
                 id = self.configs["controller_indices"]["base"][i]
                 pose_list = pose_msg_to_list(pose)
                 cmd_base_pose = (
@@ -361,8 +393,6 @@ class SimRobotController(Node, AssembledRobot):
                         line_length=0.3,
                         physics_client_id=self.physics_clent_id,
                     )
-        else:
-            time.sleep(0.001)
 
     def head_tracking_callback(self, msg):
         if msg.header.frame_id != "robot_base" or len(msg.poses) != 2:
@@ -555,6 +585,7 @@ def main(args=None):
         help="Whether to use debug mode or not.",
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--stream-viewer", action="store_true")
 
     arguments, ros_arguments = parser.parse_known_args(args)
     # One PyBullet ROS publisher per user/domain, including CLI launches.
@@ -584,6 +615,7 @@ def main(args=None):
             config_path,
             init_debug=arguments.init_debug,
             headless=arguments.headless,
+            stream_viewer=arguments.stream_viewer,
         )
         print("HC_SIMULATION_READY", flush=True)
         rclpy.spin(robot)
