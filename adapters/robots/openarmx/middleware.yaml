@@ -1,0 +1,44 @@
+camera:
+  enabled: false
+  source: ros
+  topic: /observation/cameras/head/color/compressed
+  custom_topic: ''
+  streams: []
+  width: 640
+  height: 400
+  fps: 30
+  codec: H264
+safety:
+  enabled: true
+  stop_on_startup: true
+  stop_topic: /control/emergency_stop
+ros:
+  subscriptions:
+  - topic: /observation/joint_states
+    description: ''
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 20.0
+  - topic: /action/joint_states
+    description: ''
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 20.0
+  command_mux:
+    enabled: true
+    source: vr
+    vr_topic: /control/vr/joint_states
+    exoskeleton_topic: /control/exoskeleton/joint_states
+    output_topic: /action/joint_states
+    control_source_topic: /control/source
+    hardware_ready_topic: /status/hardware/ready
+vr:
+  pose_timeout_ms: 600

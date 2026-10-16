@@ -122,6 +122,7 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
                 'headless':True, 'with_control':False, 'debug_joints':True})
             self.assertEqual(response.status, 200)
             self.assertTrue(ConfigStore(self.store.path).load()['simulation']['debug_joints'])
+            self.assertEqual(ConfigStore(self.store.path).load()['simulation']['startup_timeout_sec'], 120)
             response = await client.post('/api/simulation/start')
             self.assertEqual(response.status, 200, await response.text())
             response = await client.post('/api/simulation/start')
@@ -155,3 +156,10 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             cfg['simulation'][key] = 'false'
             with self.assertRaises(ConfigError):
                 validate_config(cfg)
+
+
+def test_startup_timeout_validation():
+    for invalid in (True, 0, -1, 601, float("nan"), float("inf"), "120"):
+        with unittest.TestCase().assertRaises(ConfigError):
+            validate_config({"simulation": {"startup_timeout_sec": invalid}})
+    assert validate_config({"simulation": {"startup_timeout_sec": 180}})["simulation"]["startup_timeout_sec"] == 180

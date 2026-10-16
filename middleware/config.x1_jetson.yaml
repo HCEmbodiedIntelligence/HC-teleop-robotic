@@ -1,59 +1,10 @@
-# HC_X1 hardware deployment; unspecified options use the application defaults.
+# Compatibility entry point; robot-owned settings come from the active package.
 robot_profiles:
   root: ../adapters/robots
   active: x1
-vr:
-  # Match the standard deployment; network stalls still require a manual reset.
-  pose_timeout_ms: 600
 ros:
   domain_id: 14
-  subscriptions:
-  - topic: /observation/joint_states
-    type: sensor_msgs/msg/JointState
-    enabled: true
-    outputs: [websocket, record]
-    event_max_hz: 20.0
-  - topic: /action/joint_states
-    type: sensor_msgs/msg/JointState
-    enabled: true
-    outputs: [websocket, record]
-    event_max_hz: 20.0
-  - topic: /observation/hands/joint_states
-    type: sensor_msgs/msg/JointState
-    enabled: true
-    outputs: [record]
-  - topic: /observation/hands/triggers
-    type: geometry_msgs/msg/PoseArray
-    enabled: true
-    outputs: [record]
-  - topic: /observation/cameras/head/color/compressed
-    type: sensor_msgs/msg/CompressedImage
-    enabled: true
-    outputs: [record]
-    qos_reliability: best_effort
-  - topic: /observation/cameras/head/depth/compressed
-    type: sensor_msgs/msg/CompressedImage
-    enabled: true
-    outputs: [record]
-    qos_reliability: best_effort
-  - topic: /status/base
-    type: std_msgs/msg/String
-    enabled: true
-    outputs: [websocket, record]
-    event_max_hz: 10.0
   recording:
     directory: ../runtime/topic_recordings
     format: mcap
     enabled: false
-camera:
-  enabled: true
-  streams:
-  - id: head
-    name: 头部相机
-    topic: /observation/cameras/head/color/compressed
-    type: sensor_msgs/msg/CompressedImage
-    stereo: false
-    width: 640
-    height: 400
-    fps: 30
-    codec: H264

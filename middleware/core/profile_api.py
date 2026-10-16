@@ -6,7 +6,7 @@ from typing import Any
 
 from aiohttp import web
 
-from .config import ConfigStore
+from .config import ConfigError, ConfigStore
 from .robot_profiles import RobotProfileError, RobotProfileManager, STANDARD_TOPICS
 
 
@@ -96,21 +96,24 @@ def register_profile_routes(
             raise web.HTTPNotFound(text=str(exc)) from exc
         if profile.get("schema") == "invalid":
             raise web.HTTPBadRequest(text="invalid robot profile cannot be activated")
-        previous = str(store.value["robot_profiles"].get("active", ""))
-        if profile_id != previous:
+        try:
             proposed = copy.deepcopy(store.value)
             proposed["robot_profiles"]["active"] = profile_id
-            saved = store.save(proposed)
-            runtime.config = saved
-            runtime._on_safety_event(
-                f"robot profile changed from {previous or 'none'} to {profile_id}; restart teleop"
-            )
+            # Reapplying the same package must also reload updated runtime settings.
+            saved = store.save(store.apply_profile(proposed))
+        except ConfigError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        runtime._on_safety_event(
+            f"robot profile applied: {profile_id}; restart teleop"
+        )
+        await runtime.restart(saved)
         return web.json_response(
             {
                 "ok": True,
                 "active": profile_id,
                 "profile": profile,
-                "restart_simulation_required": profile_id != previous,
+                "config": saved,
+                "restart_simulation_required": True,
             }
         )
 

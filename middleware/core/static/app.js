@@ -876,8 +876,7 @@ function renderProfileDetail() {
   const profile=profilesData.profiles.find(item=>item.id===select.value);
   const detail=$('#profileDetail');
   detail.textContent='';
-  const isCurrent = profile && profile.id === profilesData.active;
-  $('#activateProfile').disabled=!profile||isCurrent||profile.schema==='invalid';
+  $('#activateProfile').disabled=!profile||profile.schema==='invalid';
   if($('#deleteProfile')) $('#deleteProfile').disabled=!profile;
   $('#activeProfileBadge').textContent=profilesData.active?`当前：${profilesData.active}`:'未选择';
   if(!profile) {
@@ -1458,8 +1457,9 @@ async function init() {
     try {
       const result=await api(`/api/robot-profiles/${encodeURIComponent(profileId)}/activate`,{method:'POST'});
       profilesData.active=result.active;
-      if(config?.robot_profiles)config.robot_profiles.active=result.active;
-      renderProfiles(result.active);
+      config=result.config;
+      renderConfig();
+      await loadProfiles(result.active);
       toast(result.restart_simulation_required?'配置已应用；可在下方启动当前机器人仿真':'配置已经是活动配置');
     } catch(error){toast(`应用失败：${error.message}`,true);}
   };

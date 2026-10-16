@@ -1,6 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import yaml
 
 try:
     import aiohttp
@@ -92,6 +95,37 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         imported = await response.json()
         self.assertEqual(imported["profile"]["id"], "archive_bot")
         self.assertEqual(imported["profile"]["schema"], "hc-robot-config-v1")
+
+    async def test_apply_and_reapply_package_reload_its_runtime_settings(self):
+        from middleware.core.app import MiddlewareRuntime
+
+        form = aiohttp.FormData()
+        form.add_field("id", "runtime_bot")
+        form.add_field("urdf", URDF, filename="robot.urdf")
+        form.add_field("config", io_yaml(), filename="vr_configs.yml")
+        response = await self.client.post("/api/robot-profiles/import", data=form)
+        self.assertEqual(response.status, 201, await response.text())
+        path = Path(self.directory.name) / "profiles/runtime_bot/middleware.yaml"
+        settings = yaml.safe_load(path.read_text())
+        with patch.object(MiddlewareRuntime, "restart", new_callable=AsyncMock) as restart:
+            for timeout in (700, 900):
+                settings["vr"]["pose_timeout_ms"] = timeout
+                path.write_text(yaml.safe_dump(settings))
+                response = await self.client.post("/api/robot-profiles/runtime_bot/activate")
+                self.assertEqual(response.status, 200, await response.text())
+                self.assertTrue((await response.json())["restart_simulation_required"])
+                applied = restart.await_args.args[0]
+                self.assertEqual(applied["vr"]["pose_timeout_ms"], timeout)
+                self.assertTrue(applied["safety"]["stop_on_startup"])
+                self.assertFalse(applied["ros"]["enabled"])
+            self.assertEqual(restart.await_count, 2)
+
+        settings["server"] = {"port": 1234}
+        path.write_text(yaml.safe_dump(settings))
+        with patch.object(MiddlewareRuntime, "restart", new_callable=AsyncMock) as restart:
+            response = await self.client.post("/api/robot-profiles/runtime_bot/activate")
+            self.assertEqual(response.status, 400)
+            restart.assert_not_awaited()
 
     async def test_service_and_vr_settings_are_written_to_yaml(self):
         response = await self.client.get("/api/config")

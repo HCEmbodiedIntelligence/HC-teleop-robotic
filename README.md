@@ -38,7 +38,7 @@ chmod +x install.sh run.sh
 ./run.sh middleware
 ```
 
-然后访问 `http://<机器人IP>:7876/dashboard/#config`。相机不在系统配置页中管理；需要独立启用 WebRTC 服务时安装可选依赖：
+然后访问 `http://<机器人IP>:7876/dashboard/#config`。当前机器人包的 `middleware.yaml` 提供相机、订阅话题、安全和 VR 超时配置。需要启用 WebRTC 服务时安装可选依赖：
 
 ```bash
 ./install.sh --camera
@@ -72,18 +72,36 @@ Pinocchio 3.7 和 CasADi 3.7；系统 Python 中只有 Pinocchio 并不足以启
 保留机器专用的相机配置。遥操测试期间停止其他关节命令源，包括 HoloBrain
 HTTP 控制网关；两个项目使用相同的 `ROS_DOMAIN_ID`。
 
-Jetson X1 使用独立配置连接真实头部相机、关节和手部反馈，避免沿用默认配置
-中的 Isaac 双目相机话题。该配置不默认录制，也不依赖未安装的 D405 相机。
-启动后先在 Dashboard 确认硬件就绪、图像和反馈正常，再解除软件停止：
+相机、话题和安全配置随机器人包提供，无需额外的 X1 配置参数：
 
 ```bash
-ROS_DOMAIN_ID=14 ./run.sh teleop --config middleware/config.x1_jetson.yaml
+ROS_DOMAIN_ID=14 ./run.sh
 ```
 
-有窗口的 PyBullet 仿真建议从机器人本地桌面终端启动中间件；SSH X11
-转发可能使用软件渲染，导致模型加载超时。仿真与真机同时运行时，使用独立
-ROS 域，例如 `ROS_DOMAIN_ID=229 ./run.sh middleware`；网页启动的仿真和控制器
-会继承该域。仿真窗口显示在中间件的 `DISPLAY` 所指向的桌面。
+该命令只启动网页和 VR 网关。在网页应用机器人包后，从 PyBullet 面板选择是否
+同时启动解算与 VR 遥操控制，再点击启动。`run.sh` 的默认模式保持 `middleware`。
+旧的 `--config middleware/config.x1_jetson.yaml` 用法仍兼容，但不再承载另一份机器人配置。
+
+每个包中的 `middleware.yaml` 统一保存 `camera`、`safety`、ROS 订阅/命令话题和
+`vr.pose_timeout_ms`。启动自动加载当前包；应用包会重新加载相机与订阅，同名包也可重新应用。
+网页修改这些设置时保存回当前包；服务器地址、ROS 域、VR 网络端口和录制目录保留在本机主配置。
+ZIP 不带 `middleware.yaml` 时导入器生成安全默认值（相机关闭、标准关节话题、启动软件停止）；
+需要相机的机器人包应填写自己的流和话题。应用或重新应用包会停止当前仿真，之后按需重新启动。
+
+真机网页启动、窗口显示在本机时，从本机有桌面的终端连接真机：
+
+```bash
+ssh -Y niic@192.168.2.33
+cd ~/HC-teleop-robotic
+ROS_DOMAIN_ID=14 ./run.sh
+```
+
+保持 SSH 连接，在浏览器打开真机的 `http://192.168.2.33:7876`，关闭“无窗口模式”后启动。
+窗口通过 SSH 的 `DISPLAY` 显示到本机；不要将它覆盖为 `:0`。
+X11 转发可能使用软件渲染，启动等待默认 120 秒，可在主配置的
+`simulation.startup_timeout_sec` 调整（上限 600 秒）。
+仅验证仿真时使用独立 ROS 域，例如 `ROS_DOMAIN_ID=229 ./run.sh`，
+避免与域 14 的真机驱动同时收发控制话题。网页启动的仿真和控制器继承启动域。
 
 X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/base/pose`。
 `run.sh teleop` 使用 `body.head_pose_base.teleop_mode: yaw_velocity`：按住左 Grip
@@ -93,7 +111,7 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 该模式不使用无效定位数据，也不执行头显水平位移跟随；原有摇杆控制仍保留。
 仿真继续使用实测位姿闭环；真机提供有效位姿后可将 `teleop_mode` 改为 `pose`。
 
-根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择无窗口模式、关节调试和是否同时启动 IK/VR 控制。窗口显示在运行中间件的服务器桌面；无桌面环境请选择无窗口模式。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
+根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择无窗口模式、关节调试和是否同时启动 IK/VR 控制。窗口显示在中间件继承的 `DISPLAY`：可为服务器桌面，也可通过 SSH X11 转发至本机；没有显示通道时请选择无窗口模式。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
 
 显式 `./run.sh sim` 仍启动完整仿真，`./run.sh teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制；这两种方式由命令行管理进程，不允许从网页另起一套仿真。网页管理模式下，中间件退出会清理其启动的仿真与控制进程。
 

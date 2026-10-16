@@ -84,8 +84,8 @@ def test_head_tracking_and_raw_coordinate_preservation():
 def test_config_records_all_projected_topics_and_raw_vr():
     from pathlib import Path
     import yaml
-    from middleware.core.config import validate_config
-    config = validate_config(yaml.safe_load((Path(__file__).parents[1] / 'middleware/config.yaml').read_text()))
+    from middleware.core.config import ConfigStore
+    config = ConfigStore(Path(__file__).parents[1] / 'middleware/config.yaml').load()
     from middleware.core.dataset_topics import load_joint_groups
     config['ros']['dataset_topics']['joint_groups'] = load_joint_groups(config, Path(__file__).parents[1] / 'middleware')
     b = DatasetTopics(Node(), config['ros']['dataset_topics'])

@@ -44,10 +44,32 @@ class SimRobotController(Node, AssembledRobot):
             sim_cfg = {}
         opengl2 = self.configs.get("sim_opengl2", sim_cfg.get("sim_opengl2", True))
         options = "--opengl2" if opengl2 and not headless else ""
+        started = time.monotonic()
+        self.get_logger().info(
+            f"PyBullet connect starting: DISPLAY={os.environ.get('DISPLAY', '<unset>')} "
+            f"headless={headless} options={options!r}"
+        )
         client_id = p.connect(p.DIRECT if headless else p.GUI, options=options)
         if client_id < 0:
             raise RuntimeError("Unable to connect to PyBullet")
         self.physics_clent_id = client_id
+        self.physics_stop = threading.Event()
+        self.physics_thread = None
+        self.get_logger().info(f"PyBullet connect finished in {time.monotonic() - started:.3f}s")
+        try:
+            # Mesh uploads and intermediate resets must not trigger individual
+            # frames over a forwarded X11 connection.
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0, physicsClientId=client_id)
+            self._initialize_robot(config_file, sim_cfg, init_debug, headless)
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1, physicsClientId=client_id)
+            self._start_physics()
+            self.get_logger().info(f"PyBullet ready in {time.monotonic() - started:.3f}s")
+        except Exception:
+            self.close_simulation()
+            self.destroy_node()
+            raise
+
+    def _initialize_robot(self, config_file, sim_cfg, init_debug, headless):
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, int(init_debug and not headless))
         p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0)
         p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0)
@@ -78,6 +100,8 @@ class SimRobotController(Node, AssembledRobot):
         with_ee_constraint = False
         
         # Initialize the AssembledRobot
+        model_started = time.monotonic()
+        self.get_logger().info(f"PyBullet model loading: {robot_urdf_path}")
         AssembledRobot.__init__(
             self,
             robot_urdf_path,
@@ -86,6 +110,7 @@ class SimRobotController(Node, AssembledRobot):
             with_ee_constraint,
             self.physics_clent_id,
         )
+        self.get_logger().info(f"PyBullet model assembled in {time.monotonic() - model_started:.3f}s")
         self.reset_home()
         # Keep persistent IDs for every visual frame. The old implementation
         # drew the flange frames only once here, so they remained at the home
@@ -189,8 +214,11 @@ class SimRobotController(Node, AssembledRobot):
             Trigger, "io_teleop_reset_robot", self.reset_service_callback
         )
 
-        # Start physics only after all joints and home poses are assembled.
-        self.physics_stop = threading.Event()
+        if init_debug and not headless:
+            self.debug_timer = self.create_timer(1.0 / 60, self.update_debug_joints)
+
+    def _start_physics(self):
+        # Start physics after rendering has been restored successfully.
         def physics_sim():
             try:
                 while rclpy.ok() and not self.physics_stop.is_set():
@@ -206,14 +234,13 @@ class SimRobotController(Node, AssembledRobot):
                     rclpy.try_shutdown()
         self.physics_thread = threading.Thread(target=physics_sim, daemon=True)
         self.physics_thread.start()
-        if init_debug and not headless:
-            self.debug_timer = self.create_timer(1.0 / 60, self.update_debug_joints)
 
     def close_simulation(self):
         self.physics_stop.set()
-        self.physics_thread.join(timeout=2)
-        if p.isConnected(self.physics_clent_id):
-            p.disconnect(self.physics_clent_id)
+        if self.physics_thread is not None and self.physics_thread.is_alive():
+            self.physics_thread.join(timeout=2)
+        if p.isConnected(physicsClientId=self.physics_clent_id):
+            p.disconnect(physicsClientId=self.physics_clent_id)
 
     def reset_service_callback(self, request, response):
         print(

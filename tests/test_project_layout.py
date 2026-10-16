@@ -81,9 +81,8 @@ class ProjectLayoutTests(unittest.TestCase):
         javascript = (
             self.root / "middleware" / "core" / "static" / "app.js"
         ).read_text(encoding="utf-8")
-        config = yaml.safe_load(
-            (self.root / "middleware" / "config.yaml").read_text(encoding="utf-8")
-        )
+        from middleware.core.config import ConfigStore
+        config = ConfigStore(self.root / "middleware" / "config.yaml").load()
 
         self.assertIn("状态监控", html)
         self.assertIn('id="sourceVr"', html)

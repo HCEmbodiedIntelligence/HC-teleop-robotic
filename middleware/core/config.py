@@ -12,7 +12,7 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"host": "0.0.0.0", "port": 7876},
     "robot_profiles": {"root": "../adapters/robots", "active": "x1"},
-    "simulation": {"headless": False, "with_control": True, "debug_joints": False},
+    "simulation": {"headless": False, "with_control": True, "debug_joints": False, "startup_timeout_sec": 120},
     "ros": {
         "enabled": True,
         "domain_id": 14,
@@ -24,6 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "exoskeleton_topic": "/control/exoskeleton/joint_states",
             "output_topic": "/action/joint_states",
             "control_source_topic": "/control/source",
+            "hardware_ready_topic": "/status/hardware/ready",
         },
         "subscriptions": [],
         "recording": {
@@ -63,6 +64,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+ROBOT_MIDDLEWARE_DEFAULTS: dict[str, Any] = {
+    "camera": copy.deepcopy(DEFAULT_CONFIG["camera"]),
+    "safety": copy.deepcopy(DEFAULT_CONFIG["safety"]),
+    "ros": {
+        "subscriptions": [
+            {"topic": topic, "type": "sensor_msgs/msg/JointState", "enabled": True,
+             "outputs": ["websocket", "record"], "event_max_hz": 20.0}
+            for topic in ("/observation/joint_states", "/action/joint_states")
+        ],
+        "command_mux": copy.deepcopy(DEFAULT_CONFIG["ros"]["command_mux"]),
+    },
+    "vr": {"pose_timeout_ms": 600},
+}
+
+
 class ConfigError(ValueError):
     pass
 
@@ -94,6 +110,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     for key in ("headless", "with_control", "debug_joints"):
         if not isinstance(simulation.get(key), bool):
             raise ConfigError(f"simulation.{key} must be boolean")
+
+    timeout = simulation.get("startup_timeout_sec")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 600:
+        raise ConfigError("simulation.startup_timeout_sec must be between 0 and 600 seconds")
 
     profile_config = value.get("robot_profiles")
     if not isinstance(profile_config, dict):
@@ -338,37 +358,142 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _robot_middleware_fields(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        section: {key: copy.deepcopy(value[section][key]) for key in defaults}
+        for section, defaults in ROBOT_MIDDLEWARE_DEFAULTS.items()
+    }
+
+
+def validate_robot_middleware(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate a portable robot configuration, excluding host settings."""
+    if not isinstance(value, dict):
+        raise ConfigError("robot middleware configuration must be an object")
+    for section, settings in value.items():
+        if section not in ROBOT_MIDDLEWARE_DEFAULTS:
+            raise ConfigError(f"robot middleware cannot configure {section}")
+        if not isinstance(settings, dict):
+            raise ConfigError(f"robot middleware {section} must be an object")
+        unknown = set(settings) - set(ROBOT_MIDDLEWARE_DEFAULTS[section])
+        if unknown:
+            raise ConfigError(f"robot middleware cannot configure {section}.{sorted(unknown)[0]}")
+    mux = value.get("ros", {}).get("command_mux", {})
+    if not isinstance(mux, dict) or set(mux) - set(DEFAULT_CONFIG["ros"]["command_mux"]):
+        raise ConfigError("robot middleware ros.command_mux contains unsupported fields")
+    for key, setting in value.get("safety", {}).items():
+        if key != "stop_topic" and not isinstance(setting, bool):
+            raise ConfigError(f"safety.{key} must be boolean")
+    try:
+        normalized = validate_config(_merge(ROBOT_MIDDLEWARE_DEFAULTS, value))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigError(str(exc)) from exc
+    return _robot_middleware_fields(normalized)
+
+
+def _replace_files(payloads: dict[Path, bytes]) -> None:
+    """Stage every write before replacing files; restore prior files on failure."""
+    staged: dict[Path, str] = {}
+    previous: dict[Path, bytes | None] = {}
+    replaced: list[Path] = []
+    try:
+        for path, payload in payloads.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            previous[path] = path.read_bytes() if path.exists() else None
+            fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            staged[path] = name
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        for path, name in staged.items():
+            os.replace(name, path)
+            replaced.append(path)
+    except Exception:
+        for path in reversed(replaced):
+            original = previous[path]
+            if original is None:
+                path.unlink(missing_ok=True)
+            else:
+                fd, name = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(original)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(name, path)
+                finally:
+                    if os.path.exists(name):
+                        os.unlink(name)
+        raise
+    finally:
+        for name in staged.values():
+            if os.path.exists(name):
+                os.unlink(name)
+
+
 class ConfigStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
         self.value = copy.deepcopy(DEFAULT_CONFIG)
 
+    def _profile_middleware_path(self, value: dict[str, Any]) -> Path | None:
+        selection = value["robot_profiles"]
+        active = selection.get("active", "")
+        if not active:
+            return None
+        root = Path(selection["root"]).expanduser()
+        if not root.is_absolute():
+            root = self.path.parent / root
+        return root.resolve() / active / "middleware.yaml"
+
+    def apply_profile(self, value: dict[str, Any]) -> dict[str, Any]:
+        """Load the selected robot's settings without modifying either file."""
+        validated = validate_config(value)
+        path = self._profile_middleware_path(validated)
+        if path is None or not path.is_file():
+            return validated
+        try:
+            with path.open(encoding="utf-8") as stream:
+                robot = validate_robot_middleware(yaml.safe_load(stream))
+        except (OSError, yaml.YAMLError) as exc:
+            raise ConfigError(f"unable to read robot middleware {path}: {exc}") from exc
+        # Replace each robot-owned field, including complete lists and camera
+        # settings, so no settings from the previously selected robot survive.
+        for section, settings in robot.items():
+            if section in {"camera", "safety"}:
+                validated[section] = copy.deepcopy(settings)
+            else:
+                validated[section].update(copy.deepcopy(settings))
+        return validate_config(validated)
+
     def load(self) -> dict[str, Any]:
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as stream:
                 loaded = yaml.safe_load(stream) or {}
-            self.value = validate_config(loaded)
+            self.value = self.apply_profile(loaded)
         else:
-            self.value = validate_config({})
+            self.value = self.apply_profile({})
             self.save(self.value)
         return copy.deepcopy(self.value)
 
     def save(self, value: dict[str, Any]) -> dict[str, Any]:
         validated = validate_config(value)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.", dir=self.path.parent, text=True
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                yaml.safe_dump(
-                    validated, stream, allow_unicode=True, sort_keys=False
-                )
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp_name, self.path)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+        path = self._profile_middleware_path(validated)
+        previous_path = self._profile_middleware_path(self.value)
+        package_exists = path is not None and path.is_file()
+        switching = path != previous_path
+        if switching:
+            validated = self.apply_profile(validated)
+        host = copy.deepcopy(validated)
+        payloads: dict[Path, bytes] = {}
+        if package_exists:
+            robot = validate_robot_middleware(_robot_middleware_fields(validated))
+            if not switching:
+                payloads[path] = yaml.safe_dump(robot, allow_unicode=True, sort_keys=False).encode("utf-8")
+            for section, defaults in ROBOT_MIDDLEWARE_DEFAULTS.items():
+                for key in defaults:
+                    host[section].pop(key, None)
+        payloads[self.path] = yaml.safe_dump(host, allow_unicode=True, sort_keys=False).encode("utf-8")
+        _replace_files(payloads)
         self.value = validated
         return copy.deepcopy(validated)

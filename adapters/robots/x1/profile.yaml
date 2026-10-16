@@ -14,6 +14,7 @@ config_files:
 - controller_v23.yml
 - arm_teleop.yaml
 - vr_configs.yml
+- middleware.yaml
 link_count: 49                 # URDF Link 数量。
 joint_count: 48                # URDF Joint 总数（包含固定关节）。
 movable_joint_count: 29        # URDF 中可运动关节数量。

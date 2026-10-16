@@ -162,10 +162,10 @@ class SimulationService:
     async def _watch(self):
         waits = [asyncio.create_task(p.wait()) for p in self.processes]
         try:
-            done, _ = await asyncio.wait(waits, timeout=45, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(waits, timeout=self.options.get("startup_timeout_sec", 120), return_when=asyncio.FIRST_COMPLETED)
             if not done and self.state == 'running':
                 done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
-            code = next(iter(done)).result() if done else '启动超时（45 秒）' 
+            code = next(iter(done)).result() if done else f'启动超时（{self.options.get("startup_timeout_sec", 120)} 秒）'
             async with self.lock:
                 self.watcher = None
                 await self.stop()
@@ -233,7 +233,7 @@ def register_simulation_routes(app, service):
                 if not isinstance(value, dict) or set(value) != {'headless', 'with_control', 'debug_joints'}:
                     raise ConfigError('需要 headless、with_control、debug_joints 三个布尔选项')
                 proposed = copy.deepcopy(service.store.value)
-                proposed['simulation'] = value
+                proposed['simulation'].update(value)
                 saved = service.store.save(proposed)
                 return web.json_response(saved['simulation'])
             except (ConfigError, json.JSONDecodeError) as exc:

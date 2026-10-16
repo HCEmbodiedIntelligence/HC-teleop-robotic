@@ -15,6 +15,8 @@ from xml.etree import ElementTree
 
 import yaml
 
+from .config import ConfigError, ROBOT_MIDDLEWARE_DEFAULTS, validate_robot_middleware
+
 
 STANDARD_TOPICS = {
     "vr_frame": "/vrdata",
@@ -818,7 +820,7 @@ class RobotProfileManager:
                             "urdf": rel_urdf,
                             "primary_config": "controller_v23.yml" if controller_path.is_file() else "arm_teleop.yaml",
                             "config_files": [
-                                f for f in ("controller_v23.yml", "vr_configs.yml", "arm_teleop.yaml")
+                                f for f in ("controller_v23.yml", "vr_configs.yml", "arm_teleop.yaml", "middleware.yaml")
                                 if (path / f).is_file()
                             ],
                             "link_count": len(model.links),
@@ -861,7 +863,7 @@ class RobotProfileManager:
                         "urdf": rel_urdf,
                         "primary_config": "controller_v23.yml" if controller_path.is_file() else "vr_configs.yml",
                         "config_files": [
-                            f for f in ("controller_v23.yml", "vr_configs.yml", "arm_teleop.yaml")
+                            f for f in ("controller_v23.yml", "vr_configs.yml", "arm_teleop.yaml", "middleware.yaml")
                             if (path / f).is_file()
                         ],
                         "link_count": len(model.links),
@@ -927,6 +929,11 @@ class RobotProfileManager:
                 except Exception:
                     pass
         metadata = copy.deepcopy(metadata)
+        if (path / "middleware.yaml").is_file():
+            config_files = list(metadata.get("config_files", []))
+            if "middleware.yaml" not in config_files:
+                config_files.append("middleware.yaml")
+            metadata["config_files"] = config_files
         metadata["id"] = profile_id
         metadata["managed"] = bool(metadata.get("managed", metadata_path.is_file()))
         metadata["path"] = str(path)
@@ -983,7 +990,9 @@ class RobotProfileManager:
 
         model = UrdfModel(urdf_payload)
         source_config = _load_yaml(config_payload)
-        files: dict[str, dict[str, Any]] = {}
+        files: dict[str, dict[str, Any]] = {
+            "middleware.yaml": copy.deepcopy(ROBOT_MIDDLEWARE_DEFAULTS)
+        }
         if isinstance(source_config.get("arms"), (dict, list)) and (
             "robot" in source_config or "grippers" in source_config or "control" in source_config
         ):
@@ -1124,6 +1133,13 @@ class RobotProfileManager:
                     dest_file.parent.mkdir(parents=True, exist_ok=True)
                     dest_file.write_bytes(zf.read(info.filename))
 
+                middleware_file = temp_path / "middleware.yaml"
+                if middleware_file.exists():
+                    try:
+                        validate_robot_middleware(_load_yaml(middleware_file.read_bytes()))
+                    except ConfigError as exc:
+                        raise RobotProfileError(f"invalid middleware.yaml: {exc}") from exc
+
                 urdf_files = list(temp_path.glob("**/*.urdf"))
                 if not urdf_files:
                     for xml_file in temp_path.glob("**/*.xml"):
@@ -1147,7 +1163,7 @@ class RobotProfileManager:
 
                 yaml_files = [
                     f for f in (list(temp_path.glob("**/*.yml")) + list(temp_path.glob("**/*.yaml")))
-                    if f.name != "profile.yaml"
+                    if f.name not in {"profile.yaml", "middleware.yaml"}
                 ]
 
                 chosen_source_config = None
@@ -1188,6 +1204,8 @@ class RobotProfileManager:
 
                 model = UrdfModel(urdf_payload)
                 files: dict[str, dict[str, Any]] = {}
+                if not middleware_file.is_file():
+                    files["middleware.yaml"] = copy.deepcopy(ROBOT_MIDDLEWARE_DEFAULTS)
                 if source_kind == "teleop":
                     teleop, controller, io_config, summary = _normalize_teleop(
                         profile_id, chosen_source_config, model, rel_urdf_path
@@ -1254,7 +1272,7 @@ class RobotProfileManager:
                     "robot_name": model.robot_name,
                     "urdf": rel_urdf_path,
                     "primary_config": primary_config,
-                    "config_files": list(files),
+                    "config_files": list(dict.fromkeys([*files, "middleware.yaml"])),
                     "link_count": len(model.links),
                     "joint_count": len(model.joints),
                     "movable_joint_count": len(model.movable_joint_names),

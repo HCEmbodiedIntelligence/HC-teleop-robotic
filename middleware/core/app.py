@@ -674,7 +674,8 @@ def create_app(store: ConfigStore) -> web.Application:
                     except (ConfigError, ValueError, TypeError):
                         stop_required = False  # Let the config handler report validation errors.
                 elif request.path.endswith("/activate"):
-                    stop_required = request.match_info["profile_id"] != store.value["robot_profiles"].get("active")
+                    # Even the same ID may now contain newly imported assets/settings.
+                    stop_required = True
                 elif request.method == "DELETE":
                     stop_required = request.match_info["profile_id"] == simulation.profile_id
                 if simulation.processes and stop_required:

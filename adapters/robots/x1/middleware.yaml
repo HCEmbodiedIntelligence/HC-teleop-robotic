@@ -1,0 +1,300 @@
+camera:
+  enabled: true
+  source: ros
+  topic: /observation/cameras/head/color/compressed
+  custom_topic: ''
+  streams:
+  - id: head
+    name: 头部相机
+    topic: /observation/cameras/head/color/compressed
+    type: sensor_msgs/msg/CompressedImage
+    stereo: false
+    width: 640
+    height: 400
+    fps: 30
+    codec: H264
+    custom_topic: ''
+    enabled: true
+  width: 640
+  height: 400
+  fps: 30
+  codec: H264
+safety:
+  enabled: true
+  stop_on_startup: true
+  stop_topic: /control/emergency_stop
+ros:
+  subscriptions:
+  - topic: /observation/joint_states
+    description: ''
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 20.0
+  - topic: /action/joint_states
+    description: ''
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 20.0
+  - topic: /observation/hands/joint_states
+    description: ''
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/hands/triggers
+    description: ''
+    type: geometry_msgs/msg/PoseArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/cameras/head/color/compressed
+    description: ''
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    qos_reliability: best_effort
+  - topic: /observation/cameras/head/depth/compressed
+    description: ''
+    type: sensor_msgs/msg/CompressedImage
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    qos_reliability: best_effort
+  - topic: /status/base
+    description: ''
+    type: std_msgs/msg/String
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 0.0
+    event_max_hz: 10.0
+  - topic: /observation/left_arm/joint_states
+    description: 左机械臂实际关节反馈，按关节名称排列
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/right_arm/joint_states
+    description: 右机械臂实际关节反馈，按关节名称排列
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/waist/joint_states
+    description: 腰部实际关节反馈，X1 对应 leg_1、leg_2、zhi
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/left_arm/ee_pose
+    description: 左臂末端反馈位姿，由控制节点本地模型计算
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/right_arm/ee_pose
+    description: 右臂末端反馈位姿，由控制节点本地模型计算
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/left_arm/joint_states
+    description: 左机械臂最终下发的关节目标，按关节名称排列
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/right_arm/joint_states
+    description: 右机械臂最终下发的关节目标，按关节名称排列
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/waist/joint_states
+    description: 腰部最终关节控制目标，X1 对应 leg_1、leg_2、zhi
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/left_arm/ee_pose
+    description: 左臂末端目标位姿，与末端反馈使用相同参考坐标系
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/right_arm/ee_pose
+    description: 右臂末端目标位姿，与末端反馈使用相同参考坐标系
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/base/pose
+    description: 底盘实际位置与朝向，用于轨迹和移动距离分析
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/base/velocity
+    description: 底盘命令的结构化速度：前向、横向及偏航角速度
+    type: geometry_msgs/msg/TwistStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/headset/pose
+    description: 头显在 VR 跟踪坐标系中的位姿，不是机器人头部反馈
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /vrdata
+    description: 原始头显和双手位姿、按键、跟踪状态及 VR 时间戳
+    type: std_msgs/msg/String
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /clock
+    description: 仿真时钟，用于区分仿真时间与实际录制时间
+    type: rosgraph_msgs/msg/Clock
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /status/hardware/ready
+    description: 硬件就绪信号，供控制器判断是否允许下发命令
+    type: std_msgs/msg/Bool
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 100.0
+    event_max_hz: 20.0
+  - topic: /status/teleop
+    description: 遥操作状态，包括离合、反馈有效性及控制状态
+    type: std_msgs/msg/String
+    enabled: true
+    outputs:
+    - websocket
+    - record
+    max_hz: 10.0
+    event_max_hz: 0.0
+  - topic: /tf
+    description: 各坐标系之间的动态变换，用于位姿转换与回放
+    type: tf2_msgs/msg/TFMessage
+    enabled: false
+    outputs:
+    - record
+    max_hz: 20.0
+    event_max_hz: 0.0
+  - topic: /control/solver/joint_targets
+    description: 逆解控制器输出的关节目标，尚未经过最终命令仲裁
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /control/solver/ee_targets
+    description: 发送到求解器任务坐标系的末端目标位姿
+    type: geometry_msgs/msg/PoseArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/ee_poses
+    description: 双臂末端目标位姿，顺序为右臂、左臂
+    type: geometry_msgs/msg/PoseArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/ee_poses
+    description: 本地模型计算的双臂末端反馈位姿，顺序为右臂、左臂
+    type: geometry_msgs/msg/PoseArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/base/command
+    description: 最终底盘速度命令，顺序为偏航、前向、横向
+    type: std_msgs/msg/Float64MultiArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/left_hand/joint_states
+    description: 左手夹爪或灵巧手的关节控制目标
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/right_hand/joint_states
+    description: 右手夹爪或灵巧手的关节控制目标
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  command_mux:
+    enabled: true
+    source: vr
+    vr_topic: /control/vr/joint_states
+    exoskeleton_topic: /control/exoskeleton/joint_states
+    output_topic: /action/joint_states
+    control_source_topic: /control/source
+    hardware_ready_topic: /status/hardware/ready
+vr:
+  pose_timeout_ms: 600
