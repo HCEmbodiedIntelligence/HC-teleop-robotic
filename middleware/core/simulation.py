@@ -134,7 +134,8 @@ class SimulationService:
             env.pop(key, None)
         env.update(HC_ROBOT_CONFIG_ROOT=str(self.profiles.root), HC_ROBOT_NAME=name,
                    HC_MIDDLEWARE_CONFIG=str(self.store.path.resolve()), HC_TELEOP_MODE='sim',
-                   ROS_DOMAIN_ID=str(self.store.value['ros']['domain_id']), PYTHONUNBUFFERED='1',
+                   # Runtime honors the launcher's domain override; its children must too.
+                   ROS_DOMAIN_ID=os.environ.get('ROS_DOMAIN_ID', str(self.store.value['ros']['domain_id'])), PYTHONUNBUFFERED='1',
                    PYTHONPATH=f'{self.project}:{self.project / ".deps"}:' + env.get('PYTHONPATH', ''))
         command = ['/usr/bin/python3', str(self.project / 'simulation/general_sim_robot_control_node_ros2.py'),
                    '--profile', str(profile)]

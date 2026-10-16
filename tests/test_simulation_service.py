@@ -35,6 +35,7 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(os.environ)
         self.env.start()
         os.environ.pop('HC_EXTERNAL_STACK', None)
+        os.environ.pop('ROS_DOMAIN_ID', None)
         self.commands = []
         real_spawn = asyncio.create_subprocess_exec
 
@@ -79,6 +80,16 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service.stop()
         self.assertIsNotNone(process.returncode)
         self.assertEqual(self.service.state, 'stopped')
+
+    async def test_launcher_domain_override_reaches_simulation_and_controller(self):
+        os.environ['ROS_DOMAIN_ID'] = '229'
+        self.store.value['simulation']['with_control'] = True
+        self.assertEqual(self.store.value['ros']['domain_id'], 14)
+        async with self.service.lock:
+            await self.service.start()
+        await self.wait_state('running')
+        self.assertEqual(len(self.commands), 2)
+        self.assertTrue(all(env['ROS_DOMAIN_ID'] == '229' for _, env in self.commands))
 
     async def test_child_exit_is_reported_and_owned_peers_stop(self):
         self.store.value['simulation']['with_control'] = True
