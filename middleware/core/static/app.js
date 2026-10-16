@@ -1419,8 +1419,17 @@ async function simulationAction(action) {
 }
 
 function bindSimulationControls() {
+  const resetSimulationView=()=>{
+    $('#simulationViewEnabled').checked=false;
+    toggleSimulationView();
+  };
   $('#simulationViewEnabled').onchange=toggleSimulationView;
-  if(typeof window!=='undefined')window.addEventListener('pagehide',()=>{simulationViewAbort?.abort();simulationView?.dispose();});
+  resetSimulationView();
+  if(typeof window!=='undefined') {
+    window.addEventListener('pagehide',resetSimulationView);
+    // Browsers can restore checkbox state after initialization or from BFCache.
+    window.addEventListener('pageshow',resetSimulationView);
+  }
   for(const [id,action] of [['startSimulation','start'],['restartSimulation','restart'],['stopSimulation','stop']]) {
     $('#'+id).onclick=()=>simulationAction(action);
   }

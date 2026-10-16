@@ -5,16 +5,16 @@ const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname,'../middleware/core/static/simulation_viewer.js'),'utf8');
 const app = fs.readFileSync(path.join(__dirname,'../middleware/core/static/app.js'),'utf8');
-function fixture() {
+function fixture({restoredChecked=false}={}) {
   const elements = new Map();
   const get = key => {
-    if (!elements.has(key)) elements.set(key,{checked:false,hidden:true,textContent:'',disabled:false});
+    if (!elements.has(key)) elements.set(key,{checked:key==='#simulationViewEnabled'&&restoredChecked,hidden:true,textContent:'',disabled:false});
     return elements.get(key);
   };
-  const imports=[], instances=[], requests=[];
+  const imports=[], instances=[], requests=[], events=new Map();
   const context=vm.createContext({
     document:{querySelector:get,querySelectorAll:()=>[]},
-    window:{addEventListener:()=>{}},
+    window:{addEventListener:(name,handler)=>events.set(name,handler)},
     AbortController, setTimeout,clearTimeout,
     importView:async()=>{imports.push(1);return {mountSimulationViewer:options=>{
       const instance={options,states:[],disposed:false,dispose(){this.disposed=true;},updateState(value){this.states.push(value);}};
@@ -24,7 +24,7 @@ function fixture() {
   });
   vm.runInContext(app.replace("import('/static/simulation_viewer.js?v=1')",'importView()').replace(/init\(\);\s*$/,''),context);
   vm.runInContext('bindSimulationControls()',context);
-  return {get,context,imports,instances,requests};
+  return {get,context,imports,instances,requests,events};
 }
 
 test('default polling does not import graphics, mount a view or open a frame subscription',async()=>{
@@ -32,6 +32,26 @@ test('default polling does not import graphics, mount a view or open a frame sub
   assert.equal(f.get('#simulationViewEnabled').checked,false);
   assert.deepEqual(f.imports,[]);assert.deepEqual(f.instances,[]);
   assert.deepEqual(f.requests,['/api/simulation']);
+});
+test('refresh resets browser-restored checkbox without loading graphics',()=>{
+  const f=fixture({restoredChecked:true});
+  assert.equal(f.get('#simulationViewEnabled').checked,false);
+  assert.equal(f.get('#simulationView').hidden,true);
+  assert.deepEqual(f.imports,[]);
+  assert.deepEqual(f.instances,[]);
+});
+test('page lifecycle keeps restored checkbox and disposed view consistently off',async()=>{
+  const f=fixture();
+  f.get('#simulationViewEnabled').checked=true;await f.get('#simulationViewEnabled').onchange();
+  f.events.get('pagehide')();
+  assert.equal(f.instances[0].disposed,true);
+  assert.equal(f.get('#simulationViewEnabled').checked,false);
+  f.get('#simulationViewEnabled').checked=true; // Browser form-state restoration.
+  f.events.get('pageshow')();
+  assert.equal(f.get('#simulationViewEnabled').checked,false);
+  assert.equal(f.get('#simulationView').hidden,true);
+  assert.equal(f.imports.length,1);
+  assert.equal(f.instances.length,1);
 });
 test('independent view toggle opens and closes without saving options or restarting simulation',async()=>{
   const f=fixture();await vm.runInContext('loadSimulation()',f.context);

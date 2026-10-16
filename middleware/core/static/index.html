@@ -202,7 +202,7 @@
         <p class="muted">初始姿态和相机参数使用 ZIP 内的 vr_configs.yml。启动、重启会保存上述选项；停止仿真保留中间件运行。导入、切换机器人或修改仿真选项、ROS Domain ID 会停止当前仿真。</p>
         <div class="simulation-actions"><button class="primary" id="startSimulation" disabled>启动仿真</button><button id="restartSimulation" disabled>重启仿真</button><button class="danger" id="stopSimulation" disabled>停止仿真</button></div>
         <p id="simulationError" role="status"></p>
-        <label class="toggle"><input type="checkbox" id="simulationViewEnabled"><span></span>显示三维仿真视图</label>
+        <label class="toggle"><input type="checkbox" id="simulationViewEnabled" autocomplete="off"><span></span>显示三维仿真视图</label>
         <p class="muted">按需开启模型与末端、相机和目标位姿标记；关闭后释放显示资源，仿真和 VR 控制继续运行。</p>
         <section id="simulationView" hidden aria-label="三维仿真视图"><div id="simulationViewCanvas"></div></section>
         <p id="simulationViewStatus" class="muted" role="status">三维视图已关闭</p>
