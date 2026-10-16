@@ -105,10 +105,36 @@ def test_groups_follow_every_bundled_profile():
     from middleware.core.dataset_topics import load_joint_groups
     root = Path(__file__).parents[1]
     config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
-    for profile in ('x1', 'openarmx', 'baxter', 'fr3_duo', 'g1_dual_arm'):
+    profiles = sorted(path.parent.name for path in (root / 'adapters/robots').glob('*/arm_teleop.yaml'))
+    assert {'x1', 'openarmx'} <= set(profiles)
+    for profile in profiles:
         config['robot_profiles']['active'] = profile
         groups = load_joint_groups(config, root / 'middleware')
         source = yaml.safe_load((root / 'adapters/robots' / profile / 'arm_teleop.yaml').read_text())
         assert groups['left_arm'] == source['arms']['left']['joint_names']
         assert groups['right_arm'] == source['arms']['right']['joint_names']
         assert bool(groups.get('waist')) == bool(source.get('body', {}).get('waist_joint_names'))
+
+
+def test_groups_follow_profile_without_waist(tmp_path, monkeypatch):
+    from pathlib import Path
+    import yaml
+    from middleware.core.dataset_topics import load_joint_groups
+
+    root = Path(__file__).parents[1]
+    config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
+    profile = tmp_path / 'arms_only'
+    profile.mkdir()
+    source = {'arms': {
+        'left': {'joint_names': ['left_1', 'left_2']},
+        'right': {'joint_names': ['right_1', 'right_2']},
+    }, 'body': {'enabled': False, 'waist_joint_names': []}}
+    (profile / 'arm_teleop.yaml').write_text(yaml.safe_dump(source))
+    monkeypatch.setenv('HC_ROBOT_CONFIG_ROOT', str(tmp_path))
+    config['robot_profiles']['active'] = 'arms_only'
+
+    groups = load_joint_groups(config, root / 'middleware')
+    assert groups == {
+        'left_arm': ['left_1', 'left_2'],
+        'right_arm': ['right_1', 'right_2'],
+    }

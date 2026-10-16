@@ -89,11 +89,11 @@ class ArmTeleopConfigTests(unittest.TestCase):
         self.assertEqual(control["joint_state_topic"], "/observation/joint_states")
         self.assertEqual(control["command_topic"], "/control/vr/joint_states")
 
-    def test_disabled_waist_does_not_expose_controlled_joints(self):
+    def test_default_waist_matches_documented_joint_group(self):
         config = self.load_config()
         waist_names = config["body"]["waist_joint_names"]
-        self.assertFalse(config["body"]["enabled"])
-        self.assertEqual(waist_names, [])
+        self.assertTrue(config["body"]["enabled"])
+        self.assertEqual(waist_names, ["leg_1", "leg_2", "zhi"])
 
     def test_controller_positive_z_maps_to_robot_forward(self):
         mapping = np.asarray(self.load_config()["control"]["axis_mapping"])

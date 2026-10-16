@@ -8,6 +8,33 @@ from middleware.core.config import ConfigError, ConfigStore, validate_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_jetson_x1_config_connects_public_hardware_interfaces(self):
+        root = Path(__file__).resolve().parents[1]
+        store = ConfigStore(root / "middleware" / "config.x1_jetson.yaml")
+        config = store.load()
+
+        self.assertEqual(config["robot_profiles"]["active"], "x1")
+        profile_root = (store.path.parent / config["robot_profiles"]["root"]).resolve()
+        self.assertTrue((profile_root / "x1" / "controller_v23.yml").is_file())
+        self.assertTrue(config["safety"]["stop_on_startup"])
+        self.assertFalse(config["ros"]["recording"]["enabled"])
+        self.assertEqual(config["ros"]["domain_id"], 14)
+        self.assertEqual(config["ros"]["command_mux"]["output_topic"], "/action/joint_states")
+
+        streams = config["camera"]["streams"]
+        self.assertEqual(len(streams), 1)
+        self.assertEqual(streams[0]["topic"], "/observation/cameras/head/color/compressed")
+        self.assertFalse(streams[0]["stereo"])
+        subscriptions = {item["topic"]: item for item in config["ros"]["subscriptions"]}
+        self.assertEqual(
+            subscriptions[streams[0]["topic"]]["type"],
+            "sensor_msgs/msg/CompressedImage",
+        )
+        self.assertIn("record", subscriptions[streams[0]["topic"]]["outputs"])
+        for topic in ("/observation/joint_states", "/action/joint_states"):
+            self.assertTrue(subscriptions[topic]["enabled"])
+            self.assertIn("websocket", subscriptions[topic]["outputs"])
+
     def test_image_transport_qos_is_preserved_and_validated(self):
         item = {"topic": "/camera", "type": "sensor_msgs/msg/Image", "qos_reliability": "reliable"}
         value = validate_config({"ros": {"subscriptions": [item]}})

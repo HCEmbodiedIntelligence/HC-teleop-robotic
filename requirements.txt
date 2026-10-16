@@ -2,6 +2,8 @@ aiohttp>=3.8,<4
 PyYAML>=5.4
 mcap>=1.1,<2
 numpy>=1.24,<2
+# Keep the ROS/PyBullet NumPy 1.x environment separate from OpenCV's NumPy 2.x releases.
+opencv-python>=4.8,<4.12
 # The teleop adapter uses a headless PyBullet shadow model for FK, frame
 # conversion and optional collision checks in both sim and real-robot modes.
 pybullet==3.2.6

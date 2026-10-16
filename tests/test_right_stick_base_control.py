@@ -1,10 +1,12 @@
 """Unit tests for right hand controller joystick chassis yaw rotation."""
 import os
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import yaml
 
 try:
     import rclpy
@@ -28,9 +30,38 @@ class RightStickBaseControlTests(unittest.TestCase):
     def test_right_stick_yaw_control_with_and_without_left_clutch(self):
         """Test right stick yaw rotation when left clutch is held and independently without clutch."""
         path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
-        with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-            node = RobotArmTeleopNode(str(path), backend="v23")
+        config = yaml.safe_load(path.read_text())
+        # This case exercises the supported legacy joystick mode, independently
+        # of the stock head-pose base follower and enabled waist.
+        config["body"].update({
+            "enabled": False, "waist_joint_names": [],
+            "joint_lower": [], "joint_upper": [],
+            "max_angular_velocity": 0.45,
+            "max_linear_velocity": 0.35,
+            "max_lateral_velocity": 0.25,
+            "stick_deadzone": 0.08,
+            "stick_x_axis": 2,
+            "stick_y_axis": 3,
+            "stick_forward_direction": -1.0,
+            "stick_lateral_direction": -1.0,
+            "right_stick_yaw_enabled": True,
+            "right_stick_yaw_axis": 2,
+            "right_stick_yaw_deadzone": 0.08,
+            "right_stick_yaw_direction": -1.0,
+        })
+        config["body"]["head_pose_base"]["enabled"] = False
+        # Relative model paths still resolve from the bundled profile directory.
+        robot_urdf = Path(config["robot"]["urdf_path"])
+        if not robot_urdf.is_absolute():
+            config["robot"]["urdf_path"] = str((path.parent / robot_urdf).resolve())
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            legacy_path = Path(temporary_directory) / "arm_teleop.yaml"
+            legacy_path.write_text(yaml.safe_dump(config))
+            with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
+                node = RobotArmTeleopNode(str(legacy_path), backend="v23")
         try:
+            self.assertIsNone(node.head_base_follower)
+            self.assertTrue({"leg_1", "leg_2", "zhi"}.isdisjoint(node.controlled_names))
             node.hardware_ready = True
             node.joint_state.update(node.initial_joints)
             node.last_command.update(node.initial_joints)
@@ -136,7 +167,7 @@ class RightStickBaseControlTests(unittest.TestCase):
             yaw, fwd, lat = latest
             self.assertAlmostEqual(yaw, 0.45, places=3)
             self.assertGreater(fwd, 0.2)  # Forward translation is active!
-            self.assertFalse(node.body.active)  # Shared body config keeps waist disabled.
+            self.assertFalse(node.body.active)  # The explicit legacy fixture keeps the waist disabled.
 
             # 5. Deadzone check: right stick inside deadzone (< 0.08) produces 0 yaw
             published_base_commands.clear()

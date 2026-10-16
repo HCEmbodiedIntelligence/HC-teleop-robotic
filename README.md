@@ -56,6 +56,30 @@ cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
+Jetson 首次部署时，先安装 Conda，再运行 `./install.sh`。默认 Conda 路径为
+`~/miniconda3/bin/conda`；其他安装位置通过 `CONDA_BIN` 指定。安装脚本会创建
+独立的 `~/miniconda3/envs/hc-teleop-controller` 环境，提供带 CasADi 绑定的
+Pinocchio 3.7 和 CasADi 3.7；系统 Python 中只有 Pinocchio 并不足以启动逆解。
+自定义环境位置时，安装和运行都需要设置相同的 `HC_CONTROLLER_PREFIX`。
+安装完成后先执行以下只读检查：
+
+```bash
+./run_generic_controller.sh --check
+```
+
+同时将 `HC_X1` 更新到提供 `/action`、`/observation`、`/control`、`/status`
+接口的版本；旧 `/hc_teleop` 接口不能直接连接当前遥操控制器。更新硬件部署时
+保留机器专用的相机配置。遥操测试期间停止其他关节命令源，包括 HoloBrain
+HTTP 控制网关；两个项目使用相同的 `ROS_DOMAIN_ID`。
+
+Jetson X1 使用独立配置连接真实头部相机、关节和手部反馈，避免沿用默认配置
+中的 Isaac 双目相机话题。该配置不默认录制，也不依赖未安装的 D405 相机。
+启动后先在 Dashboard 确认硬件就绪、图像和反馈正常，再解除软件停止：
+
+```bash
+ROS_DOMAIN_ID=14 ./run.sh teleop --config middleware/config.x1_jetson.yaml
+```
+
 根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择无窗口模式、关节调试和是否同时启动 IK/VR 控制。窗口显示在运行中间件的服务器桌面；无桌面环境请选择无窗口模式。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
 
 显式 `./run.sh sim` 仍启动完整仿真，`./run.sh teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制；这两种方式由命令行管理进程，不允许从网页另起一套仿真。网页管理模式下，中间件退出会清理其启动的仿真与控制进程。
