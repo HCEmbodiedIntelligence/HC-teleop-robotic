@@ -1,4 +1,4 @@
-"""Launch mode must never override body control parameters."""
+"""Share body calibration while honoring the configured base feedback mode."""
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -23,8 +23,14 @@ def test_sim_and_teleop_load_the_same_body_parameters():
             try:
                 assert node.body_config == config['body']
                 assert node.body.joint_names == config['body']['waist_joint_names']
-                assert node.head_base_follower is not None
-                assert node.base_pose_sub.topic_name == '/observation/base/pose'
+                if mode == 'sim':
+                    assert node.head_base_mode == 'pose'
+                    assert node.head_base_follower is not None
+                    assert node.base_pose_sub.topic_name == '/observation/base/pose'
+                else:
+                    assert node.head_base_mode == 'yaw_velocity'
+                    assert node.head_base_follower is None
+                    assert not hasattr(node, 'base_pose_sub')
             finally:
                 node.destroy_node()
     finally:

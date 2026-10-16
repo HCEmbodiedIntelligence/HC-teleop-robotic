@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -235,12 +236,26 @@ class RobotArmTeleopNode(Node):
         self.neck_reference_head: tuple[tuple[float, float, float], tuple[float, float, float, float]] | None = None
         self.base_yaw_alignment_offset: float = 0.0
         pose_base_config = self.body_config.get("head_pose_base", {})
+        teleop_head_base_mode = pose_base_config.get("teleop_mode", "pose")
+        if teleop_head_base_mode not in {"pose", "yaw_velocity"}:
+            raise ValueError("body.head_pose_base.teleop_mode must be pose or yaw_velocity")
+        self.head_base_mode = (
+            teleop_head_base_mode if os.environ.get("HC_TELEOP_MODE") == "teleop"
+            and pose_base_config.get("enabled", False) else "pose"
+        )
+        self.head_velocity_max_angular = float(
+            pose_base_config.get("velocity_max_angular_velocity", 0.2)
+        )
+        if not math.isfinite(self.head_velocity_max_angular) or self.head_velocity_max_angular <= 0:
+            raise ValueError("head_pose_base.velocity_max_angular_velocity must be positive and finite")
+        self.head_velocity_reference = None
+        self.last_head_velocity_time = None
         self.head_base_follower = (
             HeadBasePoseFollower(
                 pose_base_config,
                 self.control.get("head_axis_mapping", self.control["axis_mapping"]),
                 self.body_config.get("yaw_direction", 1.0),
-            ) if pose_base_config.get("enabled", False) else None
+            ) if pose_base_config.get("enabled", False) and self.head_base_mode == "pose" else None
         )
         self.base_pose_feedback = None
         self.base_pose_stamp = float("-inf")
@@ -934,6 +949,9 @@ class RobotArmTeleopNode(Node):
         arm.reseed_target_orientation = None
 
     def _release_all(self, *, send_base_zero: bool) -> None:
+        self.head_velocity_reference = None
+        self.last_head_velocity_time = None
+        self.head_base_state = "idle"
         if getattr(self, "head_base_follower", None) is not None:
             self.head_base_follower.reset()
             self.head_base_state = "idle"
@@ -2180,7 +2198,11 @@ class RobotArmTeleopNode(Node):
         # Translation and yaw assist must use the same headset-to-chassis map.
         # The neck's FK uses joint/optical-axis conventions and can have the
         # opposite yaw sign; it is not the headset's movement reference.
-        reference = self.neck_reference_head or self.body.reference_head
+        velocity_mode = getattr(self, "head_base_mode", "pose") == "yaw_velocity"
+        reference = (self.head_velocity_reference if velocity_mode else
+                     self.neck_reference_head or self.body.reference_head)
+        if velocity_mode and reference is None:
+            return 0.0
         if self.body.head_pose is not None and reference is not None:
             if self._monotonic() - self.body.head_stamp > float(self.control["pose_timeout"]):
                 return 0.0
@@ -2383,7 +2405,8 @@ class RobotArmTeleopNode(Node):
         if not bool(self.body_config.get("head_orientation_assist_enabled", True)):
             return 0.0
 
-        align_on_move_only = bool(
+        velocity_mode = getattr(self, "head_base_mode", "pose") == "yaw_velocity"
+        align_on_move_only = not velocity_mode and bool(
             self.body_config.get("head_orientation_align_on_move_only", True)
         )
         move_threshold = float(
@@ -2394,7 +2417,8 @@ class RobotArmTeleopNode(Node):
             return 0.0
 
         body = self.body
-        ref_head = self.neck_reference_head or body.reference_head
+        ref_head = (self.head_velocity_reference if velocity_mode else
+                    self.neck_reference_head or body.reference_head)
         if body.head_pose is None or ref_head is None:
             return 0.0
         if now - body.head_stamp > float(self.control["pose_timeout"]):
@@ -2421,6 +2445,8 @@ class RobotArmTeleopNode(Node):
         max_angular_velocity = float(
             self.body_config.get("max_angular_velocity", 0.45)
         )
+        if velocity_mode:
+            max_angular_velocity = min(max_angular_velocity, self.head_velocity_max_angular)
         yaw_direction = float(self.body_config.get("yaw_direction", 1.0))
 
         return head_yaw_orientation_velocity(
@@ -2501,6 +2527,22 @@ class RobotArmTeleopNode(Node):
             else:
                 self._publish_head_base_pose(now, left_clutch_active)
             return
+        velocity_mode = getattr(self, "head_base_mode", "pose") == "yaw_velocity"
+        if velocity_mode:
+            head_fresh = (self.body.head_pose is not None and
+                          now - self.body.head_stamp <= float(self.control["pose_timeout"]))
+            if not left_clutch_active or not head_fresh or not track_head_yaw:
+                self.head_velocity_reference = None
+                self.last_head_velocity_time = None
+                self.base_yaw_alignment_offset = 0.0
+                self.head_base_state = "idle" if not left_clutch_active else "waiting_head_pose"
+                track_head_yaw = False
+            elif self.head_velocity_reference is None:
+                # Reference only the new clutch press; never reuse an old neck zero.
+                self.head_velocity_reference = self.body.head_pose
+                self.base_yaw_alignment_offset = 0.0
+                self.last_head_velocity_time = now
+                self.head_base_state = "yaw_velocity"
         cmd_vel_user = self._compute_user_base_velocity(
             now, left_clutch_active=left_clutch_active
         )
@@ -2522,6 +2564,8 @@ class RobotArmTeleopNode(Node):
         max_linear = float(self.body_config.get("max_linear_velocity", 0.35))
         max_lateral = float(self.body_config.get("max_lateral_velocity", 0.25))
         max_angular = float(self.body_config.get("max_angular_velocity", 0.45))
+        if velocity_mode:
+            max_angular = min(max_angular, self.head_velocity_max_angular)
 
         yaw, forward, lateral = blend_three_layer_base_velocity(
             cmd_vel_user=cmd_vel_user,
@@ -2535,8 +2579,13 @@ class RobotArmTeleopNode(Node):
         )
 
         dt = 1.0 / float(self.control["rate_hz"])
+        if velocity_mode:
+            dt = (min(max(now - self.last_head_velocity_time, 0.0), float(self.control["pose_timeout"]))
+                  if self.last_head_velocity_time is not None else 0.0)
+            self.last_head_velocity_time = now if self.head_velocity_reference is not None else None
         if abs(yaw) > 1e-4:
-            # Store alignment in mapped-head coordinates, not chassis coordinates.
+            # Command-integrated alignment is only an estimate, never measured odometry.
+            # Store it in mapped-head coordinates, not chassis coordinates.
             self.base_yaw_alignment_offset = self._wrap_angle(
                 self.base_yaw_alignment_offset
                 + yaw * dt * float(self.body_config.get("yaw_direction", 1.0))
@@ -2916,6 +2965,8 @@ class RobotArmTeleopNode(Node):
             self.last_command.update(neck_command)
 
         if not base_allowed and self.collision_blocked:
+            self.head_velocity_reference = None
+            self.last_head_velocity_time = None
             if getattr(self, "head_base_follower", None) is not None:
                 self.head_base_follower.reset()
                 self.head_base_state = "collision_blocked"
@@ -3061,6 +3112,8 @@ class RobotArmTeleopNode(Node):
             any_active = True
 
         if not base_allowed and self.collision_blocked:
+            self.head_velocity_reference = None
+            self.last_head_velocity_time = None
             if getattr(self, "head_base_follower", None) is not None:
                 self.head_base_follower.reset()
                 self.head_base_state = "collision_blocked"
@@ -3270,7 +3323,9 @@ class RobotArmTeleopNode(Node):
                 "hardware_ready": self.hardware_ready,
             },
             "head_base_pose": {
-                "enabled": getattr(self, "head_base_follower", None) is not None,
+                "mode": getattr(self, "head_base_mode", "pose"),
+                "enabled": (getattr(self, "head_base_follower", None) is not None or
+                            getattr(self, "head_base_mode", "pose") == "yaw_velocity"),
                 "state": getattr(self, "head_base_state", "idle"),
                 "target": self.head_base_follower.target if getattr(self, "head_base_follower", None) else None,
             },

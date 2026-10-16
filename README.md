@@ -85,6 +85,14 @@ ROS_DOMAIN_ID=14 ./run.sh teleop --config middleware/config.x1_jetson.yaml
 ROS 域，例如 `ROS_DOMAIN_ID=229 ./run.sh middleware`；网页启动的仿真和控制器
 会继承该域。仿真窗口显示在中间件的 `DISPLAY` 所指向的桌面。
 
+X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/base/pose`。
+`run.sh teleop` 使用 `body.head_pose_base.teleop_mode: yaw_velocity`：按住左 Grip
+建立头显参考，转头后以限速角速度近似跟随，松开 Grip 或头显数据超时停止头显转向。
+估计的转向量来自已发速度命令积分，不是底盘实测角度；打滑、驱动限速和丢包会产生误差。
+`velocity_max_angular_velocity: 0.2` 与 HC_X1 的 `max_vw` 一致；调整硬件限速时需同步。
+该模式不使用无效定位数据，也不执行头显水平位移跟随；原有摇杆控制仍保留。
+仿真继续使用实测位姿闭环；真机提供有效位姿后可将 `teleop_mode` 改为 `pose`。
+
 根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择无窗口模式、关节调试和是否同时启动 IK/VR 控制。窗口显示在运行中间件的服务器桌面；无桌面环境请选择无窗口模式。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
 
 显式 `./run.sh sim` 仍启动完整仿真，`./run.sh teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制；这两种方式由命令行管理进程，不允许从网页另起一套仿真。网页管理模式下，中间件退出会清理其启动的仿真与控制进程。

@@ -75,10 +75,14 @@ body:
   visualization_head_link: camera_head
   base_command_topic: /action/base/command
   base_command_mode: velocity  # 发布 [yaw, forward, lateral] 速度命令。
-  # 相对位姿闭环：按住左 Grip 建立参考；松开停止并清除参考。
-  # 开启时左摇杆优先平移，回中重新建立头显参考；不叠加旧朝向/伸展辅助。
+  # 仿真相对位姿闭环：按住左 Grip 建立参考；松开停止并清除参考。
+  # 闭环时左摇杆优先平移，回中重新建立头显参考；不叠加旧朝向/伸展辅助。
   head_pose_base:
     enabled: true
+    # 真机只有速度接口；无定位时不启用实测位姿闭环。仿真仍使用 pose。
+    # 速度转向只在左 Grip 内有效，命令积分只近似角度，不代表实测里程计。
+    teleop_mode: yaw_velocity
+    velocity_max_angular_velocity: 0.2  # 与 HC_X1 底盘 max_vw 保持一致 (rad/s)
     feedback_topic: /observation/base/pose
     feedback_timeout: 0.3
     position_scale: 1.0       # 头显水平移动 1 m -> 底盘目标移动 1 m
