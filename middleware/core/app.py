@@ -794,9 +794,9 @@ def create_app(store: ConfigStore) -> web.Application:
                         await ws.send_json(envelope("pong", "middleware", {}))
                     elif data.get("type") == "simulation_viewer":
                         if data.get("data", {}).get("enabled", True):
-                            simulation.viewers.add(ws)
+                            simulation.set_viewer(ws, True, data.get("data", {}).get("render_mode", "native"))
                         else:
-                            simulation.viewers.discard(ws)
+                            simulation.set_viewer(ws, False)
                         await ws.send_json({"type": "simulation_viewer_ack", "data": {"registered": ws in simulation.viewers}})
                     elif data.get("kind") == "ros_publish":
                         accepted = bool(
@@ -812,7 +812,7 @@ def create_app(store: ConfigStore) -> web.Application:
                     break
         finally:
             runtime.websockets.discard(ws)
-            simulation.viewers.discard(ws)
+            simulation.set_viewer(ws, False)
         return ws
 
     def camera_for_request(request: web.Request) -> tuple[str, CameraService | None]:
@@ -1270,7 +1270,7 @@ def create_app(store: ConfigStore) -> web.Application:
                 try:
                     await asyncio.wait_for(viewer.send_json(event), timeout=0.5)
                 except (ConnectionError, RuntimeError, asyncio.TimeoutError):
-                    simulation.viewers.discard(viewer)
+                    simulation.set_viewer(viewer, False)
                     try:
                         await asyncio.wait_for(viewer.close(), timeout=0.2)
                     except (ConnectionError, RuntimeError, asyncio.TimeoutError):

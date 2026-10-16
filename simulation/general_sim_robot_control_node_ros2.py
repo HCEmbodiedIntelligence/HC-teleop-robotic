@@ -30,7 +30,8 @@ from robot_utils.utils import (
 
 
 class SimRobotController(Node, AssembledRobot):
-    def __init__(self, config_path, init_debug=True, headless=False, stream_viewer=False):
+    def __init__(self, config_path, init_debug=True, headless=False, stream_viewer=False,
+                 viewer_demand_file=None):
         # Initialize ROS2 node
         Node.__init__(self, "sim_robot_controller_node")
 
@@ -63,6 +64,7 @@ class SimRobotController(Node, AssembledRobot):
         self.visualization_enabled = bool(init_debug and not headless)
         self.target_ee_poses = None
         self.stream_viewer = stream_viewer
+        self.viewer_demand_file = viewer_demand_file
         self.next_viewer_frame = 0.0
         self.get_logger().info(f"PyBullet connect finished in {time.monotonic() - started:.3f}s")
         try:
@@ -303,12 +305,64 @@ class SimRobotController(Node, AssembledRobot):
         joint_state.position = [state[0] for state in states]
         self.joint_state_pub.publish(joint_state)
         self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
-        if getattr(self, 'stream_viewer', False) and time.monotonic() >= self.next_viewer_frame:
+        demand_file = getattr(self, 'viewer_demand_file', None)
+        viewer_enabled = getattr(self, 'stream_viewer', False) or (
+            demand_file is not None and os.path.isfile(demand_file))
+        if viewer_enabled and time.monotonic() >= self.next_viewer_frame:
             with self.bullet_lock:
                 root_pose = p.getBasePositionAndOrientation(self.robot_id, physicsClientId=self.physics_clent_id)
-            frame = {'positions': dict(zip(joint_state.name, joint_state.position)), 'base_pose': root_pose}
+                markers = self._viewer_markers(root_pose)
+            frame = {'positions': dict(zip(joint_state.name, joint_state.position)),
+                     'base_pose': root_pose, 'markers': markers}
             print('HC_SIMULATION_FRAME ' + json.dumps(frame, separators=(',', ':'), allow_nan=False), flush=True)
             self.next_viewer_frame = time.monotonic() + 1.0 / 30.0
+
+    def _viewer_markers(self, root_pose):
+        """Read world-space marker poses only when a viewer requests a frame.
+
+        This method runs under ``bullet_lock`` and uses no GUI/debug RPCs.
+        Head tracking messages use the root COM frame, while arm targets use
+        their configured controller base link frames.
+        """
+        def serializable(pose):
+            return [[float(value) for value in component] for component in pose]
+
+        markers = {'base': serializable(self.base.pose)}
+        targets = self.target_ee_poses
+        bases = self.configs.get('controller_indices', {}).get('base', [])
+        for index, arm in enumerate(self.arms):
+            side = ('right', 'left')[index] if index < 2 else str(index)
+            markers['ee_actual_' + side] = serializable(arm.abs_ee_pose)
+            if targets is not None and index < len(targets) and index < len(bases):
+                base_index = bases[index]
+                base_pose = (p.getLinkState(
+                    self.robot_id, base_index, computeForwardKinematics=True,
+                    physicsClientId=self.physics_clent_id)[4:6]
+                    if base_index != -1 else self.base.pose)
+                markers['ee_target_' + side] = serializable(multiply_transforms(
+                    base_pose, pose_msg_to_list(targets[index])))
+
+        teleop = self.teleop_config
+        body = teleop.get('body', {})
+        camera_name = (body.get('visualization_head_link') or body.get('camera_link')
+                       or teleop.get('neck', {}).get('camera_link') or 'camera_head')
+        camera_index = self.link_name2id_dict.get(camera_name)
+        if camera_index is not None:
+            camera_pose = (p.getLinkState(
+                self.robot_id, camera_index, computeForwardKinematics=True,
+                physicsClientId=self.physics_clent_id)[4:6]
+                if camera_index != -1 else root_pose)
+            markers['camera_actual'] = serializable(camera_pose)
+        if self.head_tracking_poses is not None:
+            if time.monotonic() - self.head_tracking_stamp <= 0.5:
+                if 'camera_actual' not in markers:
+                    markers['camera_actual'] = serializable(multiply_transforms(
+                        root_pose, self.head_tracking_poses[0]))
+                markers['camera_target'] = serializable(multiply_transforms(
+                    root_pose, self.head_tracking_poses[1]))
+            else:
+                self.head_tracking_poses = None
+        return markers
 
     def _draw_visualizations(self):
         """Optional markers at 5 Hz in the physics worker, outside ROS callbacks."""
@@ -361,7 +415,7 @@ class SimRobotController(Node, AssembledRobot):
 
     def target_ee_callback(self, msg):
         # Visualization never competes with incoming control on the ROS executor.
-        if self.visualization_enabled and len(msg.poses) >= len(self.arms):
+        if len(msg.poses) >= len(self.arms):
             self.target_ee_poses = list(msg.poses)
 
     def _draw_target_ee(self):
@@ -586,6 +640,7 @@ def main(args=None):
     )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--stream-viewer", action="store_true")
+    parser.add_argument("--viewer-demand-file", help="Stream frames only while this file exists")
 
     arguments, ros_arguments = parser.parse_known_args(args)
     # One PyBullet ROS publisher per user/domain, including CLI launches.
@@ -616,6 +671,7 @@ def main(args=None):
             init_debug=arguments.init_debug,
             headless=arguments.headless,
             stream_viewer=arguments.stream_viewer,
+            viewer_demand_file=arguments.viewer_demand_file,
         )
         print("HC_SIMULATION_READY", flush=True)
         rclpy.spin(robot)

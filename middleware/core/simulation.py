@@ -9,13 +9,16 @@ import os
 from pathlib import Path
 import signal
 import uuid
+import math
+import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 import yaml
 from aiohttp import web
 
 from .config import ConfigError
 from .runtime_mode import configure_environment
-from .robot_profiles import RobotProfileError, UrdfModel
+from .robot_profiles import RobotProfileError, UrdfModel, validate_profile_id
 
 
 class SimulationError(ValueError):
@@ -38,7 +41,29 @@ class SimulationService:
         self.log_dir = None
         self.viewers = set()
         self.latest_frame = None
-        self.display_mode = "server"
+        self.display_mode = "web"
+        self.web_viewers = set()
+        self.demand_file = None
+        self.viewer_frames = 0
+
+    def set_viewer(self, viewer, enabled, render_mode='native'):
+        if enabled:
+            self.viewers.add(viewer)
+            if render_mode == 'web':
+                self.web_viewers.add(viewer)
+        else:
+            self.viewers.discard(viewer)
+            self.web_viewers.discard(viewer)
+        self._sync_viewer_demand()
+
+    def _sync_viewer_demand(self):
+        if self.demand_file is not None:
+            if self.viewers and self.state in ('starting', 'running'):
+                self.demand_file.touch(exist_ok=True)
+            else:
+                self.demand_file.unlink(missing_ok=True)
+        if not self.viewers:
+            self.latest_frame = None
 
     def status(self):
         active = self.store.value['robot_profiles'].get('active', '')
@@ -71,6 +96,7 @@ class SimulationService:
                     ros_domain_id=int(os.environ.get('ROS_DOMAIN_ID', self.store.value['ros']['domain_id'])),
                     hardware_domain_id=os.environ.get('HC_HARDWARE_DOMAIN_ID'),
                     display_mode=self.display_mode, viewer_clients=len(self.viewers),
+                    web_viewer_clients=len(self.web_viewers), viewer_frames=self.viewer_frames,
                     available=not reason, unavailable_reason=reason,
                     pids=[p.pid for p in self.processes if p.returncode is None])
 
@@ -81,8 +107,11 @@ class SimulationService:
                 break
             text = line.decode(errors='replace').rstrip()
             if text.startswith('HC_SIMULATION_FRAME '):
+                if not self.viewers:
+                    continue
                 try:
                     self.latest_frame = json.loads(text.split(' ', 1)[1])
+                    self.viewer_frames += 1
                 except (ValueError, TypeError):
                     pass
                 continue
@@ -136,16 +165,16 @@ class SimulationService:
                         raise SimulationError(f'当前机器人包缺少 {filename}')
         except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
             raise SimulationError(f'机器人仿真配置无效：{exc}') from exc
-        native_viewer = bool(self.viewers) and not options['headless']
-        if not options['headless'] and not native_viewer and not os.environ.get('DISPLAY'):
-            raise SimulationError('没有本机显示客户端或桌面 DISPLAY；请先在本机运行 tools/runtime/simulation_viewer.py，或选择无窗口模式。')
+        native_viewer = bool(self.viewers - self.web_viewers) and not options['headless']
         self.profile_id, self.options = name, options
         self.latest_frame = None
-        self.display_mode = 'local_viewer' if native_viewer else ('headless' if options['headless'] else 'server')
+        self.display_mode = 'local_viewer' if native_viewer else 'web'
         self.state, self.error = 'starting', ''
         self.logs.clear()
         self.log_dir = self.project / 'runtime/simulation_logs' / uuid.uuid4().hex
         self.log_dir.mkdir(parents=True, mode=0o700)
+        self.demand_file = self.log_dir / "viewer.enabled"
+        self._sync_viewer_demand()
         domain_id = configure_environment(self.store.value['ros']['domain_id'])
         env = os.environ.copy()
         for key in ('HC_CONTROLLER_CONFIG', 'HC_ARM_TELEOP_CONFIG'):
@@ -157,10 +186,9 @@ class SimulationService:
                    PYTHONPATH=f'{self.project}:{self.project / ".deps"}:' + env.get('PYTHONPATH', ''))
         command = ['/usr/bin/python3', str(self.project / 'simulation/general_sim_robot_control_node_ros2.py'),
                    '--profile', str(profile)]
-        if options['headless'] or native_viewer:
-            command.append('--headless')
-        if native_viewer:
-            command.append('--stream-viewer')
+        # Browser display is independent from physics: every Dashboard simulator
+        # runs DIRECT, and produces frames only while a viewer is subscribed.
+        command += ['--headless', '--viewer-demand-file', str(self.demand_file)]
         if options['debug_joints']:
             command.append('--init_debug')
         command += ['--ros-args']
@@ -227,12 +255,60 @@ class SimulationService:
         self.processes.clear()
         self.readers.clear()
         self.state = 'stopped'
+        self._sync_viewer_demand()
+        self.latest_frame = None
         return self.status()
 
 
 def register_simulation_routes(app, service):
     async def status(_request):
         return web.json_response(service.status())
+
+    def asset_path(profile_id, relative):
+        root = (service.profiles.root / validate_profile_id(profile_id)).resolve()
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise web.HTTPForbidden(text='asset escapes robot package') from exc
+        if path.suffix.lower() not in {'.urdf', '.stl', '.obj', '.dae', '.png', '.jpg', '.jpeg', '.mtl', '.glb', '.gltf', '.bin'} or not path.is_file():
+            raise web.HTTPNotFound()
+        return path
+
+    async def model(_request):
+        name = service.profile_id if service.state in ('starting', 'running') else service.store.value['robot_profiles'].get('active', '')
+        try:
+            meta = service.profiles.get(name)
+            folder = service.profiles.root / validate_profile_id(name)
+            config_path = folder / 'arm_teleop.yaml'
+            if not config_path.is_file():
+                config_path = folder / 'vr_configs.yml'
+            config = yaml.safe_load(config_path.read_text()) or {}
+            relative = config.get('robot', {}).get('urdf_path') or config.get('urdf_path') or meta.get('urdf')
+            if not isinstance(relative, str):
+                raise ValueError('profile has no URDF path')
+            root = ET.parse(asset_path(name, relative)).getroot()
+            child_links = {j.find('child').get('link') for j in root.findall('joint') if j.find('child') is not None}
+            link = next((v for v in root.findall('link') if v.get('name') not in child_links), None)
+            origin = link.find('inertial/origin') if link is not None else None
+            xyz = [float(v) for v in origin.get('xyz', '0 0 0').split()] if origin is not None else [0., 0., 0.]
+            rpy = [float(v) for v in origin.get('rpy', '0 0 0').split()] if origin is not None else [0., 0., 0.]
+            if len(xyz) != 3 or len(rpy) != 3 or not all(math.isfinite(v) for v in xyz + rpy):
+                raise ValueError('invalid root inertial origin')
+            sr, sp, sy = (math.sin(v / 2) for v in rpy)
+            cr, cp, cy = (math.cos(v / 2) for v in rpy)
+            quat = [sr*cp*cy-cr*sp*sy, cr*sp*cy+sr*cp*sy, cr*cp*sy-sr*sp*cy, cr*cp*cy+sr*sp*sy]
+            base = '/api/simulation/assets/' + quote(name, safe='') + '/'
+            return web.json_response({'profile_id': name, 'urdf_url': base + quote(relative, safe='/'), 'asset_base_url': base, 'base_inertial_pose': [xyz, quat]}, headers={'Cache-Control': 'no-store'})
+        except (RobotProfileError, OSError, KeyError, ValueError, ET.ParseError, yaml.YAMLError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def asset(request):
+        try:
+            path = asset_path(request.match_info['profile_id'], request.match_info['path'])
+        except RobotProfileError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.FileResponse(path)
 
     async def action(request):
         async with service.lock:
@@ -261,6 +337,8 @@ def register_simulation_routes(app, service):
             except (ConfigError, json.JSONDecodeError) as exc:
                 raise web.HTTPBadRequest(text=str(exc)) from exc
 
+    app.router.add_get('/api/simulation/model', model)
+    app.router.add_get('/api/simulation/assets/{profile_id}/{path:.*}', asset)
     app.router.add_put('/api/simulation/options', options)
     app.router.add_get('/api/simulation', status)
     app.router.add_post('/api/simulation/{action}', action)
