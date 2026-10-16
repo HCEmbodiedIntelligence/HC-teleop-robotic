@@ -1,0 +1,6 @@
+version: 1
+id: robot_api_six_dof
+urdf: urdf/six_dof.urdf
+primary_config: arm_teleop.yaml
+schema: hc-robot-api/v1
+teleop_compatible: true

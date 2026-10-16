@@ -1,4 +1,4 @@
-> 旧双臂遥操作栈：该目录保留左右双臂及历史夹爪/腰部假设，不作为通用机器人前端扩展。当前平台统一入口使用 `hc_teleop_recv` 与模型插件配置。
+> 当前 HC / OpenArmX 集成工作区入口见 [../start.md](../start.md)。第三方控制与订阅接口、换机兼容范围和 demo 见 [对外接口说明](docs/ROBOT_PUBLIC_API.md)。
 
 # HC Teleop
 
@@ -17,7 +17,7 @@
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
-真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/control/vr/joint_states`，外骨骼发布 `/control/exoskeleton/joint_states`；中间件通过可锁存的 `/control/source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/action/joint_states`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
+统一模式下 OpenArmX、X1 的 VR 位姿和程序 ServoP 共用 Motion 逆解，与 ServoJ/MoveJ 共享最终关节 RTC。公共双臂名为 `left_joint_1…N`、`right_joint_1…N`，能力从 `/status/robot/info` 在线读取。中间件按 `/control/source` 选择公共目标并发布 `/action/joint_states`，共同硬件边界转换到 `/internal/robot/joint_commands`；驱动模型反馈走 `/internal/robot/joint_states`，HC 转成公共 `/observation/joint_states`。硬件仓库继续独立负责厂商通信和执行保护。外骨骼使用 `/control/exoskeleton/joint_states`，需按当前 profile 提供公共名称；切源、停止和恢复仍执行原有许可代际检查。
 
 原有的 `d435_webrtc_server.py` 与手动 UDP 调试工具
 `tools/diagnostics/udp_receiver.py` 仍然保留。新服务兼容它们的关键协议：
@@ -69,7 +69,7 @@ ROS_DOMAIN_ID=14 ./run.sh teleop
 - HC 通用 `vr_configs.yml`：包含 `urdf_path`、`arms`、`controller_indices`，可选 `folding_waist`。导入器会校验所有 joint/link 索引，并生成标准接口的 `controller_v23.yml`；双臂配置还会生成 `arm_teleop.yaml`。
 - 重构控制器 `controller_v23.yml`：包含 `model.free_joints`、`task` 和 `limit`。导入器会校验 URDF 关节与任务 link，并统一 ROS 话题和 URDF 相对路径。该格式只提供 IK 控制配置，不包含 HC PyBullet 仿真所需的 `vr_configs.yml`。
 
-点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。真机模式退出并重新执行 `./run.sh teleop`；仿真模式重新执行 `./run.sh sim`。机器人型号以 Dashboard/`middleware/config.yaml` 中当前激活的 profile 为准。
+完整统一 API 的 ZIP 还包含 `robot_api.yaml` 和 `motion/` 配置，引用现有分组和 home；只导入上述旧格式不会自动获得统一 Servo 能力，列表会显示缺少的配置。点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。重启中间件、控制和硬件适配器以一致加载新 profile；显式 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 优先于配置文件。统一 API 的启动和迁移步骤见 [对外接口说明](docs/ROBOT_PUBLIC_API.md)。
 
 导入接口对齐当前遥操作链路的标准话题：`/observation/joint_states`、`/control/solver/joint_targets`、`/action/joint_states`、`/control/solver/ee_targets`、`/action/ee_poses`、`/observation/ee_poses`、`/status/solver/joint_states` 和 `/action/base/command`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
 

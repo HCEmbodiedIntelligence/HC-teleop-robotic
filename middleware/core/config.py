@@ -24,6 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "exoskeleton_topic": "/control/exoskeleton/joint_states",
             "output_topic": "/action/joint_states",
             "control_source_topic": "/control/source",
+            "hardware_enable_topic": "/control/hardware/enabled",
         },
         "subscriptions": [],
         "recording": {
@@ -137,6 +138,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         "exoskeleton_topic",
         "output_topic",
         "control_source_topic",
+        "hardware_enable_topic",
     ):
         topic = str(command_mux.get(key, "")).strip()
         if not topic.startswith("/"):
@@ -145,6 +147,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         mux_topics.append(topic)
     if len(set(mux_topics)) != len(mux_topics):
         raise ConfigError("ros.command_mux topics must be different")
+    if command_mux["hardware_enable_topic"] in {
+        "/control/teleop/enabled", value.get("safety", {}).get("stop_topic", "/control/emergency_stop")
+    }:
+        raise ConfigError("hardware_enable_topic must differ from VR enable and emergency stop")
 
     _port(value["server"]["port"], "server.port")
     _port(value["vr"]["pose_port"], "vr.pose_port")
@@ -244,6 +250,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     workflow = recording.setdefault("workflow", "hc")
     if workflow not in ("hc", "platform_raw"):
         raise ConfigError("ros.recording.workflow must be hc or platform_raw")
+    if type(recording.setdefault("derive_action_from_next_state", False)) is not bool:
+        raise ConfigError("ros.recording.derive_action_from_next_state must be boolean")
+    if workflow != "platform_raw" and recording["derive_action_from_next_state"]:
+        raise ConfigError("测试 action 补齐仅支持平台 raw 录制工作流")
     for key, default in (("capture_config_file", ""), ("job_state_dir", "../runtime/recording_jobs"),
                          ("artifact_state_dir", "../runtime/artifact_ready")):
         value_path = recording.setdefault(key, default)

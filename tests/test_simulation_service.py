@@ -91,6 +91,15 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.service.error)
         self.assertTrue(all(p.returncode is not None for p in processes))
 
+    async def test_environment_profile_selection_matches_child(self):
+        os.environ['HC_ROBOT_NAME'] = 'other_bot'
+        async with self.service.lock:
+            await self.service.start()
+        self.assertEqual(self.service.status()['active_profile'], 'other_bot')
+        args, env = self.commands[0]
+        self.assertIn(str(self.profiles.root / 'other_bot'), args)
+        self.assertEqual(env['HC_ROBOT_NAME'], 'other_bot')
+
     async def test_missing_sim_config_and_external_stack_are_rejected(self):
         (self.profiles.root / 'test_bot/vr_configs.yml').unlink(missing_ok=True)
         (self.profiles.root / 'test_bot/arm_teleop.yaml').unlink(missing_ok=True)

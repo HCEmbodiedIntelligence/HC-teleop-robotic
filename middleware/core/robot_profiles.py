@@ -931,7 +931,25 @@ class RobotProfileManager:
         metadata["managed"] = bool(metadata.get("managed", metadata_path.is_file()))
         metadata["path"] = str(path)
         metadata["standard_topics"] = dict(STANDARD_TOPICS)
+        # Legacy URDF/V23 imports remain usable in their explicitly legacy mode;
+        # they must never advertise a complete unified Servo interface.
+        from .robot_api import RobotApiProfile
+        try:
+            api = RobotApiProfile(path)
+            metadata["unified_api"] = {"available": True, "schema": "hc-robot-api/v1", "revision": api.revision}
+        except (RobotProfileError, KeyError, TypeError, ValueError) as exc:
+            metadata["unified_api"] = {"available": False, "reason": str(exc)}
         return metadata
+
+    def export_archive(self, profile_id: str) -> bytes:
+        self.get(profile_id)
+        path = self._path(profile_id)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file in sorted(path.rglob("*")):
+                if file.is_file() and not file.is_symlink() and not any(p.startswith(".") for p in file.relative_to(path).parts):
+                    archive.write(file, file.relative_to(path).as_posix())
+        return output.getvalue()
 
     def list(self) -> list[dict[str, Any]]:
         profiles = []
@@ -1123,6 +1141,22 @@ class RobotProfileManager:
                     dest_file = temp_path / dest_rel
                     dest_file.parent.mkdir(parents=True, exist_ok=True)
                     dest_file.write_bytes(zf.read(info.filename))
+
+                # A complete v1 profile is already normalized. Preserve its
+                # model, solver settings, mappings and home verbatim, validating
+                # before replacing any existing profile.
+                if (temp_path / "robot_api.yaml").is_file():
+                    from .robot_api import RobotApiProfile
+                    api = RobotApiProfile(temp_path)
+                    metadata = api.metadata
+                    metadata.update(id=profile_id, display_name=display_name, managed=True,
+                                    config_files=sorted(str(f.relative_to(temp_path)) for f in temp_path.rglob("*")
+                                                        if f.suffix in {".yaml", ".yml"} and f.name != "profile.yaml"))
+                    (temp_path / "profile.yaml").write_text(yaml.safe_dump(metadata, sort_keys=False), encoding="utf-8")
+                    if target.exists():
+                        shutil.rmtree(target)
+                    os.rename(temp_path, target)
+                    return self.get(profile_id)
 
                 urdf_files = list(temp_path.glob("**/*.urdf"))
                 if not urdf_files:

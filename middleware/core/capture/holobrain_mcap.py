@@ -144,17 +144,20 @@ def calibration_document(ident, calibration, receive):
               'source':'recorded_sensor_msgs/CameraInfo', 'received_at_ros_time_ns':int(receive),
               'resolution':{}}
     for name in ('rgb','depth'):
+        if name not in calibration:
+            continue  # RGB-only cameras must not require invented depth intrinsics.
         info = calibration.get(name, {})
         k = info.get('k', [])
         if len(k) != 9 or k[0] <= 0 or k[4] <= 0:
             return None
         result[name] = {'fx':k[0],'fy':k[4],'cx':k[2],'cy':k[5],
                         'distortion_model':info.get('distortion_model',''),
-                        'distortion_coefficients':info.get('d', [])}
+                        'distortion_coefficients':info.get('d', []),
+                        'frame_id':info.get('frame_id', info.get('coordinate_frame', ''))}
         if info.get('distortion_model') == 'plumb_bob' and len(info.get('d',[])) == 5:
             result[name]['distortion_order'] = ['k1','k2','p1','p2','k3']
         result['resolution']['color' if name == 'rgb' else name] = {
             'width':info['width'],'height':info['height']}
     # CameraInfo does not contain the robot-to-camera transform or RGB/depth
     # extrinsics. Those must come from measured calibration, never an identity.
-    return result
+    return result if result['resolution'] else None

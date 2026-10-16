@@ -180,155 +180,21 @@ def profile_settings(path):
 
 def main():
     import os
+    import sys
     from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from middleware.core.robot_api import selected_profile
+    import yaml
     config = os.environ.get('HC_ARM_TELEOP_CONFIG')
-    if not config:
-        config = str(Path(os.environ['HC_ROBOT_CONFIG_ROOT']) / os.environ['HC_ROBOT_NAME'] / 'arm_teleop.yaml')
-    arm_names, base_frame, endpoints, control = profile_settings(config)
-    sides = tuple(arm_names)
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-    from geometry_msgs.msg import PoseArray, PoseStamped
-    from sensor_msgs.msg import JointState
-    from std_msgs.msg import Bool, Header, String
-
-    def stamp_seconds(message):
-        return message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
-
-    class MotionTeleopBridge(Node):
-        def __init__(self):
-            super().__init__('motion_teleop_bridge')
-            self.cache = MotionCache(arm_names)
-            qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE)
-            self.pose_pubs = {side: self.create_publisher(PoseStamped, endpoints[(side, 'servo_p')], qos) for side in sides}
-            self.joint_pubs = {side: self.create_publisher(JointState, endpoints[(side, 'servo_j')], qos) for side in sides}
-            self.command_pub = self.create_publisher(JointState, control.get('generic_command_topic', '/control/solver/joint_targets'), qos)
-            self.state_pub = self.create_publisher(JointState, control.get('solver_topic', '/status/solver/joint_states'), qos)
-            self.ack_pub = self.create_publisher(Header, '/status/solver/reset_ack', qos)
-            self.create_subscription(JointState, control.get('joint_state_topic', '/observation/joint_states'), self.feedback, qos_profile_sensor_data)
-            self.create_subscription(JointState, '/control/motion/joint_targets', self.result, qos)
-            self.create_subscription(PoseArray, control.get('target_pose_topic', '/action/ee_poses'), self.pose, qos)
-            self.create_subscription(JointState, '/control/solver/target_joint_from_vr', self.home, qos)
-            self.create_subscription(String, '/status/teleop', self.status, qos)
-            self.create_subscription(Bool, '/status/hardware/ready', self.ready, qos)
-            self.create_subscription(Bool, '/control/emergency_stop', self.stop, qos)
-            self.create_subscription(Bool, '/control/teleop/enabled', self.enable, qos)
-            self.create_subscription(Bool, '/control/solver/reset', self.reset, qos)
-            self.create_timer(0.01, self.tick)
-            self.get_logger().info(f'motion bridge: {config}; groups={sides}; frame={base_frame}')
-
-        def times(self):
-            return time.monotonic(), self.get_clock().now().nanoseconds * 1e-9
-
-        def feedback(self, msg):
-            now, wall = self.times()
-            try:
-                ack = self.cache.feedback_received(msg.name, msg.position, stamp_seconds(msg), now, wall)
-            except (ValueError, TypeError):
-                return
-            if ack:
-                header = Header()
-                header.stamp = self.get_clock().now().to_msg()
-                self.ack_pub.publish(header)
-
-        def result(self, msg):
-            now, wall = self.times()
-            try:
-                self.cache.accept_result(msg.name, msg.position, stamp_seconds(msg), now, wall)
-            except (ValueError, TypeError):
-                pass
-
-        def status(self, msg):
-            now, wall = self.times()
-            try:
-                self.cache.update_status(json.loads(msg.data), now, wall)
-            except (ValueError, TypeError, AttributeError):
-                self.cache.status = {}
-                self.cache.clear(wall)
-
-        def ready(self, msg):
-            now, wall = self.times()
-            self.cache.hardware, self.cache.hardware_time = bool(msg.data), now
-            if not msg.data:
-                self.cache.clear(wall)
-
-        def stop(self, msg):
-            if msg.data:
-                self.cache.estopped = True
-                self.cache.clear(self.times()[1])
-
-        def enable(self, msg):
-            self.cache.estopped = not bool(msg.data)
-            self.cache.clear(self.times()[1])
-
-        def reset(self, msg):
-            if msg.data:
-                self.cache.reset(self.times()[1])
-
-        def pose(self, msg):
-            now, wall = self.times()
-            if msg.header.frame_id != base_frame or len(msg.poses) != len(sides) or not valid_stamp(stamp_seconds(msg), wall, 0.2):
-                return
-            for side, pose in zip(sides, msg.poses):
-                q = pose.orientation
-                numbers = [pose.position.x, pose.position.y, pose.position.z, q.x, q.y, q.z, q.w]
-                norm = math.sqrt(sum(value * value for value in numbers[3:]))
-                if not all(math.isfinite(value) for value in numbers) or norm < 1e-8:
-                    continue
-                if self.cache.grant(side, now, wall):
-                    target = PoseStamped()
-                    target.header, target.pose = msg.header, pose
-                    target.pose.orientation.x /= norm
-                    target.pose.orientation.y /= norm
-                    target.pose.orientation.z /= norm
-                    target.pose.orientation.w /= norm
-                    self.pose_pubs[side].publish(target)
-
-        def home(self, msg):
-            now, wall = self.times()
-            try:
-                values = joint_values(msg.name, msg.position)
-            except (ValueError, TypeError):
-                return
-            if not valid_stamp(stamp_seconds(msg), wall, 0.2):
-                return
-            for side in sides:
-                names = arm_names[side]
-                if all(name in values for name in names) and self.cache.grant(side, now, wall, homing=True):
-                    target = JointState()
-                    target.header = msg.header
-                    target.name, target.position = list(names), [values[name] for name in names]
-                    self.joint_pubs[side].publish(target)
-
-        def tick(self):
-            now, wall = self.times()
-            values = self.cache.output(now, wall)
-            if values is not None:
-                msg = JointState()
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.name, msg.position = list(values), list(values.values())
-                self.command_pub.publish(msg)
-                # State carries measured values and the original source stamp.
-                # Solver targets must not be presented as measured feedback.
-                measured = JointState()
-                measured_names = [n for n in values if n in self.cache.feedback]
-                measured.name = measured_names
-                measured.position = [self.cache.feedback[n] for n in measured_names]
-                stamp = min(self.cache.feedback_stamp.values())
-                measured.header.stamp.sec = int(stamp)
-                measured.header.stamp.nanosec = int((stamp - int(stamp)) * 1e9)
-                self.state_pub.publish(measured)
-
-    rclpy.init()
-    node = MotionTeleopBridge()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.try_shutdown()
+    if config:
+        profile = Path(config).resolve().parent
+    else:
+        middleware_config = root / 'middleware/config.yaml'
+        profile = selected_profile(yaml.safe_load(middleware_config.read_text()), middleware_config.parent)
+    from adapters.nodes.unified_motion_teleop import main as run
+    run(profile)
 
 
 if __name__ == '__main__':

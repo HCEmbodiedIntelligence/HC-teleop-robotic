@@ -15,6 +15,7 @@ def generate_launch_description():
         'sdk_config_file': share / 'config/robo_manip.test_humanoid.yaml',
         'tool_config_file': share / 'config/tools.yaml',
         'urdf_file': share / 'urdf/test_humanoid.urdf',
+        'robot_api_file': '',
         'joint_state_endpoint': '/observation/joint_states',
         'joint_command_endpoint': '/control/motion/joint_targets',
     }

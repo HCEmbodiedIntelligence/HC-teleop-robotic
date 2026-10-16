@@ -690,4 +690,155 @@
     <limit effort="333" lower="0.0" upper="0.044" velocity="10.0"/>
     <mimic joint="openarmx_right_finger_joint1"/>
   </joint>
+
+  <!-- Camera mounts from openarmx_urdf-1.0_basic.rar (2026-10-16). CAD frames; optical-frame registration is separate. -->
+<link name="XJZJ_Link">
+    <inertial>
+      <origin xyz="0.0195807306967431 2.58532346259988E-05 0.0414165670403889" rpy="0 0 0" />
+      <mass value="0.0533057089381443" />
+      <inertia ixx="8.46350668876977E-05" ixy="-3.76188051012509E-08" ixz="-2.3685494633772E-05" iyy="8.47814421782962E-05" iyz="-8.51081103958754E-08" izz="2.97845544225821E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/XJZJ_Link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/XJZJ_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+
+<joint name="XJZJ" type="fixed">
+    <origin xyz="0.00321 0 0.81297" rpy="0 0 0" />
+    <parent link="openarmx_body_link0" />
+    <child link="XJZJ_Link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+
+
+<link name="XJ_Link">
+    <inertial>
+      <origin xyz="2.79415009730721E-05 0.00111297986153634 0.012428476711972" rpy="0 0 0" />
+      <mass value="0.0456898574293222" />
+      <inertia ixx="2.78351960972268E-05" ixy="1.37085274685455E-09" ixz="-7.41051260675272E-09" iyy="4.13606780186455E-06" iyz="4.09811286047984E-07" izz="2.75493963012006E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/XJ_Link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.792156862745098 0.819607843137255 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/XJ_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+
+
+<joint name="XJ" type="fixed">
+    <origin xyz="0.0484847918575208 0 0.101257907919113" rpy="-3.14159265358979 0.698131700797709 3.14159265358979" />
+    <parent link="XJZJ_Link" />
+    <child link="XJ_Link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+
+
+
+
+<link name="L_Link7_XJ_Link">
+    <inertial>
+      <origin xyz="7.89064283515939E-05 -8.50307162954672E-05 0.0116355107787249" rpy="0 0 0" />
+      <mass value="0.0389014964910646" />
+      <inertia ixx="7.12390373640227E-06" ixy="-4.0662517868632E-10" ixz="1.50715086683531E-08" iyy="7.132736919239E-06" iyz="-1.07127917077963E-08" izz="1.0887596633211E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/L_Link7_XJ_Link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/L_Link7_XJ_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+
+
+
+<joint name="L_Link7_XJ_joint" type="fixed">
+    <origin xyz="0.10811 0 0.082659" rpy="2.618 -3.1416 -1.5708" />
+    <parent link="openarmx_left_link7" />
+    <child link="L_Link7_XJ_Link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+
+
+
+
+
+
+
+
+<link name="R_LINK7_XJ_Link">
+    <inertial>
+      <origin xyz="8.50307162954533E-05 7.89064283515939E-05 0.0116355107787249" rpy="0 0 0" />
+      <mass value="0.0389014964910647" />
+      <inertia ixx="7.13273691923902E-06" ixy="4.0662517867894E-10" ixz="1.07127917078014E-08" iyy="7.12390373640229E-06" iyz="1.5071508668365E-08" izz="1.0887596633211E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/R_LINK7_XJ_Link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../meshes/cameras/R_LINK7_XJ_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+
+
+<joint name="R_LINK7_XJ" type="fixed">
+    <origin xyz="0.108111848164622 0 0.0816585089852266" rpy="0 -0.523598775598298 0" />
+    <parent link="openarmx_right_link7" />
+    <child link="R_LINK7_XJ_Link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+
+
+
+
+
+
+
 </robot>

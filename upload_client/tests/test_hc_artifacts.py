@@ -96,6 +96,26 @@ def test_worker_restart_commit_reconciliation(kind,hc_cfg,monkeypatch):
     assert result['state']==('awaiting_slice' if kind=='platform_raw' else 'raw_committed')
     assert result['manifest']['source_format']=={'hc_mcap':'MCAP','hc_lerobot':'LEROBOT_V3','platform_raw':'CAPTURE_BUNDLE'}[kind]
 
+
+def test_mcap_commit_does_not_call_lerobot_processing(hc_cfg,monkeypatch):
+    hc_cfg['processing_endpoint']=True
+    descriptor=ready(hc_cfg)
+    queue=Queue(hc_cfg['queue_directory'])
+    queue.enqueue_artifact(descriptor,hc_cfg)
+    api=OfflinePlatform()
+    request=api.api
+    def strict_api(method,suffix='',payload=None):
+        assert not suffix.endswith(('/processing',':retry-processing'))
+        return request(method,suffix,payload)
+    api.api=strict_api
+    monkeypatch.setattr('humanoid_upload.worker.Http',lambda cfg:api)
+    Worker(queue,hc_cfg).tick()
+    result=queue.jobs()[0]
+    assert result['server_state']=='COMMITTED'
+    assert result['state']=='raw_committed' and result['code'] is None
+    assert result['quality_status']=='PENDING'  # Upload success is not QC success.
+
+
 @pytest.mark.parametrize('mutation',['hash','missing','truncated','escape','symlink','duplicate','time','raw_marker'])
 def test_reject_incomplete_unsafe(mutation,hc_cfg):
     d=ready(hc_cfg,'platform_raw' if mutation=='raw_marker' else 'hc_mcap'); path=Path(d['root'])/d['files'][0]['path']

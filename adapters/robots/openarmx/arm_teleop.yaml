@@ -108,13 +108,14 @@ grippers:
     finger_closed: [0.0]
 control:
   # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
-  backend: v23
+  backend: motion
+  home_on_start: false
   enabled_on_start: true
   rate_hz: 100.0
   # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。
   vr_data_topic: /vrdata
-  joint_state_topic: /observation/joint_states
-  command_topic: /control/vr/joint_states
+  joint_state_topic: /internal/robot/joint_states
+  command_topic: /internal/vr/aux_joint_targets
   generic_command_topic: /control/solver/joint_targets
   solver_topic: /status/solver/joint_states
   solver_reset_topic: /control/solver/reset

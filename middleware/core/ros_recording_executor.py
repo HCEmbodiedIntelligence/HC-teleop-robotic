@@ -119,7 +119,7 @@ def _raw_recording_process(
     reset_event: Any,
     status_queue: Any,
 ) -> None:
-    """Receive serialized ROS messages without deserializing them."""
+    """Record CDR directly; additionally summarize selected CameraInfo messages."""
     _lower_recording_priority()
     context = None
     executor = None
@@ -162,6 +162,13 @@ def _raw_recording_process(
         from rclpy.executors import SingleThreadedExecutor
         from .ros_qos import subscription_qos
         from rosidl_runtime_py.utilities import get_message
+        from rclpy.serialization import deserialize_message, serialize_message
+        from sensor_msgs.msg import CameraInfo
+        from std_msgs.msg import String
+        from .camera_calibration import CameraCalibrations
+        import json
+
+        calibrations = CameraCalibrations()
 
         domain_id = int(config.get("domain_id", 14))
         context = Context()
@@ -208,6 +215,20 @@ def _raw_recording_process(
                         }
                     )
                     counters["recorded"] += 1
+                    if msg_type == 'sensor_msgs/msg/CameraInfo':
+                        candidate = calibrations.observe(
+                            topic, deserialize_message(raw_data, CameraInfo),
+                            node.get_clock().now().nanoseconds)
+                        if candidate is not None:
+                            calibration_topic, document, token = candidate
+                            event_queue.put_nowait({
+                                'kind': 'ros_message', 'topic': calibration_topic,
+                                'msg_type': 'std_msgs/msg/String',
+                                '_raw': serialize_message(String(data=json.dumps(document, allow_nan=False))),
+                                'stamp_ns': time.time_ns(),
+                            })
+                            calibrations.committed(token)
+                            counters['recorded'] += 1
                 except queue.Full:
                     counters["rejected"] += 1
                     _counter_add(dropped_counter)

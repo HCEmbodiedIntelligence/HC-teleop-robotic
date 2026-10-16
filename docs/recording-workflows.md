@@ -25,6 +25,28 @@ ros:
 
 `platform_raw` 必须给出 `capture_config_file`，内容沿用迁入 capture.config.validate 的完整 JSON/YAML 配置。storage.directory/export_directory 相对该采集配置文件。保留 `retain_original_ros`、`depth_video_encoding`、既有缓冲/磁盘/编码限制及三种媒体策略。raw 配置不由 HC 的 format/fps 覆盖。独立相机节点及自定义消息包需要正确安装，不能靠旧 manager Python 环境补依赖。
 
+### RGB MP4 与原始深度打包
+
+`workflow: hc` 的单 MCAP 录制不经过旧 manager 的媒体打包流程。需要 RGB 编码为 H.264 MP4、原始深度按源 dtype/shape 无损压缩到 `raw.mcap` 时，选择 `platform_raw`。默认 `storage.retain_original_ros: false`、`storage.depth_video_encoding: false`，包标识为 `rgb-mp4-raw-depth/v1`；不是把深度转成有损视频。
+
+在已 source 当前 ROS/相机环境并安装 capture 依赖后，从当前统一机器人接口和相机配置生成可复用配置：
+
+```bash
+python middleware/profile_cli.py capture-config --profile adapters/robots/openarmx --output runtime/openarmx-capture.yaml
+```
+
+`--cameras /绝对路径/cameras.yaml` 可指定本次已确认的相机配置。生成器使用公共关节名与 SI 单位、排除 URDF mimic 关节，订阅现有统一话题；它不启动硬件。网页“话题录制”的“录制格式”可选原生 MCAP、LeRobot、自定义格式（RGB MP4 + 无损深度包）、MCAP + LeRobot。选择自定义格式时填入生成文件路径，点击“保存录制配置”用于下一段录制。正常停止、媒体排空和平台绑定完成后，RecordingService 才发布整包 ready 描述给 UploadService。
+
+### 仅测试的 action 补齐
+
+网页“话题录制”中的“仅测试：无真实 action 时，用下一帧状态生成 action”默认关闭。对应中间件设置 `ros.recording.derive_action_from_next_state`，仅用于 `platform_raw`；其它格式禁用该开关。它覆盖采集文件中的 `alignment.derive_action_from_next_state`，因此导入遗留测试配置不会自动开启补齐。更改只影响下一段，上一段采集和收尾完成后生效。
+
+开启时，仍要求真实状态、相机和曝光数据通过预检，只允许 action 来源尚未收到数据。沿用迁入的 NextStateActions：以实际主相机相邻帧为基准生成候选，记录 `action_origin: next_state`、`action_stage: derived`；某来源整段出现任何真实动作/终止事件，就不选择该来源的派生候选。跨时钟跳变、状态缺口及末帧缺少下一帧时保留无效标记。不会向 ROS 或电机发布这些候选。
+
+关闭时不生成候选；必需的 action 来源缺失会阻止 raw 预检查，不会把测试补齐当成真实命令。只对实际开启的测试段记录该策略，真实数据采集请保持关闭。
+
+原生 MCAP 按实际收到的话题保存，所以静态且没有上游动作时可以没有 action；该格式不使用测试补齐。LeRobot 导出要求录到 `/observation/joint_states` 和 `/action/joint_states`，整段缺少 action 会明确报错并保留源 MCAP，不会静默用反馈替代真实命令。
+
 subscriptions 增加 `required: true|false` 与 `recording_mode: continuous|event`。缺省 `/action/`、`/control/`、`/status/` 为 event，其余 continuous。必需 continuous 源检查新鲜度/频率，event 不要求操作者先运动。开始仍需至少一个选择的源；服务统一预检，不使用 HTTP force 绕过。消息缺失和整段无动作不补造 action。
 
 OpenArmX 可显式使用以下附加动作映射；有效期是数据采样新鲜度规则，须按 A 的实际指令语义校准，不代表电机采用或执行：

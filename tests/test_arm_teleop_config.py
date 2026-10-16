@@ -86,14 +86,15 @@ class ArmTeleopConfigTests(unittest.TestCase):
     def test_robot_profile_uses_only_standard_command_topics(self):
         control = self.load_config()["control"]
         self.assertNotIn("command_smoothing", control)
-        self.assertEqual(control["joint_state_topic"], "/observation/joint_states")
-        self.assertEqual(control["command_topic"], "/control/vr/joint_states")
+        self.assertEqual(control["joint_state_topic"], "/internal/robot/joint_states")
+        self.assertEqual(control["command_topic"], "/internal/vr/aux_joint_targets")
+        self.assertEqual(control["backend"], "motion")
 
-    def test_disabled_waist_does_not_expose_controlled_joints(self):
+    def test_x1_preserves_enabled_waist_group(self):
         config = self.load_config()
         waist_names = config["body"]["waist_joint_names"]
-        self.assertFalse(config["body"]["enabled"])
-        self.assertEqual(waist_names, [])
+        self.assertTrue(config["body"]["enabled"])
+        self.assertEqual(waist_names, ["leg_1", "leg_2", "zhi"])
 
     def test_controller_positive_z_maps_to_robot_forward(self):
         mapping = np.asarray(self.load_config()["control"]["axis_mapping"])

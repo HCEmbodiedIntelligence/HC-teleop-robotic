@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from middleware.core.robot_profiles import RobotProfileError, RobotProfileManager
+from middleware.core.robot_api import RobotApiProfile, selected_profile
 
 
 def load_selection(config_path: Path) -> tuple[str, RobotProfileManager]:
@@ -22,29 +23,31 @@ def load_selection(config_path: Path) -> tuple[str, RobotProfileManager]:
     profile_config = config.get("robot_profiles", {})
     if not isinstance(profile_config, dict):
         raise RobotProfileError("middleware robot_profiles must be an object")
-    profile_id = str(profile_config.get("active", "")).strip()
-    if not profile_id:
-        raise RobotProfileError("no active robot profile is selected")
-    root = Path(str(profile_config.get("root", "../adapters/robots"))).expanduser()
-    if not root.is_absolute():
-        root = config_path.parent / root
-    return profile_id, RobotProfileManager(root)
+    selected = selected_profile(config, config_path.parent)
+    return selected.name, RobotProfileManager(selected.parent)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Resolve the active robot profile")
     parser.add_argument(
         "field",
-        choices=("active", "root", "profile-dir", "controller", "teleop", "simulation"),
+        choices=("active", "root", "profile-dir", "controller", "teleop", "simulation", "api", "generate", "export", "capture-config"),
     )
     parser.add_argument(
         "--config",
         default=str(Path(__file__).resolve().parent / "config.yaml"),
     )
+    parser.add_argument("--profile", help="explicit profile directory (offline inspection/generation)")
+    parser.add_argument("--output", help="runtime directory for generate; zip file for export")
+    parser.add_argument("--cameras", help="camera YAML for capture-config; defaults to the selected profile cameras.yaml")
     arguments = parser.parse_args()
     try:
         config_path = Path(arguments.config).expanduser().resolve()
-        profile_id, manager = load_selection(config_path)
+        if arguments.profile:
+            selected = Path(arguments.profile).expanduser().resolve()
+            profile_id, manager = selected.name, RobotProfileManager(selected.parent)
+        else:
+            profile_id, manager = load_selection(config_path)
         if arguments.field == "active":
             print(profile_id)
             return
@@ -53,6 +56,31 @@ def main() -> None:
             return
         profile = manager.get(profile_id)
         profile_dir = Path(profile["path"])
+        if arguments.field == "capture-config":
+            from middleware.core.profile_capture import capture_config
+            if not arguments.output:
+                raise RobotProfileError("capture-config requires --output")
+            output = Path(arguments.output).expanduser().resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(yaml.safe_dump(capture_config(profile_dir, arguments.cameras), allow_unicode=True, sort_keys=False))
+            print(output)
+            return
+        if arguments.field in {"api", "generate"}:
+            import json
+            api = RobotApiProfile(profile_dir)
+            if arguments.field == "api":
+                print(json.dumps(api.describe(), indent=2, allow_nan=False))
+            elif not arguments.output:
+                raise RobotProfileError("generate requires --output")
+            else:
+                print(api.write_runtime(arguments.output))
+            return
+        if arguments.field == "export":
+            if not arguments.output:
+                raise RobotProfileError("export requires --output")
+            Path(arguments.output).write_bytes(manager.export_archive(profile_id))
+            print(Path(arguments.output).resolve())
+            return
         paths = {
             "profile-dir": profile_dir,
             "controller": profile_dir / "controller_v23.yml",

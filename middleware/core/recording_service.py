@@ -2,7 +2,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import threading
@@ -99,16 +101,23 @@ class RecordingService:
                     reason='' if sources and not issues else '录制源未就绪')
 
     def raw_hub(self):
+        from .capture.config import validate
+        path = self.resolve(self.config['capture_config_file'])
+        cfg = validate(yaml.safe_load(path.read_text()))
+        # The dashboard explicitly controls test-only derivation. Default off,
+        # including when importing a capture file left in a prior test mode.
+        cfg['alignment']['derive_action_from_next_state'] = self.config.get('derive_action_from_next_state', False)
+        for key in ('directory', 'export_directory'):
+            if key in cfg['storage']:
+                value = Path(cfg['storage'][key]).expanduser()
+                cfg['storage'][key] = str((path.parent/value).resolve() if not value.is_absolute() else value)
+        if self.raw is not None and self.raw.cfg != cfg:
+            if self.raw.busy():
+                raise ValueError('请等待当前录制和后台收尾结束，再应用新的 raw 采集设置')
+            self.raw.shutdown()
+            self.raw = None
         if self.raw is None:
-            from .capture.config import validate
             from .capture.hub import CaptureHub
-            path = self.resolve(self.config['capture_config_file'])
-            cfg = validate(yaml.safe_load(path.read_text()))
-            # Storage paths belong to the capture configuration file, not the job registry.
-            for key in ('directory', 'export_directory'):
-                if key in cfg['storage']:
-                    value = Path(cfg['storage'][key]).expanduser()
-                    cfg['storage'][key] = str((path.parent/value).resolve() if not value.is_absolute() else value)
             root = self.state_dir/'raw_engine'
             atomic_json(root/'capture-config.json', cfg)
             atomic_json(root/'capture-workflow.json', {'vr_target': 'raw', 'package_after_stop': False})
@@ -148,7 +157,24 @@ class RecordingService:
             try:
                 if workflow == 'platform_raw':
                     hub = self.raw_hub()
-                    hub.start({**(metadata or {}), 'hc_recording_id': ident})
+                    raw_metadata = copy.deepcopy(metadata or {})
+                    if hub.cfg['capture'] and 'capture_context' not in raw_metadata:
+                        from .robot_api import RobotApiProfile
+                        profile_path = self.ros_config.get('robot_api_profile')
+                        if not profile_path:
+                            raise ValueError('平台 raw 录制需要当前 robot_api_profile 或明确的 capture_context')
+                        api = RobotApiProfile(profile_path)
+                        if job['profile_id'] and job['profile_id'] != api.profile_id:
+                            raise ValueError('录制 profile 与实际机器人接口不一致')
+                        raw_metadata['capture_context'] = {
+                            'local_robot_id': api.profile_id,
+                            'model_sha256': hashlib.sha256(api.urdf_path.read_bytes()).hexdigest(),
+                            'configuration_sha256': fingerprint({'robot_api_revision': api.revision, 'capture': hub.cfg}),
+                            'synthetic': raw_metadata.get('simulation') in (True, 'true') or os.environ.get('HC_TELEOP_MODE') == 'sim',
+                        }
+                    raw_metadata['test_action_from_next_state'] = hub.cfg['alignment']['derive_action_from_next_state']
+                    job['metadata'] = raw_metadata
+                    hub.start({**raw_metadata, 'hc_recording_id': ident})
                     session = hub.session
                     job.update(path=str(session.path), native_session_id=session.id,
                                config_fingerprint=fingerprint(session.cfg), config_snapshot=session.cfg)

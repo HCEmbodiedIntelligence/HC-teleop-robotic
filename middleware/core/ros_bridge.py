@@ -130,6 +130,10 @@ class RosBridge:
         camera_topics: list[str] | None = None,
     ):
         self.config = config
+        self._public_api = None
+        if config.get("robot_api_profile"):
+            from .robot_api import RobotApiProfile
+            self._public_api = RobotApiProfile(config["robot_api_profile"])
         self.on_event = on_event
         self.on_frame = on_frame
         self.camera_topic = str(camera_topic)
@@ -156,6 +160,7 @@ class RosBridge:
         self._source_cutoff = -math.inf
         self._source_stamps = {}
         self._output_epoch = 0
+        self._hardware_enable_sent_epoch = None
         self._replay_active = False
         self._mux_received = {"vr": 0, "exoskeleton": 0, "motion": 0}
         self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0, "motion": 0.0}
@@ -298,7 +303,8 @@ class RosBridge:
         with self._lock:
             self._revoke_locked()
             self._command_output_enabled = bool(enabled)
-        return self._enqueue("command_output", bool(enabled))
+            epoch = self._output_epoch
+        return self._enqueue("command_output", (bool(enabled), epoch))
 
     def _revoke_locked(self) -> None:
         self._source_cutoff = self._ros_now()
@@ -332,6 +338,8 @@ class RosBridge:
                      and all(math.isfinite(float(v)) for v in positions)
                      and math.isfinite(stamp) and stamp > 0
                      and -.05 <= self._ros_now() - stamp <= .3)
+            if valid and self._public_api is not None:
+                self._public_api.convert_message(message, to_model=True)
         except (AttributeError, TypeError, ValueError):
             valid, stamp = False, 0.0
         with self._lock:
@@ -365,6 +373,7 @@ class RosBridge:
         rclpy = None
         node = None
         executor = None
+        robot_api_boundary = None
         try:
             import os
             import rclpy
@@ -397,6 +406,10 @@ class RosBridge:
             subscription_names = []
             trackers: dict[str, TopicHealthTracker] = {}
             last_emit: dict[str, float] = {}
+
+            if self.config.get("robot_api_profile"):
+                from .robot_api_boundary import RobotApiBoundary
+                robot_api_boundary = RobotApiBoundary(node, self._public_api)
 
             dataset_config = self.config.get("dataset_topics", {})
             if dataset_config.get("enabled", False):
@@ -619,6 +632,8 @@ class RosBridge:
                 traceback=traceback.format_exc(limit=8),
             )
         finally:
+            if robot_api_boundary is not None:
+                robot_api_boundary.close()
             if executor is not None and node is not None:
                 executor.remove_node(node)
             if node is not None:
@@ -642,7 +657,7 @@ class RosBridge:
             try:
                 command, args = self._commands.get_nowait()
             except queue.Empty:
-                return
+                break
             try:
                 if command == "publish":
                     topic, msg_type_name, data = args
@@ -673,6 +688,11 @@ class RosBridge:
 
                     message = deserialize_message(raw_bytes, message_type)
                     if command == "replay_raw":
+                        if self._public_api is not None:
+                            self._public_api.convert_message(message, to_model=True)
+                            # Recording timestamps describe the recording clock;
+                            # an explicitly armed replay is a new command epoch.
+                            message.header.stamp = node.get_clock().now().to_msg()
                         with self._lock:
                             if (args[3] == self._output_epoch and self._replay_active
                                     and self._command_output_enabled and self._ready_locked(time.monotonic())):
@@ -688,8 +708,8 @@ class RosBridge:
                     )
                     message = Bool(data=True)
                     publisher.publish(message)
-                    with self._lock:
-                        self._command_output_enabled = False
+                    # emergency_stop() already revoked permission synchronously.
+                    # Do not overwrite a later explicit resume queued after it.
                     node.get_logger().warning(f"Emergency stop: {reason}")
                 elif command == "control_source":
                     mux_config = self.config.get("command_mux", {})
@@ -706,12 +726,38 @@ class RosBridge:
                     publisher.publish(String(data=str(args)))
                     node.get_logger().info(f"Joint command source: {args}")
                 elif command == "command_output":
+                    enabled, epoch = args
+                    with self._lock:
+                        if (epoch != self._output_epoch or
+                                enabled != self._command_output_enabled):
+                            continue  # A subsequent stop/source change revoked this request.
+                        self._publish_hardware_enable_locked(node, publishers, enabled)
                     node.get_logger().info(
                         "Joint command output %s"
-                        % ("enabled" if args else "disabled")
+                        % ("enabled" if enabled else "disabled")
                     )
             except Exception as exc:
                 self._set_status(error=f"publish failed: {type(exc).__name__}: {exc}")
+
+        # Source changes, ready loss and replay completion can revoke output
+        # without a queued enable request. Propagate their stop to hardware.
+        # True is an explicit resume event only; never periodically re-arm a
+        # stopped/restarted adapter, or replay a queued pre-stop enable.
+        with self._lock:
+            self._ready_locked(time.monotonic())
+            if not self._command_output_enabled:
+                self._publish_hardware_enable_locked(node, publishers, False)
+
+    def _publish_hardware_enable_locked(self, node, publishers, enabled):
+        if self._hardware_enable_sent_epoch == self._output_epoch:
+            return
+        from std_msgs.msg import Bool
+
+        topic = str(self.config.get("command_mux", {}).get(
+            "hardware_enable_topic", "/control/hardware/enabled"))
+        publisher = self._publisher(node, publishers, topic, "std_msgs/msg/Bool", Bool)
+        publisher.publish(Bool(data=enabled))
+        self._hardware_enable_sent_epoch = self._output_epoch
 
     @staticmethod
     def _publisher(

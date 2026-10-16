@@ -17,7 +17,9 @@ def preflight(cfg,reports,clocks):
                 for stream in (('rgb','depth') if source.get('depth_enabled',True) else ('rgb',)):
                     if exposure_errors(report.get(stream,{}),source):
                         missing.append(stream+' 缺少有效的逐帧曝光中点/实际曝光元数据，或曝光超过配置上限')
-            if source['transport'].startswith('ros_') and source['kind']!='pointcloud' and time.monotonic_ns()-report.get('registered_monotonic_ns',0)>3_000_000_000:
+            test_action_fallback = (bool(cfg.get('capture')) and source['kind']=='action' and source.get('named_axes')
+                                    and cfg['alignment'].get('derive_action_from_next_state',False))
+            if source['transport'].startswith('ros_') and source['kind']!='pointcloud' and not test_action_fallback and time.monotonic_ns()-report.get('registered_monotonic_ns',0)>3_000_000_000:
                 missing.append('尚未收到来源数据，请检查相机/机器人节点和 ROS 话题')
             if cfg['alignment']['strict'] and source['kind'] in {'state','action'}:
                 accepted={'read','sample'} if source['kind']=='state' else {'send','effective'}

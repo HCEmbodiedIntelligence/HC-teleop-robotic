@@ -15,6 +15,7 @@ from aiohttp import web
 
 from .config import ConfigError
 from .robot_profiles import RobotProfileError, UrdfModel
+from .robot_api import selected_profile_root
 
 
 class SimulationError(ValueError):
@@ -37,11 +38,9 @@ class SimulationService:
         self.log_dir = None
 
     def status(self):
-        active = self.store.value['robot_profiles'].get('active', '')
+        active = os.environ.get('HC_ROBOT_NAME') or self.store.value['robot_profiles'].get('active', '')
         reason = ''
-        configured_root = Path(self.store.value['robot_profiles']['root']).expanduser()
-        if not configured_root.is_absolute():
-            configured_root = self.store.path.parent / configured_root
+        configured_root = selected_profile_root(self.store.value, self.store.path.parent)
 
         if os.environ.get('HC_EXTERNAL_STACK'):
             reason = '当前由 run.sh sim/teleop 管理控制进程；请使用 ./run.sh middleware 启动后在此管理仿真。'
@@ -117,7 +116,8 @@ class SimulationService:
             urdf.relative_to(profile.resolve())
             UrdfModel(urdf.read_bytes())
             if options['with_control']:
-                for filename in ('controller_v23.yml', 'arm_teleop.yaml'):
+                files = ('arm_teleop.yaml', 'robot_api.yaml', 'motion/motion.yaml', 'motion/sdk.yaml', 'motion/channels.yaml', 'motion/tools.yaml') if (profile/'robot_api.yaml').is_file() else ('controller_v23.yml','arm_teleop.yaml')
+                for filename in files:
                     if not (profile / filename).is_file():
                         raise SimulationError(f'当前机器人包缺少 {filename}')
         except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:

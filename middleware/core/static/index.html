@@ -85,9 +85,13 @@
         </div>
         <div class="recording-settings form-grid">
           <label>录制保存目录<input id="topicRecordingDirectory" placeholder="runtime/topic_recordings"><small>数据保存目录，相对路径以项目根目录为基准</small></label>
-          <label>保存方式<select id="topicRecordingFormat"><option value="mcap">MCAP · 原始话题</option><option value="lerobot">LeRobot · 训练数据集</option><option value="both">MCAP + LeRobot</option></select><small>LeRobot 在停止录制后生成，图像保存为 MP4/H.264，按指定帧率对齐数据</small></label>
+          <label>录制格式<select id="topicRecordingFormat"><option value="mcap">原生 MCAP · 原始 ROS 话题</option><option value="lerobot">LeRobot · 训练数据集</option><option value="platform_raw">自定义格式 · RGB MP4 + 无损深度包</option><option value="both">MCAP + LeRobot</option></select><small>LeRobot 在停止后导出，需要录到 action 消息；原生 MCAP 按实际收到的话题保存。自定义格式将 RGB 编码成 H.264 MP4，深度原始像素无损压缩到 MCAP，再封存为整包。</small></label>
           <label id="lerobotFpsField">LeRobot 帧率<input id="topicRecordingLerobotFps" type="number" min="1" max="60" step="1" value="15"><small>数据集采样帧率，不会提高相机实际帧率</small></label>
           <label id="lerobotTaskField">任务描述<input id="topicRecordingLerobotTask" value="遥操作" placeholder="例如：双臂搬运箱子"><small>写入数据集的 task 描述</small></label>
+        </div>
+        <div class="recording-settings form-grid">
+          <label>自定义格式采集配置<input id="captureConfigFile" placeholder="采集配置 YAML 文件路径"><small>仅自定义格式使用；来源、相机与存储策略从该文件读取。</small></label>
+          <label><span><input id="deriveActionFromNextState" type="checkbox"> 仅测试：无真实 action 时，用下一帧状态生成 action</span><small>默认关闭，真实录制请保持关闭。仅自定义格式支持；已有真实动作不替换，缺少下一帧时保留无效标记，不会发送给机器人。</small></label>
         </div>
         <p id="recordingExportStatus" class="muted" role="status" hidden></p>
         <div id="recordingReadinessBanner" class="recording-readiness-banner">
@@ -333,9 +337,7 @@
     <section id="uploadPanel" class="data-workbench"><h2>上传</h2><p>上传模块未加载时，本地录制仍可使用。</p></section>
     <section class="data-workbench" id="dataWorkbench">
       <h2>录制作业与数据工具</h2>
-      <label>工作流 <select id="recordWorkflow"><option value="hc">HC MCAP / LeRobot / both</option><option value="platform_raw">平台 raw MCAP + MP4</option></select></label>
-      <label>raw 采集配置文件 <input id="captureConfigFile" placeholder="相对 middleware 配置目录或绝对路径"></label>
-      <button id="saveRecordWorkflow">保存下次录制配置</button>
+      <p>在<a href="#topics">话题录制</a>中选择录制格式、采集配置及测试 action 开关；保存后用于下一段录制。</p>
       <button id="refreshRecordingJobs">刷新作业</button>
       <pre id="recordingJobsStatus" aria-live="polite"></pre>
       <h3>单 MCAP 数据预览与编辑</h3>
@@ -358,6 +360,6 @@
   <script src="/static/table_columns.js?v=3"></script>
   <link rel="stylesheet" href="/static/upload_panel.css">
   <script src="/static/upload_panel.js"></script>
-  <script src="/static/app.js?v=20-export-recovery"></script>
+  <script src="/static/app.js?v=21-raw-test-action"></script>
 </body>
 </html>

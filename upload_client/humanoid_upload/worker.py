@@ -68,7 +68,8 @@ class Worker:
             if not item or any(asset["expected_" + key] != item[key] for key in ("size_bytes", "sha256", "crc64")) or asset["path"] != item["path"]:
                 raise UploadError("SERVER_ASSET_CONFLICT")
         state, terminal, action = state_for(upload["state"], upload["processing_status"], upload["quality_status"])
-        if upload["state"] == "COMMITTED" and self.cfg["processing_endpoint"]:
+        if (upload["state"] == "COMMITTED" and self.cfg["processing_endpoint"]
+                and manifest['source_format'] == 'LEROBOT_V3'):
             terminal = False  # A crash must not strand a terminal result without its episode receipt.
         job.update(upload_id=upload["upload_id"], raw_source_id=upload.get("raw_source_id"),
                    server_state=upload["state"], processing_status=upload["processing_status"],
@@ -234,7 +235,10 @@ class Worker:
             job.pop('processing_retry_request',None)
             self.queue.save(job)
             return
-        if not self.cfg["processing_endpoint"]:
+        # The optional /processing endpoint only accepts LeRobot v3. MCAP
+        # transport remains valid, but must not be sent to that format-specific
+        # endpoint or misreported as a failed upload after a successful commit.
+        if not self.cfg["processing_endpoint"] or job['manifest']['source_format'] != 'LEROBOT_V3':
             return
         request_id = job.get("processing_retry_request")
         result = (http.api("POST", path + ":retry-processing", {"request_id": request_id}) if request_id

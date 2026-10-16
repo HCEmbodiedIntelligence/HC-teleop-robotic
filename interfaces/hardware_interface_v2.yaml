@@ -1,9 +1,10 @@
 schema: hc-teleop-hardware-interface/v2
-namespaces: [/action, /observation, /control, /status]
+robot_api_schema: hc-robot-api/v1
+namespaces: [/action, /observation, /control, /status, /internal/robot]
 default_ros_domain_id: 14
 hardware_publishes:
   - {topic: /status/hardware/ready, type: std_msgs/msg/Bool, required: true, target_hz: 100, min_hz: 10}
-  - {topic: /observation/joint_states, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, min_hz: 50}
+  - {topic: /internal/robot/joint_states, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, min_hz: 50}
   - {topic: /observation/hands/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, min_hz: 1}
   - {topic: /observation/hands/triggers, type: geometry_msgs/msg/PoseArray, required: false, target_hz: 10, min_hz: 1}
   - {topic: /status/base, type: std_msgs/msg/String, required: false, target_hz: 10, min_hz: 1}
@@ -15,12 +16,21 @@ hardware_publishes:
   - {topic: /observation/cameras/d405_right/color/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
   - {topic: /observation/cameras/d405_right/depth/compressed, type: sensor_msgs/msg/CompressedImage, required: false, target_hz: 30, min_hz: 10}
 hardware_subscribes:
-  - {topic: /action/joint_states, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, timeout_ms: 150}
+  - {topic: /control/hardware/enabled, type: std_msgs/msg/Bool, required: true, event_driven: true}
+  - {topic: /control/emergency_stop, type: std_msgs/msg/Bool, required: true, event_driven: true}
+  - {topic: /internal/robot/joint_commands, type: sensor_msgs/msg/JointState, required: true, target_hz: 100, timeout_ms: 150}
   - {topic: /action/base/command, type: std_msgs/msg/Float64MultiArray, required: false, target_hz: 60, timeout_ms: 200}
   - {topic: /action/left_hand/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, timeout_ms: 500}
   - {topic: /action/right_hand/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, timeout_ms: 500}
+middleware_publishes:
+  - {topic: /observation/joint_states, type: sensor_msgs/msg/JointState, names: public, preserves_source_stamp: true}
+  - {topic: /action/joint_states, type: sensor_msgs/msg/JointState, names: public, meaning: selected_target_not_measured_state}
+  - {topic: /status/robot/info, type: std_msgs/msg/String, schema: hc-robot-api/v1, reliability: reliable, durability: transient_local, depth: 1}
 rules:
-  joint_names: Names in joint_states and joint_cmd must exactly match the imported URDF.
+  joint_names: Internal robot JointState names match the profile URDF. Public arms use left_joint_1..N and right_joint_1..N; auxiliary names and units come from /status/robot/info.
+  joint_conversion: Profile mapping is q_model=scale*q_public+offset, v_model=scale*v_public, effort_model=effort_public/scale. Vendor and SDK conversions remain at their own boundaries.
+  migration: Unified profiles require the internal model topics and the HC public boundary. Isolate legacy native-name publishers; never mix them on public topics.
   command_owner: Exactly one hardware-side node may publish to the physical joint command channel.
+  hardware_enable: Hardware execution uses /control/hardware/enabled; /control/teleop/enabled controls VR input only. Resume requires a new explicit enable and fresh targets.
   watchdog: Stop command output and hold safely after timeout; never replay a stale command.
   images: Publish compressed color/depth for recording; raw streams are optional diagnostics only.

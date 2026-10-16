@@ -112,6 +112,9 @@ def test_groups_follow_every_bundled_profile():
         config['robot_profiles']['active'] = profile
         groups = load_joint_groups(config, root / 'middleware')
         source = yaml.safe_load((root / 'adapters/robots' / profile / 'arm_teleop.yaml').read_text())
-        assert groups['left_arm'] == source['arms']['left']['joint_names']
-        assert groups['right_arm'] == source['arms']['right']['joint_names']
+        for side in ('left', 'right'):
+            expected = source['arms'][side]['joint_names']
+            if (adapter.parent / 'robot_api.yaml').is_file():
+                expected = [f'{side}_joint_{i}' for i in range(1,len(expected)+1)]
+            assert groups[side + '_arm'] == expected
         assert bool(groups.get('waist')) == bool(source.get('body', {}).get('waist_joint_names'))

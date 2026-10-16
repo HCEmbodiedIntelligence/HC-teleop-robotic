@@ -21,6 +21,7 @@ from .config import ConfigError, ConfigStore, validate_config
 from .profile_api import register_profile_routes
 from .protocol import envelope
 from .robot_profiles import RobotProfileManager
+from .robot_api import RobotApiProfile, selected_profile, selected_profile_root
 from .ros_bridge import RosBridge
 from .ros_recording_executor import RosRecordingExecutor
 from .topic_player import TopicPlayer
@@ -88,13 +89,7 @@ class MiddlewareRuntime:
             "free_joints": "[]",
             "ros_domain_id": str(self.config.get("ros", {}).get("domain_id", 14)),
         }
-        root_value = os.environ.get("HC_ROBOT_CONFIG_ROOT") or profile_config.get(
-            "root", "../adapters/robots"
-        )
-        profile_root = Path(str(root_value)).expanduser()
-        if not profile_root.is_absolute():
-            profile_root = self.config_dir / profile_root
-        profile_dir = (profile_root / profile_id).resolve()
+        profile_dir = selected_profile(self.config, self.config_dir)
         try:
             profile = yaml.safe_load(
                 (profile_dir / "profile.yaml").read_text(encoding="utf-8")
@@ -119,10 +114,17 @@ class MiddlewareRuntime:
                 )
         except (OSError, TypeError, yaml.YAMLError):
             pass
+        if (profile_dir / "robot_api.yaml").is_file():
+            api = RobotApiProfile(profile_dir)
+            metadata.update(robot_api_schema="hc-robot-api/v1", robot_api_revision=api.revision,
+                            robot_api_info=json.dumps(api.describe(), separators=(",", ":")),
+                            free_joints=json.dumps([j["public_name"] for j in api.joints.values()]))
         return metadata
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
+        # Keep runtime-derived camera selections separate from saved config.
+        self.config = copy.deepcopy(self.config)
         configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 14))
         domain_id = int(os.environ.get("ROS_DOMAIN_ID", configured_domain_id))
         # Keep all contexts created below (bridge, recorder and cameras) on the
@@ -139,6 +141,16 @@ class MiddlewareRuntime:
 
         self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vr-recording")
         self.session_profile_metadata = self._load_session_profile_metadata()
+        if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active"):
+            from .profile_cameras import apply_profile_cameras
+            apply_profile_cameras(self.config, selected_profile(self.config, self.config_dir),
+                                  simulation=os.environ.get('HC_TELEOP_MODE') == 'sim')
+        profile_dir = (selected_profile(self.config, self.config_dir)
+                       if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
+        if profile_dir is not None and (profile_dir / "robot_api.yaml").is_file():
+            # Both recorder and ROS bridge must freeze the same startup profile.
+            RobotApiProfile(profile_dir)
+            self.config["ros"]["robot_api_profile"] = str(profile_dir)
         self.recorder = RecordingService(self.config["ros"]["recording"], self.config_dir, self.config["ros"], self.topic_health)
         try:
             from .upload_service import UploadService
@@ -159,6 +171,7 @@ class MiddlewareRuntime:
             lambda: self.ros,
             self._on_replay_state,
             lambda: self.session_profile_metadata.get("profile_id", ""),
+            lambda: self.session_profile_metadata,
         )
         camera_config = self.config.get("camera", {})
         base_camera_config = {
@@ -211,7 +224,7 @@ class MiddlewareRuntime:
         )
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.vr = VrGateway(
-            self.config["vr"], self._on_pose, self.emit, self._on_safety_event
+            self.config["vr"], self._on_pose, self.emit, self._on_vr_timeout
         )
         self.ros.start()
         self.recording_ros.start()
@@ -582,6 +595,18 @@ class MiddlewareRuntime:
             self._send_safety_snapshot()
             await asyncio.sleep(0.5)
 
+    def _on_vr_timeout(self, reason: str) -> None:
+        source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
+        if source is None:
+            source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
+        if source == "vr":
+            self._on_safety_event(reason)
+        else:
+            # VR link health cannot revoke another explicitly selected source.
+            if self.ros:
+                self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
+            self.emit(envelope("vr_timeout", "middleware", {"reason": reason}), ["websocket", "udp"])
+
     def _on_safety_event(self, reason: str) -> None:
         self._safety_reason = reason
         if self.ros is not None and self.config["safety"].get("enabled", True):
@@ -697,9 +722,7 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
 def create_app(store: ConfigStore) -> web.Application:
     config = store.load()
     runtime = MiddlewareRuntime(config, store.path.parent)
-    profile_root = Path(config["robot_profiles"]["root"]).expanduser()
-    if not profile_root.is_absolute():
-        profile_root = store.path.parent / profile_root
+    profile_root = selected_profile_root(config, store.path.parent)
     profiles = RobotProfileManager(profile_root)
     app = web.Application(
         client_max_size=100 * 1024 * 1024, middlewares=[cors_middleware]

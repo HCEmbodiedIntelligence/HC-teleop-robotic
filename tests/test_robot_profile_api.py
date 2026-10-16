@@ -209,7 +209,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(del_res.status, 200)
         del_data = await del_res.json()
-        self.assertIn(filename, del_data["deleted"])
+        self.assertIn(filename, del_data["deleted"], del_data)
 
     async def test_replay_apis(self):
         filename = await self.completed_recording("replay_test.mcap")

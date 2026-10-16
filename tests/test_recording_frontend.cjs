@@ -19,10 +19,32 @@ function setup(){
 test('recording settings save together without dropping subscription configuration',()=>{
   const {ctx,fields}=setup();
   const config=JSON.parse(vm.runInContext('JSON.stringify(collectConfig())',ctx));
-  assert.deepEqual(config.ros.recording,{directory:'runtime/datasets',format:'both',lerobot_fps:15,lerobot_task:'搬运箱子'});
+  assert.deepEqual(config.ros.recording,{directory:'runtime/datasets',workflow:'hc',format:'both',derive_action_from_next_state:false,lerobot_fps:15,lerobot_task:'搬运箱子'});
   assert.deepEqual(config.ros.subscriptions,[]);
   fields['#topicRecordingLerobotFps'].value='0';
   assert.throws(()=>vm.runInContext('collectConfig()',ctx),/帧率/);
+});
+test('custom format selects the raw workflow and leaving it disables test actions',()=>{
+  const {ctx,fields}=setup();
+  fields['#captureConfigFile']={value:'/runtime/openarmx.yaml'};
+  fields['#deriveActionFromNextState']={checked:true};
+  fields['#topicRecordingFormat'].value='platform_raw';
+  vm.runInContext('updateRecordingFormatFields()',ctx);
+  let config=JSON.parse(vm.runInContext('JSON.stringify(collectConfig())',ctx));
+  assert.equal(config.ros.recording.workflow,'platform_raw');
+  assert.equal(config.ros.recording.format,'mcap');
+  assert.equal(config.ros.recording.derive_action_from_next_state,true);
+  assert.equal(config.ros.recording.capture_config_file,'/runtime/openarmx.yaml');
+  assert.equal(fields['#topicRecordingLerobotFps'].disabled,true);
+  for(const mode of ['mcap','lerobot','both']) {
+    fields['#topicRecordingFormat'].value=mode;
+    vm.runInContext('updateRecordingFormatFields()',ctx);
+    config=JSON.parse(vm.runInContext('JSON.stringify(collectConfig())',ctx));
+    assert.equal(config.ros.recording.workflow,'hc');
+    assert.equal(config.ros.recording.format,mode);
+    assert.equal(config.ros.recording.derive_action_from_next_state,false);
+    assert.equal(fields['#deriveActionFromNextState'].disabled,true);
+  }
 });
 test('MCAP disables dataset-only fields and switching back restores editing',()=>{
   const {ctx,fields}=setup();

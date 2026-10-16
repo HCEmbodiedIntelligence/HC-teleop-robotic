@@ -119,7 +119,7 @@ done
 
 if [[ "${MODE}" == middleware ]]; then
   [[ "${HEADLESS}" == false ]] || { echo "Configure headless mode in Dashboard." >&2; exit 2; }
-  unset HC_EXTERNAL_STACK HC_ROBOT_NAME HC_ROBOT_CONFIG_ROOT HC_TELEOP_MODE
+  unset HC_EXTERNAL_STACK HC_TELEOP_MODE
   ARGS=(--config "${MIDDLEWARE_CONFIG}")
   [[ -z "${LOG_DIR}" ]] || ARGS+=(--log-dir "${LOG_DIR}")
   [[ "${MONITOR}" == true ]] || ARGS+=(--no-monitor)
@@ -146,15 +146,9 @@ set -u
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 
-ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-}"
-ROBOT_NAME="${HC_ROBOT_NAME:-}"
-if [[ -z "${ROBOT_CONFIG_ROOT}" ]]; then
-  ROBOT_CONFIG_ROOT="$(/usr/bin/python3 -m middleware.profile_cli root --config "${MIDDLEWARE_CONFIG}")"
-fi
-if [[ -z "${ROBOT_NAME}" ]]; then
-  ROBOT_NAME="$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")"
-fi
-PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
+PROFILE_DIR="$(/usr/bin/python3 -m middleware.profile_cli profile-dir --config "${MIDDLEWARE_CONFIG}")"
+ROBOT_CONFIG_ROOT="$(dirname -- "${PROFILE_DIR}")"
+ROBOT_NAME="$(basename -- "${PROFILE_DIR}")"
 if [[ "${MODE}" == teleop && "${HEADLESS}" == true ]]; then
   echo "--headless is only valid in sim mode." >&2
   exit 2

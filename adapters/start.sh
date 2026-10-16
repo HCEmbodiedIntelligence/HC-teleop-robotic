@@ -58,14 +58,20 @@ export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
 
-ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 -m middleware.profile_cli root --config "${MIDDLEWARE_CONFIG}")}"
-ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")}"
+PROFILE_DIR="$(/usr/bin/python3 -m middleware.profile_cli profile-dir --config "${MIDDLEWARE_CONFIG}")"
+ROBOT_CONFIG_ROOT="$(dirname -- "${PROFILE_DIR}")"
+ROBOT_NAME="$(basename -- "${PROFILE_DIR}")"
 export HC_ROBOT_CONFIG_ROOT="${ROBOT_CONFIG_ROOT}"
 export HC_ROBOT_NAME="${ROBOT_NAME}"
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
 CONTROLLER_YML="${HC_CONTROLLER_CONFIG:-${PROFILE_DIR}/controller_v23.yml}"
 ARM_CONFIG="${HC_ARM_TELEOP_CONFIG:-${PROFILE_DIR}/arm_teleop.yaml}"
 CONTROL_BACKEND="$(/usr/bin/python3 -m adapters.core.runtime_config backend "${ARM_CONFIG}")"
+if [[ -f "${PROFILE_DIR}/robot_api.yaml" ]]; then
+  [[ "${CONTROL_BACKEND}" == motion && "$(realpath -- "${ARM_CONFIG}")" == "${PROFILE_DIR}/arm_teleop.yaml" ]] || {
+    err "统一 profile 必须使用同一 arm_teleop.yaml 和 Motion 后端"; exit 2;
+  }
+fi
 export HC_ARM_TELEOP_CONFIG="${ARM_CONFIG}"
 MOTION_INSTALL="${HC_MOTION_INSTALL:-${PROJECT_ROOT}/install_motion}"
 V23_SCRIPT="${PROJECT_ROOT}/adapters/v23/script/control_v2_3_ros2.py"

@@ -540,9 +540,9 @@ function renderConfig() {
     $('#topicRecordingDirectory').value = config?.ros?.recording?.directory || 'runtime/topic_recordings';
   }
   const recordingConfig=config?.ros?.recording || {};
-  if($('#recordWorkflow')) $('#recordWorkflow').value=recordingConfig.workflow || 'hc';
   if($('#captureConfigFile')) $('#captureConfigFile').value=recordingConfig.capture_config_file || '';
-  if($('#topicRecordingFormat')) $('#topicRecordingFormat').value=recordingConfig.format || 'mcap';
+  if($('#deriveActionFromNextState')) $('#deriveActionFromNextState').checked=recordingConfig.derive_action_from_next_state === true;
+  if($('#topicRecordingFormat')) $('#topicRecordingFormat').value=recordingConfig.workflow === 'platform_raw' ? 'platform_raw' : recordingConfig.format || 'mcap';
   if($('#topicRecordingLerobotFps')) $('#topicRecordingLerobotFps').value=recordingConfig.lerobot_fps ?? 15;
   if($('#topicRecordingLerobotTask')) $('#topicRecordingLerobotTask').value=recordingConfig.lerobot_task || '遥操作';
   updateRecordingFormatFields();
@@ -554,6 +554,12 @@ function renderConfig() {
 
 function updateRecordingFormatFields() {
   const usesLeRobot=['lerobot','both'].includes($('#topicRecordingFormat')?.value);
+  const usesRaw=$('#topicRecordingFormat')?.value === 'platform_raw';
+  if($('#captureConfigFile')) $('#captureConfigFile').disabled=!usesRaw;
+  if($('#deriveActionFromNextState')) {
+    $('#deriveActionFromNextState').disabled=!usesRaw;
+    if(!usesRaw) $('#deriveActionFromNextState').checked=false;
+  }
   for(const id of ['#topicRecordingLerobotFps','#topicRecordingLerobotTask']) {
     if($(id)) $(id).disabled=!usesLeRobot;
   }
@@ -688,6 +694,11 @@ function updateReadinessBanner() {
   const banner = $('#recordingReadinessBanner');
   const text = $('#recordingReadinessText');
   if (!banner || !text || !config) return;
+  if (config.ros?.recording?.workflow === 'platform_raw') {
+    banner.className = 'recording-readiness-banner';
+    text.textContent = '自定义格式按采集配置检查相机、状态和 action 来源；点击开始录制时执行预检查。';
+    return;
+  }
 
   const recordingSubs = (config.ros?.subscriptions || []).filter(
     item => item.enabled !== false && (item.outputs || []).includes('record')
@@ -813,7 +824,13 @@ function collectConfig() {
     if(!config.ros) config.ros = {};
     if(!config.ros.recording) config.ros.recording = {};
     config.ros.recording.directory = $('#topicRecordingDirectory').value.trim() || 'runtime/topic_recordings';
-    if($('#topicRecordingFormat')) config.ros.recording.format=$('#topicRecordingFormat').value;
+    if($('#topicRecordingFormat')) {
+      const selected=$('#topicRecordingFormat').value;
+      config.ros.recording.workflow=selected === 'platform_raw' ? 'platform_raw' : 'hc';
+      config.ros.recording.format=selected === 'platform_raw' ? 'mcap' : selected;
+      config.ros.recording.derive_action_from_next_state=selected === 'platform_raw' && $('#deriveActionFromNextState')?.checked === true;
+    }
+    if($('#captureConfigFile')) config.ros.recording.capture_config_file=$('#captureConfigFile').value.trim();
     if($('#topicRecordingLerobotFps')) {
       const fps=Number($('#topicRecordingLerobotFps').value);
       if(!Number.isInteger(fps) || fps<1 || fps>60) throw new Error('LeRobot 帧率需为 1–60 的整数');
@@ -1500,7 +1517,7 @@ async function init() {
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
       config=result.config; renderConfig();
-      toast('录制配置已写入 middleware/config.yaml 并应用');
+      toast('录制配置已保存，用于下一段录制');
     }catch(error){toast(error.message,true);}
   };
   if($('#topicRecordingFormat')) $('#topicRecordingFormat').onchange=updateRecordingFormatFields;
@@ -1528,21 +1545,21 @@ async function init() {
           }
           const dialog = $('#precheckWarningDialog');
           if (dialog) {
-            $('#precheckWarningSummary').textContent = `检测到 ${precheck.issues.length} 个待录制话题未检测到消息或频率未达标：`;
+            $('#precheckWarningSummary').textContent = `检测到 ${precheck.issues.length} 项录制源检查未通过：`;
             const tbody = $('#precheckIssueRows');
             tbody.textContent = '';
             for (const iss of precheck.issues) {
               const tr = document.createElement('tr');
               const tdTopic = document.createElement('td');
               const code = document.createElement('code');
-              code.textContent = iss.topic || iss.source || 'capture';
+              code.textContent = iss.topic || iss.source_id || iss.source || 'capture';
               tdTopic.append(code);
               const tdHz = document.createElement('td');
               tdHz.className = 'topic-rate ' + (iss.hz > 0 ? 'low' : 'none');
-              tdHz.textContent = `${Number(iss.hz || 0).toFixed(1)} Hz`;
+              tdHz.textContent = iss.hz == null ? '—' : `${Number(iss.hz).toFixed(1)} Hz`;
               const tdStd = document.createElement('td');
               tdStd.className = 'topic-target-rate';
-              tdStd.textContent = `≥ ${Number(iss.min_hz || 0).toFixed(0)} Hz`;
+              tdStd.textContent = iss.min_hz == null ? '—' : `≥ ${Number(iss.min_hz).toFixed(0)} Hz`;
               const tdDiag = document.createElement('td');
               const badge = document.createElement('span');
               badge.className = 'topic-status-badge ' + (iss.hz > 0 ? 'status-low' : 'status-none');
@@ -1759,19 +1776,6 @@ function initDataWorkbench() {
     } catch (error) { show({error:error.message}); }
   }
   el('refreshRecordingJobs').onclick = refresh;
-  el('saveRecordWorkflow').onclick = async () => {
-    try {
-      const current = await call('/api/config');
-      const cfg = current.config || current;
-      cfg.ros.recording.workflow = el('recordWorkflow').value;
-      cfg.ros.recording.capture_config_file = el('captureConfigFile').value;
-      const saved = await fetch('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)});
-      if (!saved.ok) throw new Error(await saved.text());
-      const result=await saved.json();
-      config=result.config; renderConfig();
-      show({saved:true, workflow:config.ros.recording.workflow});
-    } catch (error) { show({error:error.message}); }
-  };
   document.querySelectorAll('[data-data-action]').forEach(button => button.onclick = async () => {
     const operation = button.dataset.dataAction, filename = el('dataSource').value;
     try {
