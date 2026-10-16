@@ -541,6 +541,7 @@ function renderConfig() {
   renderRecordingRules();
   renderStandardTopics();
   renderConfigInterface();
+  renderRuntimeDomain(simulationLastState);
 }
 
 function updateRecordingFormatFields() {
@@ -1373,10 +1374,23 @@ async function toggleSimulationView() {
 }
 let simulationBusy=false;
 let simulationActionError='';
+function renderRuntimeDomain(value) {
+  const field=$('#runtimeRosDomain'), hint=$('#runtimeRosDomainHint');
+  if(!field||!hint)return;
+  const actual=value?.ros_domain_id;
+  field.value=Number.isInteger(actual)?String(actual):'—';
+  if(!Number.isInteger(actual)) {hint.textContent='尚未取得运行时域，请检查服务连接';return;}
+  const configured=config?.ros?.domain_id;
+  if(value.runtime_mode==='teleop') {
+    hint.textContent=`真机遥操实际使用域 ${actual}`+(Number.isInteger(configured)&&configured!==actual?`；启动参数覆盖了保存的默认域 ${configured}`:'');
+  } else {
+    hint.textContent=`隔离仿真实际使用域 ${actual}；启动指定的真机域 ${value.hardware_domain_id??'—'} 不用于仿真`;
+  }
+}
 async function loadSimulation() {
   try {
     const value=await api('/api/simulation');
-    simulationLastState=value;simulationView?.updateState(value);
+    simulationLastState=value;simulationView?.updateState(value);renderRuntimeDomain(value);
     const states={stopped:'已停止',starting:'启动中',running:'运行中',stopping:'停止中',failed:'启动失败 / 已退出'};
     if(!simulationBusy)$('#simulationState').textContent=states[value.state]||value.state;
     $('#simulationProfile').textContent=`运行模式：${value.runtime_mode==='teleop'?'真机遥操':'隔离仿真'} · 显示：${$('#simulationViewEnabled').checked?'网页三维已开启':'网页三维已关闭'} · ROS 域：${value.ros_domain_id??'—'} · 当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
@@ -1387,6 +1401,7 @@ async function loadSimulation() {
     $('#restartSimulation').disabled=simulationBusy||!value.available||value.state==='stopping';
     $('#stopSimulation').disabled=simulationBusy||!active;
   } catch(error) {
+    renderRuntimeDomain(null);
     $('#simulationError').textContent=`无法读取仿真状态：${error.message}`;
     for(const id of ['startSimulation','restartSimulation','stopSimulation']) $('#'+id).disabled=true;
   }

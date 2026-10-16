@@ -213,7 +213,8 @@
         <div class="form-grid">
           <label>HTTP Host<input data-path="server.host"></label>
           <label>HTTP Port<input type="number" data-path="server.port"></label>
-          <label>ROS 2 Domain ID<input type="number" min="0" max="232" data-path="ros.domain_id" placeholder="0"><small>真机 teleop 使用的域（0~232）；默认仿真自动使用另一个本机专用域</small></label>
+          <label>当前实际运行 ROS 域<input id="runtimeRosDomain" readonly value="—"><small id="runtimeRosDomainHint">正在读取运行状态…</small></label>
+          <label>默认 ROS 域（保存配置）<input type="number" min="0" max="232" data-path="ros.domain_id" placeholder="0"><small>未指定 ROS_DOMAIN_ID 时供启动使用；启动参数优先。修改默认域后需重新启动整个入口。</small></label>
           <label>ROS 2 节点名称<input data-path="ros.node_name" placeholder="hc_teleop_middleware"></label>
         </div>
         <label class="toggle"><input type="checkbox" data-path="vr.enabled"><span></span>启用 VR UDP 网关</label>
