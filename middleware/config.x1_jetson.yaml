@@ -2,6 +2,9 @@
 robot_profiles:
   root: ../adapters/robots
   active: x1
+vr:
+  # Match the standard deployment; network stalls still require a manual reset.
+  pose_timeout_ms: 600
 ros:
   domain_id: 14
   subscriptions:

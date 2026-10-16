@@ -17,6 +17,7 @@ class ConfigTests(unittest.TestCase):
         profile_root = (store.path.parent / config["robot_profiles"]["root"]).resolve()
         self.assertTrue((profile_root / "x1" / "controller_v23.yml").is_file())
         self.assertTrue(config["safety"]["stop_on_startup"])
+        self.assertEqual(config["vr"]["pose_timeout_ms"], 600)
         self.assertFalse(config["ros"]["recording"]["enabled"])
         self.assertEqual(config["ros"]["domain_id"], 14)
         self.assertEqual(config["ros"]["command_mux"]["output_topic"], "/action/joint_states")
