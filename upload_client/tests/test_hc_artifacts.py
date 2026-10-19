@@ -95,6 +95,7 @@ def test_worker_restart_commit_reconciliation(kind,hc_cfg,monkeypatch):
     assert result['quality_status']=='PENDING'
     assert result['state']==('awaiting_slice' if kind=='platform_raw' else 'raw_committed')
     assert result['manifest']['source_format']=={'hc_mcap':'MCAP','hc_lerobot':'LEROBOT_V3','platform_raw':'CAPTURE_BUNDLE'}[kind]
+    assert result['manifest'].get('declared_episode_count') == (1 if kind == 'hc_lerobot' else None)
 
 
 def test_mcap_commit_does_not_call_lerobot_processing(hc_cfg,monkeypatch):

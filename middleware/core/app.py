@@ -1390,7 +1390,45 @@ def create_app(store: ConfigStore) -> web.Application:
                     )
                 return getattr(runtime.uploads, key)
 
-        register_upload_routes(app, UploadProxy())
+        async def update_upload_settings(body):
+            from humanoid_upload.common import UploadError
+            from .upload_service import UploadService
+            if set(body) != {"enabled", "auto_enqueue"} or any(type(v) is not bool for v in body.values()):
+                raise ValueError()
+            async with runtime._restart_lock:
+                if runtime.recorder is None:
+                    raise UploadError("UPLOAD_UNAVAILABLE", "录制服务尚未就绪")
+                if runtime.recorder.status().get("recording"):
+                    raise UploadError("ARTIFACT_BUSY", "请停止当前录制后修改上传设置")
+                proposed = copy.deepcopy(store.value)
+                proposed["uploads"].update(body)
+                upload_config = copy.deepcopy(proposed["uploads"])
+                queue_path = Path(upload_config["queue_directory"]).expanduser()
+                upload_config["queue_directory"] = str((store.path.parent / queue_path).resolve())
+                candidate = UploadService(upload_config,
+                    artifact_state_dir=runtime.recorder.artifact_state_dir,
+                    data_directory=runtime.recorder.directory)
+                old = runtime.uploads
+                if old is not None:
+                    stopped = await asyncio.to_thread(old.stop)
+                    if not stopped.get("stopped"):
+                        raise UploadError("ARTIFACT_BUSY", "上传请求尚未结束，请稍后重试")
+                try:
+                    saved = store.save(proposed)
+                except Exception:
+                    if old is not None:
+                        old.start()
+                    raise
+                runtime.config["uploads"] = copy.deepcopy(saved["uploads"])
+                runtime.uploads = candidate
+                runtime.upload_error = None
+                runtime.recorder.upload_service = candidate
+                runtime.recorder.binding_snapshot = (candidate.binding_snapshot
+                    if body["enabled"] and body["auto_enqueue"] else None)
+                candidate.start()
+                return candidate.status()
+
+        register_upload_routes(app, UploadProxy(), update_settings=update_upload_settings)
     except ImportError:
         async def upload_unavailable(request):
             return web.json_response(

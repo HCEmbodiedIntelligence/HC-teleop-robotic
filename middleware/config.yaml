@@ -5,9 +5,10 @@ robot_profiles:
   root: ../adapters/robots
   active: x1
 simulation:
-  headless: false
+  headless: true
   with_control: true
   debug_joints: false
+  startup_timeout_sec: 120
 ros:
   enabled: true
   domain_id: 14
@@ -18,6 +19,8 @@ ros:
     lerobot_fps: 15
     lerobot_task: 遥操作
     enabled: false
+    artifact_state_dir: ../runtime/artifact_state
+    upload_job_state_dir: ../runtime/recording_uploads
   dataset_topics:
     enabled: true
 vr:
@@ -29,14 +32,14 @@ vr:
   outbound_port: 5007
   publish_to_ros: true
   data_topic: /vrdata
-
-# Optional platform upload. Local recording works without the upload client.
+safety: {}
+camera: {}
 uploads:
-  enabled: false
-  auto_enqueue: false
+  enabled: true
+  auto_enqueue: true
   queue_directory: ../runtime/upload_queue
-  platform_base_url: ""
-  credential_ref: ""
-  robot_id: ""
-  local_robot_id: ""
-  task_id: ""
+  platform_base_url: ''
+  credential_ref: ''
+  robot_id: ''
+  local_robot_id: ''
+  task_id: ''

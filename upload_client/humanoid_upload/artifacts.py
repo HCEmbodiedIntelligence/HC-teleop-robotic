@@ -179,11 +179,24 @@ def manifest_for_ready(descriptor, cfg, client_id):
     marker = dict(export_id=descriptor['artifact_id'], session_id=descriptor['recording_id'],
                   robot_id=cfg['robot_id'], collection_task_id=cfg['task_id'], content_sha256=digest)
     lerobot = descriptor['kind'] == 'hc_lerobot'
+    info = read_json(root / 'meta/info.json') if lerobot else None
+    episode_count = None
+    if lerobot:
+        episode_count = info.get('total_episodes')
+        if episode_count is None:
+            episodes_file = root / 'meta/episodes.jsonl'
+            if episodes_file.exists():
+                with episodes_file.open('r') as stream:
+                    episode_count = sum(1 for line in stream if line.strip())
+            else:
+                episode_count = 1
+        episode_count = int(episode_count)
     manifest = dict(schema_version='robot-ingest/v1', client_upload_id=client_id,
                     collection_task_id=cfg['task_id'], robot_id=cfg['robot_id'],
                     source_format='LEROBOT_V3' if lerobot else 'MCAP',
-                    source_format_version=read_json(root/'meta/info.json')['codebase_version'] if lerobot else '0',
+                    source_format_version=info['codebase_version'] if lerobot else '0',
                     capture_mode='PRESEGMENTED' if lerobot else 'CONTINUOUS',
+                    declared_episode_count=episode_count,
                     capture_started_at=descriptor['capture_started_at'], capture_ended_at=descriptor['capture_ended_at'],
                     cameras=[], assets=[dict(a, asset_id=f'asset-{i:03d}', role='RAW', metadata={},
                         media_type='video/mp4' if a['path'].endswith('.mp4') else 'application/octet-stream')
@@ -193,3 +206,4 @@ def manifest_for_ready(descriptor, cfg, client_id):
                         'config_fingerprint', 'source_artifact_id', 'native_session_id')}})
     validate(manifest, 'robot-ingest-manifest')
     return root, marker, manifest
+

@@ -109,6 +109,50 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await response.json())['code'], 'UPLOAD_DISABLED')
         self.assertFalse((self.root / 'state').exists())
 
+    async def test_upload_switch_persists_without_restarting_control(self):
+        from middleware.core.topic_recorder import TopicRecorder
+        recorder = TopicRecorder({'directory': str(self.root / 'recordings'),
+                                  'artifact_state_dir': str(self.root / 'artifacts'),
+                                  'upload_job_state_dir': str(self.root / 'jobs')}, self.root)
+        self.runtime.recorder = recorder
+        store = ConfigStore(self.root / 'config.yaml')
+        store.load()
+        cfg = store.value
+        cfg['uploads']['queue_directory'] = str(self.root / 'queue')
+        store.save(cfg)
+        with patch('middleware.core.app.MiddlewareRuntime', return_value=self.runtime):
+            app = create_app(store)
+        with patch.object(self.runtime, 'start', new=AsyncMock()) as start, \
+             patch.object(self.runtime, 'stop', new=AsyncMock()), \
+             patch.object(self.runtime, 'restart', new=AsyncMock()) as restart:
+            async with TestClient(TestServer(app)) as client:
+                for enabled, automatic in ((True, False), (True, True), (False, False)):
+                    response = await client.post('/api/uploads/settings',
+                        json={'enabled': enabled, 'auto_enqueue': automatic})
+                    self.assertEqual(response.status, 200, await response.text())
+                    value = await response.json()
+                    self.assertEqual(value['enabled'], enabled)
+                    self.assertEqual(value['auto_enqueue'], automatic)
+                    self.assertEqual(ConfigStore(store.path).load()['uploads']['enabled'], enabled)
+                    self.assertEqual(bool(recorder.binding_snapshot), enabled and automatic)
+                restart.assert_not_called()
+                start.assert_awaited_once()
+                response = await client.post('/api/uploads/settings', json={'enabled': 'yes'})
+                self.assertEqual(response.status, 400)
+                with patch.object(recorder, 'status', return_value={'recording': True}):
+                    response = await client.post('/api/uploads/settings',
+                        json={'enabled': True, 'auto_enqueue': False})
+                    self.assertEqual(response.status, 409)
+                with patch('humanoid_upload.cli.check_connection', return_value={'connected': True}) as check:
+                    response = await client.post('/api/uploads/check-connection', json={
+                        'platform_base_url': 'http://127.0.0.1:8088', 'robot_id': 'robot-id',
+                        'local_robot_id': 'x1', 'task_id': 'task-id', 'credential_ref': 'env:TEST_TOKEN'})
+                    self.assertEqual(response.status, 200, await response.text())
+                    check.assert_called_once()
+        if self.runtime.uploads:
+            self.runtime.uploads.stop()
+        recorder.shutdown()
+
     async def test_upload_read_lease_blocks_delete_and_preserves_batch_failures(self):
         client_source = str(Path(__file__).resolve().parents[1] / 'upload_client')
         with patch.object(sys, 'path', [client_source, *sys.path]):

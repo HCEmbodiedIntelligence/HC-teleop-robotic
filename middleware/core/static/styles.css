@@ -916,7 +916,8 @@ tbody tr:hover { background: #fafafa; }
 .dataset-export-progress progress { display: block; width: 100%; height: 6px; margin-top: 6px; accent-color: #1677ff; }
 .dataset-export-progress.failed { color: var(--red, #cf1322); }
 
-#simulationView[hidden] { display: none; }
+/* Keep HTML hidden authoritative over component display rules (inputs, grids). */
+[hidden] { display: none !important; }
 #simulationView { margin: 16px 0; border: 1px solid #d4dee9; border-radius: 12px; overflow: hidden; }
 #simulationViewCanvas { width: 100%; height: clamp(320px, 55vh, 680px); touch-action: none; }
 #simulationViewCanvas canvas { display: block; width: 100%; height: 100%; }

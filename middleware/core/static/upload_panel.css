@@ -12,3 +12,7 @@
 .upload-panel h3, .upload-panel form > p { flex-basis: 100%; margin: 0; }
 .upload-panel td:last-child { min-width: 240px; }
 .upload-panel td { overflow-wrap: anywhere; }
+
+.upload-panel .upload-toggle { display: flex; align-items: center; gap: .5rem; }
+.upload-panel .upload-toggle input { width: auto; }
+.upload-panel button:disabled { cursor: not-allowed; opacity: .5; }

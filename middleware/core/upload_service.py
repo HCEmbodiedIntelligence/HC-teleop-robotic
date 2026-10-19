@@ -31,6 +31,13 @@ class UploadService:
         self.default_binding_id = None
         if not self.enabled:
             return
+        import importlib
+        import humanoid_upload.artifacts
+        import humanoid_upload.queue
+        import humanoid_upload.worker
+        importlib.reload(humanoid_upload.artifacts)
+        importlib.reload(humanoid_upload.queue)
+        importlib.reload(humanoid_upload.worker)
         # Validate scheduling/rates even when no binding exists or bindings are restored.
         # Placeholders only satisfy config structure; they never enter the active config.
         unbound = dict(platform_base_url='https://unbound.invalid', credential_ref='env:UNBOUND',
@@ -221,6 +228,8 @@ class UploadService:
         return {'enabled': self.enabled, 'running': bool(self._thread and self._thread.is_alive()),
                 'error': self.error, 'scan_errors': copy.deepcopy(self.scan_errors),
                 'default_binding': self.binding_snapshot() if self.default_binding_id else None,
+                'binding_values': copy.deepcopy(self.bindings.get(self.default_binding_id) or
+                    {key: self.cfg.get(key, '') for key in self.binding_fields}),
                 'auto_enqueue': bool(self.cfg['auto_enqueue']), 'jobs': self.jobs()}
 
 

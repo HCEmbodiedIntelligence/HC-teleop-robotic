@@ -156,11 +156,21 @@ class Queue:
                 if not job.get("raw_source_id") or job["processing_status"] not in {"PARTIALLY_FAILED", "FAILED"}:
                     raise UploadError("PROCESSING_RETRY_NOT_APPLICABLE", "只有已提交 Raw 的失败处理可以重试")
                 job.setdefault("processing_retry_request", str(uuid4()))
+            if not job.get("upload_id") and job.get("descriptor"):
+                try:
+                    from .artifacts import manifest_for_ready
+                    from .common import DEFAULTS
+                    cfg = {**DEFAULTS, **job.get("frozen", {})}
+                    _, _, manifest = manifest_for_ready(job["descriptor"], cfg, job["id"])
+                    job["manifest"] = manifest
+                except Exception:
+                    pass
             with self.connect() as db:
                 db.execute("DELETE FROM cancellations WHERE job_id=?", (job_id,))
             job.update(terminal=False, next_at=0, attempts=0, code=None, state="queued", resume_requested=resume)
             self.save(job)
             return job
+
 
 
 def public_job(job):

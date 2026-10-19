@@ -7,7 +7,7 @@ from http.client import HTTPException
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .common import Limiter, UploadError, canonical, credential, valid_url
 
@@ -15,6 +15,19 @@ from .common import Limiter, UploadError, canonical, credential, valid_url
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
+
+
+class UploadProxyHandler(ProxyHandler):
+    """Local services and SSH forwards must not pass through a system proxy."""
+    def proxy_open(self, req, proxy, type):
+        host = valid_url(req.full_url).hostname
+        try:
+            local = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            local = host.lower() == 'localhost'
+        if local:
+            return None
+        return super().proxy_open(req, proxy, type)
 
 
 def retry_after(value):
@@ -43,7 +56,7 @@ class PartStream:
 
 class Http:
     def __init__(self, cfg):
-        self.cfg, self.opener = cfg, build_opener(NoRedirect())
+        self.cfg, self.opener = cfg, build_opener(NoRedirect(), UploadProxyHandler())
         self.base = cfg["platform_base_url"] + "/api/v1/robot-ingest/uploads"
 
     def request(self, method, url, *, payload=None, body=None, length=None, api=True):
