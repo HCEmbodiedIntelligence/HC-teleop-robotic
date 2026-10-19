@@ -22,14 +22,22 @@ install_controller_environment() {
     bash "${SCRIPT_DIR}/run_generic_controller.sh" --check
 }
 
-if [[ "${1:-}" == "--camera" ]]; then
+install_upload_client() {
+  "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" "${SCRIPT_DIR}/upload_client"
+}
+
+if [[ "${1:-}" == "--upload" ]]; then
+  install_upload_client
+elif [[ "${1:-}" == "--camera" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-camera.txt"
 elif [[ "${1:-}" == "--sim" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-sim.txt"
   install_controller_environment
+  install_upload_client
 else
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements.txt"
   install_controller_environment
+  install_upload_client
 fi
 
 echo "Installed project-local dependencies. Start with: ${SCRIPT_DIR}/run.sh"

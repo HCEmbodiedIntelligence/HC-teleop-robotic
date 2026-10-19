@@ -1,0 +1,11 @@
+{
+  "release": "g0-20260922.1",
+  "files": {
+    "schemas/export-complete.schema.json": "9d81a1e72e8f0429db51907bb2e20ba9288b7c7a2204eb592563042be83b945e",
+    "schemas/capture-context.schema.json": "07568e195a2642fb15dc7a296cda914ad8c5b6632cb998a23e83deaaa22de2ef",
+    "schemas/source-mapping.schema.json": "d9cffd8b6ff86e3fe5b8eeae26415eefa40bea8fce0cc7684b758429d1b61c4c",
+    "schemas/robot-ingest-manifest.schema.json": "d02ba668110dd0f3d56df060514e718f0dbc36b871e529ed44c92aeb4aea99d7",
+    "schemas/robot-ingest-upload-response.schema.json": "a3fdf59a7b4f68209d22cba32a6adcc59eed50b7f91358d22b8fe93a3e4f2463",
+    "schemas/processing-result-proposed.schema.json": "d1b247029b332ee801afeaf35f8ea07d51ae5dfaeca2aa7453572ba07751def7"
+  }
+}

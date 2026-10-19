@@ -149,6 +149,32 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 
 “话题录制”页从 ROS Graph 读取当前话题和消息类型，可直接添加自定义消息，也可在“系统配置 → HC 标准 ROS 2 接口”中切换内置消息是否录制。点击“保存录制配置”后写回 `middleware/config.yaml`；启用录制时，消息按启动会话写入 `runtime/topic_recordings/`。MCAP 录制使用独立 ROS Context 和多线程执行器，不与 Dashboard 健康检测或 WebRTC 视频回调共用执行器。X1 默认只录制规范化压缩相机话题；同源 `/io_teleop` 别名和大体积未压缩回退流默认不勾选，仍可在界面按需启用。
 
+### 自动上传到数据平台
+
+`main` 已迁入 `humanoid` 的上传客户端、持久队列、分片续传、重试/取消和平台处理状态面板。原有 v23 控制、网页三维仿真、ROS 域隔离及机器人配置加载保持不变；本次不迁入 Motion、统一机器人 API、`platform_raw` 或数据裁剪工具。
+
+现有部署先运行 `./install.sh --upload`，然后在实际启动使用的中间件 YAML 中配置：
+
+```yaml
+uploads:
+  enabled: true
+  auto_enqueue: true
+  queue_directory: ../runtime/upload_queue
+  platform_base_url: https://your-data-platform.example
+  credential_ref: env:HC_UPLOAD_TOKEN
+  robot_id: platform-robot-id
+  local_robot_id: x1
+  task_id: collection-task-id
+```
+
+令牌由启动中间件进程的环境变量提供；也可使用 `file:/绝对路径/凭据文件`（仅服务用户可读，权限 0600）。仓库默认 `enabled: false`、`auto_enqueue: false`，不会自动上传历史数据。修改启用配置后重启中间件；“上传管理”页可切换默认机器人/任务绑定。启用自动上传但尚未选择绑定时，开始录制会明确报错，不会把数据归入未知任务。
+
+每次录制开始时固定绑定与采集开始时间，停止写入后记录采集结束时间。MCAP 正常关闭后、LeRobot 导出成功后，后台生成独立产物 ID、校验和与完成标记，再自动入队；同时保存两种格式时分别上传。转换失败保留源文件，不把未完成的 LeRobot 当作可上传数据。状态分别保存在 `runtime/recording_uploads/`、`runtime/artifact_state/` 和 `runtime/upload_queue/`，重启可接续已正常关闭源文件的产物交接和上传队列；采集中断不会自动标记为完整录制。
+
+数据集列表中的“上传”按钮可把已就绪的产物送到上传管理页手动入队。新功能安装前的旧文件没有可信采集生命周期/完成标记，不会仅凭文件名或修改时间自动上传；安装后未绑定的录制也不会在切换默认任务后静默绑定。上传读取期间删除会被拒绝，取消后需等读锁释放。上传完成、平台处理完成和质检通过是不同状态。
+
+上传客户端沿用 humanoid 的平台 API 契约。本地回环服务测试不代替目标平台的真实接收验收；需使用匹配的服务器地址和凭据。配置与客户端细节见 [上传集成说明](upload_client/HC_INTEGRATION.md)。
+
 ### LeRobot 数据集保存
 
 录制页可选择 MCAP、LeRobot 或两者同时保存，并设置数据集帧率和任务描述。MCAP 保留原始话题（包括 `/vrdata`）；LeRobot 在停止录制后异步生成，相机保存为 H.264 MP4，状态和动作保存为 Parquet。录制页及数据集管理页显示转换阶段、百分比和处理数量，完成后支持特征查看、相机视频预览、完整 ZIP 下载及删除。

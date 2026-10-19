@@ -29,3 +29,14 @@ vr:
   outbound_port: 5007
   publish_to_ros: true
   data_topic: /vrdata
+
+# Optional platform upload. Local recording works without the upload client.
+uploads:
+  enabled: false
+  auto_enqueue: false
+  queue_directory: ../runtime/upload_queue
+  platform_base_url: ""
+  credential_ref: ""
+  robot_id: ""
+  local_robot_id: ""
+  task_id: ""

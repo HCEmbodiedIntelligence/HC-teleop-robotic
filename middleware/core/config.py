@@ -354,6 +354,25 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                     normalized.append(subscription)
                 elif subscription["type"] != stream["type"]:
                     raise ConfigError(f"conflicting camera types for topic: {stream['topic']}")
+    uploads = value.setdefault("uploads", {})
+    if not isinstance(uploads, dict):
+        raise ConfigError("uploads must be an object")
+    for key in ("enabled", "auto_enqueue"):
+        if not isinstance(uploads.setdefault(key, False), bool):
+            raise ConfigError("uploads." + key + " must be boolean")
+    for key, default in (("queue_directory", "../runtime/upload_queue"),
+                         ("platform_base_url", ""), ("credential_ref", ""),
+                         ("robot_id", ""), ("local_robot_id", ""), ("task_id", "")):
+        if not isinstance(uploads.setdefault(key, default), str):
+            raise ConfigError("uploads." + key + " must be string")
+    if not uploads["queue_directory"].strip():
+        raise ConfigError("uploads.queue_directory must be a non-empty path")
+    if uploads["credential_ref"] and not uploads["credential_ref"].startswith(("env:", "file:")):
+        raise ConfigError("uploads credentials must use env: or file: reference")
+    for key, default in (("artifact_state_dir", "../runtime/artifact_state"),
+                         ("upload_job_state_dir", "../runtime/recording_uploads")):
+        if not isinstance(recording.setdefault(key, default), str) or not recording[key].strip():
+            raise ConfigError("ros.recording." + key + " must be a non-empty path")
     value["camera"] = cam_config
     return value
 

@@ -45,7 +45,7 @@ let profilesData = {active:'', profiles:[], standard_topics:{}};
 let ws = null;
 let pendingVrPose = null;
 let vrPoseFramePending = false;
-const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', config:'系统配置'};
+const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', uploads:'上传管理', config:'系统配置'};
 let discoveredTopics = [];
 let latestTopicHealth = {};
 const jointMonitor = {command:new Map(), feedback:new Map()};
@@ -121,6 +121,19 @@ async function api(url, options={}) {
   return response.json();
 }
 
+let disposeUploadPanel = null;
+let pendingUploadArtifact = null;
+function updateUploadPanel(page) {
+  if (disposeUploadPanel) { disposeUploadPanel(); disposeUploadPanel = null; }
+  if (page === 'uploads' && window.mountUploadPanel) {
+    disposeUploadPanel = window.mountUploadPanel($('#uploadPanel'));
+    if (pendingUploadArtifact) {
+      $('#uploadPanel [name="artifact_id"]').value = pendingUploadArtifact;
+      pendingUploadArtifact = null;
+    }
+  }
+}
+
 function route() {
   const requested = location.hash.slice(1) || 'overview';
   const page = titles[requested] ? requested : 'overview';
@@ -129,6 +142,7 @@ function route() {
   $('#pageTitle').textContent = titles[page];
   if (page === 'topics') loadTopics();
   updateDatasetPolling(page);
+  updateUploadPanel(page);
   if (page === 'config') loadProfiles($('#robotProfileSelect')?.value);
 }
 
@@ -1219,6 +1233,19 @@ async function loadDatasets() {
         }
       };
 
+      if (file.artifact_id) {
+        const uploadBtn = document.createElement('button');
+        uploadBtn.className = 'btn-sm';
+        uploadBtn.textContent = '上传';
+        uploadBtn.disabled = datasetUnavailable(file) || file.upload_artifact_state !== 'ready';
+        uploadBtn.title = file.upload_error || (uploadBtn.disabled ? '等待产物封存完成' : '选择平台绑定并入队');
+        uploadBtn.onclick = () => {
+          pendingUploadArtifact = file.artifact_id;
+          if (location.hash === '#uploads') route();
+          else location.hash = '#uploads';
+        };
+        group.append(uploadBtn);
+      }
       group.append(downloadLink, deleteBtn);
       actionCell.append(group);
 

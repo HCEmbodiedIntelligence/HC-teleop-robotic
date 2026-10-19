@@ -1,0 +1,547 @@
+{
+  "$defs": {
+    "CameraRecordingConfigV1": {
+      "additionalProperties": false,
+      "description": "Queryable camera timing facts copied from the immutable config object.",
+      "properties": {
+        "camera_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Camera Id",
+          "type": "string"
+        },
+        "topic": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topic"
+        },
+        "fps": {
+          "exclusiveMinimum": 0,
+          "maximum": 1000,
+          "title": "Fps",
+          "type": "number"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "maximum": 32768,
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "maximum": 32768,
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height"
+        },
+        "codec": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Codec",
+          "type": "string"
+        },
+        "clock_domain": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Clock Domain",
+          "type": "string"
+        },
+        "time_base_numerator": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Time Base Numerator",
+          "type": "integer"
+        },
+        "time_base_denominator": {
+          "maximum": 1000000000,
+          "minimum": 1,
+          "title": "Time Base Denominator",
+          "type": "integer"
+        },
+        "capture_start_offset_ns": {
+          "default": 0,
+          "description": "Nanoseconds encoded as a decimal string for JSON precision.",
+          "pattern": "^(?:0|[1-9][0-9]*)$",
+          "title": "Capture Start Offset Ns",
+          "type": "string"
+        }
+      },
+      "required": [
+        "camera_id",
+        "fps",
+        "codec",
+        "clock_domain",
+        "time_base_denominator"
+      ],
+      "title": "CameraRecordingConfigV1",
+      "type": "object"
+    },
+    "CreateRecordingUploadCommand": {
+      "additionalProperties": false,
+      "description": "Immutable multi-object manifest for one uninterrupted recording.",
+      "properties": {
+        "schema_version": {
+          "const": "continuous-recording-upload/v2",
+          "default": "continuous-recording-upload/v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "recording_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Recording Id",
+          "type": "string"
+        },
+        "rollout_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Rollout Id",
+          "type": "string"
+        },
+        "data_package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Data Package Id",
+          "type": "string"
+        },
+        "collection_task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Collection Task Id",
+          "type": "string"
+        },
+        "collection_job_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Collection Job Id",
+          "type": "string"
+        },
+        "robot_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Robot Id",
+          "type": "string"
+        },
+        "device_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capture_started_at": {
+          "format": "date-time",
+          "title": "Capture Started At",
+          "type": "string"
+        },
+        "capture_ended_at": {
+          "format": "date-time",
+          "title": "Capture Ended At",
+          "type": "string"
+        },
+        "recording_config": {
+          "$ref": "#/$defs/RecordingConfigurationV1"
+        },
+        "assets": {
+          "items": {
+            "$ref": "#/$defs/RecordingAssetManifestV1"
+          },
+          "maxItems": 4095,
+          "minItems": 3,
+          "title": "Assets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "recording_id",
+        "rollout_id",
+        "data_package_id",
+        "collection_task_id",
+        "collection_job_id",
+        "robot_id",
+        "device_id",
+        "capture_started_at",
+        "capture_ended_at",
+        "recording_config",
+        "assets"
+      ],
+      "title": "CreateRecordingUploadCommand",
+      "type": "object"
+    },
+    "OpenArmRawRecordingUpload": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "openarm-raw-recording-upload/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "recording_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Recording Id",
+          "type": "string"
+        },
+        "rollout_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Rollout Id",
+          "type": "string"
+        },
+        "data_package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Data Package Id",
+          "type": "string"
+        },
+        "collection_task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Collection Task Id",
+          "type": "string"
+        },
+        "collection_job_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Collection Job Id",
+          "type": "string"
+        },
+        "robot_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Robot Id",
+          "type": "string"
+        },
+        "device_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "capture_started_at": {
+          "format": "date-time",
+          "title": "Capture Started At",
+          "type": "string"
+        },
+        "capture_ended_at": {
+          "format": "date-time",
+          "title": "Capture Ended At",
+          "type": "string"
+        },
+        "assets": {
+          "items": {
+            "$ref": "#/$defs/RecordingAssetManifestV1"
+          },
+          "maxItems": 4095,
+          "minItems": 3,
+          "title": "Assets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "recording_id",
+        "rollout_id",
+        "data_package_id",
+        "collection_task_id",
+        "collection_job_id",
+        "robot_id",
+        "device_id",
+        "capture_started_at",
+        "capture_ended_at",
+        "assets"
+      ],
+      "title": "OpenArmRawRecordingUpload",
+      "type": "object"
+    },
+    "RecordingAssetManifestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/RecordingAssetRole"
+        },
+        "camera_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Camera Id"
+        },
+        "media_type": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 1,
+          "title": "Size",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "crc64": {
+          "anyOf": [
+            {
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crc64"
+        },
+        "part_count": {
+          "default": 1,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Part Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "role",
+        "media_type",
+        "size",
+        "sha256"
+      ],
+      "title": "RecordingAssetManifestV1",
+      "type": "object"
+    },
+    "RecordingAssetRole": {
+      "enum": [
+        "RAW_VIDEO",
+        "SENSOR_DATA",
+        "RECORDING_CONFIG",
+        "CALIBRATION",
+        "AUXILIARY"
+      ],
+      "title": "RecordingAssetRole",
+      "type": "string"
+    },
+    "RecordingConfigurationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "recording-config/v1",
+          "default": "recording-config/v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "recorder_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Recorder Version",
+          "type": "string"
+        },
+        "primary_clock_domain": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Primary Clock Domain",
+          "type": "string"
+        },
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/CameraRecordingConfigV1"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Cameras",
+          "type": "array"
+        },
+        "sensors": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SensorRecordingConfigV1"
+          },
+          "maxItems": 2048,
+          "title": "Sensors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "recorder_version",
+        "primary_clock_domain",
+        "cameras"
+      ],
+      "title": "RecordingConfigurationV1",
+      "type": "object"
+    },
+    "SensorRecordingConfigV1": {
+      "additionalProperties": false,
+      "description": "Queryable non-video timing facts copied from the immutable config object.",
+      "properties": {
+        "topic": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        },
+        "clock_domain": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Clock Domain",
+          "type": "string"
+        },
+        "timestamp_mode": {
+          "$ref": "#/$defs/SensorTimestampMode",
+          "default": "ABSOLUTE_NS"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "topic",
+        "clock_domain"
+      ],
+      "title": "SensorRecordingConfigV1",
+      "type": "object"
+    },
+    "SensorTimestampMode": {
+      "enum": [
+        "ABSOLUTE_NS",
+        "RECORDING_OFFSET_NS"
+      ],
+      "title": "SensorTimestampMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "openarm-recording-complete/v1",
+        "openarm-recording-complete/v2"
+      ],
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "export_id": {
+      "format": "uuid",
+      "title": "Export Id",
+      "type": "string"
+    },
+    "session_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "robot_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "title": "Robot Id",
+      "type": "string"
+    },
+    "local_robot_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "title": "Local Robot Id",
+      "type": "string"
+    },
+    "collection_task_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "title": "Collection Task Id",
+      "type": "string"
+    },
+    "synthetic": {
+      "title": "Synthetic",
+      "type": "boolean"
+    },
+    "content_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "recording_upload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CreateRecordingUploadCommand"
+        },
+        {
+          "$ref": "#/$defs/OpenArmRawRecordingUpload"
+        }
+      ],
+      "title": "Recording Upload"
+    }
+  },
+  "required": [
+    "schema_version",
+    "export_id",
+    "session_id",
+    "robot_id",
+    "local_robot_id",
+    "collection_task_id",
+    "synthetic",
+    "content_sha256",
+    "recording_upload"
+  ],
+  "title": "OpenArmRecordingComplete",
+  "type": "object"
+}

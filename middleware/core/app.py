@@ -27,6 +27,21 @@ from .vr_gateway import VrGateway
 from .runtime_mode import configure_environment
 
 
+def _upload_failure(exc: Exception) -> dict[str, Any] | None:
+    """Identify optional uploader errors without making uploads a hard dependency."""
+    try:
+        from humanoid_upload.common import UploadError
+    except ImportError:
+        return None
+    if not isinstance(exc, UploadError):
+        return None
+    return {"ok": False, "code": exc.code, "reason": exc.action}
+
+
+def _upload_failure_status(code: str) -> int:
+    return 409 if code in {"ARTIFACT_BUSY", "WORKER_ALREADY_RUNNING", "BINDING_REQUIRED"} else 400
+
+
 def local_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -49,6 +64,8 @@ class MiddlewareRuntime:
         self.cameras: dict[str, CameraService] = {}
         self._cameras_by_topic: dict[str, list[CameraService]] = {}
         self.recorder: TopicRecorder | None = None
+        self.uploads = None
+        self.upload_error = None
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
@@ -131,6 +148,7 @@ class MiddlewareRuntime:
 
         self.session_profile_metadata = self._load_session_profile_metadata()
         self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
+        await self._start_uploads()
         self.player = TopicPlayer(
             self.recorder.directory,
             lambda: self.ros,
@@ -200,6 +218,34 @@ class MiddlewareRuntime:
             self._on_safety_event("middleware startup")
         self._safety_sync_task = asyncio.create_task(self._sync_safety_state())
 
+    async def _start_uploads(self) -> None:
+        """Optional uploader; unavailable dependencies must not prevent local recording."""
+        self.uploads = None
+        self.upload_error = None
+        try:
+            from .upload_service import UploadService
+            upload_config = copy.deepcopy(self.config.get("uploads", {"enabled": False}))
+            queue_path = Path(upload_config.get("queue_directory", "../runtime/upload_queue")).expanduser()
+            upload_config["queue_directory"] = str(
+                (self.config_dir / queue_path).resolve() if not queue_path.is_absolute() else queue_path
+            )
+            service = UploadService(
+                upload_config, artifact_state_dir=self.recorder.artifact_state_dir,
+                data_directory=self.recorder.directory,
+            )
+            try:
+                await asyncio.to_thread(service.start)
+            except Exception:
+                await asyncio.to_thread(service.stop)
+                raise
+            self.uploads = service
+            self.recorder.upload_service = service
+            if upload_config.get("enabled", False) and upload_config.get("auto_enqueue", False):
+                self.recorder.binding_snapshot = service.binding_snapshot
+        except Exception as exc:
+            self.upload_error = str(exc)
+            self._log("error", "upload unavailable: " + str(exc))
+
     async def stop(self) -> None:
         if self._safety_sync_task is not None:
             self._safety_sync_task.cancel()
@@ -222,7 +268,10 @@ class MiddlewareRuntime:
         if self.ros is not None:
             await asyncio.to_thread(self.ros.stop)
         if self.recorder is not None:
-            await asyncio.to_thread(self.recorder.stop)
+            await asyncio.to_thread(self.recorder.shutdown)
+        if self.uploads is not None:
+            await asyncio.to_thread(self.uploads.stop)
+            self.uploads = None
         try:
             import rclpy
             if rclpy.ok():
@@ -411,15 +460,20 @@ class MiddlewareRuntime:
                 ["websocket", "udp"],
             )
         except Exception as exc:
-            self._log("error", f"Failed to start recording on VR X button: {exc}")
+            upload_failure = _upload_failure(exc)
+            error_text = (f"{upload_failure['code']}: {upload_failure['reason']}"
+                          if upload_failure else str(exc))
+            self._log("error", f"Failed to start recording on VR X button: {error_text}")
             self.emit(
                 envelope(
                     "recording_error",
                     "middleware",
                     {
                         "recording": False,
-                        "error": str(exc),
+                        "error": error_text,
                         "action": "start_failed",
+                        **({"code": upload_failure["code"], "reason": upload_failure["reason"]}
+                           if upload_failure else {}),
                     },
                 ),
                 ["websocket", "udp"],
@@ -1018,6 +1072,11 @@ def create_app(store: ConfigStore) -> web.Application:
             )
         except (ValueError, RuntimeError, FileExistsError, ImportError) as exc:
             return web.json_response({"ok": False, "reason": str(exc)}, status=400)
+        except Exception as exc:
+            failure = _upload_failure(exc)
+            if failure is None:
+                raise
+            return web.json_response(failure, status=_upload_failure_status(failure["code"]))
         if runtime.ros is not None:
             runtime.ros.publish(
                 "/teleop/recording_state",
@@ -1158,6 +1217,11 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPNotFound(text=str(exc)) from exc
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
+        except Exception as exc:
+            failure = _upload_failure(exc)
+            if failure is None:
+                raise
+            return web.json_response(failure, status=_upload_failure_status(failure["code"]))
 
     async def batch_delete_recordings(request: web.Request) -> web.Response:
         if runtime.recorder is None:
@@ -1171,7 +1235,10 @@ def create_app(store: ConfigStore) -> web.Application:
                 await asyncio.to_thread(runtime.recorder.delete_recording, fname)
                 deleted.append(fname)
             except Exception as exc:
-                failed.append({"filename": fname, "error": str(exc)})
+                failure = _upload_failure(exc)
+                failed.append({"filename": fname, "error": str(exc),
+                               **({"code": failure["code"], "reason": failure["reason"]}
+                                  if failure else {})})
         return web.json_response({"ok": True, "deleted": deleted, "failed": failed})
 
     async def start_replay(request: web.Request) -> web.Response:
@@ -1310,6 +1377,28 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/safety/resume", safety_resume)
     app.router.add_post("/api/teleop/home", teleop_home)
     app.router.add_post("/api/teleop/source", set_control_source)
+    try:
+        from .upload_api import register_upload_routes
+
+        class UploadProxy:
+            def __getattr__(self, key):
+                if runtime.uploads is None:
+                    raise web.HTTPServiceUnavailable(
+                        text=json.dumps({"enabled": False, "state": "unavailable",
+                                         "error": runtime.upload_error or "upload service unavailable"}),
+                        content_type="application/json",
+                    )
+                return getattr(runtime.uploads, key)
+
+        register_upload_routes(app, UploadProxy())
+    except ImportError:
+        async def upload_unavailable(request):
+            return web.json_response(
+                {"enabled": False, "state": "unavailable", "error": "upload module is not installed"},
+                status=503,
+            )
+        app.router.add_get("/api/uploads", upload_unavailable)
+        app.router.add_post("/api/uploads/{operation}", upload_unavailable)
     app.router.add_post("/api/recording/precheck", precheck_recording)
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)

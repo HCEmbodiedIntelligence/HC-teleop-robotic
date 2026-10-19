@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -352,6 +352,12 @@ class TopicRecorder:
         self._lock = threading.Lock()
         self._last_error: str | None = None
         self._active_metadata: dict[str, str] = {}
+        from .recording_artifacts import RecordingArtifacts
+        self._artifacts = RecordingArtifacts(config, config_dir, self.directory)
+        self.artifact_state_dir = self._artifacts.state_dir
+        self.binding_snapshot = None
+        self.upload_service = None
+        self._capture_identity = None
 
     def ipc_resources(self) -> tuple[Any, Any, Any]:
         """Resources inherited by the raw ROS subscription process."""
@@ -388,6 +394,9 @@ class TopicRecorder:
         self.path = source_dir / fname
         if self.path.exists():
             raise FileExistsError(f"录制文件已存在: {self.path}")
+        # Freeze the platform task at capture start, never at conversion/upload time.
+        binding = self.binding_snapshot() if self.binding_snapshot else None
+        self._capture_identity = self._artifacts.begin(self.path, self.save_format, metadata or {}, binding)
         self._active_metadata = {
             str(key): str(value)
             for key, value in (metadata or {}).items()
@@ -426,6 +435,7 @@ class TopicRecorder:
                     self._last_error = "MCAP writer exited during startup"
                 self._process = None
                 raise RuntimeError(self._last_error)
+            self._artifacts.mark_started(self._capture_identity)
             self._accepting_event.set()
         return str(self.path)
 
@@ -434,6 +444,7 @@ class TopicRecorder:
         if process is None:
             return self.status()
         self._accepting_event.clear()
+        capture_ended_at = datetime.now(timezone.utc).isoformat()
         while True:
             try:
                 self._queue.put_nowait(None)
@@ -449,6 +460,10 @@ class TopicRecorder:
             raise TimeoutError("MCAP writer did not finish within 30 seconds")
         self._process = None
         self.status()  # Drain writer errors before exporting a closed source.
+        if process.exitcode != 0 and not self._last_error:
+            self._last_error = f"MCAP writer exited with code {process.exitcode}"
+        self._artifacts.close(self._capture_identity, self._last_error, capture_ended_at)
+        self._capture_identity = None
         if self.save_format != "mcap" and not self._last_error:
             self._start_lerobot_export()
         return self.status()
@@ -549,6 +564,7 @@ class TopicRecorder:
                 "dropped": _counter_get(self._dropped),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",
+                "upload_handoff_errors": dict(self._artifacts.recovery_errors),
                 "format": self.save_format,
                 "export_state": self._export_state,
                 "export_progress": self.export_progress(),
@@ -693,11 +709,28 @@ class TopicRecorder:
             from .recording_datasets import pending_datasets
             files.extend(pending_datasets(datasets_dir, {item.get('id') for item in files}))
         files.sort(key=lambda x: x["timestamp"], reverse=True)
-        return files
+        return self._artifacts.annotate(files)
+
+    def shutdown(self):
+        try:
+            return self.stop()
+        finally:
+            self._artifacts.shutdown()
 
     def delete_recording(self, filename: str) -> None:
         from .recording_datasets import resolve_dataset
         target = resolve_dataset(self.directory, filename)
+        if self.is_recording() and self.path and target == self.path.resolve():
+            raise ValueError("cannot delete actively recording file")
+        if self._export_state == "exporting" and (
+            target == Path(self._lerobot_path).resolve() or
+            (self.path and target == self.path.resolve())
+        ):
+            raise ValueError("cannot delete source or dataset while exporting")
+        with self._artifacts.deleting(target):
+            self._delete_recording(filename, target)
+
+    def _delete_recording(self, filename: str, target: Path) -> None:
         if filename.startswith("lerobot:"):
             if self._export_state == "exporting" and target.resolve() == Path(self._lerobot_path).resolve():
                 raise ValueError("cannot delete dataset while exporting")

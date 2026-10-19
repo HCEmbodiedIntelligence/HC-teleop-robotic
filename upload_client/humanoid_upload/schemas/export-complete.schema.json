@@ -1,0 +1,89 @@
+{
+  "$id": "urn:openarm:export-complete:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "assets": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "crc64": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "path": {
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\\\:]+$",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "size_bytes",
+          "sha256",
+          "crc64"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "collection_task_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "contract_version": {
+      "const": "openarm-capture/v1"
+    },
+    "export_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "robot_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "openarm-export-complete/v1"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "const": "COMPLETE"
+    },
+    "synthetic": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "contract_version",
+    "export_id",
+    "session_id",
+    "collection_task_id",
+    "robot_id",
+    "synthetic",
+    "status",
+    "completed_at",
+    "assets",
+    "content_sha256"
+  ],
+  "type": "object"
+}

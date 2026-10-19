@@ -94,3 +94,26 @@ test('dataset polling runs only on visible dataset page',()=>{
   ctx.location.hash='#datasets';ctx.document.visibilityState='hidden';
   vm.runInContext("updateDatasetPolling('datasets')",ctx);assert.equal(count,2);
 });
+
+test('ready upload artifact opens upload page with opaque ID; unfinished artifacts cannot enqueue',async()=>{
+  const {ctx,fields}=setup([{...dataset,artifact_id:'artifact-123',upload_artifact_state:'ready'},
+    {...dataset,id:'pending',artifact_id:'artifact-pending',upload_artifact_state:'writing'}]);
+  ctx.location={hash:'#datasets'};
+  await vm.runInContext('loadDatasets()',ctx);
+  const action = row => row.children[9].children[0].children.find(button=>button.textContent==='上传');
+  const upload=action(fields['#datasetRows'].children[0]);
+  assert.equal(upload.disabled,false);
+  upload.onclick();
+  assert.equal(ctx.location.hash,'#uploads');
+  assert.equal(vm.runInContext('pendingUploadArtifact',ctx),'artifact-123');
+  assert.equal(action(fields['#datasetRows'].children[1]).disabled,true);
+  let mounts=0,disposes=0;
+  const input={value:''};
+  fields['#uploadPanel [name="artifact_id"]']=input;
+  ctx.window={mountUploadPanel:()=>{mounts++;return ()=>disposes++;}};
+  vm.runInContext("updateUploadPanel('uploads')",ctx);
+  assert.equal(input.value,'artifact-123');
+  assert.equal(mounts,1);
+  vm.runInContext("updateUploadPanel('datasets')",ctx);
+  assert.equal(disposes,1);
+});
