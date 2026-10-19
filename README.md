@@ -117,11 +117,15 @@ ROS_DOMAIN_ID=14 ./run.sh
 原 `tools/runtime/simulation_viewer.py` 仍作为可选兼容工具保留，不是网页流程的必需项。
 
 X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/base/pose`。
-`run.sh teleop` 使用 `body.head_pose_base.teleop_mode: yaw_velocity`：按住左 Grip
-建立头显参考，转头后以限速角速度近似跟随，松开 Grip 或头显数据超时停止头显转向。
-估计的转向量来自已发速度命令积分，不是底盘实测角度；打滑、驱动限速和丢包会产生误差。
-`velocity_max_angular_velocity: 0.2` 与 HC_X1 的 `max_vw` 一致；调整硬件限速时需同步。
-该模式不使用无效定位数据，也不执行头显水平位移跟随；原有摇杆控制仍保留。
+`run.sh teleop` 使用 `body.head_pose_base.teleop_mode: planar_velocity`：按住左 Grip
+建立头显参考，前后/左右移动和转头分别映射为底盘前后、横移和旋转。
+松开 Grip、追踪失效、输入超时或急停后停止并清除参考，下次按住重新定中心。
+左/右摇杆手动底盘命令优先；摇杆回中后若仍按住 Grip，以当前头显位置重新定中心。
+目标是相对位移，不是持续倾身测速：头显停下后底盘根据命令积分估计到位后停止。
+估计值不是底盘实测位姿；打滑、驱动限速和丢包会产生误差，不能保证精确距离。
+头显跟随限速为前后/横向各 `0.1 m/s`、旋转 `0.2 rad/s`，需与 HC_X1
+的 `max_vx/max_vy/max_vw` 保持一致。状态中 `feedback_source: command_estimate`
+明确标记估计来源。原 `yaw_velocity` 配置仍可选择只跟随转向。
 仿真继续使用实测位姿闭环；真机提供有效位姿后可将 `teleop_mode` 改为 `pose`。
 
 根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择关节调试和是否同时启动 IK/VR 控制。按需开启网页三维视图；后台仿真不依赖桌面 DISPLAY。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。

@@ -28,7 +28,7 @@ def test_sim_and_teleop_load_the_same_body_parameters():
                     assert node.head_base_follower is not None
                     assert node.base_pose_sub.topic_name == '/observation/base/pose'
                 else:
-                    assert node.head_base_mode == 'yaw_velocity'
+                    assert node.head_base_mode == 'planar_velocity'
                     assert node.head_base_follower is None
                     assert not hasattr(node, 'base_pose_sub')
             finally:

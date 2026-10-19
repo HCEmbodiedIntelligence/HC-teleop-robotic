@@ -51,7 +51,7 @@ from .collision_safety import (
     calibrated_clearance,
     improves_collision_clearance,
 )
-from .head_base_pose import HeadBasePoseFollower
+from .head_base_pose import HeadBasePoseFollower, HeadBaseVelocityFollower
 from .solver_rearm import SolverRearmGate
 from .teleop_state import ArmRuntime, BodyRuntime, IkCandidate
 from .vr_input import decode_vr_frame
@@ -237,8 +237,8 @@ class RobotArmTeleopNode(Node):
         self.base_yaw_alignment_offset: float = 0.0
         pose_base_config = self.body_config.get("head_pose_base", {})
         teleop_head_base_mode = pose_base_config.get("teleop_mode", "pose")
-        if teleop_head_base_mode not in {"pose", "yaw_velocity"}:
-            raise ValueError("body.head_pose_base.teleop_mode must be pose or yaw_velocity")
+        if teleop_head_base_mode not in {"pose", "yaw_velocity", "planar_velocity"}:
+            raise ValueError("body.head_pose_base.teleop_mode must be pose, yaw_velocity or planar_velocity")
         self.head_base_mode = (
             teleop_head_base_mode if os.environ.get("HC_TELEOP_MODE") == "teleop"
             and pose_base_config.get("enabled", False) else "pose"
@@ -257,6 +257,18 @@ class RobotArmTeleopNode(Node):
                 self.body_config.get("yaw_direction", 1.0),
             ) if pose_base_config.get("enabled", False) and self.head_base_mode == "pose" else None
         )
+        self.head_planar_follower = (
+            HeadBaseVelocityFollower(
+                pose_base_config,
+                self.control.get("head_axis_mapping", self.control["axis_mapping"]),
+                self.body_config.get("yaw_direction", 1.0),
+            ) if self.head_base_mode == "planar_velocity" else None
+        )
+        self.head_velocity_max_linear = float(pose_base_config.get("velocity_max_linear_velocity", 0.05))
+        self.head_velocity_max_lateral = float(pose_base_config.get("velocity_max_lateral_velocity", 0.05))
+        for value in (self.head_velocity_max_linear, self.head_velocity_max_lateral):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("head planar velocity limits must be positive and finite")
         self.base_pose_feedback = None
         self.base_pose_stamp = float("-inf")
         self.base_pose_frame = ""
@@ -736,6 +748,15 @@ class RobotArmTeleopNode(Node):
         if frame is None:
             return
         head = frame.poses.get("head")
+        if (getattr(self, "head_planar_follower", None) is not None and
+                (head is None or self._read_pose(head) is None)):
+            # Unified frames explicitly report tracking loss: do not retain a
+            # previous moving target until the timestamp timeout expires.
+            self.body.head_pose = None
+            self.body.head_stamp = float("-inf")
+            self.head_planar_follower.reset()
+            self.head_base_state = "waiting_head_pose"
+            self._stop_base_if_pending()
         if head is not None:
             self._head_pose_callback(head)
         for side in ("left", "right"):
@@ -955,6 +976,8 @@ class RobotArmTeleopNode(Node):
         if getattr(self, "head_base_follower", None) is not None:
             self.head_base_follower.reset()
             self.head_base_state = "idle"
+        if getattr(self, "head_planar_follower", None) is not None:
+            self.head_planar_follower.reset()
         for arm in self.arms.values():
             self._release_arm(arm)
         self.body.active = False
@@ -2501,6 +2524,37 @@ class RobotArmTeleopNode(Node):
             ),
         )
 
+    def _publish_head_planar_velocity(self, now: float, engaged: bool) -> None:
+        follower = self.head_planar_follower
+        manual = self._compute_user_base_velocity(now, left_clutch_active=engaged)
+        if any(abs(v) > 1e-6 for v in manual):
+            follower.reset()
+            self.head_base_state = "manual_stick"
+            forward, lateral, yaw = manual
+        elif (not engaged or self.body.head_pose is None or
+              now - self.body.head_stamp > float(self.control["pose_timeout"])):
+            follower.reset()
+            self.head_base_state = "idle" if not engaged else "waiting_head_pose"
+            self._stop_base_if_pending()
+            return
+        else:
+            self.head_base_state = "planar_velocity_estimated"
+            limits = (
+                min(self.head_velocity_max_linear, float(self.body_config.get("max_linear_velocity", .35))),
+                min(self.head_velocity_max_lateral, float(self.body_config.get("max_lateral_velocity", .25))),
+                min(self.head_velocity_max_angular, float(self.body_config.get("max_angular_velocity", .45))),
+            )
+            yaw, forward, lateral = follower.update_velocity(
+                self.body.head_pose, now, limits, float(self.control["pose_timeout"]))
+        if max(abs(yaw), abs(forward), abs(lateral)) > 1e-4:
+            if self.body_config.get("base_command_mode", "velocity") == "delta":
+                period = 1. / float(self.control["rate_hz"])
+                yaw, forward, lateral = yaw * period, forward * period, lateral * period
+            self.base_pub.publish(Float64MultiArray(data=[yaw, forward, lateral]))
+            self.base_zero_pending = True
+        else:
+            self._stop_base_if_pending()
+
     def _publish_base_command(
         self,
         now: float,
@@ -2508,6 +2562,9 @@ class RobotArmTeleopNode(Node):
         track_head_yaw: bool = True,
         left_clutch_active: bool = False,
     ) -> None:
+        if getattr(self, "head_planar_follower", None) is not None:
+            self._publish_head_planar_velocity(now, left_clutch_active and track_head_yaw)
+            return
         if getattr(self, "head_base_follower", None) is not None:
             forward, lateral, _ = self._compute_user_base_velocity(
                 now, left_clutch_active=left_clutch_active
@@ -3325,9 +3382,11 @@ class RobotArmTeleopNode(Node):
             "head_base_pose": {
                 "mode": getattr(self, "head_base_mode", "pose"),
                 "enabled": (getattr(self, "head_base_follower", None) is not None or
-                            getattr(self, "head_base_mode", "pose") == "yaw_velocity"),
+                            getattr(self, "head_base_mode", "pose") in {"yaw_velocity", "planar_velocity"}),
                 "state": getattr(self, "head_base_state", "idle"),
-                "target": self.head_base_follower.target if getattr(self, "head_base_follower", None) else None,
+                "target": (self.head_base_follower.target if getattr(self, "head_base_follower", None)
+                           else self.head_planar_follower.target if getattr(self, "head_planar_follower", None) else None),
+                "feedback_source": "measured_pose" if self.head_base_mode == "pose" else "command_estimate",
             },
             "stop_reason": self.stop_reason,
             "feedback_fresh": feedback_fresh,

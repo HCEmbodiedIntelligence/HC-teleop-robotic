@@ -21,7 +21,7 @@ def pose(yaw=0.):
     return np.zeros(3), quaternion_from_axis_angle([0, 1, 0], yaw)
 
 
-@pytest.mark.parametrize('mode, expected', [('teleop', 'yaw_velocity'), ('sim', 'pose'), (None, 'pose')])
+@pytest.mark.parametrize('mode, expected', [('teleop', 'planar_velocity'), ('sim', 'pose'), (None, 'pose')])
 def test_launch_mode_selects_real_velocity_or_simulated_pose(mode, expected):
     rclpy.init(domain_id=168)
     try:
@@ -32,7 +32,7 @@ def test_launch_mode_selects_real_velocity_or_simulated_pose(mode, expected):
             node = RobotArmTeleopNode(str(CONFIG), backend='v23')
         try:
             assert node.head_base_mode == expected
-            assert (node.head_base_follower is None) == (expected == 'yaw_velocity')
+            assert (node.head_base_follower is None) == (expected == 'planar_velocity')
             assert node.head_velocity_max_angular == pytest.approx(.2)
         finally:
             node.destroy_node()

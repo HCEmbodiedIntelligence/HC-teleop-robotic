@@ -80,8 +80,10 @@ body:
   head_pose_base:
     enabled: true
     # 真机只有速度接口；无定位时不启用实测位姿闭环。仿真仍使用 pose。
-    # 速度转向只在左 Grip 内有效，命令积分只近似角度，不代表实测里程计。
-    teleop_mode: yaw_velocity
+    # 左 Grip 内跟随平面位移与偏航；命令积分仅估算位移，不代表实测里程计。
+    teleop_mode: planar_velocity
+    velocity_max_linear_velocity: 0.1  # 与 HC_X1 max_vx 保持一致 (m/s)
+    velocity_max_lateral_velocity: 0.1 # 与 HC_X1 max_vy 保持一致 (m/s)
     velocity_max_angular_velocity: 0.2  # 与 HC_X1 底盘 max_vw 保持一致 (rad/s)
     feedback_topic: /observation/base/pose
     feedback_timeout: 0.3
