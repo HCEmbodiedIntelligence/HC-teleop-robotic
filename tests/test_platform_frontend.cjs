@@ -12,7 +12,7 @@ test('task selection, visible refresh, offline retention and history are explici
   const w = dom.window, doc = w.document;
   const requests = [], timers = new Map();
   const connection = { id: 'connection-a', platform_name: 'Platform', robot_name: 'Robot', verified: true };
-  let offline = false, available = true, savedSelection = { mode: 'local' };
+  let offline = false, available = true, savedSelection = { mode: 'local' }, uploadFormat = 'mcap';
   const task = { name: 'Task A', collection_task_id: 'A', project_name: 'Project', task_code: '0001', description: 'Collect A' };
   const originalSet = w.Storage.prototype.setItem;
   w.Storage.prototype.setItem = () => { throw new Error('secrets must not enter browser storage'); };
@@ -25,8 +25,9 @@ test('task selection, visible refresh, offline retention and history are explici
     const operation = url.replace('/api/platform/', '').split('?')[0];
     if (operation === 'tasks' && offline) throw new Error('offline');
     if (operation === 'preflight' && !available) return { ok: false, json: async () => ({ reason: '任务已关闭' }) };
+    if (operation === 'upload-format') uploadFormat = JSON.parse(options.body).format;
     if (operation === 'selection') savedSelection = JSON.parse(options.body);
-    const body = ['status','verify','connect'].includes(operation) ? { connection, auto_upload: true, recent: null, recording_selection: savedSelection }
+    const body = ['status','verify','connect','upload-format'].includes(operation) ? { connection, upload_format: uploadFormat, auto_upload: true, recent: null, recording_selection: savedSelection }
       : operation === 'selection' ? { recording_selection: savedSelection }
       : operation === 'tasks' ? { items: available ? [task] : [], total: available ? 1 : 0, projects: [{ id: 'p', name: 'Project' }] }
       : operation === 'preflight' ? { task }
@@ -38,6 +39,15 @@ test('task selection, visible refresh, offline retention and history are explici
     w.eval(fs.readFileSync(path.join(root,'platform_panel.js'),'utf8'));
     await settle();
     assert.equal(requests.filter(r => r.url.startsWith('/api/platform/tasks')).length, 1);
+    const format = doc.getElementById('platformUploadFormat');
+    assert.equal(format.value, 'mcap');
+    format.value = 'lerobot'; await format.onchange();
+    assert.equal(uploadFormat, 'lerobot');
+    assert.equal(format.value, 'lerobot');
+    w.platformRecordingStatus({recording:true});
+    assert.equal(format.disabled, true);
+    w.platformRecordingStatus({recording:false});
+    assert.equal(format.disabled, false);
     assert.equal((await w.platformRecordingSelection()).mode, 'local');
     assert.equal(doc.getElementById('platformArm'), null);
     const local = doc.getElementById('platformLocal');

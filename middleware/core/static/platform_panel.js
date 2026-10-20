@@ -70,7 +70,7 @@
     active = Boolean(recording?.recording);
     const task = recording?.task_recording?.binding?.task;
     el('platformActive').textContent = active ? `正在录制：${task?.name || '未关联平台任务，保存到本机'}` : '';
-    for (const id of ['platformTasks', 'platformLocal', 'platformAuto', 'platformConnect']) el(id).disabled = active;
+    for (const id of ['platformTasks', 'platformLocal', 'platformAuto', 'platformConnect', 'platformUploadFormat']) el(id).disabled = active;
     if (!pendingSelection && !selectionError && recording?.recording_selection &&
         JSON.stringify(recording.recording_selection) !== JSON.stringify(state.recording_selection)) {
       state.recording_selection = recording.recording_selection;
@@ -84,6 +84,7 @@
       ? `平台：${connection.platform_name} · 机器人：${connection.robot_name} · ${connection.verified ? '已连接' : '等待验证'}`
       : '尚未连接平台';
     el('platformAuto').checked = state.auto_upload === true;
+    el('platformUploadFormat').value = state.upload_format || 'mcap';
   }
   async function refreshTasks() {
     if (!state.connection) return;
@@ -146,6 +147,7 @@
         const row = document.createElement('tr');
         const uploaded = job?.server_state === 'COMMITTED';
         const values = [record.path.split('/').pop() || '启动中', record.binding?.task?.name || '未选择任务',
+          (record.upload_format || (record.format === 'lerobot' || job?.kind === 'hc_lerobot' ? 'lerobot' : 'mcap')) === 'lerobot' ? 'LeRobot' : 'MCAP',
           uploaded ? '已上传' : labels[job?.state || record.state] || job?.state || record.state,
           processingLabels[job?.processing_state] || job?.processing_state || '尚未开始',
           qualityLabels[job?.quality_state] || job?.quality_state || '尚未质检', record.error || job?.next_action || ''];
@@ -154,7 +156,7 @@
         button.textContent = !record.binding ? '选择任务后上传' : job ? '重试 / 刷新结果' : '上传';
         button.disabled = ['starting', 'recording', 'stopping', 'finalizing', 'interrupted', 'failed', 'deleted'].includes(record.state);
         button.onclick = async () => {
-          if (!record.binding) { await openHistory(record.recording_id, values[0], record.format === 'lerobot' ? 'LEROBOT_V3' : 'MCAP'); return; }
+          if (!record.binding) { await openHistory(record.recording_id, values[0], (record.upload_format || record.format) === 'lerobot' ? 'LEROBOT_V3' : 'MCAP'); return; }
           if (record.legacy_job) {
             try { await post('retry-upload', { job_id: job.id }); await refreshRecords(); }
             catch (error) { message(error.message); }
@@ -165,7 +167,7 @@
         };
         action.append(button); row.append(action); body.append(row);
       }
-      if (!rows.length) { const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 7;
+      if (!rows.length) { const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 8;
         cell.textContent = '录制后会在这里显示整理、上传、平台处理和质检状态。'; row.append(cell); body.append(row); }
     } catch (error) { message(error.message); }
   }
@@ -216,6 +218,13 @@
         return selectionSave;
       }
       return saveSelection();
+    };
+    el('platformUploadFormat').onchange = async () => {
+      const field = el('platformUploadFormat'); field.disabled = true;
+      try { state = await post('upload-format', { format: field.value }); renderConnection();
+        requestId = null; await refreshTasks(); message('上传格式已保存，仅对之后开始的录制生效。');
+      } catch (error) { renderConnection(); message(error.message); }
+      finally { field.disabled = active; }
     };
     el('platformAuto').onchange = async () => {
       try { state = await post('auto-upload', { enabled: el('platformAuto').checked }); renderConnection(); }

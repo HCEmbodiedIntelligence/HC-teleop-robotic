@@ -54,6 +54,16 @@ class TaskRecorder:
                 raise UploadError('RECORDING_ACTIVE', '请停止当前录制后修改任务')
             return self.platform.set_recording_selection(selection)
 
+    def set_upload_format(self, value):
+        with self.lock:
+            if self.active or self.recorder.is_recording():
+                raise UploadError('RECORDING_ACTIVE', '请停止当前录制后修改上传格式')
+            return self.platform.set_upload_format(value)
+
+    @staticmethod
+    def upload_format(job):
+        return job.get('upload_format') or ('lerobot' if job['format'] == 'lerobot' else 'mcap')
+
     def start(self, filename='', metadata=None, selection=None):
         with self.lock:
             selection = copy.deepcopy(selection if selection is not None else self.platform.recording_selection())
@@ -70,6 +80,9 @@ class TaskRecorder:
                 raise UploadError('RECORDING_ACTIVE', '已有录制正在进行，请先停止')
             # Network validation is inside the same critical section as the local
             # start and durable snapshot. Failure never silently becomes local mode.
+            upload_format = self.platform.state['upload_format']
+            if upload_format == 'lerobot' and self.recorder.save_format == 'mcap':
+                raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '上传 LeRobot 需要在话题录制页将本地保存方式设为 LeRobot 或 MCAP + LeRobot')
             binding = self.platform.freeze(selection)
             try:
                 local = self.platform.identity_provider()
@@ -81,7 +94,7 @@ class TaskRecorder:
             job = dict(recording_id=identity, request_id=request_id, intent=intent,
                        requested_filename=filename, path=str((self.directory / '.lerobot_sources' if self.recorder.save_format == 'lerobot' else self.directory) / (Path(chosen).name if chosen.endswith('.mcap') else Path(chosen).name + '.mcap')), state='starting', error=None,
                        binding=binding, started_at=now(), ended_at=None,
-                       format=self.recorder.save_format, metadata=copy.deepcopy(metadata or {}),
+                       format=self.recorder.save_format, upload_format=upload_format, metadata=copy.deepcopy(metadata or {}),
                        local_robot=local, upload_requested=False)
             self.jobs[identity] = job
             self.save(job)
@@ -127,7 +140,7 @@ class TaskRecorder:
             with self.lock:
                 job = copy.deepcopy(self.jobs[identity])
             source = Path(job['path'])
-            if job['format'] == 'lerobot':
+            if self.upload_format(job) == 'lerobot':
                 target = Path(job.get('dataset_path') or self.directory / 'lerobot' / source.stem)
                 from .export_progress import progress_path
                 import time
@@ -224,7 +237,7 @@ class TaskRecorder:
                 if not selection or selection.get('mode') != 'platform':
                     raise UploadError('TASK_REQUIRED', '请为这条历史录制明确选择任务')
                 binding = self.platform.freeze(selection, remember=False,
-                    source_format='LEROBOT_V3' if job['format'] == 'lerobot' else 'MCAP')
+                    source_format='LEROBOT_V3' if self.upload_format(job) == 'lerobot' else 'MCAP')
                 if binding['local_robot'] != job['local_robot']:
                     raise UploadError('LOCAL_ROBOT_MISMATCH', '历史录制的机器人配置不同，不能自动改绑')
                 descriptor_path = self.platform.upload.state_dir / (job['recording_id'] + '.json')

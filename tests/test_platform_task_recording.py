@@ -361,3 +361,71 @@ def test_historical_lerobot_uses_source_capture_and_its_own_format(tmp_path, mon
         assert queued[0]['manifest']['collection_task_id']=='B'
         with pytest.raises(ValueError,match='上传队列'): recorder.delete_recording('lerobot:old')
     finally: recorder.close()
+
+
+def test_upload_format_persists_and_is_frozen_per_recording(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_upload_format('mcap')
+        recorder.start(selection=choice(service, 'A'))
+        with pytest.raises(UploadError, match='RECORDING_ACTIVE'):
+            recorder.set_upload_format('lerobot')
+        recorder.record({'topic': '/test', 'payload': {'frame': 1}, 'stamp_ns': time.time_ns()})
+        recorder.stop(); finish(recorder)
+        recorder.set_upload_format('lerobot')
+        assert recorder.records()[0]['upload_format'] == 'mcap'
+        assert service.upload.queue.jobs()[0]['manifest']['source_format'] == 'MCAP'
+        restored = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+        assert restored.status()['upload_format'] == 'lerobot'
+        with pytest.raises(UploadError, match='UPLOAD_FORMAT_UNAVAILABLE'):
+            recorder.start(selection=choice(service, 'A'))
+        assert not recorder.is_recording()
+    finally:
+        recorder.close()
+
+
+def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
+    from middleware.core.export_progress import progress_path
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    recorder.recorder.save_format = 'both'
+    recorder.set_upload_format('lerobot')
+    def exported():
+        dataset = recorder.directory/'lerobot'/recorder.recorder.path.stem
+        (dataset/'meta').mkdir(parents=True)
+        (dataset/'data').mkdir()
+        atomic_json(dataset/'meta/info.json', {'codebase_version':'v3.0','total_frames':1,
+            'total_episodes':1,'fps':10,'robot_type':LOCAL['profile_id'],
+            'features':{'observation.state':{'dtype':'float32','shape':[1]}}})
+        (dataset/'data/part.parquet').write_bytes(b'PAR1synthetic-closed-filePAR1')
+        atomic_json(progress_path(dataset), {'state':'completed'})
+    monkeypatch.setattr(recorder.recorder, '_start_lerobot_export', exported)
+    try:
+        path = capture(recorder, choice(service, 'A'))
+        assert Path(path).is_file()
+        jobs = service.upload.queue.jobs()
+        assert len(jobs) == 1
+        assert jobs[0]['manifest']['source_format'] == 'LEROBOT_V3'
+        assert jobs[0]['manifest']['declared_episode_count'] == 1
+        assert not any(a['path'].endswith('.mcap') for a in jobs[0]['manifest']['assets'])
+        assert recorder.records()[0]['format'] == 'both'
+        assert recorder.records()[0]['upload_format'] == 'lerobot'
+    finally:
+        recorder.close()
+
+
+def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):
+    from middleware.core.export_progress import progress_path
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    recorder.recorder.save_format = 'both'
+    recorder.set_upload_format('lerobot')
+    def failed_export():
+        dataset = recorder.directory/'lerobot'/recorder.recorder.path.stem
+        atomic_json(progress_path(dataset), {'state':'error'})
+    monkeypatch.setattr(recorder.recorder, '_start_lerobot_export', failed_export)
+    try:
+        path = capture(recorder, choice(service, 'A'))
+        assert Path(path).is_file()
+        assert service.upload.queue.jobs() == []
+        assert recorder.records()[0]['code'] == 'EXPORT_FAILED'
+    finally:
+        recorder.close()

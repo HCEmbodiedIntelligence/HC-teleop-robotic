@@ -67,6 +67,9 @@ class PlatformConnection:
             'auto_upload': bool(legacy.get('auto_enqueue', False)),
             'worker_enabled': bool(legacy.get('enabled', False)),
         }
+        if 'upload_format' not in self.state:
+            self.state['upload_format'] = 'lerobot' if config['ros']['recording'].get('format') == 'lerobot' else 'mcap'
+            self.save()
         self.error = None
         for entry in self.state['connections'].values():
             entry['verified'] = False
@@ -201,7 +204,7 @@ class PlatformConnection:
 
     @property
     def source_format(self):
-        return 'LEROBOT_V3' if self.config['ros']['recording'].get('format') == 'lerobot' else 'MCAP'
+        return 'LEROBOT_V3' if self.state['upload_format'] == 'lerobot' else 'MCAP'
 
     def freeze(self, selection, *, remember=True, source_format=None):
         if not isinstance(selection, dict) or selection.get('mode') not in ('local', 'platform'):
@@ -252,6 +255,14 @@ class PlatformConnection:
             self.state = next_state
             return {'recording_selection': copy.deepcopy(value)}
 
+    def set_upload_format(self, value):
+        if value not in ('mcap', 'lerobot'):
+            raise UploadError('UPLOAD_FORMAT_INVALID', '上传格式请选择 MCAP 或 LeRobot')
+        with self._lock:
+            self.state['upload_format'] = value
+            self.save()
+        return self.status()
+
     def set_auto(self, enabled):
         if type(enabled) is not bool:
             raise UploadError('UPLOAD_REQUEST_INVALID')
@@ -271,7 +282,7 @@ class PlatformConnection:
                     | {'id': current}) if connection else None,
                     'recent': copy.deepcopy(self.state['recent']), 'error': self.error,
                     'recording_selection': self.recording_selection(),
-                    'auto_upload': self.state['auto_upload'], 'jobs': self.upload.jobs()}
+                    'auto_upload': self.state['auto_upload'], 'upload_format': self.state['upload_format'], 'jobs': self.upload.jobs()}
 
     def start(self):
         self._resume_legacy()

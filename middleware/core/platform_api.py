@@ -42,6 +42,8 @@ def register_platform_routes(app, runtime):
                     result = await asyncio.to_thread(platform.connect, body['link'])
                 elif operation == 'verify':
                     result = await asyncio.to_thread(platform.verify)
+                elif operation == 'upload-format':
+                    result = await asyncio.to_thread(runtime.recorder.set_upload_format, body['format'])
                 elif operation == 'auto-upload':
                     result = await asyncio.to_thread(platform.set_auto, body['enabled'])
                 elif operation == 'preflight':
