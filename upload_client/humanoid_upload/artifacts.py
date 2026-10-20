@@ -67,7 +67,7 @@ def inspect_ready(descriptor, cfg):
     required = {'schema_version', 'recording_id', 'artifact_id', 'kind', 'root', 'files',
                 'profile_id', 'config_fingerprint', 'source_artifact_id', 'native_session_id',
                 'native_completion_marker', 'binding_id', 'completed_at'}
-    if not required <= descriptor.keys() or descriptor.keys() - required - {'capture_started_at', 'capture_ended_at'}:
+    if not required <= descriptor.keys() or descriptor.keys() - required - {'capture_started_at', 'capture_ended_at', 'ownership_snapshot'}:
         raise UploadError('ARTIFACT_SCHEMA_INVALID')
     artifact_id(descriptor.get('artifact_id'))
     artifact_id(descriptor.get('recording_id'))
@@ -204,6 +204,8 @@ def manifest_for_ready(descriptor, cfg, client_id):
                     format_metadata={'hc_artifact': {k: descriptor.get(k) for k in (
                         'schema_version', 'artifact_id', 'recording_id', 'kind', 'profile_id',
                         'config_fingerprint', 'source_artifact_id', 'native_session_id')}})
+    if descriptor.get('ownership_snapshot'):
+        manifest['format_metadata']['ownership_snapshot'] = descriptor['ownership_snapshot']
     validate(manifest, 'robot-ingest-manifest')
     return root, marker, manifest
 

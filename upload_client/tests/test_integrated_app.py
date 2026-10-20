@@ -49,7 +49,9 @@ def test_integrated_upload_lifecycle(tmp_path, monkeypatch):
             assert not runtime.upload_error
             assert runtime.recorder.upload_service is runtime.uploads
             assert runtime.uploads.request_raw_seal is None
-            assert runtime.recorder.__class__.__name__ == 'TopicRecorder'
+            assert runtime.recorder.__class__.__name__ == 'TaskRecorder'
+            assert runtime.recorder.recorder.__class__.__name__ == 'TopicRecorder'
+            assert runtime.platform.status()['auto_upload'] is False
             response = await client.post('/api/uploads/scan', json={})
             assert response.status == 200, await response.text()
             assert (await response.json())['enqueued'] == 0

@@ -24,10 +24,10 @@ test('LeRobot list uses opaque identifier, ZIP download and details without ROS 
   assert.match(cells[5].textContent,/122 帧.*1 episode/);
   assert.match(cells[6].textContent,/3 路相机.*15 FPS/);
   const actions=cells[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['详情','下载','删除']);
+  assert.deepEqual(actions.map(el=>el.textContent),['详情','下载','选择任务后上传','删除']);
   assert.equal(actions[1].href,'/api/recordings/lerobot%3Ateleop%20test/download');
   assert.equal(actions[1].download,'teleop test.zip');
-  await actions[2].onclick();
+  await actions.find(el=>el.textContent==='删除').onclick();
   assert.equal(calls.find(call=>call.options?.method==='DELETE').url,'/api/recordings/lerobot%3Ateleop%20test');
 });
 test('LeRobot details show aligned frame statistics, task, features and camera preview',()=>{
@@ -44,7 +44,7 @@ test('MCAP keeps replay and plain file download',async()=>{
   const {ctx,fields}=setup([{filename:'test.mcap',format:'MCAP',message_count:12,channels:[{topic:'/clock'}]}]);
   await vm.runInContext('loadDatasets()',ctx);
   const actions=fields['#datasetRows'].children[0].children[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','下载','删除']);
+  assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','下载','选择任务后上传','删除']);
   assert.equal(actions[2].href,'/api/recordings/test.mcap/download');
   assert.equal(actions[2].download,'test.mcap');
 });
@@ -59,7 +59,7 @@ test('pending export appears immediately with stage, percentage and counters; op
   assert.match(progress.children[0].textContent,/编码相机视频.*62%.*1 \/ 3 路视频/);
   assert.equal(progress.children[1].value,62);
   const actions=cells[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['下载','删除']);
+  assert.deepEqual(actions.map(el=>el.textContent),['下载','选择任务后上传','删除']);
   assert.ok(actions.every(el=>el.disabled));
   assert.equal(actions[0].href,undefined);
 });
@@ -95,25 +95,16 @@ test('dataset polling runs only on visible dataset page',()=>{
   vm.runInContext("updateDatasetPolling('datasets')",ctx);assert.equal(count,2);
 });
 
-test('ready upload artifact opens upload page with opaque ID; unfinished artifacts cannot enqueue',async()=>{
+test('historical recording opens task selection without asking for artifact IDs',async()=>{
   const {ctx,fields}=setup([{...dataset,artifact_id:'artifact-123',upload_artifact_state:'ready'},
-    {...dataset,id:'pending',artifact_id:'artifact-pending',upload_artifact_state:'writing'}]);
-  ctx.location={hash:'#datasets'};
+    {...dataset,id:'pending',is_current:true}]);
+  let selected=null;
+  ctx.window={platformUploadHistory:(...args)=>{selected=args;}};
   await vm.runInContext('loadDatasets()',ctx);
-  const action = row => row.children[9].children[0].children.find(button=>button.textContent==='上传');
+  const action = row => row.children[9].children[0].children.find(button=>button.textContent==='选择任务后上传');
   const upload=action(fields['#datasetRows'].children[0]);
-  assert.equal(upload.disabled,false);
-  upload.onclick();
-  assert.equal(ctx.location.hash,'#uploads');
-  assert.equal(vm.runInContext('pendingUploadArtifact',ctx),'artifact-123');
+  assert.equal(upload.disabled,false); upload.onclick();
+  assert.equal(selected[0],dataset.id);
+  assert.equal(selected[2],'LEROBOT_V3');
   assert.equal(action(fields['#datasetRows'].children[1]).disabled,true);
-  let mounts=0,disposes=0;
-  const input={value:''};
-  fields['#uploadPanel [name="artifact_id"]']=input;
-  ctx.window={mountUploadPanel:()=>{mounts++;return ()=>disposes++;}};
-  vm.runInContext("updateUploadPanel('uploads')",ctx);
-  assert.equal(input.value,'artifact-123');
-  assert.equal(mounts,1);
-  vm.runInContext("updateUploadPanel('datasets')",ctx);
-  assert.equal(disposes,1);
 });

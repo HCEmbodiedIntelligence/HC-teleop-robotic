@@ -121,17 +121,8 @@ async function api(url, options={}) {
   return response.json();
 }
 
-let disposeUploadPanel = null;
-let pendingUploadArtifact = null;
 function updateUploadPanel(page) {
-  if (disposeUploadPanel) { disposeUploadPanel(); disposeUploadPanel = null; }
-  if (page === 'uploads' && window.mountUploadPanel) {
-    disposeUploadPanel = window.mountUploadPanel($('#uploadPanel'));
-    if (pendingUploadArtifact) {
-      $('#uploadPanel [name="artifact_id"]').value = pendingUploadArtifact;
-      pendingUploadArtifact = null;
-    }
-  }
+  if (page === 'uploads' && typeof window !== 'undefined') window.platformRefreshRecords?.();
 }
 
 function route() {
@@ -305,6 +296,7 @@ function renderStatus(data) {
       : `未录制 · 保存目录：${config?.ros?.recording?.directory || 'runtime/topic_recordings'}`;
   }
   renderRecordingExport(recording.status || recording);
+  if (typeof window !== "undefined") window.platformRecordingStatus?.(recording.status || recording);
   setText('#vrPeer',vr.peer ? `${vr.peer[0]}:${vr.peer[1]}` : 'VR 未连接');
   for (const name of ['Head','Left','Right']) {
     const indicator=$('#track'+name);
@@ -1233,20 +1225,11 @@ async function loadDatasets() {
         }
       };
 
-      if (file.artifact_id) {
-        const uploadBtn = document.createElement('button');
-        uploadBtn.className = 'btn-sm';
-        uploadBtn.textContent = '上传';
-        uploadBtn.disabled = datasetUnavailable(file) || file.upload_artifact_state !== 'ready';
-        uploadBtn.title = file.upload_error || (uploadBtn.disabled ? '等待产物封存完成' : '选择平台绑定并入队');
-        uploadBtn.onclick = () => {
-          pendingUploadArtifact = file.artifact_id;
-          if (location.hash === '#uploads') route();
-          else location.hash = '#uploads';
-        };
-        group.append(uploadBtn);
-      }
-      group.append(downloadLink, deleteBtn);
+      const platformBtn = document.createElement('button');
+      platformBtn.className = 'btn-sm'; platformBtn.textContent = '选择任务后上传';
+      platformBtn.disabled = datasetUnavailable(file) || Boolean(file.platform_recording?.binding);
+      platformBtn.onclick = () => window.platformUploadHistory?.(file.platform_recording?.recording_id || datasetIdentifier(file), file.filename, isLeRobotDataset(file) ? 'LEROBOT_V3' : 'MCAP');
+      group.append(downloadLink, platformBtn, deleteBtn);
       actionCell.append(group);
 
       row.append(selectCell, nameCell, profileCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
@@ -1566,7 +1549,7 @@ async function init() {
     try {
       const result = await api('/api/recording/start', {
         method: 'POST',
-        body: JSON.stringify({ force }),
+        body: JSON.stringify({ force, selection: await window.platformRecordingSelection() }),
       });
       toast(`已开始话题录制：${result.path}`);
       renderStatus(await api('/api/status'));
@@ -1627,6 +1610,7 @@ async function init() {
     $('#stopRecordingBtn').onclick=async()=>{
       try {
         const result=await api('/api/recording/stop',{method:'POST'});
+        window.platformRecordingStopped?.();
         toast(`话题录制已停止，本次共录制 ${result.status?.messages||0} 条消息`);
         renderStatus(await api('/api/status'));
       } catch(error){toast(`停止录制失败：${error.message}`,true);}

@@ -1,3 +1,5 @@
+> 单链接连接、按任务名称录制和自动上传请使用机器人页面，详见 [平台任务录制](../docs/PLATFORM_TASK_RECORDING.md)。以下手动字段与 CLI 保留用于旧部署维护。
+
 > HC 迁入版本 1.4.0：普通 HC 产物、服务/API、面板和文件锁接线请先阅读 [HC_INTEGRATION.md](HC_INTEGRATION.md)。以下保留原客户端协议说明；旧 manager 路径和 G0 验收记录属于来源实现，不是本轮集成通过证据。
 
 # 独立机器人上传器 v1

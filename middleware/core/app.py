@@ -64,6 +64,8 @@ class MiddlewareRuntime:
         self.cameras: dict[str, CameraService] = {}
         self._cameras_by_topic: dict[str, list[CameraService]] = {}
         self.recorder: TopicRecorder | None = None
+        self.platform = None
+        self._record_commands = None
         self.uploads = None
         self.upload_error = None
         self.player: TopicPlayer | None = None
@@ -146,9 +148,24 @@ class MiddlewareRuntime:
         except Exception:
             pass
 
+        from concurrent.futures import ThreadPoolExecutor
+        self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recording-command")
         self.session_profile_metadata = self._load_session_profile_metadata()
-        self.recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
-        await self._start_uploads()
+        recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
+        self.recorder = recorder
+        try:
+            from .platform_connection import PlatformConnection
+            from .task_recording import TaskRecorder
+            self.platform = PlatformConnection(self.config, self.config_dir, recorder.directory)
+            self.recorder = TaskRecorder(recorder, self.platform)
+            self.platform.activity_provider = lambda: "COLLECTING" if self.recorder.is_recording() else (
+                "UPLOADING" if any(job['state'] == 'uploading' for job in self.platform.upload.jobs()) else "IDLE")
+            self.platform.start()
+            self.uploads = self.platform.upload
+        except ImportError:
+            self.platform = None
+            await self._start_uploads()
+            self.recorder.binding_snapshot = None
         self.player = TopicPlayer(
             self.recorder.directory,
             lambda: self.ros,
@@ -205,6 +222,7 @@ class MiddlewareRuntime:
             camera_topics=list(self._cameras_by_topic),
         )
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
+        self.recorder.prepare_recording = self.recording_ros.prepare_recording
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_safety_event
         )
@@ -267,11 +285,16 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.recording_ros.stop)
         if self.ros is not None:
             await asyncio.to_thread(self.ros.stop)
+        if self._record_commands is not None:
+            await asyncio.to_thread(self._record_commands.shutdown, wait=True)
+            self._record_commands = None
         if self.recorder is not None:
             await asyncio.to_thread(self.recorder.shutdown)
-        if self.uploads is not None:
+        if self.platform is not None:
+            await asyncio.to_thread(self.platform.stop)
+        elif self.uploads is not None:
             await asyncio.to_thread(self.uploads.stop)
-            self.uploads = None
+        self.uploads = None
         try:
             import rclpy
             if rclpy.ok():
@@ -394,9 +417,11 @@ class MiddlewareRuntime:
             self._last_y_held = bool(left_held & 2)
 
             if x_down:
-                self._handle_vr_record_start()
+                if self._record_commands is not None:
+                    self._record_commands.submit(self._handle_vr_record_start)
             elif y_down:
-                self._handle_vr_record_stop()
+                if self._record_commands is not None:
+                    self._record_commands.submit(self._handle_vr_record_stop)
 
         if self.ros is None:
             return
@@ -434,9 +459,9 @@ class MiddlewareRuntime:
             )
             return
         try:
-            filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
-            if self.recording_ros is not None:
+            if self.platform is None and self.recording_ros is not None:
                 self.recording_ros.prepare_recording()
+            filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
             path = self.recorder.start(filename, self.session_profile_metadata)
             self._log("info", f"Recording started by VR X button: {filename}")
             if self.ros is not None:
@@ -1020,6 +1045,12 @@ def create_app(store: ConfigStore) -> web.Application:
                 data = await request.json()
             except Exception:
                 pass
+        if runtime.platform is None and runtime.upload_error:
+            if (data.get('selection') or {}).get('mode', 'local') != 'local':
+                return web.json_response({'ok': False, 'code': 'PLATFORM_UNAVAILABLE',
+                    'reason': '平台模块尚未安装，可暂不关联平台任务录制到本机'}, status=409)
+            if runtime.recording_ros is not None:
+                runtime.recording_ros.prepare_recording()
         force = bool(data.get("force", False))
         filename = str(data.get("filename", "")).strip()
 
@@ -1062,13 +1093,12 @@ def create_app(store: ConfigStore) -> web.Application:
                     "issues": issues,
                 }, status=400)
 
-        if runtime.recording_ros is not None:
-            runtime.recording_ros.prepare_recording()
         try:
             path = await asyncio.to_thread(
                 runtime.recorder.start,
                 filename,
                 runtime.session_profile_metadata,
+                *([data.get("selection")] if runtime.platform is not None else []),
             )
         except (ValueError, RuntimeError, FileExistsError, ImportError) as exc:
             return web.json_response({"ok": False, "reason": str(exc)}, status=400)
@@ -1077,6 +1107,9 @@ def create_app(store: ConfigStore) -> web.Application:
             if failure is None:
                 raise
             return web.json_response(failure, status=_upload_failure_status(failure["code"]))
+        status = runtime.recorder.status()
+        if not status.get("recording") or status.get("path") != path:
+            return web.json_response({"ok": True, "recording": False, "path": path, "replayed": True})
         if runtime.ros is not None:
             runtime.ros.publish(
                 "/teleop/recording_state",
@@ -1402,6 +1435,16 @@ def create_app(store: ConfigStore) -> web.Application:
                     raise UploadError("ARTIFACT_BUSY", "请停止当前录制后修改上传设置")
                 proposed = copy.deepcopy(store.value)
                 proposed["uploads"].update(body)
+                if runtime.platform is not None:
+                    saved = store.save(proposed)
+                    runtime.config['uploads'] = copy.deepcopy(saved['uploads'])
+                    platform = runtime.platform
+                    with platform._lock:
+                        platform.state.update(worker_enabled=body['enabled'], auto_upload=body['auto_enqueue'])
+                        platform.save()
+                    if body['enabled']: platform.upload.start()
+                    else: await asyncio.to_thread(platform.upload.stop)
+                    return {**platform.upload.status(), **body}
                 upload_config = copy.deepcopy(proposed["uploads"])
                 queue_path = Path(upload_config["queue_directory"]).expanduser()
                 upload_config["queue_directory"] = str((store.path.parent / queue_path).resolve())
@@ -1441,6 +1484,8 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)
     app.router.add_post("/api/recording/stop", stop_recording)
+    from .platform_api import register_platform_routes
+    register_platform_routes(app, runtime)
     app.router.add_get("/api/recording/status", get_recording_status)
     app.router.add_get("/api/recordings", get_recordings)
     app.router.add_post("/api/recordings/upload", import_mcap_file)

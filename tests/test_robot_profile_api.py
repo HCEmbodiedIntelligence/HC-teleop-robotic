@@ -30,6 +30,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         value["camera"]["enabled"] = False
         value["safety"]["enabled"] = False
         value["safety"]["stop_on_startup"] = False
+        value["uploads"] = {"queue_directory": str(root / "queue")}
         self.store.save(value)
         self.client = TestClient(TestServer(create_app(self.store)))
         await self.client.start_server()
@@ -177,7 +178,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_recording_api_start_stop(self):
         # Start recording with force=True
-        res = await self.client.post("/api/recording/start", json={"filename": "api_test.mcap", "force": True})
+        res = await self.client.post("/api/recording/start", json={"filename": "api_test.mcap", "force": True, "selection": {"mode": "local"}})
         self.assertEqual(res.status, 200)
         data = await res.json()
         self.assertTrue(data["ok"])
@@ -196,9 +197,25 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stop_data["ok"])
         self.assertFalse(stop_data["recording"])
 
+    async def test_default_local_capture_and_shared_selection_api(self):
+        response = await self.client.get('/api/platform/status')
+        self.assertEqual((await response.json())['recording_selection'], {'mode': 'local'})
+        response = await self.client.post('/api/platform/selection', json={'mode': 'local'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['recording_selection'], {'mode': 'local'})
+        response = await self.client.post('/api/recording/start', json={'force': True})
+        self.assertEqual(response.status, 200)
+        self.assertTrue((await response.json())['recording'])
+        response = await self.client.post('/api/platform/selection', json={'mode': 'local'})
+        self.assertEqual(response.status, 409)
+        self.assertEqual((await response.json())['code'], 'RECORDING_ACTIVE')
+        response = await self.client.post('/api/recording/stop')
+        self.assertEqual(response.status, 200)
+        self.assertFalse((await response.json())['recording'])
+
     async def test_dataset_management_apis(self):
         # Start and stop recording to create a file
-        await self.client.post("/api/recording/start", json={"filename": "ds_test.mcap", "force": True})
+        await self.client.post("/api/recording/start", json={"filename": "ds_test.mcap", "force": True, "selection": {"mode": "local"}})
         await self.client.post("/api/recording/stop")
 
         # List recordings
@@ -213,6 +230,13 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         content = await down_res.read()
         self.assertGreater(len(content), 0)
 
+        # Finalization owns the source until its immutable inventory is written.
+        import asyncio
+        for _ in range(100):
+            records = await (await self.client.get('/api/platform/recordings')).json()
+            if all(item['state'] not in ('finalizing', 'upload_pending') for item in records['items']):
+                break
+            await asyncio.sleep(.02)
         # Batch delete
         del_res = await self.client.post(
             "/api/recordings/batch-delete",
@@ -224,7 +248,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replay_apis(self):
         # Create an MCAP file first
-        await self.client.post("/api/recording/start", json={"filename": "replay_test.mcap", "force": True})
+        await self.client.post("/api/recording/start", json={"filename": "replay_test.mcap", "force": True, "selection": {"mode": "local"}})
         await self.client.post("/api/recording/stop")
 
         # Start replay

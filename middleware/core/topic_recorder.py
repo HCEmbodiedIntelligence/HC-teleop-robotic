@@ -358,6 +358,7 @@ class TopicRecorder:
         self.binding_snapshot = None
         self.upload_service = None
         self._capture_identity = None
+        self.task_managed = False
 
     def ipc_resources(self) -> tuple[Any, Any, Any]:
         """Resources inherited by the raw ROS subscription process."""
@@ -377,7 +378,7 @@ class TopicRecorder:
     ) -> str:
         self.stop()
         if self.status()["export_state"] == "exporting":
-            raise RuntimeError("LeRobot 数据正在保存，请等待完成后再开始下一次录制")
+            self._detach_export()
         if self.save_format != "mcap":
             from .lerobot_export import ensure_export_available
             ensure_export_available()
@@ -396,7 +397,8 @@ class TopicRecorder:
             raise FileExistsError(f"录制文件已存在: {self.path}")
         # Freeze the platform task at capture start, never at conversion/upload time.
         binding = self.binding_snapshot() if self.binding_snapshot else None
-        self._capture_identity = self._artifacts.begin(self.path, self.save_format, metadata or {}, binding)
+        self._capture_identity = (None if self.task_managed else
+            self._artifacts.begin(self.path, self.save_format, metadata or {}, binding))
         self._active_metadata = {
             str(key): str(value)
             for key, value in (metadata or {}).items()
@@ -467,6 +469,27 @@ class TopicRecorder:
         if self.save_format != "mcap" and not self._last_error:
             self._start_lerobot_export()
         return self.status()
+
+    def _detach_export(self) -> None:
+        """Keep a closed capture converting while the next capture uses the IPC."""
+        process, log, destination = self._export_process, self._export_log, Path(self._lerobot_path)
+        self._export_process, self._export_log = None, None
+        if process is None:
+            return  # An independently resumed converter owns its progress file.
+
+        def finish():
+            from .export_progress import ExportProgress, progress_path
+            try:
+                code = process.wait()
+                success = code == 0 and (destination / 'meta/info.json').is_file()
+                ExportProgress(progress_path(destination)).update(
+                    '转换完成' if success else '转换失败', 100 if success else 0,
+                    state='completed' if success else 'error',
+                    error='' if success else 'LeRobot 保存失败，原始 MCAP 已保留', force=True)
+            finally:
+                if log is not None: log.close()
+
+        threading.Thread(target=finish, name='lerobot-finalize', daemon=True).start()
 
     def _start_lerobot_export(self) -> None:
         assert self.path is not None
@@ -732,7 +755,8 @@ class TopicRecorder:
 
     def _delete_recording(self, filename: str, target: Path) -> None:
         if filename.startswith("lerobot:"):
-            if self._export_state == "exporting" and target.resolve() == Path(self._lerobot_path).resolve():
+            from .export_progress import read_progress, progress_path
+            if read_progress(progress_path(target)).get('state') == 'exporting':
                 raise ValueError("cannot delete dataset while exporting")
             from .recording_datasets import dataset_files
             dataset_files(target)  # Refuse symlink-containing trees.
