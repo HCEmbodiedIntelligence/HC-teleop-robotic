@@ -4,6 +4,7 @@
   let state = { connection: null, recent: null }, selected = '', page = 1, total = 0;
   let tasks = [], requestId = null, refreshGeneration = 0, active = false;
   let selectionSave = Promise.resolve(), selectionVersion = 0, pendingSelection = 0, selectionError = null;
+  let choosingTask = false;
   let historyTarget = null, historySelected = '', historyPage = 1;
   const post = (path, body = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
   async function call(path, options = {}) {
@@ -14,6 +15,8 @@
     return body;
   }
   const message = value => { el('platformMessage').textContent = value; };
+  const taskPrompt = () => (state.connection ? '请选择采集任务' : '请先连接平台，再选择采集任务') +
+    '，选定后自动保存关联；选择前仍使用上次保存的录制设置。';
   function selection() {
     if (el('platformLocal').checked || !state.connection || !selected) return { mode: 'local' };
     return { mode: 'platform', connection_id: state.connection.id, task_id: selected };
@@ -28,7 +31,8 @@
   function renderSelection() {
     const value = state.recording_selection;
     selected = value?.mode === 'platform' && value.connection_id === state.connection?.id ? value.task_id : '';
-    el('platformLocal').checked = !selected;
+    if (selected) choosingTask = false;
+    el('platformLocal').checked = !selected && !choosingTask;
     if (selected && ![...el('platformTasks').options].some(option => option.value === selected)) {
       el('platformTasks').append(new Option('已选任务（正在验证）', selected));
     }
@@ -46,7 +50,7 @@
         state.recording_selection = result.recording_selection;
         if (version === selectionVersion) {
           renderSelection();
-          message('设置已自动保存，网页与手柄录制共用。');
+          message(choosingTask ? taskPrompt() : '设置已自动保存，网页与手柄录制共用。');
         }
       } catch (error) {
         if (version === selectionVersion) {
@@ -113,7 +117,7 @@
         } catch (error) {
           if (generation === refreshGeneration) message(`原选择已不可用或验证失败：${error.message}。请选择其他任务，或勾选“暂不关联平台任务”后保存到本机。`);
         }
-      } else message('未关联平台任务，网页或手柄可直接开始本地录制。');
+      } else message(choosingTask ? taskPrompt() : '未关联平台任务，网页或手柄可直接开始本地录制。');
     } catch (error) {
       if (generation === refreshGeneration) message(`任务刷新失败：${error.message}。已选任务保留；断网时可勾选“暂不关联平台任务”，照常保存到本机。`);
     }
@@ -189,7 +193,7 @@
       el('platformConnect').disabled = true;
       const link = el('platformLink').value;
       el('platformLink').value = '';
-      try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null;
+      try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null; choosingTask = false;
         renderSelection(); renderConnection(); await refreshTasks(); }
       catch (error) { message(`连接失败，原连接已保留：${error.message}。可重新粘贴同一链接重试。`); }
       finally { el('platformConnect').disabled = false; }
@@ -199,10 +203,20 @@
     el('platformProject').onchange = () => { page = 1; void refreshTasks(); };
     el('platformPrev').onclick = () => { page--; void refreshTasks(); };
     el('platformNext').onclick = () => { page++; void refreshTasks(); };
-    el('platformTasks').onchange = () => { selected = el('platformTasks').value; el('platformLocal').checked = !selected;
+    el('platformTasks').onchange = () => { choosingTask = false; selected = el('platformTasks').value; el('platformLocal').checked = !selected;
       el('platformDescription').textContent = tasks.find(task => task.collection_task_id === selected)?.description || '';
       return saveSelection(); };
-    el('platformLocal').onchange = saveSelection;
+    el('platformLocal').onchange = () => {
+      choosingTask = !el('platformLocal').checked && !selected;
+      if (choosingTask) {
+        // Wait for an explicit task choice instead of saving local mode and
+        // checking the box again when the save or status update completes.
+        message(taskPrompt());
+        el('platformTasks').focus();
+        return selectionSave;
+      }
+      return saveSelection();
+    };
     el('platformAuto').onchange = async () => {
       try { state = await post('auto-upload', { enabled: el('platformAuto').checked }); renderConnection(); }
       catch (error) { renderConnection(); message(error.message); }
