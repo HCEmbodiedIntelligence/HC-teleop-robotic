@@ -163,3 +163,47 @@ test('saved selection is restored, rapid changes stay ordered, and failed saves 
     assert.deepEqual(saved, { mode: 'local' });
   } finally { dom.window.close(); }
 });
+
+test('shared scheme details, pinned revision and independent receipt states remain visible', async () => {
+  const root = path.resolve(__dirname, '../middleware/core/static');
+  const dom = new JSDOM(fs.readFileSync(path.join(root, 'index.html'), 'utf8'), {
+    url: 'http://robot.example/', runScripts: 'outside-only', pretendToBeVisual: true,
+  });
+  const w = dom.window, doc = w.document;
+  const connection = { id: 'connection', platform_name: 'Platform', robot_name: 'Robot', verified: true };
+  const task = { collection_task_id: 'A', name: '任务 A', task_code: 'A', project_name: 'Project', selectable: true,
+    capture_plan: { revision: 1, scheme: { scheme_id: '视觉方案', version: 2 }, source_format: 'LEROBOT_V3', mapping_version: 3,
+      output: { frequency_hz: 15, features: { 'observation.state': { shape: [21], required: true }, camera: { shape: [32, 32, 3], required: false } } } } };
+  let saved = { mode: 'local' };
+  const requests = [];
+  w.setInterval = () => 1; w.clearInterval = () => {};
+  w.fetch = async (url, options) => {
+    const operation = url.split('/').pop().split('?')[0]; requests.push(operation);
+    if (operation === 'selection') saved = JSON.parse(options.body);
+    const body = ['status', 'verify'].includes(operation) ? { connection, recording_selection: saved }
+      : operation === 'selection' ? { recording_selection: saved }
+      : operation === 'preflight' ? { task }
+      : operation === 'tasks' ? { items: [task, { ...task, collection_task_id: 'B', selectable: false, reason: 'CAPTURE_MAPPING_UNVERIFIED' }], projects: [], total: 2 }
+      : operation === 'recordings' ? { items: [{ recording_id: 'r', path: '/data/synthetic.mcap', state: 'queued', binding: { task } }],
+        jobs: [{ id: 'u', local_recording_id: 'r', server_state: 'COMMITTED', processing_state: 'READY', quality_state: 'PASS',
+                 data_status: 'READABLE', annotation_status: 'NOT_CONFIGURED', training_status: 'NOT_READY' }] } : {};
+    return { ok: true, json: async () => structuredClone(body) };
+  };
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  try {
+    w.eval(fs.readFileSync(path.join(root, 'platform_panel.js'), 'utf8')); await settle();
+    doc.getElementById('platformTasks').value = 'A'; await doc.getElementById('platformTasks').onchange();
+    assert.match(doc.getElementById('platformDescription').textContent, /视觉方案 v2.*LEROBOT_V3.*15 Hz.*映射 v3.*可选/);
+    assert.equal((await w.platformRecordingSelection()).expected_plan_revision, 1);
+    task.capture_plan.revision = 2;
+    await doc.getElementById('platformRefresh').onclick(); await settle();
+    assert.equal((await w.platformRecordingSelection()).expected_plan_revision, 1);
+    assert.match(doc.getElementById('platformMessage').textContent, /修订已变化/);
+    assert.equal([...doc.getElementById('platformTasks').options].find(o => o.value === 'B').disabled, true);
+    assert.match(doc.getElementById('platformTasks').textContent, /CAPTURE_MAPPING_UNVERIFIED/);
+    assert.match(doc.getElementById('platformRecordings').textContent, /数据：可读.*标注待配置.*训练交付：未就绪/);
+    await doc.getElementById('platformTasks').onchange();
+    assert.equal((await w.platformRecordingSelection()).expected_plan_revision, 2);
+    assert.equal(requests.some(op => op.includes('prepare')), false);
+  } finally { w.close(); }
+});

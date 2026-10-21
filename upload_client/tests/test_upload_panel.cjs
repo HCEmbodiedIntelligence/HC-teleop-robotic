@@ -6,7 +6,11 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../../middleware/core/static/upload_panel.js'), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 class Element {
-  constructor() { this.textContent = ''; this.children = []; this.classList = {add() {}}; }
+  constructor() {
+    this.textContent = ''; this.children = []; this.classList = {add() {}};
+    this.elements = { enabled: { checked: false }, auto_enqueue: { checked: false }, namedItem: () => null };
+  }
+  addEventListener(name, callback) { this['on' + name] = callback; }
   append(child) { this.children.push(child); }
   replaceChildren() { this.children = []; }
 }

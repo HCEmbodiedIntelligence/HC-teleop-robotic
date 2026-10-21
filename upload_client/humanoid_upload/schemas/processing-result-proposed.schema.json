@@ -31,7 +31,11 @@
               "open_episode",
               "retry_processing",
               "repair_export",
-              "review_quality"
+              "review_quality",
+              "configure_capture_plan",
+              "review_structure",
+              "configure_annotation",
+              "retry_annotation"
             ]
           },
           "quality_status": {
@@ -58,8 +62,53 @@
               "PENDING",
               "PROCESSING",
               "READY",
-              "FAILED"
+              "FAILED",
+              "AWAITING_CONFIGURATION",
+              "STRUCTURE_MISMATCH"
             ]
+          },
+          "annotation_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "annotation_status": {
+            "enum": [
+              "UNKNOWN",
+              "NOT_CONFIGURED",
+              "PENDING",
+              "READY",
+              "FAILED",
+              "NOT_REQUIRED",
+              "COMPLETED",
+              "PENDING_CONFIGURATION",
+              "CREATED",
+              "APPROVED"
+            ]
+          },
+          "data_status": {
+            "enum": [
+              "UNKNOWN",
+              "PENDING",
+              "COMMITTED",
+              "READABLE",
+              "FAILED",
+              "READY"
+            ]
+          },
+          "training_status": {
+            "enum": [
+              "UNKNOWN",
+              "NOT_READY",
+              "PENDING",
+              "READY",
+              "BLOCKED",
+              "NOT_REQUESTED"
+            ]
+          },
+          "data_readable": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -88,7 +137,9 @@
         "PROCESSING",
         "READY",
         "PARTIALLY_FAILED",
-        "FAILED"
+        "FAILED",
+        "AWAITING_CONFIGURATION",
+        "STRUCTURE_MISMATCH"
       ]
     },
     "quality_status": {
@@ -112,6 +163,46 @@
     "upload_id": {
       "minLength": 1,
       "type": "string"
+    },
+    "annotation_task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "annotation_status": {
+      "enum": [
+        "UNKNOWN",
+        "NOT_CONFIGURED",
+        "PENDING",
+        "READY",
+        "FAILED",
+        "NOT_REQUIRED",
+        "COMPLETED",
+        "PENDING_CONFIGURATION",
+        "CREATED",
+        "APPROVED"
+      ]
+    },
+    "data_status": {
+      "enum": [
+        "UNKNOWN",
+        "PENDING",
+        "COMMITTED",
+        "READABLE",
+        "FAILED",
+        "READY"
+      ]
+    },
+    "training_status": {
+      "enum": [
+        "UNKNOWN",
+        "NOT_READY",
+        "PENDING",
+        "READY",
+        "BLOCKED",
+        "NOT_REQUESTED"
+      ]
     }
   },
   "required": [

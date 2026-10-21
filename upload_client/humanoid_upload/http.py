@@ -1,6 +1,8 @@
 import json
+import errno
 import ipaddress
 import re
+import socket
 import ssl
 import time
 from http.client import HTTPException
@@ -18,16 +20,46 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class UploadProxyHandler(ProxyHandler):
-    """Local services and SSH forwards must not pass through a system proxy."""
+    """LAN services and this host's interfaces must not use an Internet proxy."""
     def proxy_open(self, req, proxy, type):
         host = valid_url(req.full_url).hostname
         try:
-            local = ipaddress.ip_address(host).is_loopback
+            address = ipaddress.ip_address(host)
         except ValueError:
-            local = host.lower() == 'localhost'
-        if local:
-            return None
+            if host.lower().rstrip('.') == 'localhost':
+                return None
+        else:
+            if address.is_loopback or address.is_private or address.is_link_local:
+                return None
+            # Some LANs use public address ranges (e.g. 172.168.x.x).
+            # Binding checks whether the address belongs to this machine without
+            # sending traffic, changing DNS, or disabling proxies for public hosts.
+            try:
+                family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+                with socket.socket(family, socket.SOCK_DGRAM) as probe:
+                    probe.bind((str(address), 0))
+                return None
+            except OSError:
+                pass
         return super().proxy_open(req, proxy, type)
+
+
+def network_error(error, timeout):
+    """Classify transport failures without exposing URLs, tokens or proxy secrets."""
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return UploadError('TLS_CERTIFICATE_INVALID', '平台 HTTPS 证书验证失败，请检查证书、域名和系统时间')
+    if isinstance(reason, ssl.SSLError):
+        return UploadError('TLS_CONNECTION_FAILED', '平台 HTTPS 握手失败，请检查 HTTPS 地址和证书配置', retry=True)
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return UploadError('NETWORK_TIMEOUT', f'连接平台超时（等待 {timeout:g} 秒），请检查平台地址、网络和代理设置后重试', retry=True)
+    if isinstance(reason, socket.gaierror):
+        return UploadError('NETWORK_DNS_FAILED', '无法解析平台域名，请检查连接链接中的域名及采集端 DNS 设置', retry=True)
+    if isinstance(reason, ConnectionRefusedError) or getattr(reason, 'errno', None) == errno.ECONNREFUSED:
+        return UploadError('NETWORK_CONNECTION_REFUSED', '平台或代理拒绝连接，请检查地址、端口及服务是否启动', retry=True)
+    if getattr(reason, 'errno', None) in {errno.ENETUNREACH, errno.EHOSTUNREACH}:
+        return UploadError('NETWORK_UNREACHABLE', '无法到达平台网络，请检查采集端网络、路由和防火墙设置', retry=True)
+    return UploadError('NETWORK_UNCERTAIN', '网络连接失败或连接中断，请检查平台地址、网络和代理设置后重试', retry=True)
 
 
 def retry_after(value):
@@ -95,14 +127,25 @@ class Http:
                 except (ValueError, AttributeError):
                     pass
             if error.code in {408, 429} or error.code >= 500 or (not api and error.code in {401, 403}):
-                raise UploadError(code, "等待网络恢复/重新授权同一分片", retry=True, after=after) from None
-            if error.code == 409 and code not in {"CLIENT_UPLOAD_ID_CONFLICT", "ASSET_SHA256_MISMATCH", "ASSET_CRC64_MISMATCH", "TASK_OWNERSHIP_CHANGED", "COLLECTION_TASK_INACTIVE", "TASK_NOT_READY", "LOCAL_ROBOT_MISMATCH", "CONNECTION_TICKET_USED", "CONNECTION_PERMISSION_CHANGED", "ROBOT_MODEL_REQUIRED", "ROBOT_MODEL_UNAVAILABLE", "ROBOT_IDENTITY_DISABLED"}:
+                action = "等待网络恢复/重新授权同一分片"
+                if api:
+                    action = ("平台请求超时，请稍后重试" if error.code in {408, 504} else
+                              "平台请求过于频繁，请稍后重试" if error.code == 429 else
+                              "平台服务或网络代理暂时不可用，请检查服务及代理设置后重试" if error.code in {502, 503} else
+                              "平台服务发生错误，请稍后重试或联系平台管理员")
+                    action += f"（HTTP {error.code}）"
+                raise UploadError(code, action, retry=True, after=after) from None
+            if error.code == 409 and not code.startswith('CAPTURE_') and code not in {"CLIENT_UPLOAD_ID_CONFLICT", "ASSET_SHA256_MISMATCH", "ASSET_CRC64_MISMATCH", "TASK_OWNERSHIP_CHANGED", "COLLECTION_TASK_INACTIVE", "TASK_NOT_READY", "LOCAL_ROBOT_MISMATCH", "CONNECTION_TICKET_USED", "CONNECTION_PERMISSION_CHANGED", "ROBOT_MODEL_REQUIRED", "ROBOT_MODEL_UNAVAILABLE", "ROBOT_IDENTITY_DISABLED"}:
                 raise UploadError(code, "先查询服务端事实；持续冲突请核对资产", retry=True, after=after, conflict=True) from None
             action = "检查平台任务、会话及文件校验结果；修复后显式 retry"
             if error.code in {401, 403}:
                 action = "更新同一凭据引用并检查权限/TLS设置，然后停止 worker 并执行 retry"
             if error.code == 410:
                 action = "会话已过期；联系平台管理员确认 Raw 事实并显式重新导出，勿反复创建上传"
+            if api and error.code == 404:
+                action = "平台接口不存在（HTTP 404），请检查连接链接中的平台地址及平台版本"
+            if error.code == 407:
+                action = "网络代理要求身份验证（HTTP 407），请检查采集端代理设置"
             actions = {
                 'CONNECTION_TICKET_EXPIRED': '连接链接已过期，请在平台接入详情重新复制链接',
                 'CONNECTION_RETRY_EXPIRED': '原连接的恢复期限已过，请在平台重新生成连接链接',
@@ -117,12 +160,20 @@ class Http:
                 'ROBOT_MODEL_UNAVAILABLE': '平台机器人模型尚未发布或资产不可用，请检查模型配置',
                 'ROBOT_IDENTITY_DISABLED': '平台已停用此机器人上传身份，请联系管理员恢复',
                 'ROBOT_CREDENTIAL_REVOKED': '上传凭据已撤销；使用同一机器人的新连接链接重新连接，再重试原录制',
+                'ROBOT_CREDENTIAL_INVALID': '上传凭据无效，请在平台重新生成此机器人的连接链接',
                 'SOURCE_FORMAT_NOT_ALLOWED': '机器人上传权限不允许当前录制格式，请检查平台上传规则',
+                'CAPTURE_PLAN_REQUIRED': '任务采集方案待配置；请在平台配置，原始数据已保留',
+                'CAPTURE_REVISION_CONFLICT': '任务计划修订已变化；请刷新并明确重新选择，不能自动改用新方案',
+                'CAPTURE_RECORDING_CONFLICT': '此录制 ID 已固定其他任务或方案；保留原请求并核对记录',
+                'CAPTURE_MAPPING_UNVERIFIED': '实例方案映射待验证；请在平台验证实际样本',
+                'CAPTURE_DATASET_INCOMPATIBLE': '任务方案与数据集结构不兼容；请检查字段名称、顺序、单位和频率',
+                'CAPTURE_STRUCTURE_MISMATCH': '实际数据结构与方案不一致；请在平台查看字段差异，原始数据已保留',
+                'CAPTURE_FORMAT_UNSUPPORTED': '任务方案不支持此录制格式；请明确选择兼容方案',
             }
-            action = actions.get(code, action)
+            action = actions.get(code, '任务采集方案或设备映射不可用，请在平台检查；原录制和原始数据保留' if code.startswith('CAPTURE_') else action)
             raise UploadError(code, action) from None
-        except (URLError, TimeoutError, ConnectionError, OSError, ssl.SSLError, HTTPException):
-            raise UploadError("NETWORK_UNCERTAIN", "检查平台公开地址、网络及证书；恢复后自动对账", retry=True) from None
+        except (URLError, TimeoutError, ConnectionError, OSError, ssl.SSLError, HTTPException) as error:
+            raise network_error(error, self.cfg['timeout_seconds']) from None
 
     def api(self, method, suffix="", payload=None):
         return self.request(method, self.base + suffix, payload=payload)

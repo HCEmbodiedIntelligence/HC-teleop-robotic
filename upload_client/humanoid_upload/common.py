@@ -8,8 +8,6 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from jsonschema import Draft202012Validator, FormatChecker
-
 
 class UploadError(Exception):
     """Only public codes/actions: never log a transport exception or response body."""
@@ -37,6 +35,7 @@ def read_json(path):
 
 @lru_cache(maxsize=8)
 def validator(name):
+    from jsonschema import Draft202012Validator, FormatChecker
     return Draft202012Validator(read_json(Path(__file__).parent / "schemas" /
                                          (name + ".schema.json")), format_checker=FormatChecker())
 

@@ -290,6 +290,9 @@ function renderStatus(data) {
   }
   if($('#startRecordingBtn')) $('#startRecordingBtn').disabled = isRecording;
   if($('#stopRecordingBtn')) $('#stopRecordingBtn').disabled = !isRecording;
+  for (const id of ['#topicRecordingFormat', '#saveRecording']) {
+    if ($(id)) $(id).disabled = isRecording;
+  }
   if($('#recordingMeta')) {
     $('#recordingMeta').textContent = isRecording
       ? `正在录制：已写入 ${recording.messages||0} 条消息到 ${recording.path||''}`
@@ -551,7 +554,15 @@ function renderConfig() {
 }
 
 function updateRecordingFormatFields() {
-  const usesLeRobot=['lerobot','both'].includes($('#topicRecordingFormat')?.value);
+  const format=$('#topicRecordingFormat')?.value;
+  const usesLeRobot=['lerobot','both'].includes(format);
+  const help = {
+    mcap: '本地保存 MCAP，RGB/深度保留在所选话题中。实际上传什么，在“上传管理 → 上传格式”选择。',
+    mcap_mp4: '本地整理为 MCAP＋独立 RGB MP4＋时间戳清单，深度保留在 MCAP 中。上传该原始包时，在上传管理中选择同名格式。',
+    lerobot: '本地保存 LeRobot v3 目录：RGB MP4、Parquet 和元数据。上传格式在上传管理中单独选择。',
+    both: '本地同时保存 MCAP 和 LeRobot。上传其中一份还是两份，在上传管理中选择；双份上传要求平台方案同时支持 MCAP 和 LeRobot。'
+  };
+  if ($('#recordingFormatHelp')) $('#recordingFormatHelp').textContent=(help[format] || '') + ' 保存配置后对下一段录制生效。';
   for(const id of ['#topicRecordingLerobotFps','#topicRecordingLerobotTask']) {
     if($(id)) $(id).disabled=!usesLeRobot;
   }
@@ -1038,7 +1049,7 @@ function renderDatasetVideos(file) {
   previousVideo?.pause();
   panel.textContent = '';
   const videos = file.videos || [];
-  panel.hidden = !isLeRobotDataset(file) || !videos.length;
+  panel.hidden = (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') || !videos.length;
   if (panel.hidden) return;
   const label = document.createElement('label');
   label.textContent = '相机视频';
@@ -1123,7 +1134,7 @@ async function loadDatasets() {
       const formatTag = document.createElement('span');
       formatTag.className = 'tag';
       formatTag.style.cssText = 'margin-left:8px;font-size:11px;';
-      formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : 'MCAP';
+      formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : file.format === 'CAPTURE_BUNDLE' ? 'MCAP＋MP4' : 'MCAP';
       nameCell.append(formatTag);
 
       const profileCell = document.createElement('td');
@@ -1183,7 +1194,7 @@ async function loadDatasets() {
       group.className = 'btn-group';
 
       if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.channels?.length || file.message_count)) {
-        if (!isLeRobotDataset(file)) {
+        if (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') {
           const replayBtn = document.createElement('button');
           replayBtn.className = 'primary btn-sm';
           replayBtn.textContent = '重放';
@@ -1205,7 +1216,7 @@ async function loadDatasets() {
         downloadLink.title = '数据集生成完成后可下载';
       } else {
         downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download`;
-        downloadLink.setAttribute('download', isLeRobotDataset(file) ? `${file.filename}.zip` : file.filename);
+        downloadLink.setAttribute('download', (isLeRobotDataset(file) || file.format === 'CAPTURE_BUNDLE') ? `${file.filename}.zip` : file.filename);
       }
       downloadLink.textContent = '下载';
 
@@ -1228,7 +1239,7 @@ async function loadDatasets() {
       const platformBtn = document.createElement('button');
       platformBtn.className = 'btn-sm'; platformBtn.textContent = '选择任务后上传';
       platformBtn.disabled = datasetUnavailable(file) || Boolean(file.platform_recording?.binding);
-      platformBtn.onclick = () => window.platformUploadHistory?.(file.platform_recording?.recording_id || datasetIdentifier(file), file.filename, isLeRobotDataset(file) ? 'LEROBOT_V3' : 'MCAP');
+      platformBtn.onclick = () => window.platformUploadHistory?.(datasetIdentifier(file), file.filename, isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP');
       group.append(downloadLink, platformBtn, deleteBtn);
       actionCell.append(group);
 

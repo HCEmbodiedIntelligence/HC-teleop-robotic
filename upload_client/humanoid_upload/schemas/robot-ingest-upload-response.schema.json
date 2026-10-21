@@ -463,7 +463,9 @@
         "PROCESSING",
         "READY",
         "PARTIALLY_FAILED",
-        "FAILED"
+        "FAILED",
+        "AWAITING_CONFIGURATION",
+        "STRUCTURE_MISMATCH"
       ],
       "title": "RobotIngestProcessingStatus",
       "type": "string"
@@ -711,6 +713,49 @@
           "minimum": 0,
           "title": "Verified Sample Count",
           "type": "integer"
+        },
+        "annotation_task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "annotation_status": {
+          "enum": [
+            "UNKNOWN",
+            "NOT_CONFIGURED",
+            "PENDING",
+            "READY",
+            "FAILED",
+            "NOT_REQUIRED",
+            "COMPLETED"
+          ]
+        },
+        "data_status": {
+          "enum": [
+            "UNKNOWN",
+            "PENDING",
+            "COMMITTED",
+            "READABLE",
+            "FAILED",
+            "READY"
+          ]
+        },
+        "training_status": {
+          "enum": [
+            "UNKNOWN",
+            "NOT_READY",
+            "PENDING",
+            "READY",
+            "BLOCKED",
+            "NOT_REQUESTED"
+          ]
+        },
+        "processing_config_snapshot": {
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [
@@ -876,6 +921,36 @@
           "minLength": 1,
           "title": "Source Format Version",
           "type": "string"
+        },
+        "capture_plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "plan_revision",
+            "plan_sha256",
+            "snapshot_sha256",
+            "recording_id"
+          ],
+          "properties": {
+            "plan_revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "plan_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "recording_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._-]+$"
+            }
+          }
         }
       },
       "required": [

@@ -1,9 +1,12 @@
 """Local browser facade. Only this service exchanges tickets and reads credentials."""
 import asyncio
+import logging
 from aiohttp import web
 from urllib.parse import urlsplit
 
 from humanoid_upload.common import UploadError
+
+logger = logging.getLogger(__name__)
 
 
 def register_platform_routes(app, runtime):
@@ -26,7 +29,7 @@ def register_platform_routes(app, runtime):
                         raise ValueError()
                     result = await asyncio.to_thread(platform.tasks, **query)
                 elif operation == 'recordings':
-                    result = {'items': runtime.recorder.records(), 'jobs': platform.upload.jobs()}
+                    result = {'items': runtime.recorder.upload_records(), 'jobs': platform.upload.jobs()}
                 else:
                     raise web.HTTPNotFound()
             else:
@@ -47,7 +50,7 @@ def register_platform_routes(app, runtime):
                 elif operation == 'auto-upload':
                     result = await asyncio.to_thread(platform.set_auto, body['enabled'])
                 elif operation == 'preflight':
-                    result = await asyncio.to_thread(platform.freeze, body, remember=False)
+                    result = await asyncio.to_thread(platform.preflight, body, remember=False)
                 elif operation == 'selection':
                     result = await asyncio.to_thread(runtime.recorder.set_selection, body)
                 elif operation == 'upload-recording':
@@ -65,7 +68,10 @@ def register_platform_routes(app, runtime):
             return web.json_response(result, headers={'Cache-Control': 'no-store'})
         except UploadError as error:
             platform.error = error.code
-            return web.json_response({'code': error.code, 'reason': error.action}, status=409,
+            # Public code/action only: never log a link, ticket, token or response body.
+            logger.warning('Platform operation %s failed: %s; %s', operation, error.code, error.action)
+            return web.json_response({'code': error.code, 'reason': error.action,
+                                      'retryable': error.retry}, status=409,
                                      headers={'Cache-Control': 'no-store'})
         except (ValueError, KeyError, TypeError):
             return web.json_response({'code': 'PLATFORM_REQUEST_INVALID', 'reason': '请求格式无效'}, status=400)

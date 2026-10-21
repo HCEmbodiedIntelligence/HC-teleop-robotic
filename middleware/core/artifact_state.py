@@ -71,6 +71,11 @@ def publish_ready(state_dir, job, root, paths, kind, artifact_id, *, source_arti
             result[key] = job[key]
     if binding_id is None and job.get('binding'):
         result['binding_id'] = job['binding']['binding_id']
+    if job.get('capture_snapshot'):
+        from humanoid_upload.capture_plan import validate_snapshot, OWNERSHIP_FIELDS
+        snapshot = validate_snapshot(job['capture_snapshot'], recording_id=job['recording_id'])
+        result['capture_snapshot'] = snapshot
+        result['ownership_snapshot'] = {key: snapshot[key] for key in OWNERSHIP_FIELDS}
     target = Path(state_dir)/(artifact_id+'.json')
     if target.exists():
         previous = json.loads(target.read_text())

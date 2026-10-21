@@ -85,7 +85,7 @@
         </div>
         <div class="recording-settings form-grid">
           <label>录制保存目录<input id="topicRecordingDirectory" placeholder="runtime/topic_recordings"><small>所有录制均先保存到本机；平台任务和上传开关不影响本地保存</small></label>
-          <label>本地保存格式<select id="topicRecordingFormat"><option value="mcap">MCAP · 原始话题</option><option value="lerobot">LeRobot · 训练数据集</option><option value="both">MCAP + LeRobot</option></select><small>LeRobot 在停止录制后生成，图像保存为 MP4/H.264，按指定帧率对齐数据</small></label>
+          <label>本地保存格式<select id="topicRecordingFormat"><option value="mcap">MCAP · 图像保存在话题文件中</option><option value="mcap_mp4">MCAP＋独立 MP4 · 原始包</option><option value="lerobot">LeRobot v3 · MP4＋Parquet 数据集</option><option value="both">MCAP 与 LeRobot · 本地保存两份</option></select><small id="recordingFormatHelp">保存后对下一段录制生效；平台按所选格式保留原始文件。</small></label>
           <label id="lerobotFpsField">LeRobot 帧率<input id="topicRecordingLerobotFps" type="number" min="1" max="60" step="1" value="15"><small>数据集采样帧率，不会提高相机实际帧率</small></label>
           <label id="lerobotTaskField">任务描述<input id="topicRecordingLerobotTask" value="遥操作" placeholder="例如：双臂搬运箱子"><small>写入数据集的 task 描述</small></label>
         </div>
@@ -339,6 +339,7 @@
       <article class="panel" id="platformPanel">
         <div class="panel-title"><div><h2>平台连接与上传设置</h2><p>所有录制都会先保存到本机，再根据任务和自动上传设置上传到平台。</p></div><a class="platform-page-link" href="#topics">配置本地保存格式 →</a></div>
         <p class="platform-connection-status" id="platformConnection">正在读取连接…</p>
+        <p id="platformConnectMessage" role="alert"></p>
         <details><summary>连接设置</summary>
           <p>在平台“数据源 → 机器人接入 → 接入详情”复制连接链接。</p>
           <label>连接链接<input id="platformLink" type="password" autocomplete="off" placeholder="粘贴连接链接"></label>
@@ -362,8 +363,8 @@
           </div>
         </div>
         <div class="platform-format-row">
-          <label>上传格式<select id="platformUploadFormat"><option value="mcap">MCAP · 原始话题</option><option value="lerobot">LeRobot · 训练数据集</option></select></label>
-          <p id="platformFormatHint">与本地保存格式独立；录制开始后固定，已有记录不受影响。上传 LeRobot 时，本地须保存 LeRobot 或两种格式。</p>
+          <label>上传格式<select id="platformUploadFormat"><option value="mcap">MCAP · 内嵌图像</option><option value="mcap_mp4">MCAP＋独立 MP4 · 原始包</option><option value="lerobot">LeRobot v3 · MP4＋Parquet</option><option value="both">MCAP 与 LeRobot · 上传两份</option></select></label>
+          <p id="platformFormatHint">与本地保存格式独立；录制开始后固定。平台保留所选原件。双份上传有独立进度；上传 LeRobot 时须在本地启用 LeRobot 保存。</p>
         </div>
         <p class="form-help">任务选择自动保存，网页与手柄录制共用，重启后保留。左手柄 X 开始录制，Y 结束录制；未选择平台任务时直接保存到本机。</p>
         <p id="platformMessage" role="status"></p><p id="platformActive" role="status"></p>
@@ -379,7 +380,7 @@
     <button id="platformHistoryPrev">上一页</button><button id="platformHistoryNext">下一页</button>
     <p id="platformHistoryError" role="alert"></p><button id="platformHistoryUpload" class="primary">选择并上传</button><button id="platformHistoryClose">取消</button>
   </dialog>
-  <script src="/static/platform_panel.js?v=7-format"></script>
-  <script src="/static/app.js?v=24-shared-recording"></script>
+  <script src="/static/platform_panel.js?v=9-capture-formats"></script>
+  <script src="/static/app.js?v=25-capture-formats"></script>
 </body>
 </html>

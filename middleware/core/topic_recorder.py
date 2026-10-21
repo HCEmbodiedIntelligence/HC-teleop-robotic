@@ -379,9 +379,12 @@ class TopicRecorder:
         self.stop()
         if self.status()["export_state"] == "exporting":
             self._detach_export()
-        if self.save_format != "mcap":
+        if self.save_format in ("lerobot", "both"):
             from .lerobot_export import ensure_export_available
             ensure_export_available()
+        if self.save_format == "mcap_mp4":
+            from .video_bundle import ensure_available
+            ensure_available()
         self._export_state, self._export_error, self._lerobot_path = "idle", None, ""
         self.directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -389,7 +392,7 @@ class TopicRecorder:
         if not fname.endswith(".mcap"):
             fname += ".mcap"
         # Keep the complete source, including /vrdata, for recovery and audit.
-        source_dir = self.directory / ".lerobot_sources" if self.save_format == "lerobot" else self.directory
+        source_dir = self.directory / ".lerobot_sources" if self.save_format == "lerobot" else self.directory / ".bundle_sources" if self.save_format == "mcap_mp4" else self.directory
         source_dir.mkdir(parents=True, exist_ok=True)
         fname = Path(fname).name
         self.path = source_dir / fname
@@ -466,7 +469,7 @@ class TopicRecorder:
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self._artifacts.close(self._capture_identity, self._last_error, capture_ended_at)
         self._capture_identity = None
-        if self.save_format != "mcap" and not self._last_error:
+        if self.save_format in ("lerobot", "both") and not self._last_error:
             self._start_lerobot_export()
         return self.status()
 
@@ -501,9 +504,17 @@ class TopicRecorder:
         from .export_progress import ExportProgress, progress_path
         ExportProgress(progress_path(destination)).update('等待转换', 0, force=True, reset=True)
         self._export_log = log_path.open("w", encoding="utf-8")
+        fps, task = self.lerobot_fps, self.lerobot_task
+        from .capture_formats import lerobot_snapshot
+        snapshot = lerobot_snapshot(self._active_metadata)
+        if snapshot:
+            from humanoid_upload.capture_plan import validate_snapshot
+            snapshot = validate_snapshot(snapshot, source_format='LEROBOT_V3')
+            fps = int(snapshot['output']['frequency_hz'])
+            task = json.loads(self._active_metadata['platform_task'])['task']['name']
         command = [sys.executable, "-m", "middleware.core.lerobot_export",
-                   str(self.path), str(destination), "--fps", str(self.lerobot_fps),
-                   "--task", self.lerobot_task, "--robot-type",
+                   str(self.path), str(destination), "--fps", str(fps),
+                   "--task", task, "--robot-type",
                    self._active_metadata.get("profile_id", "robot")]
         try:
             # Export runs outside the ROS and video workers at lower priority.
@@ -731,6 +742,15 @@ class TopicRecorder:
                         continue  # Incomplete/invalid exports are not ready datasets.
             from .recording_datasets import pending_datasets
             files.extend(pending_datasets(datasets_dir, {item.get('id') for item in files}))
+        from .recording_datasets import inspect_bundle
+        bundles_dir = self.directory / "bundles"
+        if bundles_dir.is_dir() and not bundles_dir.is_symlink():
+            for bundle in bundles_dir.iterdir():
+                if bundle.is_dir() and not bundle.is_symlink() and not bundle.name.startswith('.'):
+                    try:
+                        files.append(inspect_bundle(bundle))
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue
         files.sort(key=lambda x: x["timestamp"], reverse=True)
         return self._artifacts.annotate(files)
 
@@ -754,7 +774,7 @@ class TopicRecorder:
             self._delete_recording(filename, target)
 
     def _delete_recording(self, filename: str, target: Path) -> None:
-        if filename.startswith("lerobot:"):
+        if filename.startswith(("lerobot:", "bundle:")):
             from .export_progress import read_progress, progress_path
             if read_progress(progress_path(target)).get('state') == 'exporting':
                 raise ValueError("cannot delete dataset while exporting")

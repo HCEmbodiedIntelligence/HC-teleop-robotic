@@ -82,6 +82,28 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.directory.cleanup()
 
+    async def test_format_selection_saves_through_page_api_and_survives_reload(self):
+        for mode in ('mcap', 'mcap_mp4', 'lerobot', 'both'):
+            response = await self.client.get('/api/config')
+            config = await response.json()
+            config['ros']['recording']['format'] = mode
+            saved = await self.client.put('/api/config', json=config)
+            self.assertEqual(saved.status, 200, await saved.text())
+            reloaded = await (await self.client.get('/api/config')).json()
+            self.assertEqual(reloaded['ros']['recording']['format'], mode)
+            self.assertEqual(ConfigStore(self.root/'middleware.yaml').load()['ros']['recording']['format'], mode)
+
+    async def test_saving_format_during_capture_keeps_the_active_configuration(self):
+        from unittest.mock import patch
+        config = await (await self.client.get('/api/config')).json()
+        original = config['ros']['recording']['format']
+        config['ros']['recording']['format'] = 'mcap_mp4'
+        with patch.object(TopicRecorder, 'is_recording', return_value=True):
+            response = await self.client.put('/api/config', json=config)
+            self.assertEqual(response.status, 409)
+            self.assertEqual((await response.json())['code'], 'RECORDING_ACTIVE')
+        self.assertEqual(ConfigStore(self.root/'middleware.yaml').load()['ros']['recording']['format'], original)
+
     async def test_list_zip_video_range_and_batch_delete(self):
         response = await self.client.get('/api/recordings')
         data = await response.json()

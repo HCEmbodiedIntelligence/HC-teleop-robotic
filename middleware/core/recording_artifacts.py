@@ -64,13 +64,20 @@ class RecordingArtifacts:
             from humanoid_upload.artifacts import ArtifactLocks  # noqa: F401
         except ImportError:
             return None  # Local capture remains available before install.sh --upload.
-        identity = uuid.uuid4().hex
+        snapshot = metadata.get('capture_snapshot')
+        if isinstance(snapshot, str): snapshot = json.loads(snapshot)
+        if snapshot:
+            from humanoid_upload.capture_plan import validate_snapshot
+            snapshot = validate_snapshot(snapshot, recording_id=metadata.get('recording_id'))
+        identity = snapshot['recording_id'] if snapshot else uuid.uuid4().hex
         job = dict(recording_id=identity, directory=str(self.directory), source=str(source),
                    destination=str(self.directory / 'lerobot' / Path(source).stem),
                    format=save_format, profile_id=metadata.get('profile_id') or 'unknown',
                    config_fingerprint=fingerprint({'recording': self.config, 'profile': metadata}),
                    capture_started_at=datetime.now(timezone.utc).isoformat(),
                    binding=binding, state='capturing', artifacts={})
+        if snapshot:
+            job['capture_snapshot'] = snapshot
         with self.lock:
             self.save(job)
         return identity

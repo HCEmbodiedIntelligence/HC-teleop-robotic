@@ -52,7 +52,8 @@ def test_schema_provenance():
     from humanoid_upload import common
     directory = Path(common.__file__).parent/"schemas"
     provenance = json.loads((directory/"provenance.json").read_text())
-    assert provenance["release"] == "g0-20260922.1"
+    assert provenance["release"] == "hc-shared-capture-20261021.2"
+    assert provenance["upstream_release"] == "g0-20260922.1"
     for name, sha in provenance["files"].items():
         assert hashlib.sha256((directory/Path(name).name).read_bytes()).hexdigest() == sha
 

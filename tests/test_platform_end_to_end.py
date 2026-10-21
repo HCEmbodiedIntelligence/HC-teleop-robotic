@@ -39,6 +39,23 @@ from middleware.core.task_recording import TaskRecorder
 from middleware.core.topic_recorder import TopicRecorder
 from humanoid_upload.common import UploadError
 from test_platform_task_recording import LOCAL, capture, choice, finish
+from capture_contract_support import task_document, snapshot_document
+from types import SimpleNamespace
+
+
+class MemoryCapturePlans:
+    """Implements the platform RecordingPlans port; durable PostgreSQL remains a separate gate."""
+    def __init__(self):
+        self.snapshots = {}
+
+    def preview(self, scope, task_id, robot_id, source_format):
+        task = task_document(task_id, source_format, version=1 if task_id == 'A' else 2)
+        return SimpleNamespace(plan=task['capture_plan'], processing_config={'source': 'TASK_PLAN'})
+
+    def prepare(self, scope, task_id, robot_id, command, actor):
+        payload = command.model_dump(mode='json')
+        task = task_document(task_id, payload['source_format'], version=1 if task_id == 'A' else 2)
+        return self.snapshots.setdefault(payload['recording_id'], snapshot_document(task, payload, robot_id))
 
 
 def test_single_link_real_http_a_b_offline_restart_and_scope(tmp_path, monkeypatch):
@@ -47,6 +64,7 @@ def test_single_link_real_http_a_b_offline_restart_and_scope(tmp_path, monkeypat
         collection_task_id=task, organization_id='foreign' if task == 'X' else 'org',
         project_id='project-'+task, dataset_id='dataset-'+task, region_code='region', task_status='ACTIVE') for task in 'ABX'))
     service = RobotIngestService.in_memory(repository=repo)
+    service.connections.capture_plans = MemoryCapturePlans()
     auth = AuthContext(subject_id='test-admin', organization_ids=frozenset({'org'}),
         project_ids=frozenset({'project-A'}), region_codes=frozenset({'region'}),
         organization_scope_triples=frozenset({('org','project-A','region')}),
@@ -64,6 +82,7 @@ def test_single_link_real_http_a_b_offline_restart_and_scope(tmp_path, monkeypat
     client = TestClient(app)
     faults = {'redeem': True, 'commit': True, 'offline': False}
     puts = []
+    protocol_errors = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
         def do_GET(self): self.api()
@@ -81,6 +100,10 @@ def test_single_link_real_http_a_b_offline_restart_and_scope(tmp_path, monkeypat
             result = client.request(self.command,self.path,content=raw or None,
                 headers={k:v for k,v in self.headers.items() if k.lower() in ('content-type','authorization')})
             data = result.json()
+            if isinstance(data.get('data'), dict) and 'manifest' in data['data']:
+                from humanoid_upload.common import validator
+                protocol_errors.extend((list(error.path), error.message) for error in
+                                       validator('robot-ingest-upload-response').iter_errors(data))
             if 'authorizations' in data:
                 for item in data['authorizations']:
                     item['url'] = base+'/objects'+urlsplit(item['url']).path
@@ -95,10 +118,12 @@ def test_single_link_real_http_a_b_offline_restart_and_scope(tmp_path, monkeypat
     thread = threading.Thread(target=server.serve_forever,daemon=True); thread.start()
     cfg = {'ros': {'recording': {'format':'mcap','directory':str(tmp_path/'data')}},
            'uploads': {'queue_directory':str(tmp_path/'queue'),'timeout_seconds':2,'poll_seconds':1}}
+    cfg['ros']['subscriptions'] = [{'topic':'/test', 'type':'sensor_msgs/msg/JointState', 'outputs':['record']}]
     monkeypatch.setenv('no_proxy','127.0.0.1')
     def local_service():
         value = PlatformConnection(cfg,tmp_path,tmp_path/'data',identity_provider=lambda:dict(LOCAL))
         monkeypatch.setattr(value.upload,'start',lambda:None)
+        value.capture_health = lambda: {'/test': {'has_data':True, 'hz':15, 'state':'ok'}}
         return value
     platform = local_service(); recorder = None
     try:
@@ -129,13 +154,14 @@ def test_single_link_real_http_a_b_offline_restart_and_scope(tmp_path, monkeypat
                     job['next_at'] = 0; platform.upload.queue.save(job)
             platform.upload.step(scan=False)
         jobs = platform.upload.queue.jobs()
+        assert not protocol_errors, protocol_errors
         assert len(jobs) == 2 and {j['server_state'] for j in jobs} == {'COMMITTED'}
         assert len(puts) == 2 and len(repo._uploads) == 2
         assert [j['manifest']['collection_task_id'] for j in jobs] == ['A','B']
         assert all(j['quality_status'] == 'PENDING' for j in jobs)
         with pytest.raises(UploadError): platform.freeze(choice(platform,'X'))
         recorder = TaskRecorder(TopicRecorder(cfg['ros']['recording'],tmp_path),platform)
-        local = next(j for j in recorder.records() if not j['binding'])
+        local = next(j for j in recorder.records() if not j['binding'] and j['intent']['mode'] == 'local')
         recorder.upload_recording(local['recording_id'],choice(platform,'A')); finish(recorder)
         repo._targets['A'] = repo._targets['A'].model_copy(update={'dataset_id':'changed'})
         platform.upload.step(scan=False)

@@ -3,31 +3,70 @@
   const el = id => document.getElementById(id);
   let state = { connection: null, recent: null }, selected = '', page = 1, total = 0;
   let tasks = [], requestId = null, refreshGeneration = 0, active = false;
+  let connecting = false;
   let selectionSave = Promise.resolve(), selectionVersion = 0, pendingSelection = 0, selectionError = null;
   let choosingTask = false;
   let historyTarget = null, historySelected = '', historyPage = 1;
   const post = (path, body = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
   async function call(path, options = {}) {
-    const response = await fetch('/api/platform/' + path, { cache: 'no-store', ...options,
-      headers: { 'Content-Type': 'application/json' } });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.reason || body.code || '平台请求失败');
+    let response;
+    try {
+      response = await fetch('/api/platform/' + path, { cache: 'no-store', ...options,
+        headers: { 'Content-Type': 'application/json' } });
+    } catch (_) {
+      throw Object.assign(new Error('浏览器无法连接采集端，请检查采集端服务和浏览器网络后重试'),
+        { code: 'ROBOT_SERVICE_UNREACHABLE', retryable: true });
+    }
+    let body;
+    try { body = await response.json(); } catch (_) {
+      throw Object.assign(new Error(`采集端返回了无效响应（HTTP ${response.status}），请检查采集端服务后重试`),
+        { code: 'ROBOT_SERVICE_RESPONSE_INVALID', retryable: true });
+    }
+    if (!response.ok) {
+      const code = typeof body?.code === 'string' && /^[A-Z][A-Z0-9_]{0,95}$/.test(body.code) ? body.code : '';
+      throw Object.assign(new Error(`${body?.reason || '平台请求失败'}${code ? `（${code}）` : ''}`),
+        { code, retryable: body?.retryable === true });
+    }
     return body;
   }
   const message = value => { el('platformMessage').textContent = value; };
+  const connectionMessage = (value, failed = false) => {
+    el('platformConnectMessage').textContent = value;
+    el('platformConnectMessage').classList.toggle('error', failed);
+  };
   const taskPrompt = () => (state.connection ? '请选择采集任务' : '请先连接平台，再选择采集任务') +
     '，选定后自动保存关联；选择前仍使用上次保存的录制设置。';
   function selection() {
     if (el('platformLocal').checked || !state.connection || !selected) return { mode: 'local' };
-    return { mode: 'platform', connection_id: state.connection.id, task_id: selected };
+    const revision = tasks.find(task => task.collection_task_id === selected)?.capture_plan?.revision;
+    return { mode: 'platform', connection_id: state.connection.id, task_id: selected,
+      ...(revision ? { expected_plan_revision: revision } : {}) };
   }
   window.platformRecordingSelection = async () => {
     await ready;
     await selectionSave;
     if (selectionError) throw selectionError;
     requestId ||= uuid();
-    return { ...selection(), request_id: requestId };
+    return { ...(state.recording_selection || selection()), request_id: requestId };
   };
+  function taskDescription(task) {
+    const plan = task?.capture_plan;
+    if (!plan) return `${task?.description || ''} · 采集方案待配置${task?.reason ? `：${task.reason}` : ''}`;
+    const fields = Object.entries(plan.output?.features || {}).map(([key, feature]) =>
+      `${key} ${feature.shape?.join('×') || ''}（${feature.required === false ? '可选，未采集保留缺失' : '必需'}）`).join('；');
+    return `${task.description || ''} · 采集方案 ${plan.scheme?.scheme_id} v${plan.scheme?.version}` +
+      ` · 计划修订 ${plan.revision} · ${plan.source_format} · 保留 ${plan.output?.frequency_hz} Hz` +
+      ` · 映射 v${plan.mapping_version} ${task.selectable === false ? '不可用：' + task.reason : '已验证'}` +
+      ` · 输出要求：${fields}`;
+  }
+  function taskOption(task) {
+    const plan = task.capture_plan;
+    const option = new Option(`${task.name} / ${task.project_name} / ${task.task_code}` +
+      (plan ? ` · ${plan.scheme?.scheme_id} v${plan.scheme?.version} · ${plan.source_format}` : ' · 方案待配置') +
+      (task.selectable === false ? ` · 不可用：${task.reason || '请检查映射'}` : ''), task.collection_task_id);
+    option.disabled = task.selectable === false;
+    return option;
+  }
   function renderSelection() {
     const value = state.recording_selection;
     selected = value?.mode === 'platform' && value.connection_id === state.connection?.id ? value.task_id : '';
@@ -71,6 +110,7 @@
     const task = recording?.task_recording?.binding?.task;
     el('platformActive').textContent = active ? `正在录制：${task?.name || '未关联平台任务，保存到本机'}` : '';
     for (const id of ['platformTasks', 'platformLocal', 'platformAuto', 'platformConnect', 'platformUploadFormat']) el(id).disabled = active;
+    el('platformConnect').disabled = active || connecting;
     if (!pendingSelection && !selectionError && recording?.recording_selection &&
         JSON.stringify(recording.recording_selection) !== JSON.stringify(state.recording_selection)) {
       state.recording_selection = recording.recording_selection;
@@ -99,7 +139,7 @@
       const projectValue = el('platformProject').value;
       el('platformProject').replaceChildren(new Option('全部项目', ''), ...response.projects.map(p => new Option(p.name, p.id)));
       el('platformProject').value = projectValue;
-      el('platformTasks').replaceChildren(new Option('请选择采集任务', ''), ...tasks.map(t => new Option(`${t.name} / ${t.project_name} / ${t.task_code}`, t.collection_task_id)));
+      el('platformTasks').replaceChildren(new Option('请选择采集任务', ''), ...tasks.map(taskOption));
       if (selected && !tasks.some(t => t.collection_task_id === selected)) {
         el('platformTasks').append(new Option('原选择（正在验证）', selected));
       }
@@ -113,8 +153,11 @@
           if (generation !== refreshGeneration || connectionId !== state.connection?.id || selected !== binding.task.collection_task_id) return;
           const option = [...el('platformTasks').options].find(o => o.value === selected);
           if (option) option.textContent = `${binding.task.name} / ${binding.task.project_name} / ${binding.task.task_code}`;
-          el('platformDescription').textContent = binding.task.description || '任务未填写说明';
-          message('任务已刷新。开始录制时会再次验证并固定本段任务。');
+          el('platformDescription').textContent = taskDescription(binding.task);
+          const savedRevision = state.recording_selection?.expected_plan_revision;
+          message(savedRevision && savedRevision !== binding.task.capture_plan?.revision
+            ? '任务计划修订已变化，请明确重新选择任务后开始录制。原录制快照保持不变。'
+            : '任务已刷新。开始录制时准备并固定本段方案；方案选择不会启动设备发布。');
         } catch (error) {
           if (generation === refreshGeneration) message(`原选择已不可用或验证失败：${error.message}。请选择其他任务，或勾选“暂不关联平台任务”后保存到本机。`);
         }
@@ -134,11 +177,13 @@
         });
       }
       const labels = { ready: '已整理', queued: '等待上传', upload_pending: '等待上传', recording: '正在录制',
+        preparing: '准备录制中', prepared: '方案已固定，等待设备就绪', prepare_failed: '准备失败，请按原请求重试',
         stopping: '正在收尾', finalizing: '整理中', interrupted: '录制中断', needs_attention: '需要处理',
         uploading: '上传中', raw_committed: '已上传', processing: '已上传', ready_upload: '已上传' };
       const processingLabels = { UNKNOWN: '未知', NOT_STARTED: '尚未开始', PENDING: '等待处理',
         PROCESSING: '处理中', DISCOVERING_EPISODES: '识别片段中', READY: '处理完成', FAILED: '处理失败',
-        PARTIALLY_FAILED: '部分处理失败', AWAITING_SLICE: '等待切片', SLICED: '已切片' };
+        PARTIALLY_FAILED: '部分处理失败', AWAITING_CONFIGURATION: '采集方案待配置', STRUCTURE_MISMATCH: '实际结构与方案不一致',
+        AWAITING_SLICE: '等待切片', SLICED: '已切片' };
       const qualityLabels = { UNKNOWN: '未知', PENDING: '等待质检', NOT_EVALUATED: '尚未质检',
         PASS: '通过', RISK: '存在风险', REJECT: '未通过' };
       const body = el('platformRecordings'); body.replaceChildren();
@@ -146,23 +191,29 @@
         const job = record.legacy_job || result.jobs.find(j => j.local_recording_id === record.recording_id);
         const row = document.createElement('tr');
         const uploaded = job?.server_state === 'COMMITTED';
-        const values = [record.path.split('/').pop() || '启动中', record.binding?.task?.name || '未选择任务',
-          (record.upload_format || (record.format === 'lerobot' || job?.kind === 'hc_lerobot' ? 'lerobot' : 'mcap')) === 'lerobot' ? 'LeRobot' : 'MCAP',
+        const annotation = { NOT_CONFIGURED: '标注待配置', FAILED: '标注创建失败', READY: '标注任务已创建',
+          COMPLETED: '标注完成', PENDING: '等待标注', NOT_REQUIRED: '不要求标注', UNKNOWN: '标注状态未知' };
+        const dataState = { READABLE: '可读', COMMITTED: '已提交', READY: '就绪', PENDING: '处理中', FAILED: '未完成' };
+        const trainingState = { READY: '就绪', NOT_READY: '未就绪', BLOCKED: '待处理', PENDING: '准备中', NOT_REQUESTED: '尚未请求' };
+        const receipt = job ? `数据：${dataState[job.data_status] || '状态未知'}；${annotation[job.annotation_status] || '标注状态未知'}；训练交付：${trainingState[job.training_status] || '状态未知'}` : '';
+        const formatLabel = { mcap: 'MCAP', lerobot: 'LeRobot v3', mcap_mp4: 'MCAP＋MP4 原始包' }[record.format];
+        const values = [record.path.split('/').pop() || '启动中', record.binding?.task?.name || record.preparation?.checked?.task?.name || '未选择任务',
+          formatLabel || (job?.kind === 'hc_lerobot' ? 'LeRobot v3' : 'MCAP'),
           uploaded ? '已上传' : labels[job?.state || record.state] || job?.state || record.state,
           processingLabels[job?.processing_state] || job?.processing_state || '尚未开始',
-          qualityLabels[job?.quality_state] || job?.quality_state || '尚未质检', record.error || job?.next_action || ''];
+          qualityLabels[job?.quality_state] || job?.quality_state || '尚未质检', [record.error || job?.next_action, receipt].filter(Boolean).join('；')];
         for (const value of values) { const td = document.createElement('td'); td.textContent = value; row.append(td); }
         const action = document.createElement('td'), button = document.createElement('button');
         button.textContent = !record.binding ? '选择任务后上传' : job ? '重试 / 刷新结果' : '上传';
-        button.disabled = ['starting', 'recording', 'stopping', 'finalizing', 'interrupted', 'failed', 'deleted'].includes(record.state);
+        button.disabled = ['preparing', 'prepared', 'prepare_failed', 'starting', 'recording', 'stopping', 'finalizing', 'interrupted', 'failed', 'deleted'].includes(record.state);
         button.onclick = async () => {
-          if (!record.binding) { await openHistory(record.recording_id, values[0], (record.upload_format || record.format) === 'lerobot' ? 'LEROBOT_V3' : 'MCAP'); return; }
+          if (!record.binding) { await openHistory(record.upload_target || record.recording_id, values[0], record.format === 'lerobot' ? 'LEROBOT_V3' : record.format === 'mcap_mp4' ? 'CAPTURE_BUNDLE' : 'MCAP'); return; }
           if (record.legacy_job) {
             try { await post('retry-upload', { job_id: job.id }); await refreshRecords(); }
             catch (error) { message(error.message); }
             return;
           }
-          try { await post('upload-recording', { recording_id: record.recording_id }); await refreshRecords(); }
+          try { await post('upload-recording', { recording_id: record.upload_target || record.recording_id }); await refreshRecords(); }
           catch (error) { message(error.message); }
         };
         action.append(button); row.append(action); body.append(row);
@@ -192,13 +243,20 @@
   window.platformUploadHistory = openHistory;
   async function init() {
     el('platformConnect').onclick = async () => {
+      if (connecting || active) return;
+      connecting = true;
       el('platformConnect').disabled = true;
       const link = el('platformLink').value;
       el('platformLink').value = '';
+      connectionMessage('正在连接平台…');
       try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null; choosingTask = false;
+        connectionMessage('连接成功，请选择采集任务。');
         renderSelection(); renderConnection(); await refreshTasks(); }
-      catch (error) { message(`连接失败，原连接已保留：${error.message}。可重新粘贴同一链接重试。`); }
-      finally { el('platformConnect').disabled = false; }
+      catch (error) {
+        connectionMessage(`连接失败：${error.message}。${state.connection ? '原连接设置已保留。' : ''}` +
+          (error.retryable ? '排除故障后，可重新粘贴同一链接重试；若链接已过期，请重新生成。' : ''), true);
+      }
+      finally { connecting = false; el('platformConnect').disabled = active; }
     };
     el('platformRefresh').onclick = () => void refreshTasks();
     el('platformSearch').oninput = () => { page = 1; void refreshTasks(); };
@@ -206,7 +264,7 @@
     el('platformPrev').onclick = () => { page--; void refreshTasks(); };
     el('platformNext').onclick = () => { page++; void refreshTasks(); };
     el('platformTasks').onchange = () => { choosingTask = false; selected = el('platformTasks').value; el('platformLocal').checked = !selected;
-      el('platformDescription').textContent = tasks.find(task => task.collection_task_id === selected)?.description || '';
+      el('platformDescription').textContent = taskDescription(tasks.find(task => task.collection_task_id === selected));
       return saveSelection(); };
     el('platformLocal').onchange = () => {
       choosingTask = !el('platformLocal').checked && !selected;
@@ -246,7 +304,8 @@
     try {
       state = await call('status');
       renderSelection(); renderConnection();
-      if (state.connection) { try { state = await post('verify'); renderConnection(); } catch (error) { message(error.message); } }
+      if (state.connection) { try { state = await post('verify'); renderConnection(); }
+        catch (error) { connectionMessage(`当前连接验证失败：${error.message}`, true); } }
       await refreshTasks(); await refreshRecords();
     } catch (error) { message(error.message); }
     const visibleRefresh = () => { if (!document.hidden) { void refreshTasks(); void refreshRecords(); } };

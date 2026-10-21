@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from humanoid_upload.common import UploadError, atomic_json, canonical, read_json
 from humanoid_upload.http import Http
+from humanoid_upload.capture_plan import OWNERSHIP_FIELDS, validate_snapshot
 
 from .upload_service import UploadService
 
@@ -68,7 +69,8 @@ class PlatformConnection:
             'worker_enabled': bool(legacy.get('enabled', False)),
         }
         if 'upload_format' not in self.state:
-            self.state['upload_format'] = 'lerobot' if config['ros']['recording'].get('format') == 'lerobot' else 'mcap'
+            saved = config['ros']['recording'].get('format', 'mcap')
+            self.state['upload_format'] = saved if saved in ('lerobot', 'mcap_mp4') else 'mcap'
             self.save()
         self.error = None
         for entry in self.state['connections'].values():
@@ -204,9 +206,11 @@ class PlatformConnection:
 
     @property
     def source_format(self):
-        return 'LEROBOT_V3' if self.state['upload_format'] == 'lerobot' else 'MCAP'
+        from .capture_formats import SOURCE_FORMATS, artifact_formats
+        return SOURCE_FORMATS[artifact_formats(self.state['upload_format'])[0]]
 
-    def freeze(self, selection, *, remember=True, source_format=None):
+    def preflight(self, selection, *, remember=True, source_format=None):
+        """Read availability only. A form selection cannot create bindings or lock plans."""
         if not isinstance(selection, dict) or selection.get('mode') not in ('local', 'platform'):
             raise UploadError('RECORDING_SELECTION_REQUIRED', '请选择平台任务或“暂不关联平台任务”')
         if selection['mode'] == 'local':
@@ -223,20 +227,48 @@ class PlatformConnection:
         task = self.request(connection, 'POST', 'tasks/' + quote(selection['task_id'], safe='') + ':preflight',
                             {'source_format': source_format or self.source_format, 'local_robot': local})
         if not task.get('selectable') or task['collection_task_id'] != selection['task_id']:
-            raise UploadError('TASK_UNAVAILABLE', '任务已不可用，请刷新；不会自动选择其他任务')
+            reason = task.get('reason') or 'TASK_UNAVAILABLE'
+            raise UploadError(reason, '任务不可用：' + reason + '；请检查任务方案与设备映射')
         ownership = task['ownership']
         if connection.get('organization_id') and ownership['organization_id'] != connection['organization_id']:
             raise UploadError('ROBOT_IDENTITY_MISMATCH')
+        return {'platform_base_url': connection['platform_base_url'], 'robot_id': connection['robot_id'],
+                'collection_task_id': selection['task_id'], 'connection_id': identity,
+                'task': task, 'local_robot': local,
+                'auto_upload': self.state['auto_upload'] and self.state['worker_enabled']}
+
+    def bind(self, checked, *, remember=True):
         with self._lock:
+            identity = checked['connection_id']
             if remember and identity != self.state['current']:
                 raise UploadError('CONNECTION_CHANGED', '平台连接已变化，请刷新页面并重新选择任务')
+            connection = self.connection(identity)
+            if connection['robot_id'] != checked['robot_id'] or connection['platform_base_url'] != checked['platform_base_url']:
+                raise UploadError('ROBOT_IDENTITY_MISMATCH')
             values = {k: connection[k] for k in self.upload.binding_fields if k != 'task_id'}
-            binding = self.upload.set_binding({**values, 'task_id': selection['task_id']})
+            binding = self.upload.set_binding({**values, 'task_id': checked['collection_task_id']})
             if remember:
-                self.state['recent'] = {'connection_id': identity, 'task_id': selection['task_id']}
+                self.state['recent'] = {'connection_id': identity, 'task_id': checked['collection_task_id']}
                 self.save()
-            return {**binding, 'connection_id': identity, 'task': task, 'local_robot': local,
-                    'auto_upload': self.state['auto_upload'] and self.state['worker_enabled']}
+            return {**copy.deepcopy(checked), **binding}
+
+    def freeze(self, selection, *, remember=True, source_format=None):
+        """Explicit legacy history association, without inventing a historical snapshot."""
+        checked = self.preflight(selection, remember=remember, source_format=source_format)
+        return self.bind(checked, remember=remember) if checked else None
+
+    def prepare(self, checked, command):
+        """Caller must durably save checked and command before this network call."""
+        connection = self.connection(checked['connection_id'])
+        if self.identity_provider() != checked['local_robot']:
+            raise UploadError('LOCAL_ROBOT_MISMATCH', '准备重试期间设备配置发生变化，请恢复原配置')
+        snapshot = self.request(connection, 'POST', 'tasks/' + quote(checked['collection_task_id'], safe='') + ':prepare-recording', command)
+        plan = checked['task']['capture_plan']
+        expected = {key: checked['task']['ownership'][key] for key in OWNERSHIP_FIELDS}
+        expected.update(robot_id=checked['robot_id'], recording_id=command['recording_id'],
+                        source_format=command['source_format'], plan_revision=command['expected_plan_revision'])
+        expected.update({key: plan[key] for key in ('plan_sha256', 'scheme', 'mapping_version', 'mapping_sha256', 'output')})
+        return validate_snapshot(snapshot, **expected)
 
     def recording_selection(self):
         with self._lock:
@@ -246,18 +278,24 @@ class PlatformConnection:
 
     def set_recording_selection(self, selection):
         with self._lock:
-            self.freeze(selection)
+            checked = self.preflight(selection)
             value = {'mode': selection['mode']}
             if value['mode'] == 'platform':
                 value.update(connection_id=selection['connection_id'], task_id=selection['task_id'])
+                plan = checked['task'].get('capture_plan')
+                if not plan:
+                    raise UploadError('CAPTURE_PLAN_REQUIRED', '任务采集方案待配置；请在平台配置后重新选择')
+                if selection.get('expected_plan_revision', plan['revision']) != plan['revision']:
+                    raise UploadError('CAPTURE_REVISION_CONFLICT', '任务计划已变更；请刷新并明确重新选择方案')
+                value['expected_plan_revision'] = plan['revision']
             next_state = {**self.state, 'recording_selection': value}
             atomic_json(self.path, next_state)
             self.state = next_state
             return {'recording_selection': copy.deepcopy(value)}
 
     def set_upload_format(self, value):
-        if value not in ('mcap', 'lerobot'):
-            raise UploadError('UPLOAD_FORMAT_INVALID', '上传格式请选择 MCAP 或 LeRobot')
+        if value not in ('mcap', 'mcap_mp4', 'lerobot', 'both'):
+            raise UploadError('UPLOAD_FORMAT_INVALID', '请选择 MCAP、MCAP＋MP4 原始包、LeRobot 或双份上传')
         with self._lock:
             self.state['upload_format'] = value
             self.save()

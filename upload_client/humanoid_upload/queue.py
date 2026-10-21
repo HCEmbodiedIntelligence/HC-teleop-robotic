@@ -86,6 +86,8 @@ class Queue:
         if descriptor is not None:
             job.update(artifact_id=descriptor['artifact_id'], local_recording_id=descriptor['recording_id'],
                        kind=descriptor['kind'], descriptor=descriptor)
+            if descriptor.get('capture_snapshot'):
+                job['capture_snapshot'] = descriptor['capture_snapshot']
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if descriptor is not None:
@@ -162,8 +164,12 @@ class Queue:
                     from .common import DEFAULTS
                     cfg = {**DEFAULTS, **job.get("frozen", {})}
                     _, _, manifest = manifest_for_ready(job["descriptor"], cfg, job["id"])
+                    if job['manifest'].get('capture_plan') and manifest != job['manifest']:
+                        raise UploadError('CAPTURE_SNAPSHOT_MISMATCH', '重试不能更改已封存的上传合同')
                     job["manifest"] = manifest
                 except Exception:
+                    if job['manifest'].get('capture_plan'):
+                        raise
                     pass
             with self.connect() as db:
                 db.execute("DELETE FROM cancellations WHERE job_id=?", (job_id,))

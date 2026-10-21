@@ -12,6 +12,7 @@ from middleware.core.platform_connection import PlatformConnection
 from middleware.core.task_recording import TaskRecorder
 from middleware.core.topic_recorder import TopicRecorder, read_recording_metadata
 from humanoid_upload.common import UploadError, atomic_json, read_json
+from capture_contract_support import task_document, snapshot_document
 
 LOCAL = dict(local_robot_id='real-local-robot', profile_id='test-profile', config_fingerprint='a'*64,
              serial_no=None, model_version_id=None)
@@ -21,6 +22,8 @@ def setup(tmp_path, monkeypatch, *, legacy=None):
     cfg = {'ros': {'recording': {'format': 'mcap', 'directory': str(tmp_path/'data')}},
            'uploads': {'queue_directory': str(tmp_path/'queue'), **(legacy or {})}}
     service = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+    service.config['ros']['subscriptions'] = [{'topic': '/test', 'type': 'sensor_msgs/msg/JointState', 'outputs': ['record']}]
+    service.capture_health = lambda: {'/test': {'has_data': True, 'hz': 15, 'state': 'ok'}}
     # Tests advance the worker explicitly, so no timing-dependent real platform access.
     monkeypatch.setattr(service.upload, 'start', lambda: None)
     def request(connection, method, endpoint, payload=None, **kw):
@@ -31,10 +34,8 @@ def setup(tmp_path, monkeypatch, *, legacy=None):
             return dict(robot_id='robot', robot_name='Robot', organization_id='org', platform_name='Platform', local_robot=LOCAL)
         if endpoint.startswith('tasks/'):
             task = endpoint.split('/')[1].split(':')[0]
-            return dict(name='Task '+task, task_code=task, description='Collect', project_name='Project '+task,
-                project_id='project-'+task, collection_task_id=task, selectable=True,
-                ownership=dict(organization_id='org', project_id='project-'+task, dataset_id='dataset-'+task,
-                               collection_task_id=task, region_code='region'))
+            document = task_document(task, payload['source_format'])
+            return snapshot_document(document, payload) if endpoint.endswith(':prepare-recording') else document
         return {'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'projects': []}
     monkeypatch.setattr(service, 'request', request)
     return cfg, service
@@ -47,7 +48,7 @@ def connected(tmp_path, monkeypatch):
 
 
 def choice(service, task, request_id=None):
-    result = dict(mode='platform', connection_id=service.state['current'], task_id=task)
+    result = dict(mode='platform', connection_id=service.state['current'], task_id=task, expected_plan_revision=1)
     if request_id: result['request_id'] = request_id
     return result
 
@@ -215,6 +216,8 @@ def test_shared_selection_survives_restart_and_local_mode_does_not_reuse_recent_
     finally: recorder.close()
     restored = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
     monkeypatch.setattr(restored, 'request', service.request)
+    restored.config = copy.deepcopy(service.config)
+    restored.capture_health = service.capture_health
     assert restored.recording_selection() == choice(service, 'A')
     recorder = TaskRecorder(TopicRecorder(cfg['ros']['recording'], tmp_path), restored)
     try:
@@ -384,19 +387,36 @@ def test_upload_format_persists_and_is_frozen_per_recording(tmp_path, monkeypatc
         recorder.close()
 
 
+def configure_lerobot_upload(recorder, service, monkeypatch):
+    recorder.recorder.save_format = 'both'
+    recorder.set_upload_format('lerobot')
+    topics = ['/test', '/observation/joint_states', '/action/joint_states']
+    service.config['ros']['subscriptions'] = [
+        {'topic': topic, 'type': 'sensor_msgs/msg/JointState', 'outputs': ['record']}
+        for topic in topics
+    ]
+    recorder.capture_health = lambda: {topic: {'has_data': True, 'hz': 15} for topic in topics}
+    monkeypatch.setattr('middleware.core.lerobot_export.ensure_export_available', lambda: 'synthetic-converter')
+
+
 def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
     from middleware.core.export_progress import progress_path
     cfg, service, recorder = connected(tmp_path, monkeypatch)
-    recorder.recorder.save_format = 'both'
-    recorder.set_upload_format('lerobot')
+    configure_lerobot_upload(recorder, service, monkeypatch)
     def exported():
+        import pyarrow as pa
+        import pyarrow.parquet as pq
         dataset = recorder.directory/'lerobot'/recorder.recorder.path.stem
+        snapshot = json.loads(read_recording_metadata(recorder.recorder.path)['capture_snapshot'])
+        features = {key: {field: value for field, value in feature.items()
+                         if field in ('dtype', 'shape', 'names', 'units')}
+                    for key, feature in snapshot['output']['features'].items() if feature['required']}
         (dataset/'meta').mkdir(parents=True)
         (dataset/'data').mkdir()
         atomic_json(dataset/'meta/info.json', {'codebase_version':'v3.0','total_frames':1,
-            'total_episodes':1,'fps':10,'robot_type':LOCAL['profile_id'],
-            'features':{'observation.state':{'dtype':'float32','shape':[1]}}})
-        (dataset/'data/part.parquet').write_bytes(b'PAR1synthetic-closed-filePAR1')
+            'total_episodes':1,'fps':15,'robot_type':LOCAL['profile_id'], 'features':features})
+        pq.write_table(pa.table({'observation.state': [[1.0]], 'action': [[2.0]], 'timestamp': [0.0]}),
+                       dataset/'data/part.parquet')
         atomic_json(progress_path(dataset), {'state':'completed'})
     monkeypatch.setattr(recorder.recorder, '_start_lerobot_export', exported)
     try:
@@ -416,8 +436,7 @@ def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
 def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):
     from middleware.core.export_progress import progress_path
     cfg, service, recorder = connected(tmp_path, monkeypatch)
-    recorder.recorder.save_format = 'both'
-    recorder.set_upload_format('lerobot')
+    configure_lerobot_upload(recorder, service, monkeypatch)
     def failed_export():
         dataset = recorder.directory/'lerobot'/recorder.recorder.path.stem
         atomic_json(progress_path(dataset), {'state':'error'})

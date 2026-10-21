@@ -223,6 +223,8 @@ class MiddlewareRuntime:
         )
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.recorder.prepare_recording = self.recording_ros.prepare_recording
+        if self.platform is not None:
+            self.recorder.capture_health = self.recording_ros.get_topic_health
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_safety_event
         )
@@ -775,6 +777,9 @@ def create_app(store: ConfigStore) -> web.Application:
         return web.json_response(store.value)
 
     async def put_config(request: web.Request) -> web.Response:
+        if runtime.recorder is not None and runtime.recorder.is_recording():
+            return web.json_response({'ok': False, 'code': 'RECORDING_ACTIVE',
+                'reason': '请先停止当前录制，再保存配置；新保存方式用于下一段录制'}, status=409)
         try:
             proposed = await request.json()
             old_server = dict(store.value["server"])
@@ -1230,7 +1235,7 @@ def create_app(store: ConfigStore) -> web.Application:
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
         identifier = request.match_info["filename"]
-        if not identifier.startswith("lerobot:"):
+        if not identifier.startswith(("lerobot:", "bundle:")):
             raise web.HTTPNotFound(text="not a LeRobot dataset")
         try:
             target = resolve_dataset(runtime.recorder.directory, identifier)

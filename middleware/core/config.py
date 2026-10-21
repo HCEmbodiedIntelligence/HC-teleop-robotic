@@ -245,8 +245,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
     recording_format = recording.get("format", "mcap")
-    if recording_format not in ("mcap", "lerobot", "both"):
-        raise ConfigError("ros.recording.format must be mcap, lerobot or both")
+    if recording_format not in ("mcap", "lerobot", "both", "mcap_mp4"):
+        raise ConfigError("ros.recording.format must be mcap, lerobot, both or mcap_mp4")
     lerobot_fps = recording.get("lerobot_fps", 15)
     if isinstance(lerobot_fps, bool) or not isinstance(lerobot_fps, int) or not 1 <= lerobot_fps <= 60:
         raise ConfigError("ros.recording.lerobot_fps must be an integer from 1 to 60")

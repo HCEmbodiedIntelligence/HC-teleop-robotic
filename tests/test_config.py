@@ -173,7 +173,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["camera"], ConfigStore(root / "middleware/config.x1_jetson.yaml").load()["camera"])
 
     def test_recording_save_modes_and_lerobot_options(self):
-        for mode in ("mcap", "lerobot", "both"):
+        for mode in ("mcap", "lerobot", "both", "mcap_mp4"):
             cfg = validate_config({"ros": {"recording": {"format": mode, "lerobot_fps": 15, "lerobot_task": "夹取箱子"}}})
             self.assertEqual(cfg["ros"]["recording"]["format"], mode)
             self.assertEqual(cfg["ros"]["recording"]["lerobot_task"], "夹取箱子")
