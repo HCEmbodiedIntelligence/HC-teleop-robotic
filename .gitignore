@@ -23,6 +23,13 @@ runtime/
 # Runtime supervisor is source code, not generated session data.
 !tools/runtime/
 !tools/runtime/**
+tools/runtime/__pycache__/
+
+# Local waist diagnostics and incident notes
+docs/waist_monitor.md
+docs/腰部失控事件报告_*.md
+tests/test_waist_monitor.py
+tools/diagnostics/waist_monitor.py
 
 # User-imported robot profiles in adapters/robots/ (keep built-in profiles)
 adapters/robots/*
