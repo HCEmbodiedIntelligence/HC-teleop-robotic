@@ -10,6 +10,7 @@ from middleware.core.config import (
     ConfigError, ConfigStore, ROBOT_MIDDLEWARE_DEFAULTS,
     validate_robot_middleware,
 )
+from middleware.core.ros_bridge import DEFAULT_TOPIC_STANDARDS
 from middleware.core.ros_recording_executor import recording_subscriptions
 
 
@@ -130,6 +131,10 @@ def test_x1_records_camera_calibration_and_extrinsics_for_legacy_conversion():
         assert item['type'] == 'std_msgs/msg/String'
         assert item['qos_reliability'] == 'reliable'
         assert item['max_hz'] == 0.0
+        assert DEFAULT_TOPIC_STANDARDS[topic] == {
+            'target_hz': 2.0,
+            'min_hz': 0.2,
+        }
 
 
 def test_legacy_profile_without_middleware_file_retains_host_settings(deployment):

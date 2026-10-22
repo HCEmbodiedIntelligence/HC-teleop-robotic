@@ -116,8 +116,6 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
-    target_hz: 2.0
-    min_hz: 0.2
     qos_reliability: reliable
   - topic: /io_teleop/camera_head/extrinsics
     description: 机器人到头部相机的外参 JSON，保留旧格式原始话题以支持无损转换
@@ -127,8 +125,6 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
-    target_hz: 2.0
-    min_hz: 0.2
     qos_reliability: reliable
   - topic: /status/base
     description: ''
