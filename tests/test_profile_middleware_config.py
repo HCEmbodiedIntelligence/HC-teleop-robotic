@@ -116,7 +116,7 @@ def test_package_validation_fills_missing_fields_without_mutating_defaults():
     assert ROBOT_MIDDLEWARE_DEFAULTS == original
 
 
-def test_x1_records_camera_calibration_and_extrinsics_for_legacy_conversion():
+def test_x1_records_camera_metadata_and_head_poses_for_legacy_conversion():
     profile_path = Path(__file__).resolve().parents[1] / 'adapters/robots/x1/middleware.yaml'
     profile = yaml.safe_load(profile_path.read_text())
     subscriptions = {
@@ -134,6 +134,15 @@ def test_x1_records_camera_calibration_and_extrinsics_for_legacy_conversion():
         assert DEFAULT_TOPIC_STANDARDS[topic] == {
             'target_hz': 2.0,
             'min_hz': 0.2,
+        }
+
+    for topic in ('/observation/head/pose', '/action/head/pose'):
+        item = subscriptions[topic]
+        assert item['type'] == 'geometry_msgs/msg/PoseStamped'
+        assert item['max_hz'] == 0.0
+        assert DEFAULT_TOPIC_STANDARDS[topic] == {
+            'target_hz': 60.0,
+            'min_hz': 20.0,
         }
 
 

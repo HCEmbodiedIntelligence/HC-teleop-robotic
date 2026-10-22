@@ -33,6 +33,8 @@ DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
     "/observation/cameras/head/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/observation/cameras/head/calibration": {"target_hz": 2.0, "min_hz": 0.2},
     "/observation/cameras/head/extrinsics": {"target_hz": 2.0, "min_hz": 0.2},
+    "/observation/head/pose": {"target_hz": 60.0, "min_hz": 20.0},
+    "/action/head/pose": {"target_hz": 60.0, "min_hz": 20.0},
     "/observation/cameras/overhead/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/observation/cameras/d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/observation/cameras/d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},

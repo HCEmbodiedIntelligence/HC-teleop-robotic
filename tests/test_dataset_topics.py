@@ -81,6 +81,25 @@ def test_head_tracking_and_raw_coordinate_preservation():
     assert out[0].pose.position.y == 2.
 
 
+def test_robot_head_actual_and_target_are_split_with_frame_preserved():
+    b = bridge()
+    sources = dict(b.subscriptions)
+    msg = PoseArray(poses=[Pose(), Pose()])
+    msg.header.frame_id = 'robot_base'
+    msg.header.stamp.sec = 9
+    msg.poses[0].position.x = 1.
+    msg.poses[1].position.x = 2.
+
+    sources['/status/head/tracking_poses'](msg)
+
+    actual = b.publishers['/observation/head/pose'].messages[0]
+    target = b.publishers['/action/head/pose'].messages[0]
+    assert actual.pose.position.x == 1.
+    assert target.pose.position.x == 2.
+    assert actual.header.frame_id == target.header.frame_id == 'robot_base'
+    assert actual.header.stamp.sec == target.header.stamp.sec == 9
+
+
 def test_camera_metadata_is_relayed_unchanged_to_standard_topics():
     b = bridge()
     sources = dict(b.subscriptions)

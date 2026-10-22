@@ -255,6 +255,22 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
+  - topic: /observation/head/pose
+    description: 机器人基座坐标系中的头部相机实际位姿，由关节反馈正运动学得到
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /action/head/pose
+    description: 机器人基座坐标系中的头部相机目标位姿，由头显目标映射得到
+    type: geometry_msgs/msg/PoseStamped
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
   - topic: /vrdata
     description: 原始头显和双手位姿、按键、跟踪状态及 VR 时间戳
     type: std_msgs/msg/String
