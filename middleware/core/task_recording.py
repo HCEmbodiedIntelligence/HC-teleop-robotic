@@ -387,7 +387,7 @@ class TaskRecorder(CorrectionSupport):
                 formats = ('lerobot',) if requested.startswith('lerobot:') or requested.endswith('-lerobot') else ('mcap_mp4',) if requested.startswith('bundle:') or requested.endswith('-mcap_mp4') else ('mcap',)
             if set(formats) & set(job.get('deleted_formats', [])):
                 raise UploadError('ARTIFACT_MISSING', '该格式的本地文件已删除')
-            if job['state'] in ('preparing', 'prepared', 'prepare_failed', 'starting', 'recording', 'stopping', 'interrupted', 'failed', 'deleted'):
+            if job['state'] in ('preparing', 'prepared', 'prepare_failed', 'starting', 'armed', 'recording', 'stopping', 'interrupted', 'failed', 'deleted'):
                 raise UploadError('RECORDING_NOT_READY', '录制尚未完整关闭，原始数据已保留')
             if identity in self.pending:
                 raise UploadError('ARTIFACT_BUSY', '正在整理本段数据，请稍后重试')

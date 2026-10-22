@@ -112,3 +112,23 @@ def test_existing_export_backlog_rejects_prepare_before_starting_processes(tmp_p
     finally:
         recorder.pending.clear()
         recorder.shutdown()
+
+
+def test_prepared_slot_is_hidden_and_cannot_be_uploaded_before_intervention(tmp_path):
+    from middleware.core.topic_recorder import TopicRecorder
+    from humanoid_upload.common import UploadError
+    recorder = service(tmp_path)
+    slot = TopicRecorder(recorder.config, tmp_path)
+    slot.task_managed = True
+    try:
+        recorder.start('prepared.mcap', _prepared_writer=slot)
+        identity = next(iter(recorder.jobs))
+        assert not recorder.records()
+        assert not recorder.list_recordings()
+        with pytest.raises(UploadError) as error:
+            recorder.upload_recording(identity)
+        assert error.value.code == 'RECORDING_NOT_READY'
+        assert recorder.jobs[identity]['state'] == 'armed'
+    finally:
+        slot.shutdown()
+        recorder.shutdown()
