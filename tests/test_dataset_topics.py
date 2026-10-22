@@ -81,6 +81,32 @@ def test_head_tracking_and_raw_coordinate_preservation():
     assert out[0].pose.position.y == 2.
 
 
+def test_camera_metadata_is_relayed_unchanged_to_standard_topics():
+    b = bridge()
+    sources = dict(b.subscriptions)
+    calibration = String(data='{"schema":"hc_camera_calibration/v1"}')
+    extrinsics = String(data='{"schema":"hc_robot_camera_extrinsics/v1"}')
+
+    sources['/io_teleop/camera_head/calibration'](calibration)
+    sources['/io_teleop/camera_head/extrinsics'](extrinsics)
+
+    assert b.publishers['/observation/cameras/head/calibration'].messages == [calibration]
+    assert b.publishers['/observation/cameras/head/extrinsics'].messages == [extrinsics]
+
+
+def test_force_and_vibration_feedback_are_relayed_unchanged():
+    b = bridge()
+    sources = dict(b.subscriptions)
+    wrenches = Float64MultiArray(data=list(range(12)))
+    vibration = Float64MultiArray(data=list(range(10)))
+
+    sources['/io_teleop/state_ee_wrenches'](wrenches)
+    sources['/io_teleop/vibration_feedback_exo'](vibration)
+
+    assert b.publishers['/observation/ee_wrenches'].messages == [wrenches]
+    assert b.publishers['/observation/hands/vibration_feedback'].messages == [vibration]
+
+
 def test_config_records_all_projected_topics_and_raw_vr():
     from pathlib import Path
     import yaml

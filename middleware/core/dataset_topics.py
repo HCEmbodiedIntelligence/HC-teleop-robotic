@@ -36,9 +36,29 @@ class DatasetTopics:
         subscribe(Float64MultiArray, '/action/base/command', self.base)
         self.publisher('/observation/headset/pose', PoseStamped)
         subscribe(String, '/vrdata', self.head)
+        for source, target in (
+            ('/io_teleop/camera_head/calibration',
+             '/observation/cameras/head/calibration'),
+            ('/io_teleop/camera_head/extrinsics',
+             '/observation/cameras/head/extrinsics'),
+        ):
+            self.publisher(target, String)
+            subscribe(String, source, lambda msg, t=target: self.relay(t, msg))
+        for source, target in (
+            ('/io_teleop/state_ee_wrenches', '/observation/ee_wrenches'),
+            ('/io_teleop/vibration_feedback_exo',
+             '/observation/hands/vibration_feedback'),
+        ):
+            self.publisher(target, Float64MultiArray)
+            subscribe(Float64MultiArray, source,
+                      lambda msg, t=target: self.relay(t, msg))
 
     def publisher(self, topic, cls):
         self.publishers[topic] = self.node.create_publisher(cls, topic, 10)
+
+    def relay(self, topic, msg):
+        """Republish immutable metadata under the standard observation namespace."""
+        self.publishers[topic].publish(msg)
 
     def joints(self, category, msg):
         from sensor_msgs.msg import JointState

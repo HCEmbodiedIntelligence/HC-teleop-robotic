@@ -124,8 +124,8 @@ def test_x1_records_camera_calibration_and_extrinsics_for_legacy_conversion():
     }
 
     for topic in (
-        '/io_teleop/camera_head/calibration',
-        '/io_teleop/camera_head/extrinsics',
+        '/observation/cameras/head/calibration',
+        '/observation/cameras/head/extrinsics',
     ):
         item = subscriptions[topic]
         assert item['type'] == 'std_msgs/msg/String'

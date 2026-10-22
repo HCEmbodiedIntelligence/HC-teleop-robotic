@@ -90,6 +90,22 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
+  - topic: /observation/hands/vibration_feedback
+    description: 外骨骼手部振动反馈数据
+    type: std_msgs/msg/Float64MultiArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+  - topic: /observation/ee_wrenches
+    description: 左右机械臂末端六维力反馈
+    type: std_msgs/msg/Float64MultiArray
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
   - topic: /observation/cameras/head/color/compressed
     description: 头部相机彩色图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
@@ -108,8 +124,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
     qos_reliability: best_effort
-  - topic: /io_teleop/camera_head/calibration
-    description: 头部相机内参与 RGB/深度标定 JSON，保留旧格式原始话题以支持无损转换
+  - topic: /observation/cameras/head/calibration
+    description: 头部相机内参与 RGB/深度标定 JSON
     type: std_msgs/msg/String
     enabled: true
     outputs:
@@ -117,8 +133,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
     qos_reliability: reliable
-  - topic: /io_teleop/camera_head/extrinsics
-    description: 机器人到头部相机的外参 JSON，保留旧格式原始话题以支持无损转换
+  - topic: /observation/cameras/head/extrinsics
+    description: 机器人到头部相机的外参 JSON
     type: std_msgs/msg/String
     enabled: true
     outputs:
