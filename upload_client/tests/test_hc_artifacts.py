@@ -312,6 +312,18 @@ def test_queue_upgrade_backfills_frozen_artifact_identity(hc_cfg):
         upgraded.enqueue_artifact(d,dict(hc_cfg,task_id='new-task',binding_id='new-binding'))
 
 
+def test_queue_restart_repairs_dangling_artifact_index(hc_cfg):
+    descriptor = ready(hc_cfg)
+    queue = Queue(hc_cfg['queue_directory'])
+    first = queue.enqueue_artifact(descriptor, hc_cfg)
+    with queue.connect() as db:
+        db.execute('DELETE FROM jobs WHERE id=?', (first['id'],))
+    restarted = Queue(hc_cfg['queue_directory'])
+    replacement = restarted.enqueue_artifact(descriptor, hc_cfg)
+    assert replacement['id'] != first['id']
+    assert [job['id'] for job in restarted.jobs()] == [replacement['id']]
+
+
 def test_raw_native_identity_cannot_alias_two_artifacts(hc_cfg):
     d=ready(hc_cfg,'platform_raw'); q=Queue(hc_cfg['queue_directory']); q.enqueue_artifact(d,hc_cfg)
     d['artifact_id']='alias-of-same-raw'

@@ -30,6 +30,10 @@ class Queue:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cancellations (job_id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS artifact_jobs (artifact_id TEXT PRIMARY KEY, job_id TEXT NOT NULL)")
+            # Older cleanup paths could leave an artifact index after deleting
+            # its job. Remove only those dangling rows so startup recovery can
+            # safely enqueue the preserved descriptor again.
+            db.execute("DELETE FROM artifact_jobs WHERE job_id NOT IN (SELECT id FROM jobs)")
             # Earlier HC queues predate the artifact index. Rebuild without changing jobs or bindings.
             for row in db.execute("SELECT id,payload FROM jobs"):
                 job = json.loads(row['payload'])
@@ -91,6 +95,10 @@ class Queue:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if descriptor is not None:
+                # Defend against a dangling index created after this Queue was
+                # initialized (for example by an interrupted external repair).
+                db.execute("DELETE FROM artifact_jobs WHERE artifact_id=? AND job_id NOT IN (SELECT id FROM jobs)",
+                           (descriptor['artifact_id'],))
                 bound = db.execute("SELECT j.payload FROM artifact_jobs a JOIN jobs j ON j.id=a.job_id WHERE a.artifact_id=?",
                                    (descriptor['artifact_id'],)).fetchone()
                 if bound:
