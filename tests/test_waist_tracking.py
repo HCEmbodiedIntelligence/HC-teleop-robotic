@@ -490,3 +490,208 @@ class WaistTrackingTests(unittest.TestCase):
         finally:
             node.destroy_node()
 
+    def test_a_button_resume_waist_safety_and_edge_rearm(self):
+        """Verify A button resume keeps waist output disabled, overwrites last_command with feedback,
+        and strictly requires a fresh left Grip rising edge before waist commands can be sent."""
+        from std_msgs.msg import Bool, String
+        path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
+        with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
+            node = self.make_enabled_waist_node(path)
+        try:
+            node.hardware_ready = True
+            feedback_waist = {"leg_1": 0.51, "leg_2": 1.21, "zhi": -0.59}
+            node.joint_state.update(node.initial_joints)
+            node.joint_state.update(feedback_waist)
+            node.joint_state_stamp = node._monotonic()
+
+            # Set a stale last_command that differs significantly from feedback
+            stale_waist = {"leg_1": 0.85, "leg_2": 1.55, "zhi": -0.25}
+            node.last_command.update(node.initial_joints)
+            node.last_command.update(stale_waist)
+
+            # Left Grip is currently held down by operator
+            now = node._monotonic()
+            left_joy = Joy()
+            left_joy.axes = [0.0, 1.0, 0.0, 0.0]  # clutch axis 1 = 1.0 (held)
+            node.arms["left"].joy = left_joy
+            node.arms["left"].joy_stamp = now
+            node.body.head_pose = (np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0]))
+            node.body.head_stamp = now
+
+            # Step 1: Emergency stop occurs
+            stop_msg = Bool(data=True)
+            node._stop_callback(stop_msg)
+            self.assertFalse(node.enabled)
+            self.assertFalse(node.waist_output_enabled)
+            self.assertTrue(node.waist_clutch_rearm_required)
+
+            # Step 2: Operator presses VR controller A button to resume while STILL holding left Grip
+            # Encode a VR frame with resume_requested=True and left Grip held
+            import json
+            vr_json = {
+                "poses": {
+                    "head": {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+                    "left": {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+                    "right": {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+                },
+                "inputs": {
+                    "left": {"grip": 1.0, "trigger": 0.0, "held_mask": 2},
+                    "right": {"grip": 0.0, "trigger": 0.0, "pressed_mask": 1, "held_mask": 1},  # A button
+                },
+            }
+            node._vr_data_callback(String(data=json.dumps(vr_json)))
+
+            # Verification 1: Teleop re-enabled, but waist output MUST remain closed
+            self.assertTrue(node.enabled)
+            self.assertFalse(node.waist_output_enabled, "Waist output must remain disabled after A resume!")
+            self.assertTrue(node.waist_clutch_rearm_required, "Rearm must be required after A resume!")
+
+            # Verification 2: Current waist feedback MUST overwrite stale last_command
+            for name, expected_val in feedback_waist.items():
+                self.assertAlmostEqual(
+                    node.last_command[name],
+                    expected_val,
+                    places=5,
+                    msg=f"last_command for {name} was not overwritten with feedback upon A resume!",
+                )
+
+            # Verification 3: Holding left Grip without releasing CANNOT activate waist
+            now += 0.02
+            node.arms["left"].joy_stamp = now
+            node.body.head_stamp = now
+            node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
+            self.assertFalse(node.waist_output_enabled, "Waist must NOT activate without a fresh rising edge!")
+            self.assertFalse(node.body.active, "Body must NOT engage when rearm is required!")
+
+            # Step 3: Operator releases left Grip
+            now += 0.02
+            left_joy.axes[1] = 0.0
+            node.arms["left"].joy = left_joy
+            node.arms["left"].joy_stamp = now
+            node.body.head_stamp = now
+            node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
+            self.assertFalse(node.waist_output_enabled)
+            self.assertFalse(node.body.active)
+            self.assertTrue(node.waist_clutch_rearm_required, "Rearm requirement stays active until rising edge")
+
+            # Step 4: Operator presses left Grip down (new rising edge)
+            now += 0.02
+            left_joy.axes[1] = 1.0
+            node.arms["left"].joy_stamp = now
+            node.body.head_stamp = now
+            node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
+            self.assertTrue(node.waist_output_enabled, "Waist output must be enabled after new rising edge!")
+            self.assertFalse(node.waist_clutch_rearm_required, "Rearm requirement must clear after rising edge")
+            self.assertTrue(node.body.active, "Body must engage on new rising edge!")
+        finally:
+            node.destroy_node()
+
+    def test_waist_command_not_periodically_sent_when_grip_released(self):
+        """Verify that when left Grip is released, old waist targets are NOT periodically published
+        in both internal IK (_control_tick) and external IK (_generic_command_callback) modes."""
+        path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/arm_teleop.yaml"
+        with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
+            node = self.make_enabled_waist_node(path)
+        try:
+            node.hardware_ready = True
+            node.joint_state.update(node.initial_joints)
+            node.last_command.update(node.initial_joints)
+            node.joint_state_stamp = node._monotonic()
+            node._sync_model()
+
+            waist_joint_set = set(node.body.joint_names)
+            published_msgs = []
+            node.command_pub.publish = lambda msg: published_msgs.append(msg)
+
+            # Setup joys: right Grip held (operating arms), left Grip held (operating waist)
+            now = node._monotonic()
+            node.arms["right"].joy = Joy(axes=[0.0, 1.0, 0.0, 0.0])
+            node.arms["right"].joy_stamp = now
+            node.arms["right"].pose = (np.array([0.2, 0.2, 0.2]), np.array([0.0, 0.0, 0.0, 1.0]))
+            node.arms["right"].pose_stamp = now
+
+            node.arms["left"].joy = Joy(axes=[0.0, 1.0, 0.0, 0.0])
+            node.arms["left"].joy_stamp = now
+            node.arms["left"].pose = (np.array([-0.2, 0.2, 0.2]), np.array([0.0, 0.0, 0.0, 1.0]))
+            node.arms["left"].pose_stamp = now
+            node.body.head_pose = (np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0]))
+            node.body.head_stamp = now
+
+            # --- Test 1: External IK mode (_generic_control_tick + _generic_command_callback) ---
+            node.external_ik = True
+            self.assertFalse(node.solver_rearm.blocked)
+            for arm in node.arms.values():
+                arm.active = False
+
+            # When left Grip IS held, waist should be included
+            node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
+            self.assertTrue(node.body.active)
+            all_arm_names = node.arms["right"].joint_names + node.arms["left"].joint_names
+            arm_msg = JointState()
+            arm_msg.header = Header(stamp=node.get_clock().now().to_msg())
+            arm_msg.name = all_arm_names
+            arm_msg.position = [0.1] * len(all_arm_names)
+
+            published_msgs.clear()
+            node._generic_command_callback(arm_msg)
+            self.assertTrue(len(published_msgs) > 0)
+            self.assertTrue(waist_joint_set.issubset(set(published_msgs[-1].name)))
+
+            # Now RELEASE left Grip (right Grip remains held for arms)
+            now += 0.02
+            node.arms["left"].joy.axes[1] = 0.0
+            node.arms["left"].joy_stamp = now
+            node.arms["right"].joy_stamp = now
+            node.body.head_stamp = now
+            node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
+            self.assertFalse(node.body.active)
+
+            # Send multiple external solver ticks
+            for _ in range(5):
+                published_msgs.clear()
+                arm_msg.header.stamp = node.get_clock().now().to_msg()
+                node._generic_command_callback(arm_msg)
+                self.assertTrue(len(published_msgs) > 0)
+                published_names = set(published_msgs[-1].name)
+                # Waist joints MUST NOT be sent when left Grip is released!
+                waist_in_msg = waist_joint_set.intersection(published_names)
+                self.assertEqual(
+                    waist_in_msg,
+                    set(),
+                    f"Waist joints {waist_in_msg} were periodically sent after left Grip was released!",
+                )
+
+            # --- Test 2: Internal IK mode (_control_tick) ---
+            node.external_ik = False
+            from adapters.core.arm_teleop_node import LEGACY_IK_DEFAULTS
+            for k, v in LEGACY_IK_DEFAULTS.items():
+                node.control.setdefault(k, v)
+            # When left Grip is released and right Grip held:
+            published_msgs.clear()
+            node._control_tick()
+            self.assertTrue(len(published_msgs) > 0)
+            published_names = set(published_msgs[-1].name)
+            waist_in_msg = waist_joint_set.intersection(published_names)
+            self.assertEqual(
+                waist_in_msg,
+                set(),
+                f"In internal IK, waist joints {waist_in_msg} were periodically sent while left Grip was released!",
+            )
+
+            # Now press left Grip in internal IK mode (rising edge)
+            now += 0.02
+            node.arms["left"].joy.axes[1] = 1.0
+            node.arms["left"].joy_stamp = now
+            node.arms["right"].joy_stamp = now
+            node.body.head_stamp = now
+            published_msgs.clear()
+            node._control_tick()
+            self.assertTrue(len(published_msgs) > 0)
+            published_names = set(published_msgs[-1].name)
+            self.assertTrue(
+                waist_joint_set.issubset(published_names),
+                "Waist joints must be published when left Grip is engaged in internal IK!",
+            )
+        finally:
+            node.destroy_node()
+
