@@ -51,6 +51,7 @@ class PlatformConnection:
         queue = queue if queue.is_absolute() else self.config_dir / queue
         self.directory = queue.resolve()
         self._lock = threading.RLock()
+        self._connection_generation = 0
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = None
         self.activity_provider = lambda: 'IDLE'
@@ -173,28 +174,38 @@ class PlatformConnection:
             next_state['worker_enabled'] = True
             atomic_json(self.path, next_state)
             self.state = next_state
+            self._connection_generation += 1
             self.error = None
             self.upload.start()
         # Failure to list tasks doesn't destroy a successfully saved connection.
         return self.status()
 
     def verify(self):
-        connection_id = self.state['current']
-        if not connection_id:
-            return self.status()
-        connection = self.connection(connection_id)
-        info = self.request(connection, 'GET', 'me')
-        if info['robot_id'] != connection['robot_id']:
-            raise UploadError('ROBOT_IDENTITY_MISMATCH')
-        local = self.identity_provider()
-        if info.get('local_robot') and info['local_robot'] != local:
-            raise UploadError('LOCAL_ROBOT_MISMATCH', '请检查当前机器人配置，不能以连接绕过模型校验')
         with self._lock:
-            connection.update({k: info[k] for k in ('organization_id', 'robot_name', 'platform_name')})
-            connection['verified'] = True
-            self.state['connections'][connection_id] = connection
-            self.save()
-            self.error = None
+            connection_id = self.state['current']
+            generation = self._connection_generation
+            if not connection_id:
+                return self.status()
+            connection = self.connection(connection_id)
+        try:
+            info = self.request(connection, 'GET', 'me')
+            if info['robot_id'] != connection['robot_id']:
+                raise UploadError('ROBOT_IDENTITY_MISMATCH')
+            local = self.identity_provider()
+            if info.get('local_robot') and info['local_robot'] != local:
+                raise UploadError('LOCAL_ROBOT_MISMATCH', '请检查当前机器人配置，不能以连接绕过模型校验')
+        except UploadError:
+            with self._lock:
+                if generation != self._connection_generation:
+                    return self.status()
+            raise
+        with self._lock:
+            if generation == self._connection_generation:
+                connection.update({k: info[k] for k in ('organization_id', 'robot_name', 'platform_name')})
+                connection['verified'] = True
+                self.state['connections'][connection_id] = connection
+                self.save()
+                self.error = None
         return self.status()
 
     def tasks(self, **query):

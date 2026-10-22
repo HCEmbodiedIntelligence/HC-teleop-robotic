@@ -11,11 +11,14 @@ function page() {
   const dom = new JSDOM(fs.readFileSync(path.join(root, 'index.html'), 'utf8'), {
     url: 'http://robot.example/', runScripts: 'outside-only', pretendToBeVisual: true,
   });
-  const w = dom.window, doc = w.document, timers = new Map();
+  const w = dom.window, doc = w.document, timers = new Map(), timeouts = new Map();
+  let nextTimeout = 0;
   const connection = { id: 'original', robot_name: 'Robot', platform_name: 'Platform', verified: true };
   const control = { connect: null, verify: null };
   w.setInterval = (fn, delay) => { timers.set(delay, fn); return delay; };
   w.clearInterval = delay => timers.delete(delay);
+  w.setTimeout = (fn, delay) => { const id = ++nextTimeout; timeouts.set(id, { fn, delay }); return id; };
+  w.clearTimeout = id => timeouts.delete(id);
   w.fetch = async (url, options) => {
     const op = url.replace('/api/platform/', '').split('?')[0];
     if (control[op]) return control[op](options);
@@ -24,7 +27,7 @@ function page() {
       : op === 'tasks' ? { items: [], total: 0, projects: [] } : { items: [], jobs: [] };
     return { ok: true, status: 200, json: async () => body };
   };
-  return { dom, w, doc, timers, control, start: () => w.eval(fs.readFileSync(path.join(root, 'platform_panel.js'), 'utf8')) };
+  return { dom, w, doc, timers, timeouts, control, start: () => w.eval(fs.readFileSync(path.join(root, 'platform_panel.js'), 'utf8')) };
 }
 
 for (const failure of [
@@ -101,3 +104,69 @@ test('recording updates cannot re-enable or duplicate a pending connection', asy
     assert.equal(button.disabled, false);
   } finally { p.dom.window.close(); }
 });
+
+for (const stage of ['headers', 'body']) {
+  test(`a stalled ${stage} response times out, releases the connect button and allows retry`, async () => {
+    const p = page();
+    try {
+      p.start(); await p.w.platformRecordingSelection();
+      p.control.connect = options => {
+        const stalled = new Promise((resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(new p.w.DOMException('aborted', 'AbortError')));
+        });
+        return stage === 'headers' ? stalled : { ok: true, status: 200, json: () => stalled };
+      };
+      const button = p.doc.getElementById('platformConnect');
+      const pending = button.onclick(); await settle();
+      assert.equal(button.disabled, true);
+      const deadline = [...p.timeouts.values()].find(timer => timer.delay === 20000);
+      assert.ok(deadline);
+      deadline.fn();
+      await pending;
+      assert.match(p.doc.getElementById('platformConnectMessage').textContent, /请求超时.*20 秒/);
+      assert.equal(button.disabled, false);
+      assert.equal(p.timeouts.size, 0);
+      p.control.connect = null;
+      await button.onclick();
+      assert.match(p.doc.getElementById('platformConnectMessage').textContent, /连接成功/);
+    } finally { p.dom.window.close(); }
+  });
+}
+
+test('unavailable connection service is shown beside the connection button on page load', async () => {
+  const p = page();
+  try {
+    p.control.status = async () => ({ ok: false, status: 503, json: async () => ({
+      code: 'PLATFORM_UNAVAILABLE', reason: '平台连接服务未启动，请重启采集端服务', retryable: true,
+    }) });
+    p.start(); await p.w.platformRecordingSelection();
+    assert.match(p.doc.getElementById('platformConnectMessage').textContent, /重启采集端服务/);
+    assert.equal(p.doc.getElementById('platformConnection').textContent, '平台连接状态读取失败');
+    assert.equal(p.timeouts.size, 0);
+  } finally { p.dom.window.close(); }
+});
+
+for (const phase of ['status', 'verify']) {
+  for (const failed of [false, true]) {
+    test(`late initial ${phase} ${failed ? 'failure' : 'success'} cannot overwrite a new connection`, async () => {
+      const p = page();
+      try {
+        let finish;
+        p.control[phase] = () => new Promise(resolve => { finish = resolve; });
+        p.start(); await settle();
+        assert.ok(finish);
+        p.control.connect = async () => ({ ok: true, status: 200, json: async () => ({
+          connection: { id:'replacement', robot_name:'Current Robot', platform_name:'Platform', verified:true },
+          recording_selection: { mode:'local' },
+        }) });
+        await p.doc.getElementById('platformConnect').onclick();
+        finish({ ok:!failed, status:failed ? 401 : 200, json:async () => failed
+          ? { code:'ROBOT_CREDENTIAL_INVALID', reason:'旧凭据失效' }
+          : { connection:{ id:'old', robot_name:'Old Robot', platform_name:'Platform' }, recording_selection:{ mode:'local' } } });
+        await p.w.platformRecordingSelection();
+        assert.match(p.doc.getElementById('platformConnectMessage').textContent, /连接成功/);
+        assert.match(p.doc.getElementById('platformConnection').textContent, /Current Robot/);
+      } finally { p.dom.window.close(); }
+    });
+  }
+}

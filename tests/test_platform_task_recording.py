@@ -98,6 +98,37 @@ def test_single_link_saved_secret_and_retry_request_survive_restart(tmp_path, mo
     assert restored.state['current'] == first
 
 
+@pytest.mark.parametrize('failed', [False, True])
+def test_old_verification_cannot_replace_a_new_connection(tmp_path, monkeypatch, failed):
+    import threading
+
+    _, service = setup(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect=' + 'c' * 48)
+    entered, release = threading.Event(), threading.Event()
+    original = service.request
+
+    def request(*args, **kwargs):
+        if args[2] == 'me':
+            entered.set()
+            assert release.wait(5)
+            if failed:
+                raise UploadError('ROBOT_CREDENTIAL_INVALID')
+            return {**original(*args, **kwargs), 'robot_name': 'Outdated name'}
+        return {**original(*args, **kwargs), 'robot_name': 'Current Robot'}
+
+    monkeypatch.setattr(service, 'request', request)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(service.verify)
+        try:
+            assert entered.wait(2)
+            service.connect('http://platform.invalid/#robot-connect=' + 'd' * 48)
+        finally:
+            release.set()
+        assert pending.result()['connection']['robot_name'] == 'Current Robot'
+    assert service.status()['connection']['verified']
+    assert service.error is None
+
+
 def test_two_windows_a_b_queued_independently_and_restart_preserves_ownership(tmp_path, monkeypatch):
     cfg, service, recorder = connected(tmp_path, monkeypatch)
     try:

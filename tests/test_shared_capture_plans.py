@@ -21,6 +21,33 @@ from middleware.core.task_recording import TaskRecorder
 from middleware.core.topic_recorder import TopicRecorder, read_recording_metadata
 
 
+def test_joint_only_mcap_can_be_packaged_without_dummy_video(tmp_path):
+    from mcap.reader import make_reader
+    from mcap.writer import Writer
+    from middleware.core.video_bundle import prepare
+
+    source = tmp_path / 'joints.mcap'
+    with source.open('wb') as stream:
+        writer = Writer(stream)
+        writer.start()
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'jsonschema', b'{}')
+        channel = writer.register_channel('/joints', 'json', schema)
+        for index in range(3):
+            stamp = 1_000_000_000 + index * 100_000_000
+            writer.add_message(channel, stamp, json.dumps({'name': ['axis'], 'position': [index]}).encode(), stamp)
+        writer.finish()
+    original = source.read_bytes()
+    result = prepare(source, tmp_path / 'bundle', {
+        'recording_id': 'joint-only', 'started_at': '2026-10-21T01:00:00+00:00',
+        'ended_at': '2026-10-21T01:00:01+00:00',
+    })
+    assert json.loads((result / 'session.json').read_text())['videos'] == []
+    with (result / 'raw.mcap').open('rb') as stream:
+        rows = list(make_reader(stream, validate_crcs=True).iter_messages())
+    assert len(rows) == 3 and json.loads(rows[-1][2].data)['position'] == [2]
+    assert source.read_bytes() == original
+
+
 @pytest.fixture
 def server():
     server = CaptureServer(LOCAL)

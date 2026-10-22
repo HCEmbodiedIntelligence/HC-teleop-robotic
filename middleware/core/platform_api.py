@@ -12,13 +12,18 @@ logger = logging.getLogger(__name__)
 def register_platform_routes(app, runtime):
     async def dispatch(request):
         if getattr(runtime, 'platform', None) is None:
-            return web.json_response({'code': 'PLATFORM_UNAVAILABLE', 'reason': '平台连接服务尚未就绪'}, status=503)
+            return web.json_response({
+                'code': 'PLATFORM_UNAVAILABLE',
+                'reason': '采集端的平台连接服务未启动，请重启采集端服务；如果仍然失败，请更新采集端程序',
+                'retryable': True,
+            }, status=503, headers={'Cache-Control': 'no-store'})
         platform = runtime.platform
+        connection_generation = getattr(platform, '_connection_generation', None)
         operation = request.match_info['operation']
         try:
             if request.method == 'GET':
                 if operation == 'status':
-                    result = platform.status()
+                    result = await asyncio.to_thread(platform.status)
                 elif operation == 'tasks':
                     query = dict(request.query)
                     query['page'] = max(1, int(query.get('page', 1)))
@@ -67,7 +72,8 @@ def register_platform_routes(app, runtime):
                     raise web.HTTPNotFound()
             return web.json_response(result, headers={'Cache-Control': 'no-store'})
         except UploadError as error:
-            platform.error = error.code
+            if connection_generation == getattr(platform, '_connection_generation', None):
+                platform.error = error.code
             # Public code/action only: never log a link, ticket, token or response body.
             logger.warning('Platform operation %s failed: %s; %s', operation, error.code, error.action)
             return web.json_response({'code': error.code, 'reason': error.action,

@@ -137,7 +137,7 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
-export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/upload_client:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 DOMAIN_VALUES="$(/usr/bin/python3 -m middleware.core.runtime_mode "${MIDDLEWARE_CONFIG}" --shell-values)"
 read -r ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID <<< "${DOMAIN_VALUES}"
 export ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID

@@ -4,30 +4,41 @@
   let state = { connection: null, recent: null }, selected = '', page = 1, total = 0;
   let tasks = [], requestId = null, refreshGeneration = 0, active = false;
   let connecting = false;
+  let connectionGeneration = 0;
   let selectionSave = Promise.resolve(), selectionVersion = 0, pendingSelection = 0, selectionError = null;
   let choosingTask = false;
   let historyTarget = null, historySelected = '', historyPage = 1;
   const post = (path, body = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
   async function call(path, options = {}) {
-    let response;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    const timeoutError = () => Object.assign(
+      new Error('采集端请求超时（20 秒），请检查采集端与平台服务后重试'),
+      { code: 'ROBOT_SERVICE_TIMEOUT', retryable: true });
     try {
-      response = await fetch('/api/platform/' + path, { cache: 'no-store', ...options,
-        headers: { 'Content-Type': 'application/json' } });
-    } catch (_) {
-      throw Object.assign(new Error('浏览器无法连接采集端，请检查采集端服务和浏览器网络后重试'),
-        { code: 'ROBOT_SERVICE_UNREACHABLE', retryable: true });
-    }
-    let body;
-    try { body = await response.json(); } catch (_) {
-      throw Object.assign(new Error(`采集端返回了无效响应（HTTP ${response.status}），请检查采集端服务后重试`),
-        { code: 'ROBOT_SERVICE_RESPONSE_INVALID', retryable: true });
-    }
-    if (!response.ok) {
-      const code = typeof body?.code === 'string' && /^[A-Z][A-Z0-9_]{0,95}$/.test(body.code) ? body.code : '';
-      throw Object.assign(new Error(`${body?.reason || '平台请求失败'}${code ? `（${code}）` : ''}`),
-        { code, retryable: body?.retryable === true });
-    }
-    return body;
+      let response;
+      try {
+        response = await fetch('/api/platform/' + path, { cache: 'no-store', ...options,
+          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json' } });
+      } catch (_) {
+        if (controller.signal.aborted) throw timeoutError();
+        throw Object.assign(new Error('浏览器无法连接采集端，请检查采集端服务和浏览器网络后重试'),
+          { code: 'ROBOT_SERVICE_UNREACHABLE', retryable: true });
+      }
+      let body;
+      try { body = await response.json(); } catch (_) {
+        if (controller.signal.aborted) throw timeoutError();
+        throw Object.assign(new Error(`采集端返回了无效响应（HTTP ${response.status}），请检查采集端服务后重试`),
+          { code: 'ROBOT_SERVICE_RESPONSE_INVALID', retryable: true });
+      }
+      if (!response.ok) {
+        const code = typeof body?.code === 'string' && /^[A-Z][A-Z0-9_]{0,95}$/.test(body.code) ? body.code : '';
+        throw Object.assign(new Error(`${body?.reason || '平台请求失败'}${code ? `（${code}）` : ''}`),
+          { code, retryable: body?.retryable === true });
+      }
+      return body;
+    } finally { clearTimeout(timer); }
   }
   const message = value => { el('platformMessage').textContent = value; };
   const connectionMessage = (value, failed = false) => {
@@ -51,19 +62,19 @@
   };
   function taskDescription(task) {
     const plan = task?.capture_plan;
-    if (!plan) return `${task?.description || ''} · 采集方案待配置${task?.reason ? `：${task.reason}` : ''}`;
-    const fields = Object.entries(plan.output?.features || {}).map(([key, feature]) =>
-      `${key} ${feature.shape?.join('×') || ''}（${feature.required === false ? '可选，未采集保留缺失' : '必需'}）`).join('；');
-    return `${task.description || ''} · 采集方案 ${plan.scheme?.scheme_id} v${plan.scheme?.version}` +
-      ` · 计划修订 ${plan.revision} · ${plan.source_format} · 保留 ${plan.output?.frequency_hz} Hz` +
-      ` · 映射 v${plan.mapping_version} ${task.selectable === false ? '不可用：' + task.reason : '已验证'}` +
-      ` · 输出要求：${fields}`;
+    if (!plan) return '这个任务尚未配置采集方案，请在平台补充后使用。';
+    const cameras = Object.values(plan.output?.features || {}).filter(feature =>
+      feature.role === 'rgb' || feature.role === 'depth').length;
+    const format = { MCAP: 'MCAP', CAPTURE_BUNDLE: 'MCAP＋MP4', LEROBOT_V3: 'LeRobot' }[plan.source_format] || '';
+    return `自动使用任务采集方案 · 输出 ${plan.output?.frequency_hz} Hz` +
+      ` · ${cameras ? cameras + ' 路相机' : '纯关节数据'} · 上传 ${format}` +
+      (task.selectable === false ? ` · 暂不可用：${task.reason || '请在平台检查方案'}` : '');
   }
   function taskOption(task) {
     const plan = task.capture_plan;
     const option = new Option(`${task.name} / ${task.project_name} / ${task.task_code}` +
-      (plan ? ` · ${plan.scheme?.scheme_id} v${plan.scheme?.version} · ${plan.source_format}` : ' · 方案待配置') +
-      (task.selectable === false ? ` · 不可用：${task.reason || '请检查映射'}` : ''), task.collection_task_id);
+      (!plan ? ' · 方案待配置' : task.selectable === false ? ' · 暂不可用' : ''), task.collection_task_id);
+    option.title = taskDescription(task);
     option.disabled = task.selectable === false;
     return option;
   }
@@ -244,6 +255,7 @@
   async function init() {
     el('platformConnect').onclick = async () => {
       if (connecting || active) return;
+      connectionGeneration++;
       connecting = true;
       el('platformConnect').disabled = true;
       const link = el('platformLink').value;
@@ -301,13 +313,29 @@
         el('platformHistoryDialog').close(); await refreshRecords();
       } catch (error) { el('platformHistoryError').textContent = error.message; }
     };
+    const generation = connectionGeneration;
     try {
-      state = await call('status');
-      renderSelection(); renderConnection();
-      if (state.connection) { try { state = await post('verify'); renderConnection(); }
-        catch (error) { connectionMessage(`当前连接验证失败：${error.message}`, true); } }
-      await refreshTasks(); await refreshRecords();
-    } catch (error) { message(error.message); }
+      const initial = await call('status');
+      if (generation === connectionGeneration) {
+        state = initial;
+        renderSelection(); renderConnection();
+        if (state.connection) {
+          try {
+            const verified = await post('verify');
+            if (generation === connectionGeneration) { state = verified; renderConnection(); }
+          } catch (error) {
+            if (generation === connectionGeneration)
+              connectionMessage(`当前连接验证失败：${error.message}`, true);
+          }
+        }
+        if (generation === connectionGeneration) { await refreshTasks(); await refreshRecords(); }
+      }
+    } catch (error) {
+      if (generation === connectionGeneration) {
+        el('platformConnection').textContent = '平台连接状态读取失败';
+        connectionMessage(error.message, true);
+      }
+    }
     const visibleRefresh = () => { if (!document.hidden) { void refreshTasks(); void refreshRecords(); } };
     const timer = setInterval(visibleRefresh, 30000);
     const progressTimer = setInterval(() => { if (!document.hidden) void refreshRecords(); }, 5000);

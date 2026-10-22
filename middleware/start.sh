@@ -85,7 +85,7 @@ if [[ -f /opt/ros/humble/setup.bash ]]; then
 fi
 
 export PYTHONUNBUFFERED=1
-export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/upload_client:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 export HC_RUNTIME_MODE="${HC_RUNTIME_MODE:-simulation}"
 DOMAIN_VALUES="$(/usr/bin/python3 -m middleware.core.runtime_mode "${CONFIG_PATH}" --shell-values)"
 read -r ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID <<< "${DOMAIN_VALUES}"

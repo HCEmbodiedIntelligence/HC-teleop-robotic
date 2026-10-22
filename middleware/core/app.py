@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import socket
 import time
@@ -162,7 +163,10 @@ class MiddlewareRuntime:
                 "UPLOADING" if any(job['state'] == 'uploading' for job in self.platform.upload.jobs()) else "IDLE")
             self.platform.start()
             self.uploads = self.platform.upload
-        except ImportError:
+        except ImportError as exc:
+            logging.getLogger(__name__).warning(
+                "Platform connection component could not load: %s", exc.name or type(exc).__name__
+            )
             self.platform = None
             await self._start_uploads()
             self.recorder.binding_snapshot = None

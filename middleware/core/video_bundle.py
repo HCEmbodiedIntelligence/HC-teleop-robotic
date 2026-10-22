@@ -125,8 +125,6 @@ def prepare(source, target, job):
                 for packet in video.encode():
                     container.mux(packet)
             writer.finish()
-        if not videos:
-            raise UploadError('CAPTURE_RGB_REQUIRED', 'MCAP＋MP4 原始包需要录入至少一路 RGB 图像')
         session = {'schema_version': VERSION, 'session_id': job['recording_id'], 'source_sha256': source_hash,
                    'capture_started_at': job['started_at'], 'capture_ended_at': job['ended_at'],
                    'capture_snapshot': job.get('capture_snapshot'),

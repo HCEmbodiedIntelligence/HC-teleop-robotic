@@ -36,6 +36,9 @@ def check_device(snapshot, config, recorder, health):
             if settings.get(key): required[settings[key]] = 'sensor_msgs/msg/JointState'
         for camera in settings.get('cameras', []):
             if camera.get('required', True): required[camera['topic']] = camera['message_type']
+        for name, source in settings.get('numeric_sources', {}).items():
+            if output['features'].get(name, {}).get('required', True):
+                required[source['topic']] = source['message_type']
         clock_topic = (settings.get('state_topic') if settings.get('time_source') == 'STATE_LOG_TIME'
                        else next((c['topic'] for c in settings.get('cameras', [])
                                   if c['topic'] == settings.get('primary_camera')), None))
@@ -76,5 +79,6 @@ def check_device(snapshot, config, recorder, health):
         cap = item.get('max_hz', 0)
         if cap and cap + 0.01 < rate:
             raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f'{topic} 录制限频 {cap} Hz 低于实际 {rate} Hz；无法保留原频率')
-        if topic == clock_topic and abs(rate - output['frequency_hz']) > max(0.5, output['frequency_hz'] * 0.05):
+        preserve = adapter.get('configuration', {}).get('alignment_policy', 'PRESERVE') == 'PRESERVE'
+        if preserve and topic == clock_topic and abs(rate - output['frequency_hz']) > max(0.5, output['frequency_hz'] * 0.05):
             raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f'{topic} 实际 {rate} Hz 与方案 {output["frequency_hz"]} Hz 不一致')
