@@ -27,7 +27,7 @@ test('task selection, visible refresh, offline retention and history are explici
     if (operation === 'preflight' && !available) return { ok: false, json: async () => ({ reason: '任务已关闭' }) };
     if (operation === 'upload-format') uploadFormat = JSON.parse(options.body).format;
     if (operation === 'selection') savedSelection = JSON.parse(options.body);
-    const body = ['status','verify','connect','upload-format'].includes(operation) ? { connection, upload_format: uploadFormat, auto_upload: true, recent: null, recording_selection: savedSelection }
+    const body = ['status','verify','connect','upload-format'].includes(operation) ? { connection, upload_format: uploadFormat, auto_upload: true, recent: null, recording_selection: savedSelection, local_format: 'both' }
       : operation === 'selection' ? { recording_selection: savedSelection }
       : operation === 'tasks' ? { items: available ? [task] : [], total: available ? 1 : 0, projects: [{ id: 'p', name: 'Project' }] }
       : operation === 'preflight' ? { task }
@@ -48,19 +48,27 @@ test('task selection, visible refresh, offline retention and history are explici
     assert.equal(format.disabled, true);
     w.platformRecordingStatus({recording:false});
     assert.equal(format.disabled, false);
+
+    // Test format linkage with local recording format
+    w.platformSyncLocalFormat('mcap');
+    assert.equal(format.value, 'mcap');
+    const lerobotOpt = [...format.options].find(o => o.value === 'lerobot');
+    const mcapOpt = [...format.options].find(o => o.value === 'mcap');
+    assert.equal(lerobotOpt.disabled, true);
+    assert.equal(mcapOpt.disabled, false);
+
+    w.platformSyncLocalFormat('lerobot');
+    assert.equal(format.value, 'lerobot');
+    assert.equal(mcapOpt.disabled, true);
+    assert.equal(lerobotOpt.disabled, false);
+
+    w.platformSyncLocalFormat('both');
+    assert.equal(mcapOpt.disabled, false);
+    assert.equal(lerobotOpt.disabled, false);
+
     assert.equal((await w.platformRecordingSelection()).mode, 'local');
-    assert.equal(doc.getElementById('platformArm'), null);
-    const local = doc.getElementById('platformLocal');
-    local.checked = false; await local.onchange();
-    assert.equal(local.checked, false);
-    assert.equal(doc.activeElement, doc.getElementById('platformTasks'));
-    assert.match(doc.getElementById('platformMessage').textContent, /请选择采集任务/);
-    assert.equal(requests.some(r => r.url.endsWith('/selection')), false);
-    w.platformRecordingStatus({ recording: false, recording_selection: savedSelection });
-    timers.get(30000)(); await settle();
-    assert.equal(local.checked, false);
-    assert.match(doc.getElementById('platformMessage').textContent, /请选择采集任务/);
-    assert.equal((await w.platformRecordingSelection()).mode, 'local');
+    assert.equal(doc.getElementById('platformLocal'), null);
+
     doc.getElementById('platformTasks').value = 'A';
     doc.getElementById('platformTasks').onchange(); await settle();
     const selected = await w.platformRecordingSelection();
@@ -72,7 +80,7 @@ test('task selection, visible refresh, offline retention and history are explici
     assert.match(doc.getElementById('platformMessage').textContent, /任务已关闭/);
     offline = true; timers.get(30000)(); await settle();
     assert.equal(doc.getElementById('platformTasks').value, 'A');
-    assert.match(doc.getElementById('platformMessage').textContent, /暂不关联平台任务/);
+    assert.match(doc.getElementById('platformMessage').textContent, /任务置空/);
     const before = requests.length;
     Object.defineProperty(doc, 'hidden', { configurable: true, value: true });
     timers.get(30000)(); await settle(); assert.equal(requests.length, before);
@@ -80,16 +88,15 @@ test('task selection, visible refresh, offline retention and history are explici
     assert.equal(doc.getElementById('platformTasks').disabled, true);
     assert.match(doc.getElementById('platformActive').textContent, /Task A/);
     w.platformRecordingStatus({ recording: false }); w.platformRecordingStopped();
-    doc.getElementById('platformLocal').checked = true; doc.getElementById('platformLocal').onchange();
+    doc.getElementById('platformTasks').value = ''; doc.getElementById('platformTasks').onchange();
+    await settle();
     assert.equal((await w.platformRecordingSelection()).mode, 'local');
     assert.deepEqual(savedSelection, { mode: 'local' });
-    local.checked = false; await local.onchange();
-    assert.equal(local.checked, false);
     offline = false; available = true;
     doc.getElementById('platformRefresh').onclick(); await settle();
     doc.getElementById('platformTasks').value = 'A';
     await doc.getElementById('platformTasks').onchange();
-    assert.equal(local.checked, false);
+    await settle();
     assert.deepEqual(savedSelection, { mode: 'platform', connection_id: connection.id, task_id: 'A' });
     await w.platformUploadHistory('local-recording', 'offline.mcap');
     assert.equal(doc.getElementById('platformHistoryTask').value, '');
@@ -123,7 +130,7 @@ test('saved selection is restored, rapid changes stay ordered, and failed saves 
       await new Promise(resolve => pending.push(resolve));
       saved = value;
     }
-    const body = ['status', 'verify'].includes(op) ? { connection, recording_selection: saved }
+    const body = ['status', 'verify'].includes(op) ? { connection, recording_selection: saved, local_format: 'both' }
       : op === 'tasks' ? { items: tasks, projects: [], total: 2 }
       : op === 'preflight' ? { task: tasks.find(task => task.collection_task_id === value.task_id) }
       : op === 'selection' ? { recording_selection: saved } : { items: [], jobs: [] };
@@ -135,7 +142,7 @@ test('saved selection is restored, rapid changes stay ordered, and failed saves 
     assert.equal((await w.platformRecordingSelection()).task_id, 'A');
     assert.equal(doc.getElementById('platformTasks').value, 'A');
     doc.getElementById('platformTasks').value = 'B'; doc.getElementById('platformTasks').onchange();
-    doc.getElementById('platformLocal').checked = true; doc.getElementById('platformLocal').onchange();
+    doc.getElementById('platformTasks').value = ''; doc.getElementById('platformTasks').onchange();
     let readDone = false;
     const read = w.platformRecordingSelection().then(value => { readDone = true; return value; });
     await settle();
@@ -144,17 +151,6 @@ test('saved selection is restored, rapid changes stay ordered, and failed saves 
     assert.equal(pending.length, 1); assert.equal(readDone, false);
     pending.shift()();
     assert.equal((await read).mode, 'local');
-    assert.deepEqual(saved, { mode: 'local' });
-    const local = doc.getElementById('platformLocal');
-    local.checked = false; await local.onchange();
-    // A delayed local save must not undo a later request to choose a task.
-    local.checked = true; const saveLocal = local.onchange();
-    local.checked = false; const chooseTask = local.onchange();
-    await settle();
-    assert.equal(pending.length, 1);
-    pending.shift()(); await saveLocal; await chooseTask;
-    assert.equal(local.checked, false);
-    assert.match(doc.getElementById('platformMessage').textContent, /请选择采集任务/);
     assert.deepEqual(saved, { mode: 'local' });
     fail = true;
     doc.getElementById('platformTasks').value = 'A'; await doc.getElementById('platformTasks').onchange();

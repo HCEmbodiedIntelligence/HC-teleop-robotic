@@ -223,7 +223,7 @@ class PlatformConnection:
     def preflight(self, selection, *, remember=True, source_format=None):
         """Read availability only. A form selection cannot create bindings or lock plans."""
         if not isinstance(selection, dict) or selection.get('mode') not in ('local', 'platform'):
-            raise UploadError('RECORDING_SELECTION_REQUIRED', '请选择平台任务或“暂不关联平台任务”')
+            raise UploadError('RECORDING_SELECTION_REQUIRED', '请选择平台任务或留空保存到本机')
         if selection['mode'] == 'local':
             return None
         identity = selection.get('connection_id')

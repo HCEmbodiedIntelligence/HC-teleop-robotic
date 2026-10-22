@@ -356,7 +356,18 @@ class CameraService:
                 continue
             try:
                 buf = np.frombuffer(payload, dtype=np.uint8)
-                frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                frame = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+                if frame is not None and frame.ndim == 2 and frame.dtype == np.uint16:
+                    # X1 depth is a lossless PNG in millimetres. Visualize only
+                    # the display copy; ROS recording retains the original data.
+                    valid = frame > 0
+                    intensity = (255 * (1 - np.clip(frame.astype(np.float32) / 5000, 0, 1))).astype(np.uint8)
+                    frame = cv2.applyColorMap(intensity, cv2.COLORMAP_TURBO)
+                    frame[~valid] = 0
+                elif frame is not None and frame.ndim == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                elif frame is not None and frame.shape[2] == 4:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 if frame is not None:
                     self._accept_frame(
                         frame,

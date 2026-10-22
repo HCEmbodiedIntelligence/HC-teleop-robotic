@@ -6,7 +6,6 @@
   let connecting = false;
   let connectionGeneration = 0;
   let selectionSave = Promise.resolve(), selectionVersion = 0, pendingSelection = 0, selectionError = null;
-  let choosingTask = false;
   let historyTarget = null, historySelected = '', historyPage = 1;
   const post = (path, body = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
   async function call(path, options = {}) {
@@ -45,10 +44,8 @@
     el('platformConnectMessage').textContent = value;
     el('platformConnectMessage').classList.toggle('error', failed);
   };
-  const taskPrompt = () => (state.connection ? '请选择采集任务' : '请先连接平台，再选择采集任务') +
-    '，选定后自动保存关联；选择前仍使用上次保存的录制设置。';
   function selection() {
-    if (el('platformLocal').checked || !state.connection || !selected) return { mode: 'local' };
+    if (!state.connection || !selected) return { mode: 'local' };
     const revision = tasks.find(task => task.collection_task_id === selected)?.capture_plan?.revision;
     return { mode: 'platform', connection_id: state.connection.id, task_id: selected,
       ...(revision ? { expected_plan_revision: revision } : {}) };
@@ -63,17 +60,16 @@
   function taskDescription(task) {
     const plan = task?.capture_plan;
     if (!plan) return '这个任务尚未配置采集方案，请在平台补充后使用。';
-    const cameras = Object.values(plan.output?.features || {}).filter(feature =>
-      feature.role === 'rgb' || feature.role === 'depth').length;
-    const format = { MCAP: 'MCAP', CAPTURE_BUNDLE: 'MCAP＋MP4', LEROBOT_V3: 'LeRobot' }[plan.source_format] || '';
-    return `自动使用任务采集方案 · 输出 ${plan.output?.frequency_hz} Hz` +
-      ` · ${cameras ? cameras + ' 路相机' : '纯关节数据'} · 上传 ${format}` +
+    const scheme = plan.scheme ? `${plan.scheme.scheme_id} v${plan.scheme.version}` : '未命名方案';
+    const optional = Object.values(plan.output?.features || {}).filter(feature => feature.required === false).length;
+    return `${scheme} · ${plan.source_format} · ${plan.output?.frequency_hz} Hz · 映射 v${plan.mapping_version}` +
+      ` · ${optional ? `${optional} 项可选` : '无可选项'}` +
       (task.selectable === false ? ` · 暂不可用：${task.reason || '请在平台检查方案'}` : '');
   }
   function taskOption(task) {
     const plan = task.capture_plan;
     const option = new Option(`${task.name} / ${task.project_name} / ${task.task_code}` +
-      (!plan ? ' · 方案待配置' : task.selectable === false ? ' · 暂不可用' : ''), task.collection_task_id);
+      (!plan ? ' · 方案待配置' : task.selectable === false ? ` · ${task.reason || '暂不可用'}` : ''), task.collection_task_id);
     option.title = taskDescription(task);
     option.disabled = task.selectable === false;
     return option;
@@ -81,8 +77,6 @@
   function renderSelection() {
     const value = state.recording_selection;
     selected = value?.mode === 'platform' && value.connection_id === state.connection?.id ? value.task_id : '';
-    if (selected) choosingTask = false;
-    el('platformLocal').checked = !selected && !choosingTask;
     if (selected && ![...el('platformTasks').options].some(option => option.value === selected)) {
       el('platformTasks').append(new Option('已选任务（正在验证）', selected));
     }
@@ -100,7 +94,7 @@
         state.recording_selection = result.recording_selection;
         if (version === selectionVersion) {
           renderSelection();
-          message(choosingTask ? taskPrompt() : '设置已自动保存，网页与手柄录制共用。');
+          message(selected ? '已关联采集任务，网页与手柄录制共用。' : '未关联平台任务，网页或手柄可直接开始本地录制。');
         }
       } catch (error) {
         if (version === selectionVersion) {
@@ -120,7 +114,10 @@
     active = Boolean(recording?.recording);
     const task = recording?.task_recording?.binding?.task;
     el('platformActive').textContent = active ? `正在录制：${task?.name || '未关联平台任务，保存到本机'}` : '';
-    for (const id of ['platformTasks', 'platformLocal', 'platformAuto', 'platformConnect', 'platformUploadFormat']) el(id).disabled = active;
+    for (const id of ['platformTasks', 'platformAuto', 'platformConnect', 'platformUploadFormat']) {
+      const target = el(id);
+      if (target) target.disabled = active;
+    }
     el('platformConnect').disabled = active || connecting;
     if (!pendingSelection && !selectionError && recording?.recording_selection &&
         JSON.stringify(recording.recording_selection) !== JSON.stringify(state.recording_selection)) {
@@ -129,13 +126,48 @@
     }
     if (active) el('platformHistoryDialog').close();
   };
+  function syncUploadFormatOptions(localFormat) {
+    const formatField = el('platformUploadFormat');
+    if (!formatField) return;
+    const hint = el('platformFormatHint');
+    const mcapOption = [...formatField.options].find(o => o.value === 'mcap');
+    const lerobotOption = [...formatField.options].find(o => o.value === 'lerobot');
+    if (localFormat === 'mcap') {
+      if (mcapOption) { mcapOption.disabled = false; mcapOption.textContent = 'MCAP · 原始话题'; }
+      if (lerobotOption) { lerobotOption.disabled = true; lerobotOption.textContent = 'LeRobot · 训练数据集（本地未保存）'; }
+      if (formatField.value !== 'mcap') {
+        formatField.value = 'mcap';
+        if (state.upload_format !== 'mcap') {
+          void post('upload-format', { format: 'mcap' }).then(res => { state = res; renderConnection(); }).catch(() => {});
+        }
+      }
+      if (hint) hint.textContent = '本地保存格式为 MCAP，上传格式固定为 MCAP。';
+    } else if (localFormat === 'lerobot') {
+      if (lerobotOption) { lerobotOption.disabled = false; lerobotOption.textContent = 'LeRobot · 训练数据集'; }
+      if (mcapOption) { mcapOption.disabled = true; mcapOption.textContent = 'MCAP · 原始话题（本地未保存）'; }
+      if (formatField.value !== 'lerobot') {
+        formatField.value = 'lerobot';
+        if (state.upload_format !== 'lerobot') {
+          void post('upload-format', { format: 'lerobot' }).then(res => { state = res; renderConnection(); }).catch(() => {});
+        }
+      }
+      if (hint) hint.textContent = '本地保存格式为 LeRobot，上传格式固定为 LeRobot。';
+    } else { // both
+      if (mcapOption) { mcapOption.disabled = false; mcapOption.textContent = 'MCAP · 原始话题'; }
+      if (lerobotOption) { lerobotOption.disabled = false; lerobotOption.textContent = 'LeRobot · 训练数据集'; }
+      formatField.value = state.upload_format || 'lerobot';
+      if (hint) hint.textContent = '本地同时保存 MCAP 与 LeRobot，可任选一种上传格式。';
+    }
+  }
+  window.platformSyncLocalFormat = syncUploadFormatOptions;
   function renderConnection() {
     const connection = state.connection;
     el('platformConnection').textContent = connection
       ? `平台：${connection.platform_name} · 机器人：${connection.robot_name} · ${connection.verified ? '已连接' : '等待验证'}`
       : '尚未连接平台';
     el('platformAuto').checked = state.auto_upload === true;
-    el('platformUploadFormat').value = state.upload_format || 'mcap';
+    const localFmt = state.local_format || document.getElementById('topicRecordingFormat')?.value || 'both';
+    syncUploadFormatOptions(localFmt);
   }
   async function refreshTasks() {
     if (!state.connection) return;
@@ -170,11 +202,11 @@
             ? '任务计划修订已变化，请明确重新选择任务后开始录制。原录制快照保持不变。'
             : '任务已刷新。开始录制时准备并固定本段方案；方案选择不会启动设备发布。');
         } catch (error) {
-          if (generation === refreshGeneration) message(`原选择已不可用或验证失败：${error.message}。请选择其他任务，或勾选“暂不关联平台任务”后保存到本机。`);
+          if (generation === refreshGeneration) message(`原选择已不可用或验证失败：${error.message}。请选择其他任务，或将任务置空后保存到本机。`);
         }
-      } else message(choosingTask ? taskPrompt() : '未关联平台任务，网页或手柄可直接开始本地录制。');
+      } else message('未关联平台任务，网页或手柄可直接开始本地录制。');
     } catch (error) {
-      if (generation === refreshGeneration) message(`任务刷新失败：${error.message}。已选任务保留；断网时可勾选“暂不关联平台任务”，照常保存到本机。`);
+      if (generation === refreshGeneration) message(`任务刷新失败：${error.message}。已选任务保留；断网时可将任务置空，照常保存到本机。`);
     }
   }
   async function refreshRecords() {
@@ -227,7 +259,18 @@
           try { await post('upload-recording', { recording_id: record.upload_target || record.recording_id }); await refreshRecords(); }
           catch (error) { message(error.message); }
         };
-        action.append(button); row.append(action); body.append(row);
+        action.append(button);
+        if (record.binding) {
+          const reupload = document.createElement('button');
+          reupload.textContent = '另选任务上传';
+          reupload.style.marginLeft = '6px';
+          reupload.disabled = ['starting', 'recording', 'stopping', 'finalizing', 'deleted'].includes(record.state);
+          reupload.onclick = async () => {
+            await openHistory(record.source_recording_id || record.recording_id, values[0], (record.upload_format || record.format) === 'lerobot' ? 'LEROBOT_V3' : 'MCAP');
+          };
+          action.append(reupload);
+        }
+        row.append(action); body.append(row);
       }
       if (!rows.length) { const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 8;
         cell.textContent = '录制后会在这里显示整理、上传、平台处理和质检状态。'; row.append(cell); body.append(row); }
@@ -235,6 +278,8 @@
   }
   window.platformRefreshRecords = refreshRecords;
   async function historyTasks() {
+    el('platformHistoryUpload').disabled = true;
+    el('platformHistoryError').textContent = '正在加载任务…';
     try {
       const result = await call('tasks?' + new URLSearchParams({ connection_id: historyTarget.connection_id,
         source_format: historyTarget.source_format, q: el('platformHistorySearch').value, page: String(historyPage) }));
@@ -242,14 +287,24 @@
       select.replaceChildren(new Option('为此录制选择任务', ''), ...result.items.map(t => new Option(`${t.name} / ${t.project_name} / ${t.task_code}`, t.collection_task_id)));
       if (historySelected && !result.items.some(t => t.collection_task_id === historySelected)) select.append(new Option('已选任务（开始上传时验证）', historySelected));
       select.value = historySelected;
-      el('platformHistoryPrev').disabled = historyPage <= 1; el('platformHistoryNext').disabled = historyPage * 20 >= result.total;
+      if (el('platformHistoryPage')) {
+        el('platformHistoryPage').textContent = `第 ${historyPage} 页 · 共 ${result.total || result.items.length} 个任务`;
+      }
+      el('platformHistoryError').textContent = result.items.length ? '' : '没有匹配的任务，请调整搜索条件或在平台创建任务。';
+      el('platformHistoryUpload').disabled = !historySelected;
+      el('platformHistoryPrev').disabled = historyPage <= 1; el('platformHistoryNext').disabled = historyPage * 20 >= (result.total || result.items.length);
     } catch (error) { el('platformHistoryError').textContent = error.message; }
   }
   async function openHistory(identity, name, source_format = 'MCAP') {
     if (!state.connection) { message('请先连接平台，再为历史录制选择任务'); return; }
     historyTarget = { identity, connection_id: state.connection.id, source_format }; historySelected = ''; historyPage = 1;
     el('platformHistoryName').textContent = name; el('platformHistoryError').textContent = '';
-    el('platformHistorySearch').value = ''; el('platformHistoryDialog').showModal(); await historyTasks();
+    el('platformHistoryFormat').textContent = `本次上传格式：${source_format === 'LEROBOT_V3' ? 'LeRobot 数据集' : 'MCAP 原始录制'}`;
+    el('platformHistorySearch').value = '';
+    el('platformHistoryUpload').disabled = true;
+    el('platformHistoryUpload').textContent = '选择并上传';
+    el('platformHistoryDialog').showModal();
+    await historyTasks();
   }
   window.platformUploadHistory = openHistory;
   async function init() {
@@ -261,7 +316,7 @@
       const link = el('platformLink').value;
       el('platformLink').value = '';
       connectionMessage('正在连接平台…');
-      try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null; choosingTask = false;
+      try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null;
         connectionMessage('连接成功，请选择采集任务。');
         renderSelection(); renderConnection(); await refreshTasks(); }
       catch (error) {
@@ -275,20 +330,9 @@
     el('platformProject').onchange = () => { page = 1; void refreshTasks(); };
     el('platformPrev').onclick = () => { page--; void refreshTasks(); };
     el('platformNext').onclick = () => { page++; void refreshTasks(); };
-    el('platformTasks').onchange = () => { choosingTask = false; selected = el('platformTasks').value; el('platformLocal').checked = !selected;
+    el('platformTasks').onchange = () => { selected = el('platformTasks').value;
       el('platformDescription').textContent = taskDescription(tasks.find(task => task.collection_task_id === selected));
       return saveSelection(); };
-    el('platformLocal').onchange = () => {
-      choosingTask = !el('platformLocal').checked && !selected;
-      if (choosingTask) {
-        // Wait for an explicit task choice instead of saving local mode and
-        // checking the box again when the save or status update completes.
-        message(taskPrompt());
-        el('platformTasks').focus();
-        return selectionSave;
-      }
-      return saveSelection();
-    };
     el('platformUploadFormat').onchange = async () => {
       const field = el('platformUploadFormat'); field.disabled = true;
       try { state = await post('upload-format', { format: field.value }); renderConnection();
@@ -304,14 +348,23 @@
     el('platformHistorySearch').oninput = () => { historyPage = 1; void historyTasks(); };
     el('platformHistoryPrev').onclick = () => { historyPage--; void historyTasks(); };
     el('platformHistoryNext').onclick = () => { historyPage++; void historyTasks(); };
-    el('platformHistoryTask').onchange = () => { historySelected = el('platformHistoryTask').value; };
+    el('platformHistoryTask').onchange = () => { historySelected = el('platformHistoryTask').value; el('platformHistoryUpload').disabled = !historySelected; };
     el('platformHistoryUpload').onclick = async () => {
       try {
         if (!historySelected) throw new Error('请明确选择这条录制的任务');
+        el('platformHistoryUpload').disabled = true;
+        el('platformHistoryClose').disabled = true;
+        el('platformHistoryUpload').textContent = '正在提交…';
         await post('upload-recording', { recording_id: historyTarget.identity, selection: { mode: 'platform',
-          connection_id: historyTarget.connection_id, task_id: historySelected } });
+          connection_id: historyTarget.connection_id, task_id: historySelected },
+          source_format: historyTarget.source_format, new_upload: true });
         el('platformHistoryDialog').close(); await refreshRecords();
       } catch (error) { el('platformHistoryError').textContent = error.message; }
+      finally {
+        el('platformHistoryUpload').textContent = '选择并上传';
+        el('platformHistoryUpload').disabled = !historySelected;
+        el('platformHistoryClose').disabled = false;
+      }
     };
     const generation = connectionGeneration;
     try {

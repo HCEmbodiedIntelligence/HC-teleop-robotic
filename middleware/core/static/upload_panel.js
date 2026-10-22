@@ -88,7 +88,14 @@ window.mountUploadPanel = function (element) {
           const button = document.createElement('button'); button.textContent = label;
           button.onclick = () => run(operation, body); td.append(button);
         }
-        const detail = document.createElement('p'); detail.textContent = [job.code, job.next_action].filter(Boolean).join('：');
+        let jobDetail = [job.code, job.next_action].filter(Boolean).join('：');
+        const failedEp = (job.episodes || []).find(e => e.status === 'FAILED');
+        if (failedEp?.error_code === 'LEROBOT_DATASET_SCHEMA_CONFLICT') {
+          jobDetail = failedEp.error_detail || '数据集 Schema 已固定，上传数据与已有结构冲突';
+        } else if (failedEp?.error_detail) {
+          jobDetail = failedEp.error_detail;
+        }
+        const detail = document.createElement('p'); detail.textContent = jobDetail; detail.title = jobDetail;
         td.append(detail); row.append(td); tbody.append(row);
       }
       if (value.error || Object.keys(value.scan_errors || {}).length) error.textContent = JSON.stringify({service: value.error, scan: value.scan_errors});

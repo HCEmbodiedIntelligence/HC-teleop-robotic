@@ -25,6 +25,12 @@
               "null"
             ]
           },
+          "error_detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "next_action": {
             "enum": [
               "wait",

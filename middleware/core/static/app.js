@@ -566,6 +566,10 @@ function updateRecordingFormatFields() {
   for(const id of ['#topicRecordingLerobotFps','#topicRecordingLerobotTask']) {
     if($(id)) $(id).disabled=!usesLeRobot;
   }
+  if (typeof window !== 'undefined') window.platformSyncLocalFormat?.(format);
+}
+if (typeof window !== 'undefined') {
+  window.getLocalRecordingFormat = () => $('#topicRecordingFormat')?.value || 'both';
 }
 
 function exportProgressText(progress={}) {
@@ -1237,9 +1241,14 @@ async function loadDatasets() {
       };
 
       const platformBtn = document.createElement('button');
-      platformBtn.className = 'btn-sm'; platformBtn.textContent = '选择任务后上传';
-      platformBtn.disabled = datasetUnavailable(file) || Boolean(file.platform_recording?.binding);
-      platformBtn.onclick = () => window.platformUploadHistory?.(datasetIdentifier(file), file.filename, isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP');
+      platformBtn.className = 'btn-sm';
+      platformBtn.textContent = file.platform_recording?.binding ? '另选任务上传' : '选择任务后上传';
+      platformBtn.disabled = datasetUnavailable(file);
+      platformBtn.title = datasetUnavailable(file) ? '数据生成完成后可上传' : '选择目标任务和上传；已有上传记录保持不变';
+      platformBtn.onclick = () => window.platformUploadHistory?.(
+        file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file),
+        file.filename,
+        isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP');
       group.append(downloadLink, platformBtn, deleteBtn);
       actionCell.append(group);
 

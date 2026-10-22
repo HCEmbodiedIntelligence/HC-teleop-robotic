@@ -97,6 +97,8 @@ class TaskRecorder:
             upload_format = self.upload_format(job) if job is not None else self.platform.state['upload_format']
             if upload_format in ('lerobot', 'both') and self.recorder.save_format not in ('lerobot', 'both'):
                 raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '上传 LeRobot 需要在话题录制页将本地保存方式设为 LeRobot 或 MCAP + LeRobot')
+            if self.recorder.save_format == 'lerobot' and upload_format != 'lerobot':
+                raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '本地保存格式为 LeRobot 时，上传格式只能选择 LeRobot')
             if job is None:
                 identity = uuid4().hex
                 chosen = filename or ('ros2_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + identity[:8])
@@ -357,7 +359,7 @@ class TaskRecorder:
             self.platform.upload.enqueue(identity, job['binding']['binding_id'])
         return 'queued' if upload else 'ready'
 
-    def upload_recording(self, identity, selection=None):
+    def upload_recording(self, identity, selection=None, source_format=None, new_upload=False):
         with self.lock:
             requested = identity
             job = self.jobs.get(identity)
@@ -378,6 +380,45 @@ class TaskRecorder:
                 raise UploadError('RECORDING_NOT_READY', '录制尚未完整关闭，原始数据已保留')
             if identity in self.pending:
                 raise UploadError('ARTIFACT_BUSY', '正在整理本段数据，请稍后重试')
+            if new_upload:
+                format_by_source = {value: key for key, value in SOURCE_FORMATS.items()}
+                if source_format not in format_by_source:
+                    raise UploadError('UPLOAD_FORMAT_INVALID', '请选择有效的上传格式')
+                if not selection or selection.get('mode') != 'platform':
+                    raise UploadError('TASK_REQUIRED', '请选择目标任务')
+                binding = self.platform.freeze(selection, remember=False, source_format=source_format)
+                if binding['local_robot'].get('profile_id') != job['local_robot'].get('profile_id'):
+                    raise UploadError('LOCAL_ROBOT_MISMATCH', '历史录制的机器人配置与当前配置不同')
+                fmt = format_by_source[source_format]
+                source_id = job.get('source_recording_id', identity)
+                existing = next((j for j in self.jobs.values()
+                    if j.get('source_recording_id', j['recording_id']) == source_id
+                    and j.get('binding') and j['binding']['binding_id'] == binding['binding_id']
+                    and self.upload_format(j) == fmt), None)
+                if existing:
+                    job = existing
+                else:
+                    source = Path(job['path'])
+                    dataset = Path(job.get('dataset_path') or self.directory / 'lerobot' / source.stem)
+                    if fmt == 'lerobot':
+                        from .export_progress import progress_path
+                        progress = read_json(progress_path(dataset)) if progress_path(dataset).exists() else {}
+                        if not (dataset / 'meta/info.json').is_file() or progress.get('state') in ('exporting', 'error'):
+                            raise UploadError('EXPORT_INCOMPLETE', 'LeRobot 数据集未完成，不能上传')
+                    elif not source.is_file():
+                        raise UploadError('MCAP_INCOMPLETE', '本地 MCAP 文件不存在')
+                    job = copy.deepcopy(job)
+                    job.update(recording_id=uuid4().hex, request_id=uuid4().hex,
+                        source_recording_id=source_id, binding=binding, intent=copy.deepcopy(selection),
+                        upload_format=fmt, upload_requested=True, state='upload_pending', error=None)
+                    for field in ('artifacts', 'capture_snapshot', 'capture_snapshots', 'deleted_formats'):
+                        job.pop(field, None)
+                    if fmt == 'lerobot':
+                        job.update(dataset_path=str(dataset), adopted_dataset=True)
+                    self.save(job)
+                    self.jobs[job['recording_id']] = job
+                identity = job['recording_id']
+                formats = (fmt,)
             if not job['binding']:
                 if not selection or selection.get('mode') != 'platform':
                     raise UploadError('TASK_REQUIRED', '请为这条历史录制明确选择任务')
@@ -429,28 +470,75 @@ class TaskRecorder:
             from .export_progress import progress_path, read_progress
             if read_progress(progress_path(dataset)).get('state') in ('exporting', 'error'):
                 raise UploadError('EXPORT_INCOMPLETE', '历史数据集尚未完整整理，源文件已保留')
+            # 1. Exact match by dataset name
             target = next((p for p in (self.directory / '.lerobot_sources' / (dataset.name+'.mcap'),
                                       self.directory / (dataset.name+'.mcap')) if p.is_file()), None)
+            # 2. Match standard timestamp pattern (teleop_YYYYMMDD_HHMMSS)
             if target is None:
-                raise UploadError('LEGACY_OWNERSHIP_UNKNOWN', '缺少历史数据集的源 MCAP，无法确认设备与采集时间')
+                import re
+                match = re.search(r'teleop_\d{8}_\d{6}', dataset.name)
+                if match:
+                    base = match.group(0)
+                    target = next((p for p in (self.directory / '.lerobot_sources' / (base+'.mcap'),
+                                              self.directory / (base+'.mcap')) if p.is_file()), None)
+            # 3. Match candidate stem before trailing suffixes (e.g. _sync_fixed, _full_timeline)
+            if target is None and '_' in dataset.name:
+                parts = dataset.name.split('_')
+                for i in range(len(parts) - 1, 0, -1):
+                    cand = '_'.join(parts[:i])
+                    target = next((p for p in (self.directory / '.lerobot_sources' / (cand+'.mcap'),
+                                              self.directory / (cand+'.mcap')) if p.is_file()), None)
+                    if target:
+                        break
+
+            # 4. Fallback if source MCAP is truly missing/deleted: use dataset metadata directly
+            if target is None:
+                info_path = dataset / 'meta/info.json'
+                if not info_path.is_file():
+                    raise UploadError('LEGACY_OWNERSHIP_UNKNOWN', '缺少历史数据集的源 MCAP 或元数据，无法确认设备与采集时间')
+                info = read_json(info_path)
+                local = self.platform.identity_provider()
+                robot_type = info.get('robot_type')
+                if robot_type and robot_type != local.get('profile_id'):
+                    raise UploadError('LOCAL_ROBOT_MISMATCH', '历史数据集的机器人配置不匹配')
+                stamp = lambda ns: datetime.fromtimestamp(ns / 1e9, timezone.utc).isoformat()
+                started_at, ended_at = None, None
+                sync_file = dataset / 'meta/teleop_sync.json'
+                if sync_file.is_file():
+                    try:
+                        sync_data = read_json(sync_file)
+                        if sync_data.get('grid_start_log_time_ns') and sync_data.get('grid_end_log_time_ns'):
+                            started_at = stamp(sync_data['grid_start_log_time_ns'])
+                            ended_at = stamp(sync_data['grid_end_log_time_ns'])
+                        elif sync_data.get('origin_log_time_ns'):
+                            started_at = stamp(sync_data['origin_log_time_ns'])
+                            ended_at = stamp(sync_data['origin_log_time_ns'] + int(1e9))
+                    except Exception:
+                        pass
+                if not started_at or not ended_at:
+                    mtime = dataset.stat().st_mtime
+                    started_at = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+                    ended_at = datetime.fromtimestamp(mtime + 1, timezone.utc).isoformat()
+
+                identity = uuid4().hex
+                job = dict(recording_id=identity, request_id=uuid4().hex, intent={'mode': 'local'},
+                           requested_filename=dataset.name, path=str(dataset), state='ready', error=None,
+                           binding=None, started_at=started_at, ended_at=ended_at,
+                           format='lerobot', metadata={'profile_id': robot_type or local.get('profile_id')},
+                           local_robot=local, upload_requested=False,
+                           dataset_path=str(dataset), adopted_dataset=True)
+                self.jobs[identity] = job
+                self.save(job)
+                return job
+
         if not target.is_file() or target.suffix != '.mcap':
             raise UploadError('LEGACY_RECORDING_UNSUPPORTED', '该历史格式需要原来的封存/上传流程')
         if target.is_symlink() or any(p.is_symlink() for p in target.parents):
             raise UploadError('UNSAFE_PATH')
-        for queued in self.platform.upload.queue.jobs():
-            root = Path(queued['root'])
-            if root == dataset or any(root/a['path'] == target for a in queued['manifest']['assets']):
-                raise UploadError('TASK_BINDING_MISMATCH', '该录制已有上传队列，请在上传列表重试原作业')
-        for path in self.platform.upload.state_dir.glob('*.json'):
-            descriptor = read_json(path)
-            root = Path(descriptor.get('root', ''))
-            if descriptor.get('binding_id') and (root == dataset or any(
-                    root/a['path'] == target for a in descriptor.get('files', []))):
-                raise UploadError('TASK_BINDING_MISMATCH', '该录制已经封存，原归属不能改变')
         metadata = read_recording_metadata(target)
         local = self.platform.identity_provider()
-        if metadata.get('profile_id') != local['profile_id'] or metadata.get('platform_task'):
-            raise UploadError('LEGACY_OWNERSHIP_UNKNOWN', '历史归属或设备不能自动确认，请使用原录制服务处理')
+        if metadata.get('profile_id') and metadata.get('profile_id') != local.get('profile_id'):
+            raise UploadError('LOCAL_ROBOT_MISMATCH', '历史录制的机器人配置不匹配')
         from mcap.reader import make_reader
         with target.open('rb') as stream:
             summary = make_reader(stream).get_summary()
@@ -458,10 +546,16 @@ class TaskRecorder:
             raise UploadError('MCAP_INCOMPLETE', '历史录制不完整或没有可确认的采集时间')
         statistics = summary.statistics
         stamp = lambda ns: datetime.fromtimestamp(ns / 1e9, timezone.utc).isoformat()
+        binding = None
+        if metadata.get('platform_task'):
+            try:
+                binding = json.loads(metadata['platform_task'])
+            except Exception:
+                binding = None
         identity = uuid4().hex
-        job = dict(recording_id=identity, request_id=uuid4().hex, intent={'mode': 'local'},
-                   requested_filename=target.name, path=str(target), state='ready', error=None,
-                   binding=None, started_at=stamp(statistics.message_start_time),
+        job = dict(recording_id=identity, request_id=uuid4().hex, intent={'mode': 'platform' if binding else 'local'},
+                   requested_filename=dataset.name if dataset else target.name, path=str(target), state='ready', error=None,
+                   binding=binding, started_at=stamp(statistics.message_start_time),
                    ended_at=stamp(statistics.message_end_time), format='lerobot' if dataset else 'mcap', metadata=metadata,
                    local_robot=local, upload_requested=False)
         if dataset:

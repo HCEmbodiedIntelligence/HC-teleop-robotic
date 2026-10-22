@@ -354,12 +354,8 @@
         <p id="platformDescription"></p>
         <div class="form-grid">
           <div>
-            <label class="toggle"><input id="platformLocal" type="checkbox" checked><span></span>暂不关联平台任务</label>
-            <p class="form-help">未联网或暂不确定任务时使用。本段照常保存到本机，不自动上传；之后可在下方记录中选择任务再上传。取消勾选后，请选择采集任务以保存关联。</p>
-          </div>
-          <div>
             <label class="toggle"><input id="platformAuto" type="checkbox"><span></span>录制结束后自动上传</label>
-            <p class="form-help">仅对已关联平台任务的录制生效。关闭后仍保存到本机，可在下方记录中手动上传。</p>
+            <p class="form-help">仅对已选择平台任务的录制生效。关闭后仍保存到本机，可在下方记录中手动上传。</p>
           </div>
         </div>
         <div class="platform-format-row">
@@ -374,11 +370,44 @@
     <div id="toast" role="status"></div>
   </main>
   <script src="/static/table_columns.js?v=3"></script>
-  <dialog id="platformHistoryDialog"><h3>为历史录制选择任务</h3><p id="platformHistoryName"></p>
-    <label>搜索任务<input id="platformHistorySearch" type="search"></label>
-    <label>任务<select id="platformHistoryTask"><option value="">请选择任务</option></select></label>
-    <button id="platformHistoryPrev">上一页</button><button id="platformHistoryNext">下一页</button>
-    <p id="platformHistoryError" role="alert"></p><button id="platformHistoryUpload" class="primary">选择并上传</button><button id="platformHistoryClose">取消</button>
+  <dialog id="platformHistoryDialog">
+    <form id="platformHistoryForm" method="dialog" style="max-width:580px;" onsubmit="event.preventDefault();">
+      <div class="dialog-title">
+        <div>
+          <h2>为历史录制选择任务</h2>
+          <p id="platformHistoryName" style="font-family:ui-monospace,Consolas,monospace;color:var(--muted);word-break:break-all;"></p>
+        </div>
+        <button class="dialog-close" type="button" id="platformHistoryTitleClose" onclick="document.getElementById('platformHistoryDialog').close()">×</button>
+      </div>
+      <div style="margin-top:16px;">
+        <p id="platformHistoryFormat" class="platform-format-badge" style="display:inline-block;margin:0 0 12px;padding:3px 10px;background:var(--bg);border:1px solid var(--line);border-radius:4px;font-size:12px;color:var(--text);"></p>
+        <div class="form-grid">
+          <label>搜索任务
+            <input id="platformHistorySearch" type="search" placeholder="输入任务名称或编号搜索">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <label>目标采集任务
+            <select id="platformHistoryTask">
+              <option value="">为此录制选择任务</option>
+            </select>
+          </label>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+            <span id="platformHistoryPage" style="font-size:12px;color:var(--muted);"></span>
+            <div style="display:flex;gap:6px;">
+              <button type="button" id="platformHistoryPrev" class="btn-sm">上一页</button>
+              <button type="button" id="platformHistoryNext" class="btn-sm">下一页</button>
+            </div>
+          </div>
+        </div>
+        <p class="form-help" style="margin-top:14px;">选择本次上传的目标任务。已有上传记录和原任务归属保持不变。</p>
+        <div id="platformHistoryError" class="dialog-error" role="alert" style="margin-top:10px;"></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="platformHistoryClose">取消</button>
+        <button type="button" id="platformHistoryUpload" class="primary" disabled>选择并上传</button>
+      </div>
+    </form>
   </dialog>
   <script src="/static/platform_panel.js?v=11-capture-formats"></script>
   <script src="/static/app.js?v=25-capture-formats"></script>

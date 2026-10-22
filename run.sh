@@ -129,7 +129,27 @@ if [[ "${MODE}" == middleware ]]; then
   [[ "${MONITOR}" == true ]] || ARGS+=(--no-monitor)
   [[ -z "${SERVER_HOST}" ]] || ARGS+=(--host "${SERVER_HOST}")
   [[ -z "${SERVER_PORT}" ]] || ARGS+=(--port "${SERVER_PORT}")
-  exec "${PROJECT_ROOT}/middleware/start.sh" "${ARGS[@]}"
+  # Keep the public entry point visible in ps, and own the child's lifetime.
+  MIDDLEWARE_PID=""
+  cleanup_middleware() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "${MIDDLEWARE_PID}" ]]; then
+      kill -TERM "${MIDDLEWARE_PID}" 2>/dev/null || true
+      wait "${MIDDLEWARE_PID}" 2>/dev/null || true
+    fi
+    exit "${status}"
+  }
+  trap cleanup_middleware EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" \
+    --parent "$$" -- "${PROJECT_ROOT}/middleware/start.sh" "${ARGS[@]}" &
+  MIDDLEWARE_PID=$!
+  echo "[HC] run.sh PID=$$; stop this stack with: kill $$"
+  wait "${MIDDLEWARE_PID}"
+  exit $?
 fi
 export HC_EXTERNAL_STACK=1
 

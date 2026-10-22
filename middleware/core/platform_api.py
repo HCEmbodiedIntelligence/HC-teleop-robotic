@@ -24,6 +24,10 @@ def register_platform_routes(app, runtime):
             if request.method == 'GET':
                 if operation == 'status':
                     result = await asyncio.to_thread(platform.status)
+                    local_fmt = getattr(runtime.recorder, 'save_format', None)
+                    if not local_fmt and hasattr(runtime, 'config'):
+                        local_fmt = runtime.config.get('ros', {}).get('recording', {}).get('format')
+                    result = {**result, 'local_format': local_fmt or 'both'}
                 elif operation == 'tasks':
                     query = dict(request.query)
                     query['page'] = max(1, int(query.get('page', 1)))
@@ -52,6 +56,10 @@ def register_platform_routes(app, runtime):
                     result = await asyncio.to_thread(platform.verify)
                 elif operation == 'upload-format':
                     result = await asyncio.to_thread(runtime.recorder.set_upload_format, body['format'])
+                    local_fmt = getattr(runtime.recorder, 'save_format', None)
+                    if not local_fmt and hasattr(runtime, 'config'):
+                        local_fmt = runtime.config.get('ros', {}).get('recording', {}).get('format')
+                    result['local_format'] = local_fmt or 'both'
                 elif operation == 'auto-upload':
                     result = await asyncio.to_thread(platform.set_auto, body['enabled'])
                 elif operation == 'preflight':
@@ -60,7 +68,8 @@ def register_platform_routes(app, runtime):
                     result = await asyncio.to_thread(runtime.recorder.set_selection, body)
                 elif operation == 'upload-recording':
                     result = await asyncio.to_thread(runtime.recorder.upload_recording,
-                                                      body['recording_id'], body.get('selection'))
+                                                      body['recording_id'], body.get('selection'),
+                                                      body.get('source_format'), body.get('new_upload') is True)
                 elif operation == 'retry-upload':
                     await asyncio.to_thread(platform.upload.queue.retry, body['job_id'])
                     with platform._lock:
