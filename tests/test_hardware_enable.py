@@ -98,6 +98,22 @@ def test_older_queued_stop_does_not_overwrite_later_explicit_resume():
     assert bridge.status()['command_mux']['output_enabled'] is True
 
 
+def test_stop_is_reasserted_after_discovery_but_enable_is_never_repeated():
+    bridge, wire = bridge_for('motion'), Wire()
+    with patch('middleware.core.ros_bridge.time.monotonic', return_value=100.):
+        bridge.emergency_stop('/control/emergency_stop', 'before discovery')
+        wire.drain(bridge)
+    with patch('middleware.core.ros_bridge.time.monotonic', return_value=100.2):
+        wire.drain(bridge)
+        assert wire.values() == [False, False]
+        bridge.receive_hardware_ready(True)
+        bridge.set_command_output_enabled(True)
+        wire.drain(bridge)
+    with patch('middleware.core.ros_bridge.time.monotonic', return_value=100.4):
+        wire.drain(bridge)
+        assert wire.values() == [False, False, True]
+
+
 @pytest.mark.parametrize('topic', ['/control/teleop/enabled', '/control/emergency_stop'])
 def test_config_cannot_alias_vr_or_stop_to_hardware_enable(topic):
     with pytest.raises(ConfigError, match='hardware_enable_topic'):

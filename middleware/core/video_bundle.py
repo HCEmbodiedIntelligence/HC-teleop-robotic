@@ -129,6 +129,10 @@ def prepare(source, target, job):
                    'capture_started_at': job['started_at'], 'capture_ended_at': job['ended_at'],
                    'capture_snapshot': job.get('capture_snapshot'),
                    'videos': [{'path': entry[2], 'frame_count': counts[key]} for key, entry in videos.items()]}
+        correction = source.with_suffix('.correction.json')
+        if correction.is_file():
+            import shutil
+            shutil.copyfile(correction, staging / 'correction.json')
         committed = [{'path': p.relative_to(staging).as_posix(), **checksum(p)}
                      for p in sorted(staging.rglob('*')) if p.is_file()]
         atomic_json(staging / 'manifest.json', {'state': 'completed', 'committed': committed,

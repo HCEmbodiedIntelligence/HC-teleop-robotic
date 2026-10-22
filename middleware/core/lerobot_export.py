@@ -198,6 +198,11 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
         '/action/base/velocity': 'action.base.velocity',
     }
     raw_cameras = {}
+    correction = None
+    sidecar = source.with_suffix('.correction.json')
+    if sidecar.is_file():
+        correction = json.loads(sidecar.read_text())
+    first_observations = {}
     recording_start = recording_end = None
     with source.open('rb') as handle:
         reader = make_reader(handle)
@@ -212,6 +217,12 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             progress.update('读取 MCAP', 25 * message_index / max(1, message_total) if message_total else 0,
                             message_index, message_total, '条消息')
             topic = channel.topic
+            if channel.message_encoding == 'json' and topic in ('/events/control/intervention', '/events/recording/sample_provenance'):
+                event = json.loads(message.data)
+                if event.get('kind') == 'manual_close':
+                    correction = correction or event
+                elif event.get('role') == 'initial_observation':
+                    first_observations[event['topic']] = event
             if channel.message_encoding != 'cdr' or schema is None:
                 continue
             kind = schema.name
@@ -274,7 +285,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 source_topics[key] = topic
     if not names or not raw_cameras.get('action'):
         raise ValueError('LeRobot requires recorded /observation/joint_states and /action/joint_states; missing grid samples are explicitly masked')
-    first_action_names = list(raw_cameras['action'][0][1].name)
+    first_action_names = (list(dict.fromkeys(name for _, message in raw_cameras['action'] for name in message.name))
+                          if correction else list(raw_cameras['action'][0][1].name))
     if not first_action_names:
         raise ValueError('Action has no joint names')
     # A command may intentionally omit passive/free joints in the feedback.
@@ -283,13 +295,24 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     action_names.extend(name for name in first_action_names if name not in names)
     if snapshot:
         action_names = first_action_names
+    action_axis_samples = []
     for key, samples in raw_cameras.items():
         stream_names = (names if key == 'observation.state' else action_names if key == 'action'
                         else action_map[source_topics[key]]['names'])
         if key.startswith('action.source.'):
             numeric_names[key] = stream_names
         try:
-            streams[key] = [(stamp, joint_vector(message, stream_names)) for stamp, message in samples]
+            if key == 'action' and correction:
+                values, times, aggregate = {}, {}, []
+                for stamp, message in samples:
+                    partial = joint_vector(message, list(message.name))
+                    values.update(zip(message.name, partial))
+                    times.update((name, stamp) for name in message.name)
+                    aggregate.append((stamp, [values.get(name, 0.) for name in stream_names]))
+                    action_axis_samples.append((stamp, [times.get(name, -1) for name in stream_names]))
+                streams[key] = aggregate
+            else:
+                streams[key] = [(stamp, joint_vector(message, stream_names)) for stamp, message in samples]
         except ValueError as error:
             raise ValueError(f"{source_topics[key]}: {error}") from error
     for topic, key in extra_keys.items():
@@ -300,6 +323,15 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     progress.update("对齐时间轴", 25, force=True)
     episodes = []
     origin = recording_start
+    if correction:
+        # Extra command sources are not final HC evidence. A correction export
+        # must never append a public program target or fabricate a held axis.
+        if action_sources:
+            raise ValueError('correction export uses only final HC actions; disable extra action_sources for this session')
+        recording_start = correction.get('quality', {}).get('first_action_ns')
+        recording_end = correction['end_ns']-1
+        if recording_start is None:
+            raise ValueError('No final human action in this correction; source remains downloadable')
     keys = list(streams)
     audit = {'source_counts': {key: len(samples) for key, samples in streams.items()}}
     placeholders = {}
@@ -321,12 +353,28 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                       for key, sample in selected.items()}
             values['action'] = list(values['action']) + [v for key in extra_keys.values() for v in values[key]]
             ages = [(stamp - selected[key][0]) / 1e9 if selected[key] is not None else -1.0 for key in keys]
-            rows.append({'values': values,
+            row = {'values': values,
                          'source_times': [(selected[key][0] - origin) / 1e9 if selected[key] is not None else -1.0 for key in keys],
                          'source_available': [float(selected[key] is not None) for key in keys],
                          'source_valid': [float(selected[key] is not None and ages[i] <= max_ages.get(key, sample_max_age(key)) / 1e9) for i, key in enumerate(keys)],
-                         'source_age': ages, 'grid_time': (stamp - origin) / 1e9})
-        episodes.append(rows)
+                         'source_age': ages, 'grid_time': (stamp - origin) / 1e9}
+            if correction:
+                axis_times = latest_sample(action_axis_samples, stamp, None)
+                valid = [value >= 0 and 0 <= stamp-value <= sample_max_age('action')
+                         for value in axis_times[1]] if axis_times else [False]*len(action_names)
+                row['action_valid'] = valid
+                row['source_valid'][keys.index('action')] *= float(all(valid))
+                usable = all(row['source_valid'][index] for index, key in enumerate(keys) if required_stream(key))
+                if not usable:
+                    if rows:
+                        episodes.append(rows)
+                        rows = []
+                    audit['rejected_frames'] += 1
+                    audit['retained_frames'] -= 1
+                    continue
+            rows.append(row)
+        if rows:
+            episodes.append(rows)
     if not episodes:
         raise ValueError('No recording timeline samples; check recorded topics')
     action_names = action_names + [name for item in action_sources for name in item['names']]
@@ -334,6 +382,9 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
         raise ValueError('action source joint names overlap')
     manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
     if snapshot: manifest["capture_snapshot"] = snapshot
+    if correction:
+        manifest.update(correction=correction, initial_observations=first_observations,
+                        action_semantics='HC final sent goal; measured feedback is observation.state; outcome unknown')
     path = staging / 'manifest.json'
     path.write_text(json.dumps(manifest), encoding='utf-8')
     progress.update("对齐完成", 30, sum(map(len, episodes)), sum(map(len, episodes)), "帧", force=True)
@@ -405,6 +456,9 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
         features[key] = {'dtype': 'video', 'shape': tuple(shape), 'names': ['height', 'width', 'channels']}
     features['observation.source_time'] = {'dtype': 'float64', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
     features['observation.recording_time'] = {'dtype': 'float64', 'shape': (1,), 'names': ['seconds_since_first_log_time']}
+    if manifest.get('correction'):
+        features['intervention'] = {'dtype': 'bool', 'shape': (1,), 'names': ['human_action']}
+        features['action.valid'] = {'dtype': 'bool', 'shape': (len(joint_names['action']),), 'names': joint_names['action']}
     if 'sync_audit' in manifest:
         for field in ('source_available', 'source_valid', 'source_age'):
             features['observation.' + field] = {'dtype': 'float32', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
@@ -450,6 +504,9 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
                 frame[key] = np.asarray(Image.open(value).convert('RGB')) if key in manifest['dimensions'] else np.asarray(value, dtype=features[key]['dtype'])
             frame['observation.source_time'] = np.asarray(row['source_times'], dtype=np.float64)
             frame['observation.recording_time'] = np.asarray([row['grid_time']], dtype=np.float64)
+            if manifest.get('correction'):
+                frame['intervention'] = np.asarray([True], dtype=bool)
+                frame['action.valid'] = np.asarray(row['action_valid'], dtype=bool)
             if 'sync_audit' in manifest:
                 for field in ('source_available', 'source_valid', 'source_age'):
                     frame['observation.' + field] = np.asarray(row[field], dtype=np.float32)
@@ -486,6 +543,11 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
         synchronization.update(selection='original state log_time samples, original frame count and frequency',
             missing_policy='absent optional streams remain absent; unsupported per-frame gaps stop export',
             auxiliary_policy='actual causal samples only; no numeric or image placeholders')
+    if manifest.get('correction'):
+        synchronization.update(correction=manifest['correction'], initial_observations=manifest['initial_observations'],
+            clock='MCAP log_time equals original source header or final HC send time; receive provenance retained in source',
+            selection='one correction identity; continuous valid subepisodes split at gaps; recording_time preserves original offsets',
+            intervention_semantics='true means human action, not success; outcome unknown')
     (destination / 'meta' / 'teleop_sync.json').write_text(json.dumps(synchronization, ensure_ascii=False, indent=2))
     return {'path': str(destination), 'format': 'lerobot', 'frames': len(loaded), 'episodes': len(manifest['episodes']), 'fps': manifest['fps'], 'cameras': list(manifest['dimensions']), 'episode_lengths': [len(episode) for episode in manifest['episodes']], 'image_storage': 'mp4_h264', 'sync_audit': manifest.get('sync_audit', {})}
 

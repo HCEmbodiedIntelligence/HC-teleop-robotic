@@ -157,6 +157,21 @@ function messageState(info) {
   return ['正常',`${Number(info.hz||0).toFixed(1)} Hz`,'running'];
 }
 
+function renderIntervention(status,capture) {
+  const state=status?.state||'OFF';
+  const supported=Boolean(status?.peers?.motion&&status?.peers?.teleop);
+  const labels={OFF:'关闭',HOLD:'保持',AUTO:'程序控制',TAKEOVER:'正在接管',MANUAL:'人工控制',RETURNING:'正在交还',FAULT:'故障保持',ESTOP:'急停保持'};
+  setText('#interventionState',labels[state]||state);
+  setText('#interventionReadiness',state==='OFF'?(supported?'先开启会话，等待观测和录制资源就绪。':'DAgger 需要启动 Motion 后端及 VR 接收器。'):
+    `${capture?.ready?'采集就绪':'采集准备中'} · 可用片段 ${capture?.prepared_slots||0} · ${status?.reason||''}${capture?.error?' · '+capture.error:''}${status?.recording_error?' · '+status.recording_error:''}`);
+  for(const button of $$('[data-intervention]')) {
+    const action=button.dataset.intervention;
+    button.disabled=action==='enable'?state!=='OFF'||!supported:action==='return'?
+      !(state==='HOLD'&&capture?.ready&&status?.input_valid&&status?.input_armed&&!status?.gripped):
+      action==='hold'?state==='OFF'||state==='HOLD':state==='OFF';
+  }
+}
+
 function renderCommandMux(ros) {
   const mux=ros.command_mux||{};
   const source=mux.source||'vr';
@@ -167,6 +182,7 @@ function renderCommandMux(ros) {
   if(sourceState)sourceState.className=mux.output_enabled===false?'error':'running';
   for(const button of $$('.source-switch button')) {
     button.classList.toggle('active',button.dataset.source===source);
+    button.disabled=Boolean(ros.ownership && ros.ownership.state!=='OFF');
   }
   setText('#vrCommandTopic',mux.vr_topic||'/control/vr/joint_states');
   setText('#exoCommandTopic',mux.exoskeleton_topic||'/control/exoskeleton/joint_states');
@@ -275,6 +291,7 @@ function renderStatus(data) {
   setState('#rosState',ros.state);
   setText('#rosMeta',`${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`);
   renderCommandMux(ros);
+  renderIntervention(ros.ownership, (data.recording?.status||data.recording)?.corrections);
   renderSafetyButton(ros);
   setState('#vrState', vr.state);
   setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
@@ -1484,6 +1501,16 @@ function bindSimulationControls() {
 }
 
 async function init() {
+  for(const button of $$('[data-intervention]'))button.onclick=async()=>{
+    button.disabled=true;
+    try {
+      const status=await api('/api/control/ownership');
+      const result=await api('/api/control/intervention/'+button.dataset.intervention, {
+        method:'POST', body:JSON.stringify({request_id:crypto.randomUUID(), session_id:status.session_id,
+                                          expected_epoch:status.epoch})});
+      renderIntervention(result.ownership,result.capture);
+    } catch(error){toast(error.message,true);}
+  };
   route();
   bindSimulationControls();
   loadSimulation();

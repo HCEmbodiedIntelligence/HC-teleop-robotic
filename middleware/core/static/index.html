@@ -36,6 +36,14 @@
         <article><label>关节反馈</label><strong id="jointFeedbackState">--</strong><span id="jointFeedbackMeta">等待 /observation/joint_states</span></article>
       </div>
       <div class="grid two">
+        <article class="panel">
+          <div class="panel-title"><div><h2>人工干预与纠正采集</h2><p>开始程序后，握住右 Grip 接管，正常松手自动交还。每次接管单独保存。</p></div><span id="interventionState" class="tag">关闭</span></div>
+          <p id="interventionReadiness" role="status">先开启会话，等待观测和录制资源就绪。</p>
+          <button data-intervention="enable">开启会话</button>
+          <button data-intervention="return" disabled>开始程序</button>
+          <button data-intervention="hold" disabled>暂停</button>
+          <button data-intervention="disable" disabled>退出会话</button>
+        </article>
         <article class="panel source-panel">
           <div class="panel-title"><div><h2>控制源切换</h2><p>只有选中的来源能够转发到机器人标准关节命令</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
           <div class="source-switch">

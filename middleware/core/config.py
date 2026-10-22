@@ -265,6 +265,20 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     directory = recording.get("directory")
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
+    corrections = recording.setdefault('corrections', {})
+    if not isinstance(corrections, dict):
+        raise ConfigError('recording.corrections must be an object')
+    for key, default, lower, upper in (
+        ('prepared_slots', 4, 2, 16), ('action_queue_items', 4096, 64, 65536),
+        ('total_queue_bytes', 268435456, 8388608, 2147483648),
+        ('observation_cache_bytes', 67108864, 1048576, 536870912)):
+        number = corrections.setdefault(key, default)
+        if type(number) is not int or not lower <= number <= upper:
+            raise ConfigError('recording.corrections.'+key+' is outside supported bounds')
+    for key, default in (('observation_max_age_sec', .25), ('late_message_sec', .2), ('long_gap_sec', .2)):
+        number = corrections.setdefault(key, default)
+        if isinstance(number, bool) or not isinstance(number, (float, int)) or not .01 <= number <= 2.:
+            raise ConfigError('recording.corrections.'+key+' must be between .01 and 2 seconds')
     sources = recording.setdefault("action_sources", [])
     if not isinstance(sources, list):
         raise ConfigError("action_sources must be a list")

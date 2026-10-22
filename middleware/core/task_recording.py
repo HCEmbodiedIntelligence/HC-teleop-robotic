@@ -19,7 +19,10 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-class TaskRecorder:
+from .correction_support import CorrectionSupport
+
+
+class TaskRecorder(CorrectionSupport):
     def __init__(self, recorder, platform):
         self.recorder, self.platform = recorder, platform
         self.recorder.task_managed = True
@@ -39,7 +42,7 @@ class TaskRecorder:
         for path in sorted(self.state_dir.glob('*.json')):
             job = read_json(path)
             self.jobs[job['recording_id']] = job
-            if job['state'] in ('starting', 'recording', 'stopping'):
+            if job['state'] in ('starting', 'armed', 'recording', 'stopping'):
                 job.update(state='interrupted', error='录制中断，原始数据已保留；请检查完整性后处理')
                 self.save(job)
             elif job['state'] in ('finalizing', 'upload_pending'):
@@ -57,13 +60,13 @@ class TaskRecorder:
 
     def set_selection(self, selection):
         with self.lock:
-            if self.active or self.recorder.is_recording():
+            if self.active or self.recorder.is_recording() or self.corrections:
                 raise UploadError('RECORDING_ACTIVE', '请停止当前录制后修改任务')
             return self.platform.set_recording_selection(selection)
 
     def set_upload_format(self, value):
         with self.lock:
-            if self.active or self.recorder.is_recording():
+            if self.active or self.recorder.is_recording() or self.corrections:
                 raise UploadError('RECORDING_ACTIVE', '请停止当前录制后修改上传格式')
             return self.platform.set_upload_format(value)
 
@@ -71,8 +74,11 @@ class TaskRecorder:
     def upload_format(job):
         return job.get('upload_format') or ('mcap' if job['format'] == 'both' else job['format'])
 
-    def start(self, filename='', metadata=None, selection=None):
+    def start(self, filename='', metadata=None, selection=None, *, _prepared_writer=None):
         with self.lock:
+            if self.corrections and _prepared_writer is None:
+                raise ValueError('correction capture owns recording; exit the intervention session first')
+            writer = _prepared_writer or self.recorder
             selection = copy.deepcopy(selection if selection is not None else self.platform.recording_selection())
             if not isinstance(selection, dict) or selection.get('mode') not in ('local', 'platform'):
                 raise UploadError('RECORDING_SELECTION_REQUIRED', '请选择平台任务或“暂不关联平台任务”')
@@ -95,9 +101,9 @@ class TaskRecorder:
             if self.active or self.recorder.is_recording():
                 raise UploadError('RECORDING_ACTIVE', '已有录制正在进行，请先停止')
             upload_format = self.upload_format(job) if job is not None else self.platform.state['upload_format']
-            if upload_format in ('lerobot', 'both') and self.recorder.save_format not in ('lerobot', 'both'):
+            if upload_format in ('lerobot', 'both') and writer.save_format not in ('lerobot', 'both'):
                 raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '上传 LeRobot 需要在话题录制页将本地保存方式设为 LeRobot 或 MCAP + LeRobot')
-            if self.recorder.save_format == 'lerobot' and upload_format != 'lerobot':
+            if writer.save_format == 'lerobot' and upload_format != 'lerobot':
                 raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '本地保存格式为 LeRobot 时，上传格式只能选择 LeRobot')
             if job is None:
                 identity = uuid4().hex
@@ -106,16 +112,16 @@ class TaskRecorder:
                 if not chosen.endswith('.mcap'): chosen += '.mcap'
                 job = dict(recording_id=identity, request_id=request_id, intent=intent,
                            requested_filename=filename, chosen_filename=chosen,
-                           path=str((self.directory / '.lerobot_sources' if self.recorder.save_format == 'lerobot' else self.directory / '.bundle_sources' if self.recorder.save_format == 'mcap_mp4' else self.directory) / chosen),
+                           path=str((self.directory / '.lerobot_sources' if writer.save_format == 'lerobot' else self.directory / '.bundle_sources' if writer.save_format == 'mcap_mp4' else self.directory) / chosen),
                            state='preparing', error=None, binding=None, started_at=None, ended_at=None,
-                           format=self.recorder.save_format, upload_format=upload_format, video_fps=self.recorder.lerobot_fps, metadata=copy.deepcopy(metadata or {}),
+                           format=writer.save_format, upload_format=upload_format, video_fps=writer.lerobot_fps, metadata=copy.deepcopy(metadata or {}),
                            local_robot=None, upload_requested=False)
                 # fsync before preflight/prepare: no network request can precede identity.
                 self.save(job)
                 self.jobs[identity] = job
             identity = job['recording_id']
             try:
-                if job['format'] != self.recorder.save_format:
+                if job['format'] != writer.save_format:
                     raise UploadError('CAPTURE_FORMAT_MISMATCH', '准备重试期间录制格式已变化，请恢复原格式')
                 if intent['mode'] == 'platform':
                     source_format = SOURCE_FORMATS[upload_formats(job)[0]]
@@ -151,7 +157,7 @@ class TaskRecorder:
                         job['state'] = 'prepared'
                         self.save(job)
                     from .capture_requirements import check_device
-                    check_device(job['capture_snapshot'], self.platform.config, self.recorder,
+                    check_device(job['capture_snapshot'], self.platform.config, writer,
                                  self.capture_health() if self.capture_health else {})
                     if self.upload_format(job) == 'both':
                         snapshots = job.setdefault('capture_snapshots', {'MCAP': job['capture_snapshot']})
@@ -159,7 +165,7 @@ class TaskRecorder:
                             other = job['lerobot_preparation']
                             snapshots['LEROBOT_V3'] = self.platform.prepare(other['checked'], other['command'])
                             self.save(job)
-                        check_device(snapshots['LEROBOT_V3'], self.platform.config, self.recorder,
+                        check_device(snapshots['LEROBOT_V3'], self.platform.config, writer,
                                      self.capture_health() if self.capture_health else {})
                     if not job['binding']:
                         job['binding'] = self.platform.bind(preparation['checked'])
@@ -190,10 +196,13 @@ class TaskRecorder:
                 job.update(state='starting', started_at=now(), error=None, code=None)
                 self.save(job)
                 if self.prepare_recording is not None: self.prepare_recording()
-                self.recorder.lerobot_task = binding['task']['name'] if binding else self.default_lerobot_task
-                job['path'] = self.recorder.start(job['chosen_filename'], capture_metadata)
-                job['state'] = 'recording'
-                self.active = identity
+                writer.lerobot_task = binding['task']['name'] if binding else self.default_lerobot_task
+                job['path'] = writer.start(job['chosen_filename'], capture_metadata)
+                job['state'] = 'armed' if _prepared_writer else 'recording'
+                if _prepared_writer:
+                    job['started_at'] = None
+                else:
+                    self.active = identity
                 self.save(job)
                 return job['path']
             except Exception:
@@ -319,6 +328,8 @@ class TaskRecorder:
             files, kind = dataset_files(root), 'platform_raw'
         else:
             root, files, kind = source.parent, [source], 'hc_mcap'
+            correction = source.with_suffix('.correction.json')
+            if correction.is_file(): files.append(correction)
         descriptor_path = self.platform.upload.state_dir / (identity + '.json')
         if descriptor_path.exists():
             descriptor = read_json(descriptor_path)
@@ -570,11 +581,16 @@ class TaskRecorder:
     def status(self):
         with self.lock:
             return {**self.recorder.status(), 'task_recording': copy.deepcopy(self.jobs.get(self.active)),
-                    'recording_selection': self.platform.recording_selection()}
+                    'recording': self.is_recording(),
+                    'recording_selection': self.platform.recording_selection(),
+                    'corrections': self.corrections.status() if self.corrections else None}
+
+    def is_recording(self):
+        return self.recorder.is_recording() or bool(self.corrections and self.corrections.active)
 
     def records(self):
         with self.lock:
-            return [copy.deepcopy(job) for job in self.jobs.values()]
+            return [copy.deepcopy(job) for job in self.jobs.values() if job['state'] not in ('armed', 'discarded')]
 
     def upload_records(self):
         rows = []
@@ -590,6 +606,8 @@ class TaskRecorder:
     def list_recordings(self):
         files = self.recorder.list_recordings()
         with self.lock:
+            hidden = {Path(job['path']).name for job in self.jobs.values() if job['state'] == 'armed'}
+            files = [item for item in files if item['filename'] not in hidden]
             for item in files:
                 identifier = item.get('id') or item['filename']
                 job = next((job for job in self.jobs.values() if
@@ -597,6 +615,8 @@ class TaskRecorder:
                     'lerobot:' + Path(job['path']).stem == identifier or
                     'bundle:' + Path(job['path']).stem == identifier), None)
                 if job:
+                    if job['state'] in ('starting', 'recording', 'stopping'):
+                        item['is_current'] = True
                     projection = copy.deepcopy(job)
                     fmt = 'lerobot' if identifier.startswith('lerobot:') else 'mcap_mp4' if identifier.startswith('bundle:') else 'mcap'
                     projection.update(projection.get('artifacts', {}).get(fmt, {}))
@@ -616,6 +636,8 @@ class TaskRecorder:
                         or 'lerobot:' + Path(job['path']).stem == filename
                         or 'bundle:' + Path(job['path']).stem == filename), None)
             if job:
+                if job['state'] in ('starting', 'armed', 'recording', 'stopping'):
+                    raise ValueError('录制尚未结束，不能删除')
                 ids = {artifact_identity(job, fmt) for fmt in job_artifact_formats(job)}
                 queued = any(j.get('local_recording_id') in ids for j in self.platform.upload.queue.jobs())
                 if queued or job['recording_id'] in self.pending:
@@ -631,6 +653,7 @@ class TaskRecorder:
             return result
 
     def close(self):
+        if self.corrections: self.stop_corrections()
         self.stop()
         self.closing.set()
         self.finalizer.shutdown(wait=True)

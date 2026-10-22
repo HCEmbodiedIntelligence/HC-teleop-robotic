@@ -308,6 +308,7 @@ class SimRobotController(Node, AssembledRobot):
                 self.robot_id, self.feedback_joint_indices,
                 physicsClientId=self.physics_clent_id)
         joint_state.position = [state[0] for state in states]
+        joint_state.velocity = [state[1] for state in states]
         self.joint_state_pub.publish(joint_state)
         self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
         demand_file = getattr(self, 'viewer_demand_file', None)

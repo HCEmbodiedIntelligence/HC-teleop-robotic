@@ -423,6 +423,10 @@ class RobotArmTeleopNode(Node):
         self.timer = self.create_timer(
             1.0 / float(self.control["rate_hz"]), self._control_tick
         )
+        self.intervention = None
+        if self.backend == 'motion':
+            from .intervention import InterventionTeleop
+            self.intervention = InterventionTeleop(self)
         self.get_logger().info(
             "HC-TJ teleop ready: left Grip=base+waist, right Grip=both arms+grippers, "
             f"backend={self.backend}, command={self.control['command_topic']}, "
@@ -761,6 +765,8 @@ class RobotArmTeleopNode(Node):
             arm.joy_stamp = self._monotonic()
 
     def _vr_data_callback(self, message: String) -> None:
+        if getattr(self, 'intervention', None):
+            self.intervention.observe(message.data)
         frame = decode_vr_frame(message.data)
         if frame is None:
             return
@@ -785,7 +791,7 @@ class RobotArmTeleopNode(Node):
                 self._joy_callback(self.arms[side], joy)
         resume_rising = frame.resume_requested and not self._prev_resume_requested
         self._prev_resume_requested = frame.resume_requested
-        if frame.resume_requested and (not self.enabled or self.stop_reason or resume_rising):
+        if frame.resume_requested and not (getattr(self, 'intervention', None) and self.intervention.active) and (not self.enabled or self.stop_reason or resume_rising):
             self._resume_teleop("VR controller A button pressed")
 
     def _resume_teleop(self, reason: str = "VR controller A button pressed") -> None:
@@ -961,6 +967,8 @@ class RobotArmTeleopNode(Node):
             self.get_logger().error("Teleop disabled by emergency stop")
 
     def _enabled_callback(self, message: Bool) -> None:
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            return
         if message.data and not self.enabled:
             self._resume_teleop("teleoperation enabled by command topic")
         elif not message.data:
@@ -974,12 +982,18 @@ class RobotArmTeleopNode(Node):
             self.get_logger().info("Teleop disabled by command topic")
 
     def _enable_service(self, _request: Trigger.Request, response: Trigger.Response):
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            response.success, response.message = False, 'intervention session owns enable and reference changes'
+            return response
         self._resume_teleop("teleoperation enabled by service")
         response.success = True
         response.message = "teleop enabled; use left/right Grip clutches"
         return response
 
     def _disable_service(self, _request: Trigger.Request, response: Trigger.Response):
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            response.success, response.message = False, 'use intervention pause or emergency stop'
+            return response
         self.enabled = False
         self.stop_reason = "disabled by service"
         self._release_all(send_base_zero=True)
@@ -1017,6 +1031,9 @@ class RobotArmTeleopNode(Node):
     def _reset_reference_service(
         self, _request: Trigger.Request, response: Trigger.Response
     ):
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            response.success, response.message = False, 'references are anchored by the next Grip transaction'
+            return response
         self._release_all(send_base_zero=True)
         response.success = True
         response.message = "references cleared; release both Grip controls"
@@ -2998,6 +3015,8 @@ class RobotArmTeleopNode(Node):
             "to initial_joints"
         )
     def _request_motion_home(self) -> bool:
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            return False
         if not self.enabled or not self.hardware_ready or self.stop_reason or self.homing:
             return False
         self._release_all(send_base_zero=True)
@@ -3239,6 +3258,9 @@ class RobotArmTeleopNode(Node):
         if command is not None:
             self._sync_model()
             self._publish_actual_poses()
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            self.intervention.tick(now, feedback_fresh and self.hardware_ready)
+            return
         if not self.hardware_ready:
             if getattr(self, "head_base_follower", None) is not None:
                 self.head_base_follower.reset()
@@ -3460,6 +3482,9 @@ class RobotArmTeleopNode(Node):
                 pose.orientation.w,
             ) = torso[1]
             controller_message.poses.append(pose)
+        if getattr(self, 'intervention', None) and self.intervention.active:
+            self.intervention.poses(message)
+            return
         self.target_pub.publish(message)
         self.controller_target_pub.publish(controller_message)
 

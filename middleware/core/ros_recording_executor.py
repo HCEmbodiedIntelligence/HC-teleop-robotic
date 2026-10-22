@@ -118,6 +118,7 @@ def _raw_recording_process(
     stop_event: Any,
     reset_event: Any,
     status_queue: Any,
+    ingress_resources: Any,
 ) -> None:
     """Receive serialized ROS messages without deserializing them."""
     _lower_recording_priority()
@@ -134,6 +135,10 @@ def _raw_recording_process(
     timestamps = {str(item["topic"]): deque(maxlen=120) for item in subscriptions}
     message_counts = {str(item["topic"]): 0 for item in subscriptions}
     gate = RateGate()
+
+    def enqueue(event):
+        from .topic_recorder import enqueue_record
+        return enqueue_record(ingress_resources, event)
 
     def publish_status(state: str, error: str | None = None) -> None:
         now = time.monotonic()
@@ -196,7 +201,7 @@ def _raw_recording_process(
                     counters["serialization_errors"] += 1
                     return
                 try:
-                    event_queue.put_nowait(
+                    if not enqueue(
                         {
                             "kind": "ros_message",
                             "topic": topic,
@@ -204,7 +209,8 @@ def _raw_recording_process(
                             "_raw": raw_data,
                             "stamp_ns": time.time_ns(),
                         }
-                    )
+                    ):
+                        return
                     counters["recorded"] += 1
                 except queue.Full:
                     counters["rejected"] += 1
@@ -292,7 +298,8 @@ class RosRecordingExecutor:
     def start(self) -> None:
         if not self.config.get("enabled", True) or self._process is not None:
             return
-        event_queue, accepting_event, dropped_counter = self.recorder.ipc_resources()
+        resources = self.recorder.ipc_resources()
+        event_queue, accepting_event, dropped_counter = resources[:3]
         self._stop_event.clear()
         self._process = self._mp.Process(
             target=_raw_recording_process,
@@ -305,6 +312,7 @@ class RosRecordingExecutor:
                 self._stop_event,
                 self._reset_event,
                 self._status_queue,
+                resources,
             ),
             name="ros-cdr-recorder",
             daemon=True,
@@ -316,10 +324,14 @@ class RosRecordingExecutor:
         if process is None:
             return
         self._stop_event.set()
-        process.join(timeout=8.0)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=2.0)
+        while process.is_alive():
+            process.join(timeout=.1)
+            # A multiprocessing feeder can still be flushing accepted image
+            # bytes. Normal stop must not kill it and silently truncate them.
+            with self._lock:
+                self._status.update(state='draining', active=False)
+            if self.recorder.status().get('error'):
+                raise RuntimeError('writer failed while ROS input was draining; source is incomplete')
         self._process = None
         with self._lock:
             self._status.update(state="stopped", active=False)

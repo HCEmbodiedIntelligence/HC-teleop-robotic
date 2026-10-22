@@ -23,7 +23,7 @@ def test_feedback_uses_one_batch_without_metadata_or_drawing(monkeypatch):
         joint_state_pub=Mock(), hardware_ready_pub=Mock(), hardware_ready=True,
         _draw_visualizations=Mock(),
     )
-    batch = Mock(return_value=[(.1,), (.4,)])
+    batch = Mock(return_value=[(.1, .02, (0.,)*6, 0.), (.4, -.03, (0.,)*6, 0.)])
     monkeypatch.setattr(simulation.p, 'getJointStates', batch)
     monkeypatch.setattr(simulation.p, 'getJointInfo', Mock(side_effect=AssertionError('metadata in feedback')))
     monkeypatch.setattr(simulation.p, 'getJointState', Mock(side_effect=AssertionError('individual joint RPC')))
@@ -32,6 +32,7 @@ def test_feedback_uses_one_batch_without_metadata_or_drawing(monkeypatch):
     message = node.joint_state_pub.publish.call_args.args[0]
     assert message.name == ['a', 'b']
     assert list(message.position) == [.1, .4]
+    assert list(message.velocity) == [.02, -.03]
     node._draw_visualizations.assert_not_called()
 
 
@@ -125,7 +126,7 @@ def test_viewer_demand_starts_stops_and_resumes_frames(tmp_path, monkeypatch, ca
     node.viewer_demand_file = str(demand)
     clock = [1.0]
     monkeypatch.setattr(simulation.time, 'monotonic', lambda: clock[0])
-    monkeypatch.setattr(simulation.p, 'getJointStates', Mock(return_value=[(.2,)]))
+    monkeypatch.setattr(simulation.p, 'getJointStates', Mock(return_value=[(.2, 0., (0.,)*6, 0.)]))
     root = Mock(return_value=([1, 2, 3], [0, 0, 0, 1]))
     monkeypatch.setattr(simulation.p, 'getBasePositionAndOrientation', root)
     simulation.SimRobotController.update_joint_state(node)

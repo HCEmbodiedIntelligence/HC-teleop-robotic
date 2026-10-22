@@ -235,6 +235,10 @@ class MiddlewareRuntime:
             on_frame=self._handle_camera_ros_message,
             camera_topics=list(self._cameras_by_topic),
         )
+        self.recorder.configure_corrections(self.config['ros'])
+        self.ros.ownership.open_segment = self.recorder.correction_open
+        self.ros.ownership.close_segment = self.recorder.correction_close
+        self.ros._action_sink = self.recorder.correction_action
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.recorder.prepare_recording = self.recording_ros.prepare_recording
         if self.platform is not None:
@@ -281,6 +285,8 @@ class MiddlewareRuntime:
             self._log("error", "upload unavailable: " + str(exc))
 
     async def stop(self) -> None:
+        if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            self.ros.ownership.disable()
         if self._safety_sync_task is not None:
             self._safety_sync_task.cancel()
             try:
@@ -445,7 +451,7 @@ class MiddlewareRuntime:
                 "std_msgs/msg/String",
                 {
                     "data": json.dumps(
-                        packet.as_dict(),
+                        {**packet.as_dict(), 'hc_received_ns': time.time_ns()},
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
@@ -468,6 +474,9 @@ class MiddlewareRuntime:
 
     def _handle_vr_record_start(self) -> None:
         if self.recorder is None:
+            return
+        if getattr(self.recorder, 'corrections', None):
+            self._log('info', '纠正采集使用 Grip 自动分段，X/Y 普通录制已停用')
             return
         status = self.recorder.status()
         if status.get("recording", False):
@@ -533,6 +542,9 @@ class MiddlewareRuntime:
             )
 
     def _handle_vr_record_stop(self) -> None:
+        if self.recorder is not None and getattr(self.recorder, 'corrections', None):
+            self._log('info', '纠正采集使用 Grip 自动分段，X/Y 不结束纠正会话')
+            return
         if self.recorder is None:
             return
         status = self.recorder.status()
@@ -647,6 +659,9 @@ class MiddlewareRuntime:
             await asyncio.sleep(0.5)
 
     def _on_vr_timeout(self, reason: str) -> None:
+        if self.ros and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            self.ros.ownership.fault(reason)
+            return
         source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
         if source is None:
             source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
@@ -665,6 +680,12 @@ class MiddlewareRuntime:
         self.emit(envelope("safety_stop", "middleware", {"reason": reason}), ["websocket", "udp"])
 
     def _on_safety_resume(self, reason: str) -> None:
+        if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            try:
+                self.ros.recover_intervention()
+            except ValueError as exc:
+                self._log('warning', str(exc))
+            return
         self._safety_reason = ""
         if self.ros is not None:
             stop_topic = self.config["safety"].get("stop_topic", "/control/emergency_stop")
@@ -779,6 +800,8 @@ def create_app(store: ConfigStore) -> web.Application:
         if request.method in {"POST", "PUT", "DELETE"} and (
             request.path.startswith("/api/robot-profiles") or request.path == "/api/config"
         ):
+            if runtime.ros and getattr(runtime.ros, 'ownership', None) and runtime.ros.ownership.active:
+                raise web.HTTPConflict(text='请先退出人工干预会话，再修改配置或机器人型号')
             async with simulation.lock:
                 stop_required = True
                 if request.path == "/api/config":
@@ -802,6 +825,8 @@ def create_app(store: ConfigStore) -> web.Application:
         return await handler(request)
 
     app.middlewares.append(serialize_simulation_changes)
+    from .intervention_api import register_intervention_routes
+    register_intervention_routes(app, runtime)
     register_simulation_routes(app, simulation)
     static_dir = Path(__file__).parent / "static"
 
@@ -859,6 +884,8 @@ def create_app(store: ConfigStore) -> web.Application:
         return web.json_response({"accepted": True}, status=202)
 
     async def teleop_home(request: web.Request) -> web.Response:
+        if runtime.ros and runtime.ros.ownership.active:
+            raise web.HTTPConflict(text='请退出人工干预会话后再回零')
         source = store.value.get("ros", {}).get("command_mux", {}).get(
             "source", "vr"
         )
@@ -875,6 +902,9 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPBadRequest(text="source must be vr, exoskeleton or motion")
         if runtime.ros is None or runtime.ros.status().get("state") != "running":
             raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
+
+        if runtime.ros.ownership.active:
+            raise web.HTTPConflict(text='人工干预会话正在管理控制来源')
 
         proposed = copy.deepcopy(store.value)
         proposed["ros"]["command_mux"]["source"] = source

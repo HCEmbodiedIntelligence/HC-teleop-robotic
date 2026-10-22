@@ -145,7 +145,14 @@ class RosBridge:
         self._stop = threading.Event()
         self._commands: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._boundary = None
+        self._permit_sender = None
+        self._action_sink = lambda evidence: None
+        from .control_ownership import ControlOwnership
+        self.ownership = ControlOwnership(
+            lock=self._lock, ros_clock=lambda: int(self._ros_now() * 1e9),
+            revoke=self._ownership_revoke, permit=self._ownership_permit)
         self._trackers: dict[str, TopicHealthTracker] = {}
         mux_config = config.get("command_mux", {})
         self._mux_enabled = bool(mux_config.get("enabled", True))
@@ -193,6 +200,7 @@ class RosBridge:
         now = time.monotonic()
         with self._lock:
             result = dict(self._status)
+            result['ownership'] = self.ownership.snapshot()
             result["topic_health"] = {
                 topic: tracker.status(now) for topic, tracker in self._trackers.items()
             }
@@ -234,6 +242,8 @@ class RosBridge:
             }
 
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
+        if self.ownership.active and self._ownership_control_topic(topic):
+            return False
         if self._is_final_joint_command(topic):
             # Final actuator commands must come through the mux, or through the
             # explicitly armed replay path below.  The generic HTTP publisher
@@ -242,6 +252,8 @@ class RosBridge:
         return self._enqueue("publish", (topic, msg_type, data))
 
     def publish_raw(self, topic: str, msg_type: str, raw_data: bytes) -> bool:
+        if self.ownership.active and self._ownership_control_topic(topic):
+            return False
         if self._is_final_joint_command(topic):
             with self._lock:
                 allowed = (
@@ -258,6 +270,8 @@ class RosBridge:
     def begin_replay(self) -> bool:
         """Exclusively arm replay while retaining the normal safety gates."""
         with self._lock:
+            if self.ownership.active:
+                return False
             if not self.config.get("enabled", True):
                 self._replay_active = True
                 return True
@@ -284,6 +298,7 @@ class RosBridge:
 
     def emergency_stop(self, topic: str, reason: str) -> bool:
         with self._lock:
+            self.ownership.fault(reason, estop=True)
             self._revoke_locked()
             self._command_output_enabled = False
         return self._enqueue("stop", (topic, reason))
@@ -293,6 +308,8 @@ class RosBridge:
         if source not in {"vr", "exoskeleton", "motion"}:
             raise ValueError("control source must be vr, exoskeleton or motion")
         with self._lock:
+            if self.ownership.active:
+                raise ValueError('intervention session owns source selection')
             if self._command_source != source:
                 self._revoke_locked()
                 self._command_output_enabled = False
@@ -301,6 +318,10 @@ class RosBridge:
 
     def set_command_output_enabled(self, enabled: bool) -> bool:
         with self._lock:
+            if self.ownership.active:
+                if enabled:
+                    raise ValueError('intervention resume must return to HOLD')
+                self.ownership.hold()
             self._revoke_locked()
             self._command_output_enabled = bool(enabled)
             epoch = self._output_epoch
@@ -310,11 +331,42 @@ class RosBridge:
         self._source_cutoff = self._ros_now()
         self._output_epoch += 1
 
+    @staticmethod
+    def _ownership_control_topic(topic):
+        return str(topic).startswith(('/control/', '/internal/', '/teleop/', '/action/'))
+
+    def _ownership_revoke(self):
+        self._command_output_enabled = False
+        self._revoke_locked()
+
+    def _ownership_permit(self, token, phase, cutoff_ns, active):
+        if self._permit_sender is not None:
+            self._permit_sender(token, phase, cutoff_ns, active)
+
+    def control_ready(self):
+        with self._lock:
+            return bool(self._ready_locked(time.monotonic()) and self._boundary and
+                        self._boundary.handover_ready())
+
+    def recover_intervention(self):
+        """An explicit reset may rearm hardware, but can only return to HOLD."""
+        with self._lock:
+            control = self.ownership
+            if control.state not in {'FAULT', 'ESTOP'}:
+                control.recover(control_ready=self.control_ready())
+                return
+            if not control.input_valid or control.gripped or not self._boundary or not self._boundary.handover_ready():
+                raise ValueError('恢复前需要松开 Grip、有效跟踪及新鲜静止反馈')
+            if not getattr(self, '_recovery', None):
+                self._recovery = (control.token, time.monotonic())
+                self._enqueue('ownership_recover', self._recovery)
+
     def _ready_locked(self, now: float) -> bool:
         if self._hardware_ready and now - self._hardware_ready_last > self._ready_timeout:
             self._hardware_ready = False
             self._command_output_enabled = False
             self._revoke_locked()
+            self.ownership.fault('hardware ready timeout')
         return self._hardware_ready
 
     def receive_hardware_ready(self, ready: bool, now: float | None = None) -> None:
@@ -324,11 +376,12 @@ class RosBridge:
             if not ready and self._hardware_ready:
                 self._command_output_enabled = False
                 self._revoke_locked()
+                self.ownership.fault('hardware ready lost')
             self._hardware_ready = bool(ready)
             self._hardware_ready_last = current
 
-    def forward_live_command(self, source: str, message: Any, publish: Callable) -> bool:
-        """Check and publish under the same lock as stop/source/replay changes."""
+    def forward_live_command(self, source: str, message: Any, publish: Callable, token=None) -> bool:
+        """Keep authority across slow conversion and recheck at actuator send."""
         now = time.monotonic()
         try:
             names, positions = message.name, message.position
@@ -348,11 +401,29 @@ class RosBridge:
             ready = self._ready_locked(now)
             if (not valid or stamp <= max(self._source_cutoff, self._source_stamps.get(source, 0))
                     or not ready or not self._command_output_enabled
-                    or self._replay_active or self._command_source != source):
+                    or self._replay_active or self._command_source != source
+                    or (self.ownership.active and not self.ownership.allows(token))):
+                self._mux_rejected += 1
+                return False
+            epoch = self._output_epoch
+        prepared = self._boundary.prepare(message) if self._boundary else message
+        with self._lock:
+            if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
+                    or not self._ready_locked(time.monotonic()) or self._command_source != source
+                    or self._replay_active or stamp <= self._source_stamps.get(source, 0)
+                    or (self.ownership.active and not self.ownership.allows(token))):
+                self._mux_rejected += 1
+                return False
+            if self._boundary and not (self._boundary.commit(prepared, intervention=True)
+                    if self.ownership.active else self._boundary.commit(prepared)):
                 self._mux_rejected += 1
                 return False
             self._source_stamps[source] = stamp
             publish(message)
+            if self.ownership.active:
+                evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9))
+                if evidence is not None:
+                    self._action_sink(evidence)
             self._mux_forwarded += 1
             return True
 
@@ -373,11 +444,14 @@ class RosBridge:
         rclpy = None
         node = None
         executor = None
+        context = None
         robot_api_boundary = None
         try:
             import os
             import rclpy
-            from rclpy.executors import SingleThreadedExecutor
+            from rclpy.context import Context
+            from rclpy.executors import MultiThreadedExecutor
+            from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
             from rclpy.qos import (
                 DurabilityPolicy,
                 HistoryPolicy,
@@ -393,13 +467,13 @@ class RosBridge:
             domain_id = int(self.config.get("domain_id", int(os.environ.get("ROS_DOMAIN_ID", 14))))
             os.environ["ROS_DOMAIN_ID"] = str(domain_id)
 
-            if not rclpy.ok():
-                rclpy.init(args=[], domain_id=domain_id)
-            node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"))
-            # Camera decoding is performed by CameraService's latest-frame worker,
-            # so callbacks here are deliberately short. A multi-threaded rclpy
-            # executor adds substantial wait-set and GIL overhead at these rates.
-            executor = SingleThreadedExecutor()
+            context = Context()
+            rclpy.init(args=[], context=context, domain_id=domain_id)
+            node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"), context=context)
+            # Ownership callbacks have their own group: slow collision/model
+            # work must not prevent Grip from revoking the final output lock.
+            executor = MultiThreadedExecutor(num_threads=3, context=context)
+            self._ownership_callback_group = MutuallyExclusiveCallbackGroup()
             executor.add_node(node)
             publishers: dict[tuple[str, str], Any] = {}
             subscriptions = []
@@ -409,7 +483,8 @@ class RosBridge:
 
             if self.config.get("robot_api_profile"):
                 from .robot_api_boundary import RobotApiBoundary
-                robot_api_boundary = RobotApiBoundary(node, self._public_api)
+                robot_api_boundary = RobotApiBoundary(node, self._public_api, subscribe_commands=False)
+                self._boundary = robot_api_boundary
 
             dataset_config = self.config.get("dataset_topics", {})
             if dataset_config.get("enabled", False):
@@ -474,13 +549,18 @@ class RosBridge:
                     str(mux_config.get('motion_permit_topic', '/control/motion/permit')), 1)
                 def publish_motion_permit():
                     with self._lock:
+                        if self.ownership.active:
+                            self._ownership_permit(self.ownership.token, self.ownership.phase,
+                                                   self.ownership.cutoff_ns, True)
+                            return
                         if (self._ready_locked(time.monotonic()) and self._command_output_enabled
                                 and not self._replay_active and self._command_source in {'vr', 'motion'}):
                             header = Header()
                             header.stamp = node.get_clock().now().to_msg()
                             header.frame_id = f'{self._command_source}:{self._output_epoch}'
                             permit_pub.publish(header)
-                node.create_timer(.05, publish_motion_permit)
+                node.create_timer(.05, publish_motion_permit, callback_group=self._ownership_callback_group)
+                self._setup_ownership_ros(node, publishers, permit_pub, output_publisher, subscriptions)
                 for source, topic in (
                     ("motion", str(mux_config.get("motion_topic", "/control/motion/joint_targets"))),
                     ("vr", str(mux_config.get("vr_topic", "/control/vr/joint_states"))),
@@ -632,19 +712,156 @@ class RosBridge:
                 traceback=traceback.format_exc(limit=8),
             )
         finally:
+            self._permit_sender = None
+            if executor is not None:
+                executor.shutdown(timeout_sec=5.)
+                # Humble's base shutdown waits active callbacks but does not
+                # join the ThreadPoolExecutor's already submitted callbacks.
+                executor._executor.shutdown(wait=True)
             if robot_api_boundary is not None:
                 robot_api_boundary.close()
             if executor is not None and node is not None:
                 executor.remove_node(node)
             if node is not None:
                 node.destroy_node()
-            if rclpy is not None:
+            if context is not None:
                 try:
-                    rclpy.shutdown()
+                    context.try_shutdown()
                 except Exception:
                     pass
             if self.status()["state"] != "error":
                 self._set_status(state="stopped")
+
+    def _setup_ownership_ros(self, node, publishers, permit_pub, output_pub, subscriptions):
+        """Reuse Header/String/JointState on the private HC control chain.
+
+        Public Servo inputs keep their existing header contract. The identity in
+        a *private* target's frame_id is removed before the public projection.
+        """
+        import copy
+        import json
+        from sensor_msgs.msg import JointState
+        from std_msgs.msg import Header, String
+        from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+        from .control_ownership import ControlToken
+
+        state_pub = node.create_publisher(String, '/status/control/ownership', QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        events_pub = node.create_publisher(String, '/events/control/intervention', 100)
+        action_pub = node.create_publisher(String, '/internal/control/action_evidence', 100)
+        previous_sink = self._action_sink
+        def evidence_sink(evidence):
+            previous_sink(evidence)
+            action_pub.publish(String(data=json.dumps(evidence, allow_nan=False)))
+        self._action_sink = evidence_sink
+
+        def send(token, phase, cutoff_ns, active):
+            # Publish the revoke immediately, independently of the general HTTP
+            # command queue and the 50 ms heartbeat. Keep-last heartbeats repeat
+            # the transaction until both receivers confirm it.
+            peers = self.ownership.peers
+            key = '#'.join((token.key(), phase if active else 'off',
+                            peers.get('motion', ''), peers.get('teleop', '')))
+            permit_pub.publish(Header(stamp=node.get_clock().now().to_msg(), frame_id=key))
+            if phase == 'revoke' and self.ownership.state in {'OFF', 'FAULT', 'ESTOP'}:
+                self._publish_hardware_enable_locked(node, publishers, False)
+        self._permit_sender = send
+
+        def ack(msg):
+            try:
+                value = json.loads(msg.data)
+                participant, instance = value['participant'], value['instance']
+                if participant not in {'motion', 'teleop'} or not isinstance(instance, str) or not instance:
+                    return
+                age = node.get_clock().now().nanoseconds-int(value['stamp_ns'])
+                if not -50_000_000 <= age <= 300_000_000:
+                    return
+                self.ownership.peer(participant, instance)
+                if value.get('token'):
+                    self.ownership.acknowledge(ControlToken.from_key(value['token']), value['phase'],
+                        participant, instance, value.get('success') is True, value.get('reason', ''))
+                tick()
+            except (ValueError, KeyError, TypeError):
+                return
+
+        def semantic_input(msg):
+            try:
+                value = json.loads(msg.data)
+                self.ownership.input(device_instance=value['device_instance'], sequence=int(value['sequence']),
+                    valid=value['valid'] is True, gripped=value['gripped'] is True, stamp_ns=int(value['stamp_ns']))
+                tick()
+            except (ValueError, KeyError, TypeError):
+                return
+
+        def owned_target(msg):
+            try:
+                key, frame = msg.header.frame_id.split('#', 1)
+                token = ControlToken.from_key(key)
+            except (ValueError, AttributeError):
+                return
+            target = copy.deepcopy(msg)
+            target.header.frame_id = frame
+            # First version opens arms and measured grippers only. Other axes
+            # remain held, even if an internal producer sends a mixed command.
+            if self._public_api:
+                allowed = {self._public_api.joints[n]['public_name']
+                           for group, names in self._public_api.groups.items()
+                           if group.endswith(('_arm', '_gripper')) for n in names}
+                if self._boundary:
+                    allowed.update(self._public_api.joints[n]['public_name']
+                                   for n in self._boundary.gripper_publishers)
+                if not set(target.name) <= allowed:
+                    return
+            self.forward_live_command(token.source, target, output_pub.publish, token)
+
+        event_cursor = 0
+        state_last = 0.
+        def tick():
+            nonlocal event_cursor, state_last
+            with self._lock:
+                ownership = self.ownership
+                ownership.watchdog()
+                recovery = getattr(self, '_recovery', None)
+                if recovery:
+                    if ownership.token != recovery[0] or time.monotonic()-recovery[1] > 2.:
+                        self._recovery = None
+                        self._hardware_enable_sent_epoch = None
+                        self._publish_hardware_enable_locked(node, publishers, False)
+                    elif self._hardware_ready_last > recovery[1] and self.control_ready():
+                        self._recovery = None
+                        ownership.recover(control_ready=True)
+                if ownership.state in {'AUTO', 'MANUAL'} and self._boundary and not self._boundary.feedback_fresh():
+                    ownership.fault('necessary robot feedback lost')
+                previous = ownership.state
+                ownership.advance(control_ready=self.control_ready(),
+                                  manual_ready=ownership.input_valid and ownership.gripped)
+                if ownership.state in {'AUTO', 'MANUAL'} and not self._command_output_enabled:
+                    self._command_source = ownership.token.source
+                    self._source_cutoff = ownership.cutoff_ns * 1e-9
+                    self._command_output_enabled = True
+                    # Normal handover fences Motion and this final sender.
+                    # Hardware enable is a separate explicit safety operation;
+                    # toggling it here would latch a driver stop on every Grip.
+                while event_cursor < ownership.event_seq:
+                    event = next((e for e in ownership.events if e['sequence'] > event_cursor), None)
+                    if event is None:
+                        break
+                    events_pub.publish(String(data=json.dumps(event, allow_nan=False)))
+                    event_cursor = event['sequence']
+                now = time.monotonic()
+                if now-state_last >= .1 or previous != ownership.state:
+                    state_pub.publish(String(data=json.dumps(ownership.snapshot(), allow_nan=False)))
+                    state_last = now
+
+        subscriptions.extend([
+            node.create_subscription(String, '/status/control/ack', ack, 100, callback_group=self._ownership_callback_group),
+            node.create_subscription(String, '/events/teleop/clutch', semantic_input, 100, callback_group=self._ownership_callback_group),
+            # Motion and the gripper adapter are independent producers. Keep
+            # a bounded burst so neither overwrites the other before dispatch;
+            # source age and immutable authority are still checked on receipt.
+            node.create_subscription(JointState, '/internal/control/joint_targets', owned_target, 10),
+        ])
+        node.create_timer(.005, tick, callback_group=self._ownership_callback_group)
 
     def _drain_commands(
         self,
@@ -659,8 +876,18 @@ class RosBridge:
             except queue.Empty:
                 break
             try:
-                if command == "publish":
+                if command == 'ownership_recover':
+                    with self._lock:
+                        if args != getattr(self, '_recovery', None) or args[0] != self.ownership.token:
+                            continue
+                        from std_msgs.msg import Bool
+                        self._publisher(node, publishers, '/control/emergency_stop', 'std_msgs/msg/Bool', Bool).publish(Bool(data=False))
+                        self._hardware_enable_sent_epoch = None
+                        self._publish_hardware_enable_locked(node, publishers, True)
+                elif command == "publish":
                     topic, msg_type_name, data = args
+                    if self.ownership.active and self._ownership_control_topic(topic):
+                        continue
                     message_type = get_message(msg_type_name)
                     publisher = self._publisher(
                         node, publishers, topic, msg_type_name, message_type
@@ -670,6 +897,8 @@ class RosBridge:
                     publisher.publish(message)
                 elif command in {"publish_raw", "replay_raw"}:
                     topic, msg_type_name, raw_bytes = args[:3]
+                    if self.ownership.active and self._ownership_control_topic(topic):
+                        continue
                     if command == "replay_raw":
                         with self._lock:
                             allowed = (
@@ -696,6 +925,9 @@ class RosBridge:
                         with self._lock:
                             if (args[3] == self._output_epoch and self._replay_active
                                     and self._command_output_enabled and self._ready_locked(time.monotonic())):
+                                if self._boundary:
+                                    if not self._boundary.command(message):
+                                        continue
                                 publisher.publish(message)
                     else:
                         publisher.publish(message)
@@ -712,6 +944,8 @@ class RosBridge:
                     # Do not overwrite a later explicit resume queued after it.
                     node.get_logger().warning(f"Emergency stop: {reason}")
                 elif command == "control_source":
+                    if self.ownership.active:
+                        continue
                     mux_config = self.config.get("command_mux", {})
                     topic = str(
                         mux_config.get(
@@ -726,6 +960,8 @@ class RosBridge:
                     publisher.publish(String(data=str(args)))
                     node.get_logger().info(f"Joint command source: {args}")
                 elif command == "command_output":
+                    if self.ownership.active:
+                        continue
                     enabled, epoch = args
                     with self._lock:
                         if (epoch != self._output_epoch or
@@ -745,11 +981,14 @@ class RosBridge:
         # stopped/restarted adapter, or replay a queued pre-stop enable.
         with self._lock:
             self._ready_locked(time.monotonic())
-            if not self._command_output_enabled:
+            if not getattr(self, '_recovery', None) and not self._command_output_enabled and (not self.ownership.active or
+                    self.ownership.state in {'FAULT', 'ESTOP'}):
                 self._publish_hardware_enable_locked(node, publishers, False)
 
     def _publish_hardware_enable_locked(self, node, publishers, enabled):
-        if self._hardware_enable_sent_epoch == self._output_epoch:
+        now = time.monotonic()
+        if self._hardware_enable_sent_epoch == self._output_epoch and (
+                enabled or now-getattr(self, '_hardware_enable_last_sent', float('-inf')) < .1):
             return
         from std_msgs.msg import Bool
 
@@ -758,6 +997,9 @@ class RosBridge:
         publisher = self._publisher(node, publishers, topic, "std_msgs/msg/Bool", Bool)
         publisher.publish(Bool(data=enabled))
         self._hardware_enable_sent_epoch = self._output_epoch
+        # Reassert a stop across DDS discovery/restarts. Enabling remains an
+        # explicit one-shot action and is never repeated by this heartbeat.
+        self._hardware_enable_last_sent = now
 
     @staticmethod
     def _publisher(
