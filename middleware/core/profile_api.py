@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 from typing import Any
 
 from aiohttp import web
@@ -19,7 +20,7 @@ def register_profile_routes(
     """Register profile management without coupling it to the runtime module."""
 
     async def get_robot_profiles(_request: web.Request) -> web.Response:
-        active = str(store.value["robot_profiles"].get("active", ""))
+        active = str(os.environ.get("HC_ROBOT_NAME") or store.value["robot_profiles"].get("active", ""))
         values = profiles.list()
         active_topics = dict(STANDARD_TOPICS)
         if active:
@@ -96,6 +97,8 @@ def register_profile_routes(
             raise web.HTTPNotFound(text=str(exc)) from exc
         if profile.get("schema") == "invalid":
             raise web.HTTPBadRequest(text="invalid robot profile cannot be activated")
+        if (profiles.root / profile_id / "robot_api.yaml").is_file() and not profile.get("unified_api", {}).get("available"):
+            raise web.HTTPBadRequest(text=profile["unified_api"]["reason"])
         try:
             proposed = copy.deepcopy(store.value)
             proposed["robot_profiles"]["active"] = profile_id
@@ -136,8 +139,18 @@ def register_profile_routes(
                 raise web.HTTPNotFound(text=str(exc)) from exc
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
+    async def export_robot_profile(request: web.Request) -> web.Response:
+        profile_id = request.match_info["profile_id"]
+        try:
+            payload = await asyncio.to_thread(profiles.export_archive, profile_id)
+        except RobotProfileError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.Response(body=payload, content_type="application/zip",
+                            headers={"Content-Disposition": f'attachment; filename="{profile_id}.zip"'})
+
     app.router.add_get("/api/robot-profiles", get_robot_profiles)
     app.router.add_post("/api/robot-profiles/import", import_robot_profile)
+    app.router.add_get("/api/robot-profiles/{profile_id}/export", export_robot_profile)
     app.router.add_post(
         "/api/robot-profiles/{profile_id}/activate", activate_robot_profile
     )

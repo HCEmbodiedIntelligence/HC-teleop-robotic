@@ -1,0 +1,6 @@
+[submodule "src/humanoid_motion_server"]
+	path = src/humanoid_motion_server
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_motion_server.git
+[submodule "src/humanoid_motion_interfaces"]
+	path = src/humanoid_motion_interfaces
+	url = https://github.com/HCEmbodiedIntelligence/humanoid_motion_interfaces.git

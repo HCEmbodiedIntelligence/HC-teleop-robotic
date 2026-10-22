@@ -79,6 +79,9 @@ def test_bare_launcher_ignores_inherited_teleop_and_only_starts_middleware(tmp_p
     launcher = tmp_path / "run.sh"
     launcher.write_bytes((root / "run.sh").read_bytes())
     launcher.chmod(0o755)
+    supervisor = tmp_path / "tools/runtime/process_supervisor.py"
+    supervisor.parent.mkdir(parents=True)
+    supervisor.write_bytes((root / "tools/runtime/process_supervisor.py").read_bytes())
     middleware = tmp_path / "middleware"
     middleware.mkdir()
     (middleware / "config.yaml").write_text("ros: {domain_id: 14}\n")
@@ -91,4 +94,4 @@ def test_bare_launcher_ignores_inherited_teleop_and_only_starts_middleware(tmp_p
     env = dict(os.environ, HC_RUNTIME_MODE="teleop", HC_EXTERNAL_STACK="1", HC_TELEOP_MODE="teleop")
     env.pop("HC_MIDDLEWARE_CONFIG", None)
     result = subprocess.run([str(launcher)], env=env, check=True, capture_output=True, text=True)
-    assert result.stdout.strip() == "simulation unset unset"
+    assert "simulation unset unset" in result.stdout.splitlines()

@@ -53,23 +53,34 @@ if [[ -f /opt/ros/humble/setup.bash ]]; then
   source /opt/ros/humble/setup.bash
   set -u
 fi
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-14}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$(PYTHONPATH="${PROJECT_ROOT}" /usr/bin/python3 -m adapters.core.runtime_config domain "${MIDDLEWARE_CONFIG}")}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
 export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
 
-ROBOT_CONFIG_ROOT="${HC_ROBOT_CONFIG_ROOT:-$(/usr/bin/python3 -m middleware.profile_cli root --config "${MIDDLEWARE_CONFIG}")}"
-ROBOT_NAME="${HC_ROBOT_NAME:-$(/usr/bin/python3 -m middleware.profile_cli active --config "${MIDDLEWARE_CONFIG}")}"
+PROFILE_DIR="$(/usr/bin/python3 -m middleware.profile_cli profile-dir --config "${MIDDLEWARE_CONFIG}")"
+ROBOT_CONFIG_ROOT="$(dirname -- "${PROFILE_DIR}")"
+ROBOT_NAME="$(basename -- "${PROFILE_DIR}")"
 export HC_ROBOT_CONFIG_ROOT="${ROBOT_CONFIG_ROOT}"
 export HC_ROBOT_NAME="${ROBOT_NAME}"
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
 CONTROLLER_YML="${HC_CONTROLLER_CONFIG:-${PROFILE_DIR}/controller_v23.yml}"
 ARM_CONFIG="${HC_ARM_TELEOP_CONFIG:-${PROFILE_DIR}/arm_teleop.yaml}"
+CONTROL_BACKEND="$(/usr/bin/python3 -m adapters.core.runtime_config backend "${ARM_CONFIG}")"
+if [[ -f "${PROFILE_DIR}/robot_api.yaml" && "${CONTROL_BACKEND}" == motion ]]; then
+  [[ "$(realpath -- "${ARM_CONFIG}")" == "${PROFILE_DIR}/arm_teleop.yaml" ]] || {
+    err "统一 profile 必须使用同一 arm_teleop.yaml 和 Motion 后端"; exit 2;
+  }
+fi
+export HC_ARM_TELEOP_CONFIG="${ARM_CONFIG}"
+MOTION_INSTALL="${HC_MOTION_INSTALL:-${PROJECT_ROOT}/install_motion}"
 V23_SCRIPT="${PROJECT_ROOT}/adapters/v23/script/control_v2_3_ros2.py"
 CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
 CONTROLLER_COMMAND=()
 
-for required in "${V23_SCRIPT}" "${CONTROLLER_YML}" "${ARM_CONFIG}"; do
+REQUIRED=("${ARM_CONFIG}")
+[[ "${CONTROL_BACKEND}" == motion ]] || REQUIRED+=("${V23_SCRIPT}" "${CONTROLLER_YML}")
+for required in "${REQUIRED[@]}"; do
   if [[ ! -f "${required}" ]]; then err "缺少机器人配置或程序: ${required}"; exit 2; fi
 done
 if ! /usr/bin/python3 -c 'import numpy, pybullet, rclpy, yaml' 2>/dev/null; then
@@ -78,7 +89,15 @@ if ! /usr/bin/python3 -c 'import numpy, pybullet, rclpy, yaml' 2>/dev/null; then
   exit 2
 fi
 
-if [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
+if [[ "${CONTROL_BACKEND}" == motion ]]; then
+  [[ -f "${MOTION_INSTALL}/setup.bash" ]] || { err "请先运行 ./bootstrap_colcon.sh build"; exit 2; }
+  for file in motion.yaml sdk.yaml channels.yaml tools.yaml; do
+    [[ -f "${PROFILE_DIR}/motion/${file}" ]] || { err "当前机器人缺少 motion/${file}"; exit 2; }
+  done
+  CONTROLLER_COMMAND=("${PROJECT_ROOT}/tools/run_motion.sh" --profile "${PROFILE_DIR}")
+elif [[ "${CONTROL_BACKEND}" != v23 ]]; then
+  err "HC_CONTROL_BACKEND 必须是 motion 或 v23"; exit 2
+elif [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
   export HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}"
   "${PROJECT_ROOT}/run_generic_controller.sh" --check
   CONTROLLER_COMMAND=("${PROJECT_ROOT}/run_generic_controller.sh" v23)
@@ -94,15 +113,23 @@ fi
 
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 log "机器人配置: ${ROBOT_NAME} (${PROFILE_DIR})"
-log "启动 Pinocchio v23 逆解..."
+log "启动 ${CONTROL_BACKEND} 逆解..."
 setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${CONTROLLER_COMMAND[@]}" \
-  >"${LOG_DIR}/v23_solver.log" 2>&1 &
+  >"${LOG_DIR}/${CONTROL_BACKEND}_solver.log" 2>&1 &
 PIDS+=("$!")
 sleep 1
+if [[ "${CONTROL_BACKEND}" == motion ]]; then
+  set +u
+  source "${MOTION_INSTALL}/setup.bash"
+  set -u
+  setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/motion_teleop_bridge.py" \
+    >"${LOG_DIR}/motion_bridge.log" 2>&1 &
+  PIDS+=("$!")
+fi
 
 log "启动 VR 到标准机器人接口控制节点..."
 setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py" \
-  --config "${ARM_CONFIG}" --backend v23 \
+  --config "${ARM_CONFIG}" --backend "${CONTROL_BACKEND}" \
   >"${LOG_DIR}/teleop_controller.log" 2>&1 &
 PIDS+=("$!")
 

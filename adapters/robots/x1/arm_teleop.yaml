@@ -287,7 +287,7 @@ grippers:
     - 0.05
     - 2.5
 control:
-  # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
+  # 默认使用 ControllerV23；Motion 可通过 HC_CONTROL_BACKEND 显式启用。
   backend: v23
   enabled_on_start: true
   home_on_start: true

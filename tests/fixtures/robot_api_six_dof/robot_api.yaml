@@ -1,0 +1,28 @@
+schema: hc-robot-api/v1
+groups:
+  left_arm:
+    model_joints_from: arms.left.joint_names
+    public_name_prefix: left_joint_
+  right_arm:
+    model_joints_from: arms.right.joint_names
+    public_name_prefix: right_joint_
+  whole_body:
+    combine:
+    - left_arm
+    - right_arm
+auxiliary_joints: {}
+joint_overrides: {}
+poses:
+  home:
+    model_positions_from: robot.initial_joints
+driver:
+  kind: humanoid_driver_runtime
+  groups:
+  - left_arm
+  - right_arm
+  parameters:
+    plugin_class: humanoid_driver_runtime/RosTopicRobotDriver
+    plugin_parameters:
+    - state_topic=/fixture/measured
+    - command_topic.left_arm=/fixture/left/commands
+    - command_topic.right_arm=/fixture/right/commands

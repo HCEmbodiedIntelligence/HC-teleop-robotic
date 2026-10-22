@@ -1,4 +1,4 @@
-> 旧双臂遥操作栈：该目录保留左右双臂及历史夹爪/腰部假设，不作为通用机器人前端扩展。当前平台统一入口使用 `hc_teleop_recv` 与模型插件配置。
+> 当前 HC / OpenArmX 集成工作区入口见 [../start.md](../start.md)。第三方控制与订阅接口、换机兼容范围和 demo 见 [对外接口说明](docs/ROBOT_PUBLIC_API.md)。
 
 # HC Teleop
 
@@ -17,7 +17,7 @@
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
-真机双臂采用分层结构：本仓库 v23 逆解生成内部 VR 命令 `/control/vr/joint_states`，外骨骼发布 `/control/exoskeleton/joint_states`；中间件通过可锁存的 `/control/source` 广播当前选择，并在状态监控页选择其中一路转发到标准 `/action/joint_states`。每个硬件仓库用独立固定频率节点完成速度/加速度约束和厂商命令下发。OpenArmX 零重力主动端可使用 `/home/maple/hc_openarmx` 中的 `make teleop-gravity-hc` 接入；切换到外骨骼时会锁存主动端与机器人当前位置，再按关节增量控制。
+统一模式下 OpenArmX、X1 的 VR 位姿和程序 ServoP 共用 Motion 逆解，与 ServoJ/MoveJ 共享最终关节 RTC。公共双臂名为 `left_joint_1…N`、`right_joint_1…N`，能力从 `/status/robot/info` 在线读取。中间件按 `/control/source` 选择公共目标并发布 `/action/joint_states`，共同硬件边界转换到 `/internal/robot/joint_commands`；驱动模型反馈走 `/internal/robot/joint_states`，HC 转成公共 `/observation/joint_states`。硬件仓库继续独立负责厂商通信和执行保护。外骨骼使用 `/control/exoskeleton/joint_states`，需按当前 profile 提供公共名称；切源、停止和恢复仍执行原有许可代际检查。
 
 原有的 `d435_webrtc_server.py` 与手动 UDP 调试工具
 `tools/diagnostics/udp_receiver.py` 仍然保留。新服务兼容它们的关键协议：
@@ -143,7 +143,7 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 - HC 通用 `vr_configs.yml`：包含 `urdf_path`、`arms`、`controller_indices`，可选 `folding_waist`。导入器会校验所有 joint/link 索引，并生成标准接口的 `controller_v23.yml`；双臂配置还会生成 `arm_teleop.yaml`。
 - 重构控制器 `controller_v23.yml`：包含 `model.free_joints`、`task` 和 `limit`。导入器会校验 URDF 关节与任务 link，并统一 ROS 话题和 URDF 相对路径。该格式只提供 IK 控制配置，不包含 HC PyBullet 仿真所需的 `vr_configs.yml`。
 
-点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。真机模式退出并重新执行 `./run.sh teleop`；仿真模式重新执行 `./run.sh sim`。机器人型号以 Dashboard/`middleware/config.yaml` 中当前激活的 profile 为准。
+完整统一 API 的 ZIP 还包含 `robot_api.yaml` 和 `motion/` 配置，引用现有分组和 home；只导入上述旧格式不会自动获得统一 Servo 能力，列表会显示缺少的配置。点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。重启中间件、控制和硬件适配器以一致加载新 profile；显式 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 优先于配置文件。统一 API 的启动和迁移步骤见 [对外接口说明](docs/ROBOT_PUBLIC_API.md)。
 
 导入接口对齐当前遥操作链路的标准话题：`/observation/joint_states`、`/control/solver/joint_targets`、`/action/joint_states`、`/control/solver/ee_targets`、`/action/ee_poses`、`/observation/ee_poses`、`/status/solver/joint_states` 和 `/action/base/command`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
 
@@ -153,7 +153,7 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 
 ### 自动上传到数据平台
 
-`main` 已迁入 `humanoid` 的上传客户端、持久队列、分片续传、重试/取消和平台处理状态面板。原有 v23 控制、网页三维仿真、ROS 域隔离及机器人配置加载保持不变；本次不迁入 Motion、统一机器人 API、`platform_raw` 或数据裁剪工具。
+`main` 保留平台任务、共享采集方案、持久上传队列、分片续传、重试/取消和处理状态面板，并整合 Motion 与统一机器人 API。默认仍为 v23；网页三维仿真、ROS 域隔离和机器人包配置保持可用。录制支持 MCAP、MCAP＋独立 RGB MP4 原始包、LeRobot 和双格式；深度消息在 MCAP 中原样保留。标注、裁剪、审计和恢复工具由数据平台负责，不在机器人侧重复提供。
 
 现有部署先运行 `./install.sh --upload`。新版上传管理页支持粘贴平台一次性连接链接、按名称选择任务，并独立选择上传格式。下列 YAML 绑定方式用于兼容旧部署：
 
@@ -345,3 +345,17 @@ X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；
 腰部俯仰使用头显朝前方向相对水平面的仰俯角，并减去左 Grip 接管时的参考角。偏航转身（包括保持 Grip 转向）不会把俯仰转换成侧倾；升降仍使用竖直位移，`pitch_direction` 仅负责设备方向标定。
 
 相机 WebRTC 仅在收到新图像后发送，不再以固定 30 FPS 重发缓存图像或占位图。视频时间戳使用图像到达中间件的单调时钟（压缩图像在解码前记录），因此表示实际接收节奏而非传感器硬件曝光时间；不直接使用可能暂停/回退的 ROS 仿真时间。编码较慢时只取最新帧，允许丢帧但不补帧；源断流时等待恢复。修改后重启中间件并让头显重新连接。
+
+## Motion 与统一机器人 API
+
+默认配置沿用 v23 与原生关节名。启用 Motion 前先构建两个子模块，并使硬件适配器切换到统一 API 的 internal 接口。完整启动、名称契约和使能规则见 [Motion 工作区](docs/MOTION.md) 与 [机器人公共 API](docs/ROBOT_PUBLIC_API.md)。
+
+```bash
+git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
+./bootstrap_colcon.sh build
+HC_CONTROL_BACKEND=motion ./run.sh sim
+# 硬件适配器已按统一 API 配置后：
+HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
+```
+
+`HC_CONTROL_BACKEND=motion` 同时决定中间件公共名称转换、遥操控制链和仿真话题；切换后端需停止旧入口再重新启动。旧配置不带统一 API 文件时继续支持 v23。双方功能清单及本次合并范围见 [分支整合说明](docs/MAIN_HUMANOID_INTEGRATION.md)。

@@ -23,7 +23,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["ros"]["command_mux"]["output_topic"], "/action/joint_states")
 
         streams = config["camera"]["streams"]
-        self.assertEqual(len(streams), 1)
+        self.assertEqual(len(streams), 4)
         self.assertEqual(streams[0]["topic"], "/observation/cameras/head/color/compressed")
         self.assertFalse(streams[0]["stereo"])
         subscriptions = {item["topic"]: item for item in config["ros"]["subscriptions"]}
@@ -66,7 +66,7 @@ class ConfigTests(unittest.TestCase):
         )
 
     def test_command_mux_requires_distinct_topics_and_known_source(self):
-        with self.assertRaisesRegex(ConfigError, "source must be vr or exoskeleton"):
+        with self.assertRaisesRegex(ConfigError, "source must be vr, exoskeleton or motion"):
             validate_config({"ros": {"command_mux": {"source": "unknown"}}})
         with self.assertRaisesRegex(ConfigError, "topics must be different"):
             validate_config(
@@ -166,7 +166,8 @@ class ConfigTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         config = ConfigStore(root / "middleware/config.yaml").load()
         streams = config["camera"]["streams"]
-        self.assertEqual([s["id"] for s in streams], ["head"])
+        self.assertEqual([s["id"] for s in streams if s["enabled"]], ["head", "overhead"])
+        self.assertEqual(streams[1]["topic"], "/observation/cameras/head/depth/compressed")
         subscriptions = {s["topic"] for s in config["ros"]["subscriptions"]}
         self.assertNotIn("/io_teleop/camera_head/color", subscriptions)
         self.assertNotIn("/observation/cameras/wrist_left/color/compressed", subscriptions)

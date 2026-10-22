@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import copy
 import json
 import logging
@@ -20,6 +21,8 @@ from .config import ConfigError, ConfigStore, validate_config
 from .profile_api import register_profile_routes
 from .protocol import envelope
 from .robot_profiles import RobotProfileManager
+from .robot_api import RobotApiProfile, selected_profile, selected_profile_root
+from adapters.core.runtime_config import unified_profile
 from .ros_bridge import RosBridge
 from .ros_recording_executor import RosRecordingExecutor
 from .topic_player import TopicPlayer
@@ -67,6 +70,7 @@ class MiddlewareRuntime:
         self.recorder: TopicRecorder | None = None
         self.platform = None
         self._record_commands = None
+        self._record_command_slots = threading.BoundedSemaphore(8)
         self.uploads = None
         self.upload_error = None
         self.player: TopicPlayer | None = None
@@ -102,13 +106,7 @@ class MiddlewareRuntime:
             "free_joints": "[]",
             "ros_domain_id": str(self.config.get("ros", {}).get("domain_id", 14)),
         }
-        root_value = os.environ.get("HC_ROBOT_CONFIG_ROOT") or profile_config.get(
-            "root", "../adapters/robots"
-        )
-        profile_root = Path(str(root_value)).expanduser()
-        if not profile_root.is_absolute():
-            profile_root = self.config_dir / profile_root
-        profile_dir = (profile_root / profile_id).resolve()
+        profile_dir = selected_profile(self.config, self.config_dir)
         try:
             profile = yaml.safe_load(
                 (profile_dir / "profile.yaml").read_text(encoding="utf-8")
@@ -133,6 +131,11 @@ class MiddlewareRuntime:
                 )
         except (OSError, TypeError, yaml.YAMLError):
             pass
+        if unified_profile(profile_dir):
+            api = RobotApiProfile(profile_dir)
+            metadata.update(robot_api_schema="hc-robot-api/v1", robot_api_revision=api.revision,
+                            robot_api_info=json.dumps(api.describe(), separators=(",", ":")),
+                            free_joints=json.dumps([j["public_name"] for j in api.joints.values()]))
         return metadata
 
     async def start(self) -> None:
@@ -152,6 +155,12 @@ class MiddlewareRuntime:
         from concurrent.futures import ThreadPoolExecutor
         self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recording-command")
         self.session_profile_metadata = self._load_session_profile_metadata()
+        profile_dir = (selected_profile(self.config, self.config_dir)
+                       if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
+        self.config["ros"].pop("robot_api_profile", None)
+        if profile_dir is not None and unified_profile(profile_dir):
+            RobotApiProfile(profile_dir)
+            self.config["ros"]["robot_api_profile"] = str(profile_dir)
         recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
         self.recorder = recorder
         try:
@@ -175,6 +184,7 @@ class MiddlewareRuntime:
             lambda: self.ros,
             self._on_replay_state,
             lambda: self.session_profile_metadata.get("profile_id", ""),
+            lambda: self.session_profile_metadata,
         )
         camera_config = self.config.get("camera", {})
         base_camera_config = {
@@ -230,7 +240,7 @@ class MiddlewareRuntime:
         if self.platform is not None:
             self.recorder.capture_health = self.recording_ros.get_topic_health
         self.vr = VrGateway(
-            self.config["vr"], self._on_pose, self.emit, self._on_safety_event
+            self.config["vr"], self._on_pose, self.emit, self._on_vr_timeout
         )
         self.ros.start()
         self.recording_ros.start()
@@ -388,7 +398,7 @@ class MiddlewareRuntime:
         )
         self._last_both_sticks_held = both_sticks_held
         if mark_down:
-            self._handle_vr_record_mark()
+            self._dispatch_recording(self._handle_vr_record_mark)
 
         # Replay control events use UDP and can be lost.  While replay is
         # active or waiting for the A-button acknowledgement, periodically
@@ -423,11 +433,9 @@ class MiddlewareRuntime:
             self._last_y_held = bool(left_held & 2)
 
             if x_down:
-                if self._record_commands is not None:
-                    self._record_commands.submit(self._handle_vr_record_start)
+                self._dispatch_recording(self._handle_vr_record_start)
             elif y_down:
-                if self._record_commands is not None:
-                    self._record_commands.submit(self._handle_vr_record_stop)
+                self._dispatch_recording(self._handle_vr_record_stop)
 
         if self.ros is None:
             return
@@ -443,6 +451,20 @@ class MiddlewareRuntime:
                     )
                 },
             )
+
+    def _dispatch_recording(self, operation):
+        if self._record_commands is None:
+            operation()
+            return
+        if not self._record_command_slots.acquire(blocking=False):
+            self._log('error', 'recording command queue is full')
+            return
+        try:
+            future = self._record_commands.submit(operation)
+        except Exception:
+            self._record_command_slots.release()
+            raise
+        future.add_done_callback(lambda _: self._record_command_slots.release())
 
     def _handle_vr_record_start(self) -> None:
         if self.recorder is None:
@@ -624,6 +646,18 @@ class MiddlewareRuntime:
             self._send_safety_snapshot()
             await asyncio.sleep(0.5)
 
+    def _on_vr_timeout(self, reason: str) -> None:
+        source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
+        if source is None:
+            source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
+        if source == "vr":
+            self._on_safety_event(reason)
+        else:
+            # VR link health cannot revoke another explicitly selected source.
+            if self.ros:
+                self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
+            self.emit(envelope("vr_timeout", "middleware", {"reason": reason}), ["websocket", "udp"])
+
     def _on_safety_event(self, reason: str) -> None:
         self._safety_reason = reason
         if self.ros is not None and self.config["safety"].get("enabled", True):
@@ -703,6 +737,8 @@ class MiddlewareRuntime:
         return {
             "status": "ok",
             "version": 1,
+            "runtime_profile": self.session_profile_metadata,
+            "control_backend": os.environ.get("HC_CONTROL_BACKEND") or None,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
             "ros": ros_status,
@@ -729,9 +765,7 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
 def create_app(store: ConfigStore) -> web.Application:
     config = store.load()
     runtime = MiddlewareRuntime(config, store.path.parent)
-    profile_root = Path(config["robot_profiles"]["root"]).expanduser()
-    if not profile_root.is_absolute():
-        profile_root = store.path.parent / profile_root
+    profile_root = selected_profile_root(config, store.path.parent)
     profiles = RobotProfileManager(profile_root)
     app = web.Application(
         client_max_size=100 * 1024 * 1024, middlewares=[cors_middleware]
@@ -837,8 +871,8 @@ def create_app(store: ConfigStore) -> web.Application:
     async def set_control_source(request: web.Request) -> web.Response:
         data = await request.json()
         source = str(data.get("source", "")).strip().lower()
-        if source not in {"vr", "exoskeleton"}:
-            raise web.HTTPBadRequest(text="source must be vr or exoskeleton")
+        if source not in {"vr", "exoskeleton", "motion"}:
+            raise web.HTTPBadRequest(text="source must be vr, exoskeleton or motion")
         if runtime.ros is None or runtime.ros.status().get("state") != "running":
             raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
 

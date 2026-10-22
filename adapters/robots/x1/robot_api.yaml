@@ -1,0 +1,55 @@
+# Public/model SI boundary. Arm order and home are referenced, never duplicated.
+schema: hc-robot-api/v1
+groups:
+  left_arm:
+    model_joints_from: arms.left.joint_names
+    public_name_prefix: left_joint_
+  right_arm:
+    model_joints_from: arms.right.joint_names
+    public_name_prefix: right_joint_
+  whole_body:
+    combine:
+    - left_arm
+    - right_arm
+  waist:
+    model_joints_from: body.waist_joint_names
+    public_name_prefix: waist_joint_
+  head:
+    model_joints_from: body.neck_joint_names
+    public_name_prefix: head_joint_
+auxiliary_joints:
+  L_ban: left_gripper_joint_1
+  R_ban: right_gripper_joint_1
+  left_wheel_1: left_wheel_joint_1
+  left_wheel_2: left_wheel_joint_2
+  left_wheel_3: left_wheel_joint_3
+  left_wheel_4: left_wheel_joint_4
+  right_wheel_1: right_wheel_joint_1
+  right_wheel_2: right_wheel_joint_2
+  right_wheel_3: right_wheel_joint_3
+  right_wheel_4: right_wheel_joint_4
+joint_overrides: {}
+poses:
+  home:
+    model_positions_from: robot.initial_joints
+driver:
+  kind: humanoid_driver_runtime
+  groups:
+  - left_arm
+  - right_arm
+  - waist
+  - head
+  parameters:
+    plugin_class: humanoid_driver_runtime/RosTopicRobotDriver
+    plugin_parameters:
+    - state_topic=/x1/joint_states
+    - command_topic.left_arm=/x1/left_arm/commands
+    - command_topic.right_arm=/x1/right_arm/commands
+    - command_topic.waist=/x1/waist/commands
+    - command_topic.head=/x1/head/commands
+    - state_timeout_s=0.25
+    - startup_grace_s=3.0
+    command_max_age_ms: 100
+    feedback_max_age_ms: 200
+    hardware_ready_topic: /status/hardware/ready
+    emergency_stop_topic: /control/emergency_stop

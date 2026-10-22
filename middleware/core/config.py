@@ -25,6 +25,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "output_topic": "/action/joint_states",
             "control_source_topic": "/control/source",
             "hardware_ready_topic": "/status/hardware/ready",
+            "hardware_enable_topic": "/control/hardware/enabled",
+            "motion_topic": "/control/motion/joint_targets",
+            "motion_permit_topic": "/control/motion/permit",
+            "hardware_ready_timeout_sec": 0.5,
         },
         "subscriptions": [],
         "recording": {
@@ -143,16 +147,21 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(command_mux, dict):
         raise ConfigError("ros.command_mux must be an object")
     source = str(command_mux.get("source", "vr")).strip().lower()
-    if source not in {"vr", "exoskeleton"}:
-        raise ConfigError("ros.command_mux.source must be vr or exoskeleton")
+    if source not in {"vr", "exoskeleton", "motion"}:
+        raise ConfigError("ros.command_mux.source must be vr, exoskeleton or motion")
     command_mux["source"] = source
     command_mux["enabled"] = bool(command_mux.get("enabled", True))
+    command_mux.setdefault("motion_topic", "/control/motion/joint_targets")
+    command_mux.setdefault("motion_permit_topic", "/control/motion/permit")
     mux_topics = []
     for key in (
         "vr_topic",
+        "motion_topic",
+        "motion_permit_topic",
         "exoskeleton_topic",
         "output_topic",
         "control_source_topic",
+        "hardware_enable_topic",
     ):
         topic = str(command_mux.get(key, "")).strip()
         if not topic.startswith("/"):
@@ -161,6 +170,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         mux_topics.append(topic)
     if len(set(mux_topics)) != len(mux_topics):
         raise ConfigError("ros.command_mux topics must be different")
+    if command_mux["hardware_enable_topic"] in {
+        "/control/teleop/enabled", value.get("safety", {}).get("stop_topic", "/control/emergency_stop")
+    }:
+        raise ConfigError("hardware_enable_topic must differ from VR enable and emergency stop")
 
     _port(value["server"]["port"], "server.port")
     _port(value["vr"]["pose_port"], "vr.pose_port")
@@ -238,12 +251,40 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if qos_reliability is not None:
             normalized[-1]["qos_reliability"] = qos_reliability
     value["ros"]["subscriptions"] = normalized
+    mux = value["ros"].setdefault("command_mux", {})
+    mux.setdefault("motion_topic", "/control/motion/joint_targets")
+    timeout = mux.setdefault("hardware_ready_timeout_sec", 0.5)
+    import math
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ConfigError("hardware_ready_timeout_sec must be positive and finite")
+    if not isinstance(mux["motion_topic"], str) or not mux["motion_topic"].startswith("/"):
+        raise ConfigError("motion_topic must be an absolute ROS topic")
     recording = value["ros"].get("recording")
     if not isinstance(recording, dict):
         raise ConfigError("ros.recording must be an object")
     directory = recording.get("directory")
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
+    sources = recording.setdefault("action_sources", [])
+    if not isinstance(sources, list):
+        raise ConfigError("action_sources must be a list")
+    used_topics, used_names = set(), set()
+    for item in sources:
+        if not isinstance(item, dict) or set(item) != {"topic", "names", "units", "max_age_sec"}:
+            raise ConfigError("action_sources requires topic, names, units, max_age_sec")
+        if not isinstance(item['topic'], str) or not item['topic'].startswith('/') or item['topic'] in used_topics | {'/action/joint_states', '/observation/joint_states'}:
+            raise ConfigError("invalid or duplicate action topic")
+        if not isinstance(item['names'], list) or not item['names'] or any(not isinstance(n,str) or not n for n in item['names']):
+            raise ConfigError("action source names must be nonempty strings")
+        if len(set(item['names'])) != len(item['names']) or used_names.intersection(item['names']):
+            raise ConfigError("duplicate action joint names")
+        if not isinstance(item['units'], list) or len(item['units']) != len(item['names']) or any(u not in {'rad', 'm', 'unitless'} for u in item['units']):
+            raise ConfigError("action source units must match names")
+        age = item['max_age_sec']
+        if isinstance(age, bool) or not isinstance(age, (int,float)) or not math.isfinite(age) or age <= 0:
+            raise ConfigError("action source max_age_sec must be positive and finite")
+        used_topics.add(item['topic'])
+        used_names.update(item['names'])
     recording_format = recording.get("format", "mcap")
     if recording_format not in ("mcap", "lerobot", "both", "mcap_mp4"):
         raise ConfigError("ros.recording.format must be mcap, lerobot, both or mcap_mp4")
@@ -455,6 +496,16 @@ class ConfigStore:
         self.path = Path(path).expanduser().resolve()
         self.value = copy.deepcopy(DEFAULT_CONFIG)
 
+    @staticmethod
+    def _runtime_selection(value: dict[str, Any]) -> dict[str, Any]:
+        validated = validate_config(value)
+        # The controller, API and simulator honor these startup overrides.
+        # Load camera/recording settings from that same profile as well.
+        for variable, key in (("HC_ROBOT_NAME", "active"), ("HC_ROBOT_CONFIG_ROOT", "root")):
+            if os.environ.get(variable):
+                validated["robot_profiles"][key] = os.environ[variable]
+        return validate_config(validated)
+
     def _profile_middleware_path(self, value: dict[str, Any]) -> Path | None:
         selection = value["robot_profiles"]
         active = selection.get("active", "")
@@ -467,7 +518,7 @@ class ConfigStore:
 
     def apply_profile(self, value: dict[str, Any]) -> dict[str, Any]:
         """Load the selected robot's settings without modifying either file."""
-        validated = validate_config(value)
+        validated = self._runtime_selection(value)
         path = self._profile_middleware_path(validated)
         if path is None or not path.is_file():
             return validated
@@ -496,7 +547,7 @@ class ConfigStore:
         return copy.deepcopy(self.value)
 
     def save(self, value: dict[str, Any]) -> dict[str, Any]:
-        validated = validate_config(value)
+        validated = self._runtime_selection(value)
         path = self._profile_middleware_path(validated)
         previous_path = self._profile_middleware_path(self.value)
         package_exists = path is not None and path.is_file()

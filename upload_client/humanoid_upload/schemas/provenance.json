@@ -4,7 +4,7 @@
     "schemas/capture-context.schema.json": "07568e195a2642fb15dc7a296cda914ad8c5b6632cb998a23e83deaaa22de2ef",
     "schemas/export-complete.schema.json": "9d81a1e72e8f0429db51907bb2e20ba9288b7c7a2204eb592563042be83b945e",
     "schemas/openarm-recording-complete.schema.json": "4c2b2cc638ae91f53cffdf5ad170f80ed54f4d87ddc63f9f2b3d29d08c22793c",
-    "schemas/processing-result-proposed.schema.json": "0be1ca697a75bb9052d1864b9a40df44bdcdabb920e47a3cfad12e6ff036dfa7",
+    "schemas/processing-result-proposed.schema.json": "7886713ef90a57ea389e840b0057806806adfbd74020e931bad13266f342470c",
     "schemas/robot-ingest-manifest.schema.json": "4dce279efcf2dd71cf9c2228fb74c215bf5e78639e38a37d5a3258fc0ad21638",
     "schemas/robot-ingest-upload-response.schema.json": "12c539211c481f0866b53edc8fe626f5cb71fe168055984ff50cca204bca739d",
     "schemas/source-mapping.schema.json": "d9cffd8b6ff86e3fe5b8eeae26415eefa40bea8fce0cc7684b758429d1b61c4c"

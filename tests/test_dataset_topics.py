@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+import pytest
 
 from geometry_msgs.msg import PoseArray, Pose, PoseStamped
 from sensor_msgs.msg import JointState
@@ -99,10 +100,14 @@ def test_no_projection_subscribes_to_its_own_output():
     assert not ({topic for topic, callback in b.subscriptions} & set(b.publishers))
 
 
-def test_groups_follow_every_bundled_profile():
+@pytest.mark.parametrize('backend', ['v23', 'motion'])
+def test_groups_follow_every_bundled_profile(backend, monkeypatch):
     from pathlib import Path
     import yaml
     from middleware.core.dataset_topics import load_joint_groups
+    monkeypatch.setenv('HC_CONTROL_BACKEND', backend)
+    monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
+    monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
     root = Path(__file__).parents[1]
     config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
     profiles = sorted(path.parent.name for path in (root / 'adapters/robots').glob('*/arm_teleop.yaml'))
@@ -111,8 +116,11 @@ def test_groups_follow_every_bundled_profile():
         config['robot_profiles']['active'] = profile
         groups = load_joint_groups(config, root / 'middleware')
         source = yaml.safe_load((root / 'adapters/robots' / profile / 'arm_teleop.yaml').read_text())
-        assert groups['left_arm'] == source['arms']['left']['joint_names']
-        assert groups['right_arm'] == source['arms']['right']['joint_names']
+        for side in ('left', 'right'):
+            expected = source['arms'][side]['joint_names']
+            if backend == 'motion':
+                expected = [f'{side}_joint_{i}' for i in range(1,len(expected)+1)]
+            assert groups[side + '_arm'] == expected
         assert bool(groups.get('waist')) == bool(source.get('body', {}).get('waist_joint_names'))
 
 

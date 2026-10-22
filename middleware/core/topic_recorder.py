@@ -332,6 +332,7 @@ class TopicRecorder:
         if not directory.is_absolute():
             directory = config_dir / directory
         self.directory = directory.resolve()
+        self.action_sources = config.get("action_sources", [])
         self.save_format = str(config.get("format", "mcap"))
         self.lerobot_fps = int(config.get("lerobot_fps", 15))
         self.lerobot_task = str(config.get("lerobot_task", "遥操作"))
@@ -464,6 +465,8 @@ class TopicRecorder:
         if process.is_alive():
             raise TimeoutError("MCAP writer did not finish within 30 seconds")
         self._process = None
+        if process.exitcode != 0:
+            self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self.status()  # Drain writer errors before exporting a closed source.
         if process.exitcode != 0 and not self._last_error:
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
@@ -515,7 +518,7 @@ class TopicRecorder:
         command = [sys.executable, "-m", "middleware.core.lerobot_export",
                    str(self.path), str(destination), "--fps", str(fps),
                    "--task", task, "--robot-type",
-                   self._active_metadata.get("profile_id", "robot")]
+                   self._active_metadata.get("profile_id", "robot"), "--action-sources", json.dumps(self.action_sources)]
         try:
             # Export runs outside the ROS and video workers at lower priority.
             if sys.platform.startswith("linux"):

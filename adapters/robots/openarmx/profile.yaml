@@ -14,8 +14,14 @@ config_files:
 - arm_teleop.yaml
 - vr_configs.yml
 - middleware.yaml
-link_count: 30                       # URDF Link 数量。
-joint_count: 29                      # URDF Joint 总数（包含固定关节）。
+- robot_api.yaml
+- cameras.yaml
+- motion/motion.yaml
+- motion/sdk.yaml
+- motion/channels.yaml
+- motion/tools.yaml
+link_count: 34                       # URDF Link 数量。
+joint_count: 33                      # URDF Joint 总数（包含固定关节）。
 movable_joint_count: 18              # 14 个臂关节加 4 个夹爪关节。
 free_joint_count: 14                 # ControllerV23 控制的双臂关节数量。
 task_count: 2                        # 左、右手 TCP 各一个完整位姿任务。

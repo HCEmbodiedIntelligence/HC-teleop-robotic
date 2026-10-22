@@ -428,7 +428,7 @@ class WaistTrackingTests(unittest.TestCase):
         """Verify SimRobotController initializes folding_waist to initial_joints and resets on reset_home()."""
         from simulation.general_sim_robot_control_node_ros2 import SimRobotController
         cfg_path = Path(__file__).resolve().parents[1] / "adapters/robots/x1/vr_configs.yml"
-        sim_node = SimRobotController(str(cfg_path), init_debug=False)
+        sim_node = SimRobotController(str(cfg_path), init_debug=False, headless=True)
         try:
             expected_home = [0.5, 1.2, -0.6]
             self.assertEqual(len(sim_node.folding_waist.joint_pos), 3)

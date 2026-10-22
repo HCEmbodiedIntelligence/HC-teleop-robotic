@@ -41,3 +41,10 @@ adapters/robots/*
 
 # Isolated optional LeRobot export environment
 .venv-lerobot/
+
+# Optional Motion workspace outputs and local environment links
+build_motion/
+install_motion
+log_motion/
+.deps
+.venv-lerobot

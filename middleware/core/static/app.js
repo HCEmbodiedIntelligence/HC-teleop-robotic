@@ -160,7 +160,7 @@ function messageState(info) {
 function renderCommandMux(ros) {
   const mux=ros.command_mux||{};
   const source=mux.source||'vr';
-  const sourceLabel=source==='exoskeleton'?'外骨骼':'VR / IK';
+  const sourceLabel=source==='motion'?'Move / Servo':source==='exoskeleton'?'外骨骼':'VR / IK';
   setText('#controlSourceState',sourceLabel);
   setText('#controlSourceMeta',mux.output_enabled===false?'急停门控已关闭':'命令输出已使能');
   const sourceState=$('#controlSourceState');
@@ -172,6 +172,9 @@ function renderCommandMux(ros) {
   setText('#exoCommandTopic',mux.exoskeleton_topic||'/control/exoskeleton/joint_states');
   setText('#outputCommandTopic',mux.output_topic||'/action/joint_states');
   setText('#muxForwarded',String(mux.forwarded||0));
+  setText('#hardwareReadyState',mux.hardware_ready===true?'就绪':mux.hardware_ready===false?'未就绪':'未知');
+  setText('#hardwareReadyAge',Number.isFinite(mux.hardware_ready_age)?mux.hardware_ready_age.toFixed(3)+' s':'未知');
+  setText('#muxRejected',String(mux.rejected||0));
   const sourceStatus=(name,label)=>{
     const age=mux.last_received_age?.[name];
     const count=mux.received?.[name]||0;
@@ -1786,13 +1789,14 @@ async function init() {
   if($('#stopButton'))$('#stopButton').onclick=toggleSafety;
   const setControlSource=async source=>{
     try {
-      const label=source==='exoskeleton'?'外骨骼':'VR / IK';
+      const label=source==='motion'?'Move / Servo':source==='exoskeleton'?'外骨骼':'VR / IK';
       await api('/api/teleop/source',{method:'POST',body:JSON.stringify({source})});
       renderStatus(await api('/api/status'));
       toast(`控制源已切换为 ${label}`);
     }catch(error){toast(error.message,true);}
   };
   if($('#sourceVr'))$('#sourceVr').onclick=()=>setControlSource('vr');
+  if($('#sourceMotion'))$('#sourceMotion').onclick=()=>setControlSource('motion');
   if($('#sourceExoskeleton'))$('#sourceExoskeleton').onclick=()=>setControlSource('exoskeleton');
   document.addEventListener('visibilitychange', () => updateDatasetPolling(location.hash.slice(1)));
   configureProfileDialog();

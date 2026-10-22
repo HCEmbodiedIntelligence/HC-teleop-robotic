@@ -23,11 +23,13 @@ class TopicPlayer:
         ros_bridge_provider: Callable[[], Any],
         state_callback: Callable[[str, dict[str, Any]], None] | None = None,
         active_profile_provider: Callable[[], str] | None = None,
+        active_api_metadata_provider: Callable[[], dict] | None = None,
     ):
         self.directory = directory
         self._get_ros = ros_bridge_provider
         self._state_callback = state_callback
         self._get_active_profile = active_profile_provider or (lambda: "")
+        self._get_active_api_metadata = active_api_metadata_provider or (lambda: {})
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -101,6 +103,12 @@ class TopicPlayer:
                 raise FileNotFoundError(f"MCAP file not found: {filename}")
 
             recording_metadata = read_recording_metadata(target)
+            active_api = self._get_active_api_metadata()
+            if mode == "drive" and active_api.get("robot_api_schema"):
+                if recording_metadata.get("robot_api_schema") != active_api["robot_api_schema"]:
+                    raise ValueError("drive replay requires public joint metadata; historical native-name recordings need explicit offline conversion")
+                if recording_metadata.get("robot_api_revision") != active_api.get("robot_api_revision"):
+                    raise ValueError("drive replay mapping revision differs; review and explicitly convert the recording first")
             recorded_profile = str(recording_metadata.get("profile_id", "")).strip()
             active_profile = str(self._get_active_profile() or "").strip()
             if (

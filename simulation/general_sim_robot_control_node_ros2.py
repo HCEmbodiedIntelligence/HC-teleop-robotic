@@ -141,13 +141,18 @@ class SimRobotController(Node, AssembledRobot):
         self.init_ground_plane(sim_cfg, init_debug=init_debug and not headless)
         
         # ROS2 publishers and subscribers
+        from adapters.core.runtime_config import unified_profile
+        unified = unified_profile(self.robot_description_path)
+        if unified:
+            from middleware.core.robot_api import RobotApiProfile
+            RobotApiProfile(self.robot_description_path)
         self.joint_state_pub = self.create_publisher(
-            JointState, f"/io_teleop/joint_states", 1
+            JointState, "/internal/robot/joint_states" if unified else "/io_teleop/joint_states", 1
         )
         self.base_pose_pub = self.create_publisher(PoseStamped, "/observation/base/pose", 10)
         self.joint_cmd_sub = self.create_subscription(
             JointState,
-            f"/io_teleop/joint_cmd",
+            "/internal/robot/joint_commands" if unified else "/io_teleop/joint_cmd",
             self.joint_cmd_callback,
             1,
         )

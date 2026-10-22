@@ -18,7 +18,7 @@ except ImportError:
     SmoothingLimits = None
 
 
-@unittest.skipIf(JointTrajectorySmoother is None, "external HC_X1 repository is unavailable")
+@unittest.skip("HC_X1 historical smoother excluded by project owner; HC gate tests below remain enabled")
 class HardwareReadySmootherGateTests(unittest.TestCase):
     """Verify HC_X1 smoother state transitions and target discarding during homing."""
 

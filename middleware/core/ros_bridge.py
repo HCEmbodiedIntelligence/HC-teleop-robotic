@@ -130,6 +130,10 @@ class RosBridge:
         camera_topics: list[str] | None = None,
     ):
         self.config = config
+        self._public_api = None
+        if config.get("robot_api_profile"):
+            from .robot_api import RobotApiProfile
+            self._public_api = RobotApiProfile(config["robot_api_profile"])
         self.on_event = on_event
         self.on_frame = on_frame
         self.camera_topic = str(camera_topic)
@@ -148,9 +152,18 @@ class RosBridge:
         self._command_source = str(mux_config.get("source", "vr"))
         self._command_output_enabled = True
         self._hardware_ready = False
+        self._hardware_ready_last = -math.inf
+        self._ready_timeout = float(mux_config.get('hardware_ready_timeout_sec', 0.5))
+        if not math.isfinite(self._ready_timeout) or self._ready_timeout <= 0:
+            raise ValueError('hardware_ready_timeout_sec must be positive and finite')
+        self._ros_now = time.time
+        self._source_cutoff = -math.inf
+        self._source_stamps = {}
+        self._output_epoch = 0
+        self._hardware_enable_sent_epoch = None
         self._replay_active = False
-        self._mux_received = {"vr": 0, "exoskeleton": 0}
-        self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0}
+        self._mux_received = {"vr": 0, "exoskeleton": 0, "motion": 0}
+        self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0, "motion": 0.0}
         self._mux_forwarded = 0
         self._mux_rejected = 0
         domain_id = int(config.get("domain_id", 0))
@@ -184,10 +197,13 @@ class RosBridge:
                 topic: tracker.status(now) for topic, tracker in self._trackers.items()
             }
             mux_config = self.config.get("command_mux", {})
+            ready = self._ready_locked(now)
             result["command_mux"] = {
                 "enabled": self._mux_enabled,
                 "output_enabled": self._command_output_enabled,
-                "hardware_ready": self._hardware_ready,
+                "hardware_ready": ready,
+                "hardware_ready_age": (now - self._hardware_ready_last
+                                       if math.isfinite(self._hardware_ready_last) else None),
                 "replay_active": self._replay_active,
                 "source": self._command_source,
                 "vr_topic": mux_config.get("vr_topic", "/control/vr/joint_states"),
@@ -231,11 +247,12 @@ class RosBridge:
                 allowed = (
                     self._replay_active
                     and self._command_output_enabled
-                    and self._hardware_ready
+                    and self._ready_locked(time.monotonic())
                 )
+                epoch = self._output_epoch
             if not allowed:
                 return False
-            return self._enqueue("replay_raw", (topic, msg_type, raw_data))
+            return self._enqueue("replay_raw", (topic, msg_type, raw_data, epoch))
         return self._enqueue("publish_raw", (topic, msg_type, raw_data))
 
     def begin_replay(self) -> bool:
@@ -244,13 +261,14 @@ class RosBridge:
             if not self.config.get("enabled", True):
                 self._replay_active = True
                 return True
-            if not self._command_output_enabled or not self._hardware_ready:
+            if not self._command_output_enabled or not self._ready_locked(time.monotonic()):
                 return False
             self._replay_active = True
             return True
 
     def end_replay(self, require_reset: bool = True) -> None:
         with self._lock:
+            self._revoke_locked()
             self._replay_active = False
             if require_reset:
                 # A deliberate dashboard/VR resume is required before any live
@@ -266,21 +284,77 @@ class RosBridge:
 
     def emergency_stop(self, topic: str, reason: str) -> bool:
         with self._lock:
+            self._revoke_locked()
             self._command_output_enabled = False
         return self._enqueue("stop", (topic, reason))
 
     def set_control_source(self, source: str) -> bool:
         source = str(source).strip().lower()
-        if source not in {"vr", "exoskeleton"}:
-            raise ValueError("control source must be vr or exoskeleton")
+        if source not in {"vr", "exoskeleton", "motion"}:
+            raise ValueError("control source must be vr, exoskeleton or motion")
         with self._lock:
+            if self._command_source != source:
+                self._revoke_locked()
+                self._command_output_enabled = False
             self._command_source = source
         return self._enqueue("control_source", source)
 
     def set_command_output_enabled(self, enabled: bool) -> bool:
         with self._lock:
+            self._revoke_locked()
             self._command_output_enabled = bool(enabled)
-        return self._enqueue("command_output", bool(enabled))
+            epoch = self._output_epoch
+        return self._enqueue("command_output", (bool(enabled), epoch))
+
+    def _revoke_locked(self) -> None:
+        self._source_cutoff = self._ros_now()
+        self._output_epoch += 1
+
+    def _ready_locked(self, now: float) -> bool:
+        if self._hardware_ready and now - self._hardware_ready_last > self._ready_timeout:
+            self._hardware_ready = False
+            self._command_output_enabled = False
+            self._revoke_locked()
+        return self._hardware_ready
+
+    def receive_hardware_ready(self, ready: bool, now: float | None = None) -> None:
+        with self._lock:
+            current = time.monotonic() if now is None else now
+            self._ready_locked(current)
+            if not ready and self._hardware_ready:
+                self._command_output_enabled = False
+                self._revoke_locked()
+            self._hardware_ready = bool(ready)
+            self._hardware_ready_last = current
+
+    def forward_live_command(self, source: str, message: Any, publish: Callable) -> bool:
+        """Check and publish under the same lock as stop/source/replay changes."""
+        now = time.monotonic()
+        try:
+            names, positions = message.name, message.position
+            stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+            valid = (bool(names) and len(names) == len(positions)
+                     and len(set(names)) == len(names) and all(names)
+                     and all(math.isfinite(float(v)) for v in positions)
+                     and math.isfinite(stamp) and stamp > 0
+                     and -.05 <= self._ros_now() - stamp <= .3)
+            if valid and self._public_api is not None:
+                self._public_api.convert_message(message, to_model=True)
+        except (AttributeError, TypeError, ValueError):
+            valid, stamp = False, 0.0
+        with self._lock:
+            self._mux_received[source] += 1
+            self._mux_last_received[source] = now
+            ready = self._ready_locked(now)
+            if (not valid or stamp <= max(self._source_cutoff, self._source_stamps.get(source, 0))
+                    or not ready or not self._command_output_enabled
+                    or self._replay_active or self._command_source != source):
+                self._mux_rejected += 1
+                return False
+            self._source_stamps[source] = stamp
+            publish(message)
+            self._mux_forwarded += 1
+            return True
 
     def _enqueue(self, command: str, data: Any) -> bool:
         try:
@@ -299,6 +373,7 @@ class RosBridge:
         rclpy = None
         node = None
         executor = None
+        robot_api_boundary = None
         try:
             import os
             import rclpy
@@ -332,6 +407,10 @@ class RosBridge:
             trackers: dict[str, TopicHealthTracker] = {}
             last_emit: dict[str, float] = {}
 
+            if self.config.get("robot_api_profile"):
+                from .robot_api_boundary import RobotApiBoundary
+                robot_api_boundary = RobotApiBoundary(node, self._public_api)
+
             dataset_config = self.config.get("dataset_topics", {})
             if dataset_config.get("enabled", False):
                 from .dataset_topics import DatasetTopics
@@ -350,8 +429,7 @@ class RosBridge:
                 )
                 def hardware_ready_cb(msg: Any) -> None:
                     ready = bool(getattr(msg, "data", False))
-                    with self._lock:
-                        self._hardware_ready = ready
+                    self.receive_hardware_ready(ready)
 
                 subscriptions.append(
                     node.create_subscription(
@@ -390,7 +468,21 @@ class RosBridge:
                     JointState,
                 )
 
+                self._ros_now = lambda: node.get_clock().now().nanoseconds * 1e-9
+                from std_msgs.msg import Header
+                permit_pub = node.create_publisher(Header,
+                    str(mux_config.get('motion_permit_topic', '/control/motion/permit')), 1)
+                def publish_motion_permit():
+                    with self._lock:
+                        if (self._ready_locked(time.monotonic()) and self._command_output_enabled
+                                and not self._replay_active and self._command_source in {'vr', 'motion'}):
+                            header = Header()
+                            header.stamp = node.get_clock().now().to_msg()
+                            header.frame_id = f'{self._command_source}:{self._output_epoch}'
+                            permit_pub.publish(header)
+                node.create_timer(.05, publish_motion_permit)
                 for source, topic in (
+                    ("motion", str(mux_config.get("motion_topic", "/control/motion/joint_targets"))),
                     ("vr", str(mux_config.get("vr_topic", "/control/vr/joint_states"))),
                     (
                         "exoskeleton",
@@ -407,32 +499,7 @@ class RosBridge:
                         *,
                         source: str = source,
                     ) -> None:
-                        now = time.monotonic()
-                        valid = (
-                            len(message.name) == len(message.position)
-                            and bool(message.name)
-                            and all(math.isfinite(float(value)) for value in message.position)
-                        )
-                        with self._lock:
-                            self._mux_received[source] += 1
-                            self._mux_last_received[source] = now
-                            selected = self._command_source == source
-                            output_enabled = self._command_output_enabled
-                            hw_ready = self._hardware_ready
-                            replay_active = self._replay_active
-                            if not valid:
-                                self._mux_rejected += 1
-                        if (
-                            not valid
-                            or not selected
-                            or not output_enabled
-                            or not hw_ready
-                            or replay_active
-                        ):
-                            return
-                        output_publisher.publish(message)
-                        with self._lock:
-                            self._mux_forwarded += 1
+                        self.forward_live_command(source, message, output_publisher.publish)
 
                     subscriptions.append(
                         node.create_subscription(
@@ -565,6 +632,8 @@ class RosBridge:
                 traceback=traceback.format_exc(limit=8),
             )
         finally:
+            if robot_api_boundary is not None:
+                robot_api_boundary.close()
             if executor is not None and node is not None:
                 executor.remove_node(node)
             if node is not None:
@@ -588,7 +657,7 @@ class RosBridge:
             try:
                 command, args = self._commands.get_nowait()
             except queue.Empty:
-                return
+                break
             try:
                 if command == "publish":
                     topic, msg_type_name, data = args
@@ -600,13 +669,14 @@ class RosBridge:
                     set_message_fields(message, data)
                     publisher.publish(message)
                 elif command in {"publish_raw", "replay_raw"}:
-                    topic, msg_type_name, raw_bytes = args
+                    topic, msg_type_name, raw_bytes = args[:3]
                     if command == "replay_raw":
                         with self._lock:
                             allowed = (
-                                self._replay_active
+                                args[3] == self._output_epoch
+                                and self._replay_active
                                 and self._command_output_enabled
-                                and self._hardware_ready
+                                and self._ready_locked(time.monotonic())
                             )
                         if not allowed:
                             continue
@@ -617,7 +687,18 @@ class RosBridge:
                     from rclpy.serialization import deserialize_message
 
                     message = deserialize_message(raw_bytes, message_type)
-                    publisher.publish(message)
+                    if command == "replay_raw":
+                        if self._public_api is not None:
+                            self._public_api.convert_message(message, to_model=True)
+                            # Recording timestamps describe the recording clock;
+                            # an explicitly armed replay is a new command epoch.
+                            message.header.stamp = node.get_clock().now().to_msg()
+                        with self._lock:
+                            if (args[3] == self._output_epoch and self._replay_active
+                                    and self._command_output_enabled and self._ready_locked(time.monotonic())):
+                                publisher.publish(message)
+                    else:
+                        publisher.publish(message)
                 elif command == "stop":
                     topic, reason = args
                     from std_msgs.msg import Bool
@@ -627,12 +708,10 @@ class RosBridge:
                     )
                     message = Bool(data=True)
                     publisher.publish(message)
-                    with self._lock:
-                        self._command_output_enabled = False
+                    # emergency_stop() already revoked permission synchronously.
+                    # Do not overwrite a later explicit resume queued after it.
                     node.get_logger().warning(f"Emergency stop: {reason}")
                 elif command == "control_source":
-                    with self._lock:
-                        self._command_source = str(args)
                     mux_config = self.config.get("command_mux", {})
                     topic = str(
                         mux_config.get(
@@ -647,14 +726,38 @@ class RosBridge:
                     publisher.publish(String(data=str(args)))
                     node.get_logger().info(f"Joint command source: {args}")
                 elif command == "command_output":
+                    enabled, epoch = args
                     with self._lock:
-                        self._command_output_enabled = bool(args)
+                        if (epoch != self._output_epoch or
+                                enabled != self._command_output_enabled):
+                            continue  # A subsequent stop/source change revoked this request.
+                        self._publish_hardware_enable_locked(node, publishers, enabled)
                     node.get_logger().info(
                         "Joint command output %s"
-                        % ("enabled" if args else "disabled")
+                        % ("enabled" if enabled else "disabled")
                     )
             except Exception as exc:
                 self._set_status(error=f"publish failed: {type(exc).__name__}: {exc}")
+
+        # Source changes, ready loss and replay completion can revoke output
+        # without a queued enable request. Propagate their stop to hardware.
+        # True is an explicit resume event only; never periodically re-arm a
+        # stopped/restarted adapter, or replay a queued pre-stop enable.
+        with self._lock:
+            self._ready_locked(time.monotonic())
+            if not self._command_output_enabled:
+                self._publish_hardware_enable_locked(node, publishers, False)
+
+    def _publish_hardware_enable_locked(self, node, publishers, enabled):
+        if self._hardware_enable_sent_epoch == self._output_epoch:
+            return
+        from std_msgs.msg import Bool
+
+        topic = str(self.config.get("command_mux", {}).get(
+            "hardware_enable_topic", "/control/hardware/enabled"))
+        publisher = self._publisher(node, publishers, topic, "std_msgs/msg/Bool", Bool)
+        publisher.publish(Bool(data=enabled))
+        self._hardware_enable_sent_epoch = self._output_epoch
 
     @staticmethod
     def _publisher(

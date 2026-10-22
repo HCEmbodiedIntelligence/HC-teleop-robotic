@@ -1,0 +1,62 @@
+# Public/model SI boundary. Arm order and home are referenced, never duplicated.
+schema: hc-robot-api/v1
+groups:
+  left_arm:
+    model_joints_from: arms.left.joint_names
+    public_name_prefix: left_joint_
+  right_arm:
+    model_joints_from: arms.right.joint_names
+    public_name_prefix: right_joint_
+  whole_body:
+    combine:
+    - left_arm
+    - right_arm
+auxiliary_joints:
+  openarmx_left_finger_joint1: left_gripper_joint_1
+  openarmx_left_finger_joint2: left_gripper_joint_2
+  openarmx_right_finger_joint1: right_gripper_joint_1
+  openarmx_right_finger_joint2: right_gripper_joint_2
+joint_overrides: {}
+poses:
+  home:
+    model_positions_from: robot.initial_joints
+driver:
+  kind: openarmx_hc_robot_adapter
+  parameters:
+    robot_feedback_topic: /joint_states
+    hc_feedback_topic: /internal/robot/joint_states
+    hc_command_topic: /internal/robot/joint_commands
+    right_gripper_topic: /action/right_hand/joint_states
+    left_gripper_topic: /action/left_hand/joint_states
+    right_controller_topic: /right_forward_position_controller/commands
+    left_controller_topic: /left_forward_position_controller/commands
+    emergency_stop_topic: /control/emergency_stop
+    enable_topic: /control/hardware/enabled
+    publish_rate_hz: 100.0
+    command_timeout_sec: 0.15
+    feedback_timeout_sec: 0.5
+    gripper_lower: 0.0
+    gripper_upper: 0.044
+    gripper_max_velocity: 0.08
+    right_gripper_joint_name: openarmx_right_finger_joint1
+    left_gripper_joint_name: openarmx_left_finger_joint1
+    right_max_velocity:
+    - 1.0
+    - 1.0
+    - 1.2
+    - 1.2
+    - 1.5
+    - 1.5
+    - 1.5
+    left_max_velocity:
+    - 1.0
+    - 1.0
+    - 1.2
+    - 1.2
+    - 1.5
+    - 1.5
+    - 1.5
+    hardware_ready_topic: /status/hardware/ready
+    hardware_state_topic: /dynamic_joint_states
+    hardware_mode: real
+    gripper_timeout_sec: 0.5

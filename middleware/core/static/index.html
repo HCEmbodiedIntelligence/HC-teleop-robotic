@@ -40,9 +40,10 @@
           <div class="panel-title"><div><h2>控制源切换</h2><p>只有选中的来源能够转发到机器人标准关节命令</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
           <div class="source-switch">
             <button id="sourceVr" data-source="vr"><strong>VR / IK</strong><small id="vrSourceStatus">未检测</small></button>
+            <button id="sourceMotion" data-source="motion"><strong>Move / Servo</strong><small>程序控制</small></button>
             <button id="sourceExoskeleton" data-source="exoskeleton"><strong>外骨骼</strong><small id="exoSourceStatus">未检测</small></button>
           </div>
-          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
+          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>硬件状态</dt><dd id="hardwareReadyState">未知</dd></div><div><dt>状态时效</dt><dd id="hardwareReadyAge">未知</dd></div><div><dt>累计拒绝</dt><dd id="muxRejected">0</dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
         </article>
         <article class="panel system-panel">
           <div class="panel-title"><div><h2>链路状态</h2><p>VR、控制器、相机和网页连接状态</p></div><span id="vrPeer" class="tag">VR 未连接</span></div>
@@ -410,6 +411,6 @@
     </form>
   </dialog>
   <script src="/static/platform_panel.js?v=11-capture-formats"></script>
-  <script src="/static/app.js?v=25-capture-formats"></script>
+  <script src="/static/app.js?v=26-motion-source"></script>
 </body>
 </html>

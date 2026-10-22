@@ -78,7 +78,9 @@ if [[ ! -d "${PROJECT_ROOT}/.deps/aiohttp" ]] && ! /usr/bin/python3 -c "import a
   exit 2
 fi
 
-if [[ -f /opt/ros/humble/setup.bash ]]; then
+if [[ -f "${PROJECT_ROOT}/../../setup_hc.bash" ]]; then
+  source "${PROJECT_ROOT}/../../setup_hc.bash"
+elif [[ -f /opt/ros/humble/setup.bash ]]; then
   set +u
   source /opt/ros/humble/setup.bash
   set -u

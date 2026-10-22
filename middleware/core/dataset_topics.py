@@ -103,14 +103,15 @@ class DatasetTopics:
 
 def load_joint_groups(config, config_dir):
     """Resolve split groups from the active robot profile, including profiles without waist."""
-    import os
-    from pathlib import Path
+    from adapters.core.runtime_config import unified_profile
+    from .robot_api import RobotApiProfile, selected_profile
     import yaml
-    profile = config['robot_profiles']
-    root = Path(os.environ.get('HC_ROBOT_CONFIG_ROOT') or profile.get('root', '../adapters/robots')).expanduser()
-    if not root.is_absolute():
-        root = Path(config_dir) / root
-    adapter = yaml.safe_load((root / profile['active'] / 'arm_teleop.yaml').read_text())
+    directory = selected_profile(config, config_dir)
+    if unified_profile(directory):
+        api = RobotApiProfile(directory)
+        return {group: [api.joints[n]['public_name'] for n in names]
+                for group, names in api.groups.items() if group != 'whole_body'}
+    adapter = yaml.safe_load((directory / 'arm_teleop.yaml').read_text())
     groups = {f'{side}_arm': list(arm['joint_names']) for side, arm in adapter['arms'].items()}
     waist = adapter.get('body', {}).get('waist_joint_names', [])
     if waist:

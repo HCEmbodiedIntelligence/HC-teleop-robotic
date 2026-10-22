@@ -88,8 +88,9 @@ class ArmTeleopConfigTests(unittest.TestCase):
         self.assertNotIn("command_smoothing", control)
         self.assertEqual(control["joint_state_topic"], "/observation/joint_states")
         self.assertEqual(control["command_topic"], "/control/vr/joint_states")
+        self.assertEqual(control["backend"], "v23")
 
-    def test_default_waist_matches_documented_joint_group(self):
+    def test_x1_preserves_enabled_waist_group(self):
         config = self.load_config()
         waist_names = config["body"]["waist_joint_names"]
         self.assertTrue(config["body"]["enabled"])

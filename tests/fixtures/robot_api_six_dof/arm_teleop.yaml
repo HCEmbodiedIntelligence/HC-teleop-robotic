@@ -1,0 +1,164 @@
+robot:
+  urdf_path: urdf/six_dof.urdf
+  base_position:
+  - 0.0
+  - 0.0
+  - 0.0
+  base_orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  initial_joints:
+    fixture_left_axis_1: 0.0
+    fixture_left_axis_2: 0.3
+    fixture_left_axis_3: 0.0
+    fixture_left_axis_4: -0.6
+    fixture_left_axis_5: 0.2
+    fixture_left_axis_6: 0.0
+    fixture_right_axis_1: 0.0
+    fixture_right_axis_2: 0.3
+    fixture_right_axis_3: 0.0
+    fixture_right_axis_4: -0.6
+    fixture_right_axis_5: 0.2
+    fixture_right_axis_6: 0.0
+arms:
+  right:
+    base_link: fixture_base
+    generic_task_base_link: fixture_base
+    ee_link: right_tcp
+    joint_names:
+    - fixture_right_axis_1
+    - fixture_right_axis_2
+    - fixture_right_axis_3
+    - fixture_right_axis_4
+    - fixture_right_axis_5
+    - fixture_right_axis_6
+  left:
+    base_link: fixture_base
+    generic_task_base_link: fixture_base
+    ee_link: left_tcp
+    joint_names:
+    - fixture_left_axis_1
+    - fixture_left_axis_2
+    - fixture_left_axis_3
+    - fixture_left_axis_4
+    - fixture_left_axis_5
+    - fixture_left_axis_6
+body:
+  enabled: false
+  waist_joint_names: []
+  torso_link: fixture_base
+  base_command_topic: /action/base/command
+  base_command_mode: velocity
+  stick_x_axis: 2
+  stick_y_axis: 3
+  stick_deadzone: 0.08
+  stick_forward_direction: 1.0
+  stick_lateral_direction: -1.0
+  max_linear_velocity: 0.0
+  max_lateral_velocity: 0.0
+  yaw_deadzone: 0.18
+  yaw_gain: 0.0
+  yaw_direction: -1.0
+  max_angular_velocity: 0.0
+  head_height_axis: 2
+  head_pitch_position_axis: 1
+  height_scale: 0.0
+  pitch_scale: 0.0
+  height_direction: -1.0
+  pitch_direction: -1.0
+  max_height_delta: 0.0
+  max_pitch_delta: 0.0
+  pitch_axis_world:
+  - -1.0
+  - 0.0
+  - 0.0
+  joint_lower: []
+  joint_upper: []
+  max_joint_velocity: 0.0
+  ik_iterations: 10
+  ik_damping: 0.05
+  ik_max_update: 0.08
+grippers:
+  trigger_axis: 0
+  max_velocity: 0.08
+  include_sim_joints: false
+  right:
+    sim_joint: ''
+    sim_closed_position: 0.0
+    finger_topic: /action/right_hand/joint_states
+    finger_joint_names: []
+    finger_open: []
+    finger_closed: []
+  left:
+    sim_joint: ''
+    sim_closed_position: 0.0
+    finger_topic: /action/left_hand/joint_states
+    finger_joint_names: []
+    finger_open: []
+    finger_closed: []
+control:
+  backend: motion
+  enabled_on_start: true
+  rate_hz: 100.0
+  vr_data_topic: /vrdata
+  joint_state_topic: /internal/robot/joint_states
+  command_topic: /internal/vr/aux_joint_targets
+  generic_command_topic: /control/solver/joint_targets
+  solver_topic: /status/solver/joint_states
+  solver_reset_topic: /control/solver/reset
+  solver_reset_ack_topic: /status/solver/reset_ack
+  target_pose_topic: /action/ee_poses
+  controller_target_pose_topic: /control/solver/ee_targets
+  actual_pose_topic: /observation/ee_poses
+  status_topic: /status/teleop
+  safety_stop_topic: /control/emergency_stop
+  enable_topic: /control/teleop/enabled
+  clutch_axis: 1
+  clutch_threshold: 0.55
+  home_gesture_axis: 2
+  home_gesture_threshold: 0.95
+  home_gesture_release_threshold: 0.35
+  home_joint_velocity: 0.5
+  home_tolerance: 0.015
+  pose_timeout: 0.5
+  input_timeout: 0.5
+  joint_state_timeout: 0.5
+  axis_mapping:
+  - - 0.0
+    - 0.0
+    - -1.0
+  - - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  head_axis_mapping:
+  - - 0.0
+    - 0.0
+    - -1.0
+  - - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  position_scale: 0.8
+  max_displacement: 0.8
+  orientation_enabled: true
+  orientation_weight: 0.35
+  target_position_deadband: 0.0
+  target_orientation_deadband: 0.0
+  target_filter_alpha: 0.75
+  command_joint_deadband: 0.0
+  collision_avoidance_enabled: false
+  collision_min_distance: 0.02
+  collision_home_tolerance: 0.008
+  collision_ignore_graph_distance: 2
+  collision_check_intra_arm: false
+  collision_check_inter_arm: true
+  collision_check_arm_body: true
+  collision_latch_until_release: true
+  collision_escape_epsilon: 1.0e-05
