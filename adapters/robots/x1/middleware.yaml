@@ -108,6 +108,28 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
     qos_reliability: best_effort
+  - topic: /io_teleop/camera_head/calibration
+    description: 头部相机内参与 RGB/深度标定 JSON，保留旧格式原始话题以支持无损转换
+    type: std_msgs/msg/String
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    target_hz: 2.0
+    min_hz: 0.2
+    qos_reliability: reliable
+  - topic: /io_teleop/camera_head/extrinsics
+    description: 机器人到头部相机的外参 JSON，保留旧格式原始话题以支持无损转换
+    type: std_msgs/msg/String
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
+    target_hz: 2.0
+    min_hz: 0.2
+    qos_reliability: reliable
   - topic: /status/base
     description: ''
     type: std_msgs/msg/String

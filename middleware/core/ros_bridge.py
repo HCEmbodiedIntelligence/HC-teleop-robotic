@@ -28,6 +28,8 @@ DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
     "/observation/hands/joint_states": {"target_hz": 10.0, "min_hz": 1.0},
     "/observation/cameras/head/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/observation/cameras/head/depth/compressed": {"target_hz": 30.0, "min_hz": 10.0},
+    "/io_teleop/camera_head/calibration": {"target_hz": 2.0, "min_hz": 0.2},
+    "/io_teleop/camera_head/extrinsics": {"target_hz": 2.0, "min_hz": 0.2},
     "/observation/cameras/overhead/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/observation/cameras/d405_left/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
     "/observation/cameras/d405_right/color/compressed": {"target_hz": 30.0, "min_hz": 10.0},
