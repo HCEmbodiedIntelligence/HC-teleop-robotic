@@ -46,5 +46,6 @@ adapters/robots/*
 build_motion/
 install_motion
 log_motion/
+/log/
 .deps
 .venv-lerobot

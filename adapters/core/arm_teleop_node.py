@@ -128,6 +128,10 @@ class RobotArmTeleopNode(Node):
         self.generic_command_stamp = 0.0
         self.generic_command_count = 0
         self.generic_aux_command: dict[str, float] = {}
+        self.waist_output_enabled = False
+        self.waist_clutch_rearm_required = False
+        self._prev_left_grip = False
+        self._prev_resume_requested = False
         self.solver_rearm = SolverRearmGate()
         self.hardware_ready = False
         self.collision_enabled = bool(
@@ -779,10 +783,35 @@ class RobotArmTeleopNode(Node):
             joy = frame.inputs.get(side)
             if joy is not None:
                 self._joy_callback(self.arms[side], joy)
-        if frame.resume_requested and (not self.enabled or self.stop_reason):
-            self.enabled = True
-            self.stop_reason = ""
-            self.get_logger().info("VR controller A button pressed: teleop re-enabled")
+        resume_rising = frame.resume_requested and not self._prev_resume_requested
+        self._prev_resume_requested = frame.resume_requested
+        if frame.resume_requested and (not self.enabled or self.stop_reason or resume_rising):
+            self._resume_teleop("VR controller A button pressed")
+
+    def _resume_teleop(self, reason: str = "VR controller A button pressed") -> None:
+        self.enabled = True
+        self.stop_reason = ""
+        self.waist_output_enabled = False
+        self.waist_clutch_rearm_required = True
+        if self.body.active:
+            self.body.active = False
+            self.body.reference_head = None
+            self.body.reference_torso = None
+            self.body.reference_target_link = None
+            self.body.target_head_local = None
+            self.body.smoothed_head_pose = None
+        for name in self.body.joint_names:
+            if name in self.joint_state:
+                self.last_command[name] = float(self.joint_state[name])
+            self.generic_aux_command.pop(name, None)
+        now = self._monotonic()
+        left_input_fresh = self._input_fresh(self.arms["left"], now)
+        self._prev_left_grip = bool(
+            left_input_fresh and self._clutch_pressed(self.arms["left"])
+        )
+        self.get_logger().info(
+            f"{reason}: teleop re-enabled, waist output disabled until new left Grip edge"
+        )
 
     def _joint_state_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -907,6 +936,9 @@ class RobotArmTeleopNode(Node):
                         )
                     )
         merged.update(self.generic_aux_command)
+        if not self.body.active:
+            for name in self.body.joint_names:
+                merged.pop(name, None)
         if arms_active or self.body.active:
             if not self._collision_command_allowed(merged, now):
                 return
@@ -921,21 +953,28 @@ class RobotArmTeleopNode(Node):
         if message.data:
             self.enabled = False
             self.stop_reason = "emergency stop topic"
+            self.waist_output_enabled = False
+            self.waist_clutch_rearm_required = True
+            for name in self.body.joint_names:
+                self.generic_aux_command.pop(name, None)
             self._release_all(send_base_zero=True)
             self.get_logger().error("Teleop disabled by emergency stop")
 
     def _enabled_callback(self, message: Bool) -> None:
-        self.enabled = bool(message.data)
-        self.stop_reason = "" if self.enabled else "disabled by command topic"
-        self._release_all(send_base_zero=True)
-        self.get_logger().info(
-            f"Teleop {'enabled' if self.enabled else 'disabled'} by command topic"
-        )
+        if message.data and not self.enabled:
+            self._resume_teleop("teleoperation enabled by command topic")
+        elif not message.data:
+            self.enabled = False
+            self.stop_reason = "disabled by command topic"
+            self.waist_output_enabled = False
+            self.waist_clutch_rearm_required = True
+            for name in self.body.joint_names:
+                self.generic_aux_command.pop(name, None)
+            self._release_all(send_base_zero=True)
+            self.get_logger().info("Teleop disabled by command topic")
 
     def _enable_service(self, _request: Trigger.Request, response: Trigger.Response):
-        self.enabled = True
-        self.stop_reason = ""
-        self._release_all(send_base_zero=True)
+        self._resume_teleop("teleoperation enabled by service")
         response.success = True
         response.message = "teleop enabled; use left/right Grip clutches"
         return response
@@ -1012,6 +1051,10 @@ class RobotArmTeleopNode(Node):
         self.body.reference_torso = None
         self.body.reference_target_link = None
         self.body.target_head_local = None
+        self.waist_output_enabled = False
+        self.waist_clutch_rearm_required = True
+        for name in self.body.joint_names:
+            self.generic_aux_command.pop(name, None)
         if send_base_zero:
             self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
 
@@ -1157,6 +1200,26 @@ class RobotArmTeleopNode(Node):
         return len(arm.joy.axes) > index and arm.joy.axes[index] >= float(
             self.control["clutch_threshold"]
         )
+
+    def _update_waist_clutch(self, now: float) -> bool:
+        left_input_fresh = self._input_fresh(self.arms["left"], now)
+        left_grip = left_input_fresh and self._clutch_pressed(self.arms["left"])
+        rising_edge = left_grip and not self._prev_left_grip
+        self._prev_left_grip = left_grip
+
+        if self.waist_clutch_rearm_required:
+            if rising_edge:
+                self.waist_clutch_rearm_required = False
+                self.waist_output_enabled = True
+                self.get_logger().info(
+                    "new left Grip rising edge detected: waist output rearmed and enabled"
+                )
+            else:
+                self.waist_output_enabled = False
+        else:
+            self.waist_output_enabled = left_grip
+
+        return self.waist_output_enabled
 
     def _sync_model(self) -> None:
         for name, value in self.joint_state.items():
@@ -3051,6 +3114,7 @@ class RobotArmTeleopNode(Node):
         left_base_requested = left_input_fresh and self._clutch_pressed(
             self.arms["left"]
         )
+        waist_active = self._update_waist_clutch(now)
         left_stick_active = (
             left_input_fresh
             and bool(self.body_config.get("left_stick_independent_base", True))
@@ -3083,7 +3147,7 @@ class RobotArmTeleopNode(Node):
             base_requested, arms_requested
         )
         body_requested = (
-            left_base_requested
+            waist_active
             and base_allowed
             and bool(self.body_config.get("enabled", True))
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
@@ -3094,6 +3158,8 @@ class RobotArmTeleopNode(Node):
             if not self.body.active:
                 self._engage_body()
             self._update_body(body_command)
+            self.generic_aux_command.update(body_command)
+            self.last_command.update(body_command)
         elif self.body.active:
             self.body.active = False
             self.body.reference_head = None
@@ -3103,20 +3169,10 @@ class RobotArmTeleopNode(Node):
             self.body.smoothed_head_pose = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
             for name in self.body.joint_names:
-                body_command[name] = float(
-                    self.last_command.get(
-                        name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
-                    )
-                )
+                self.generic_aux_command.pop(name, None)
         else:
             for name in self.body.joint_names:
-                body_command[name] = float(
-                    self.last_command.get(
-                        name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
-                    )
-                )
-        self.generic_aux_command.update(body_command)
-        self.last_command.update(body_command)
+                self.generic_aux_command.pop(name, None)
 
         neck_command: dict[str, float] = {}
         self._update_neck_joints(neck_command, now)
@@ -3225,6 +3281,7 @@ class RobotArmTeleopNode(Node):
         left_base_requested = left_input_fresh and self._clutch_pressed(
             self.arms["left"]
         )
+        waist_active = self._update_waist_clutch(now)
         left_stick_active = (
             left_input_fresh
             and bool(self.body_config.get("left_stick_independent_base", True))
@@ -3248,7 +3305,7 @@ class RobotArmTeleopNode(Node):
             base_requested, arms_requested
         )
         body_requested = (
-            left_base_requested
+            waist_active
             and base_allowed
             and bool(self.body_config.get("enabled", True))
             and now - self.body.head_stamp <= float(self.control["pose_timeout"])
@@ -3322,10 +3379,14 @@ class RobotArmTeleopNode(Node):
                 return
             message = JointState()
             message.header.stamp = self.get_clock().now().to_msg()
-            message.name = self.controlled_names
+            if self.body.active:
+                message.name = list(self.controlled_names)
+            else:
+                waist_names = set(self.body.joint_names)
+                message.name = [name for name in self.controlled_names if name not in waist_names]
             message.position = [float(command[name]) for name in message.name]
             self.command_pub.publish(message)
-            self.last_command.update(command)
+            self.last_command.update({name: command[name] for name in message.name})
             if arms_requested:
                 self._publish_target_poses()
         self._publish_status(now, feedback_fresh)
