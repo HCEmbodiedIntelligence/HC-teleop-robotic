@@ -34,7 +34,7 @@ class FastH264EncoderTests(unittest.TestCase):
         # and periodic intra refresh remove that periodic burst.
         self.assertLess(encoded_sizes[60], 20_000)
 
-    def test_small_remb_change_does_not_reopen_encoder(self):
+    def test_remb_changes_do_not_reopen_encoder(self):
         from middleware.core.fast_h264 import FastH264Encoder
 
         encoder = FastH264Encoder()
@@ -50,6 +50,9 @@ class FastH264EncoderTests(unittest.TestCase):
         codec = encoder.codec
         encoder.target_bitrate = 850_000
         encode(1)
+        self.assertIs(encoder.codec, codec)
+        encoder.target_bitrate = 500_000
+        encode(2)
         self.assertIs(encoder.codec, codec)
 
 
