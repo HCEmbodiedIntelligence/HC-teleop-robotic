@@ -613,7 +613,12 @@ function cameraMonitorSummary(stream,health) {
   const inputFps=cameraActualFps(stream,health);
   const sendFps=Number(stream.webrtc_send_fps);
   const safeSendFps=Number.isFinite(sendFps)&&sendFps>0?sendFps:0;
-  return `${inputFps>0?'正在接收':'等待图像'} · ROS输入 ${inputFps.toFixed(1)} FPS · 头显发送 ${safeSendFps.toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
+  const codec=stream.webrtc_codec||stream.codec||'未知';
+  const bitrate=Number(stream.webrtc_bitrate_mbps)||0;
+  const target=Number(stream.webrtc_target_bitrate_mbps)||0;
+  const loss=Number(stream.webrtc_fraction_lost_pct)||0;
+  const rtt=stream.webrtc_rtt_ms==null?'--':`${Number(stream.webrtc_rtt_ms).toFixed(1)} ms`;
+  return `${inputFps>0?'正在接收':'等待图像'} · ROS输入 ${inputFps.toFixed(1)} FPS · 头显发送 ${safeSendFps.toFixed(1)} FPS · ${codec} ${bitrate.toFixed(2)}/${target.toFixed(2)} Mbps · 丢包 ${loss.toFixed(2)}% · RTT ${rtt} · 头显连接 ${stream.peers||0}`;
 }
 function renderCameraStatus(camera,health={}) {
   for(const element of $$('[data-camera-status]')){
