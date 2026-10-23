@@ -26,6 +26,12 @@ def check_device(snapshot, config, recorder, health):
     subscriptions = {item['topic']: item for item in config.get('ros', {}).get('subscriptions', [])
                      if item.get('enabled', True) and 'record' in item.get('outputs', [])}
     required = {}
+    # Command streams are gated by teleoperation ownership/deadman input. They
+    # can correctly be silent before recording starts, unlike observation
+    # streams which must already be live to prove the device is available.
+    action_topics = set()
+    observation_topics = set()
+    maskable_topics = set()
     if snapshot['source_format'] in ('MCAP', 'CAPTURE_BUNDLE'):
         settings = adapter['configuration']
         roles = {feature['role'] for feature in output['features'].values() if feature.get('required', True)}
@@ -34,11 +40,21 @@ def check_device(snapshot, config, recorder, health):
             raise UploadError('CAPTURE_SOURCE_UNSUPPORTED', '方案必需的状态或动作缺少明确话题映射；请在平台修复实例映射')
         for key in ('state_topic', 'action_topic'):
             if settings.get(key): required[settings[key]] = 'sensor_msgs/msg/JointState'
+        if settings.get('state_topic'):
+            observation_topics.add(settings['state_topic'])
+        if settings.get('action_topic'):
+            action_topics.add(settings['action_topic'])
         for camera in settings.get('cameras', []):
             if camera.get('required', True): required[camera['topic']] = camera['message_type']
         for name, source in settings.get('numeric_sources', {}).items():
             if output['features'].get(name, {}).get('required', True):
                 required[source['topic']] = source['message_type']
+                if output['features'].get(name, {}).get('missing') == 'presence_and_validity':
+                    maskable_topics.add(source['topic'])
+                if name == 'action' or name.startswith('action.'):
+                    action_topics.add(source['topic'])
+                elif name == 'observation' or name.startswith('observation.'):
+                    observation_topics.add(source['topic'])
     else:
         sources = {'observation.state': '/observation/joint_states', 'action': '/action/joint_states', **NUMERIC_TOPICS}
         sources.update({camera_feature(topic): topic for topic, item in subscriptions.items()
@@ -56,6 +72,18 @@ def check_device(snapshot, config, recorder, health):
                 raise UploadError('CAPTURE_SOURCE_UNSUPPORTED', f'本机导出器无法采集 {key}（来源 {source}）；请检查实例映射')
             required[topic] = ('sensor_msgs/msg/JointState' if source in ('observation.state', 'action')
                                else subscriptions.get(topic, {}).get('type'))
+            # "required" means the dataset column must exist. Auxiliary
+            # numeric sources with an explicit presence/validity policy may be
+            # unavailable on a robot; the exporter represents that honestly
+            # with a zero value and false availability/validity flags.
+            if (feature.get('missing') == 'presence_and_validity'
+                    and source not in ('observation.state', 'action')
+                    and not source.startswith('observation.images.')):
+                maskable_topics.add(topic)
+            if source == 'action' or source.startswith('action.'):
+                action_topics.add(topic)
+            elif source == 'observation.state' or source.startswith('observation.'):
+                observation_topics.add(topic)
         clock_topic = '/observation/joint_states'
         required.setdefault(clock_topic, 'sensor_msgs/msg/JointState')
         required.setdefault('/action/joint_states', 'sensor_msgs/msg/JointState')
@@ -65,6 +93,10 @@ def check_device(snapshot, config, recorder, health):
             raise UploadError('CAPTURE_SOURCE_NOT_RECORDING', f'方案要求 {topic}，本机未启用该话题录制；选择方案不会启动设备发布')
         if message_type and item.get('type') != message_type:
             raise UploadError('CAPTURE_STRUCTURE_MISMATCH', f'{topic} 消息类型与方案不一致')
+        if topic in action_topics and topic not in observation_topics:
+            continue
+        if topic in maskable_topics:
+            continue
         observed = health.get(topic, {})
         if not observed.get('has_data') or observed.get('state') in ('no_data', 'error'):
             raise UploadError('CAPTURE_REQUIRED_DATA_MISSING', f'未检测到方案必需话题 {topic} 的实时数据；请检查设备发布')

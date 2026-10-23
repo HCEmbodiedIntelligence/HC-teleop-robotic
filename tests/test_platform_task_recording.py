@@ -2,9 +2,11 @@
 import copy
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -442,6 +444,34 @@ def test_historical_lerobot_uses_source_capture_and_its_own_format(tmp_path, mon
     finally: recorder.close()
 
 
+def test_delete_unstarted_prepared_recording_without_mcap_file(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
+    recorder = TaskRecorder(raw, service)
+    try:
+        # Create a job that failed at preparation / check_device before starting
+        job = {
+            'recording_id': 'aborted-job-1',
+            'state': 'prepared',
+            'started_at': None,
+            'path': str(tmp_path / 'data' / 'teleop_aborted.mcap'),
+            'error': 'test error',
+        }
+        recorder.jobs[job['recording_id']] = job
+        recorder.save(job)
+        assert (recorder.state_dir / 'aborted-job-1.json').is_file()
+        assert len(recorder.records()) == 1
+
+        res = recorder.delete_recording('teleop_aborted.mcap')
+        assert res['deleted'] == 'teleop_aborted.mcap'
+        assert not (recorder.state_dir / 'aborted-job-1.json').exists()
+        assert len(recorder.records()) == 0
+    finally:
+        recorder.close()
+
+
+
 def test_historical_lerobot_matches_source_mcap_with_custom_suffix(tmp_path, monkeypatch):
     cfg, service = create_service(tmp_path, monkeypatch)
     service.connect('http://platform.invalid/#robot-connect='+'c'*48)
@@ -533,6 +563,10 @@ def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
     from middleware.core.export_progress import progress_path
     cfg, service, recorder = connected(tmp_path, monkeypatch)
     configure_lerobot_upload(recorder, service, monkeypatch)
+    # Keep this policy test deterministic; BackgroundProcess transport has its
+    # own coverage and does not affect which descriptor is upload-eligible.
+    monkeypatch.setattr(service.upload.artifact_process, 'call', lambda function, *args: function(*args))
+    monkeypatch.setattr('middleware.core.artifact_jobs.enqueue_ready', lambda descriptor, cfg: {'queued': True})
     def exported():
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -552,15 +586,66 @@ def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
     try:
         path = capture(recorder, choice(service, 'A'))
         assert Path(path).is_file()
-        jobs = service.upload.queue.jobs()
-        assert len(jobs) == 1
-        assert jobs[0]['manifest']['source_format'] == 'LEROBOT_V3'
-        assert jobs[0]['manifest']['declared_episode_count'] == 1
-        assert not any(a['path'].endswith('.mcap') for a in jobs[0]['manifest']['assets'])
-        assert recorder.records()[0]['format'] == 'both'
-        assert recorder.records()[0]['upload_format'] == 'lerobot'
+        record = recorder.records()[0]
+        assert record['format'] == 'both'
+        assert record['upload_format'] == 'lerobot'
+        rows = recorder.upload_records()
+        assert len(rows) == 1
+        assert rows[0]['format'] == 'lerobot'
+        assert not rows[0]['display_name'].endswith('.mcap')
+        selected = read_json(service.upload.state_dir / (record['recording_id'] + '.json'))
+        mcap = read_json(service.upload.state_dir / (record['recording_id'] + '-mcap.json'))
+        assert selected['kind'] == 'hc_lerobot'
+        assert selected['binding_id'] == record['binding']['binding_id']
+        assert mcap['binding_id'] is None
+        scanned = []
+        monkeypatch.setattr(service.upload, 'enqueue', lambda identity, binding_id, **kw: scanned.append(identity))
+        service.upload.cfg['auto_enqueue'] = True
+        assert service.upload.scan()['enqueued'] == 1
+        assert scanned == [record['recording_id']]
     finally:
         recorder.close()
+
+
+def test_upload_history_only_exposes_selected_format_and_dataset_name():
+    recorder = TaskRecorder.__new__(TaskRecorder)
+    recorder.lock = threading.RLock()
+    recorder.jobs = {'capture': {
+        'recording_id': 'capture', 'path': '/data/teleop_20261023_135933.mcap',
+        'format': 'both', 'upload_format': 'lerobot', 'state': 'ready',
+    }}
+    rows = recorder.upload_records()
+    assert len(rows) == 1
+    assert rows[0]['format'] == 'lerobot'
+    assert rows[0]['display_name'] == 'teleop_20261023_135933'
+
+
+def test_capture_check_wakes_recording_inputs_before_reading_health():
+    task = task_document(source_format='LEROBOT_V3')
+    snapshot = snapshot_document(task, dict(recording_id='capture', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    topics = ('/observation/joint_states', '/action/joint_states')
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type='sensor_msgs/msg/JointState', outputs=['record'])
+                                    for topic in topics]}}
+    recorder = TaskRecorder.__new__(TaskRecorder)
+    recorder.platform = SimpleNamespace(config=cfg)
+    awake = False
+    health_reads = 0
+    def prepare():
+        nonlocal awake
+        awake = True
+    recorder.prepare_recording = prepare
+    def health():
+        nonlocal health_reads
+        health_reads += 1
+        ready = awake and health_reads >= 3
+        return {
+            '/observation/joint_states': {'has_data': ready, 'state': 'ok' if ready else 'no_data'},
+            '/action/joint_states': {'has_data': False, 'state': 'no_data'},
+        }
+    recorder.capture_health = health
+    recorder.prepare_and_check([snapshot], SimpleNamespace(lerobot_fps=15))
+    assert awake and health_reads == 3
 
 
 def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):

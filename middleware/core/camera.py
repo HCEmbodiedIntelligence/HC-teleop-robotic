@@ -46,6 +46,9 @@ class CameraService:
         self._frames_received = 0
         self._last_fps_calc = time.monotonic()
         self._fps_counter = 0
+        self._decoded_last_fps_calc = time.monotonic()
+        self._decoded_fps_counter = 0
+        self._last_decoded_at = 0.0
         self._webrtc_last_fps_calc = time.monotonic()
         self._webrtc_fps_counter = 0
         self._webrtc_frames_sent = 0
@@ -55,11 +58,16 @@ class CameraService:
             "topic": config.get("topic", "/observation/cameras/head/color/compressed"),
             "custom_topic": config.get("custom_topic", ""),
             "capture_fps": 0.0,
+            "decoded_fps": 0.0,
+            "jpeg_decode_ms": 0.0,
             "webrtc_send_fps": 0.0,
             "webrtc_frames_sent": 0,
             "webrtc_codec": "",
             "webrtc_bitrate_mbps": 0.0,
             "webrtc_target_bitrate_mbps": 0.0,
+            "webrtc_encode_ms": 0.0,
+            "webrtc_encoded_frame_kb": 0.0,
+            "webrtc_forced_keyframes": 0,
             "webrtc_packets_sent": 0,
             "webrtc_remote_packets_lost": 0,
             "webrtc_fraction_lost_pct": 0.0,
@@ -179,6 +187,8 @@ class CameraService:
         now = time.monotonic()
         if now - self._last_capture_at > 1.8:
             result["capture_fps"] = 0.0
+        if now - self._last_decoded_at > 1.8:
+            result["decoded_fps"] = 0.0
         if now - self._last_send_at > 1.8:
             result["webrtc_send_fps"] = 0.0
         result.update(
@@ -308,6 +318,21 @@ class CameraService:
         if count_capture:
             self._record_capture_frame(topic)
 
+    def _record_decoded_frame(self, decode_ms: float) -> None:
+        """Track frames which completed JPEG/PNG decoding for WebRTC."""
+        now = time.monotonic()
+        with self._lock:
+            self._last_decoded_at = now
+            self._decoded_fps_counter += 1
+            elapsed = now - self._decoded_last_fps_calc
+            self._status["jpeg_decode_ms"] = round(float(decode_ms), 2)
+            if elapsed >= 1.0:
+                self._status["decoded_fps"] = round(
+                    self._decoded_fps_counter / elapsed, 1
+                )
+                self._decoded_last_fps_calc = now
+                self._decoded_fps_counter = 0
+
     def _normalize_frame(self, frame: Any) -> Any:
         """Make ROS frames match the configured WebRTC encoder dimensions."""
         if frame is None or cv2 is None:
@@ -355,6 +380,9 @@ class CameraService:
             self._status["webrtc_codec"] = ""
             self._status["webrtc_bitrate_mbps"] = 0.0
             self._status["webrtc_target_bitrate_mbps"] = 0.0
+            self._status["webrtc_encode_ms"] = 0.0
+            self._status["webrtc_encoded_frame_kb"] = 0.0
+            self._status["webrtc_forced_keyframes"] = 0
             self._status["webrtc_packets_sent"] = 0
             self._status["webrtc_remote_packets_lost"] = 0
             self._status["webrtc_fraction_lost_pct"] = 0.0
@@ -410,6 +438,17 @@ class CameraService:
                         changes["webrtc_target_bitrate_mbps"] = round(
                             float(target_bitrate) / 1_000_000, 3
                         )
+                    encode_ms = getattr(encoder, "average_encode_ms", None)
+                    if encode_ms is not None:
+                        changes["webrtc_encode_ms"] = round(float(encode_ms), 2)
+                    encoded_bytes = getattr(encoder, "last_payload_bytes", None)
+                    if encoded_bytes is not None:
+                        changes["webrtc_encoded_frame_kb"] = round(
+                            float(encoded_bytes) / 1024.0, 2
+                        )
+                    forced_keyframes = getattr(encoder, "forced_keyframes", None)
+                    if forced_keyframes is not None:
+                        changes["webrtc_forced_keyframes"] = int(forced_keyframes)
                 if changes:
                     self._set_status(**changes)
                 await asyncio.sleep(1.0)
@@ -432,6 +471,7 @@ class CameraService:
             if not payload or np is None or cv2 is None:
                 continue
             try:
+                decode_started = time.perf_counter()
                 buf = np.frombuffer(payload, dtype=np.uint8)
                 frame = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
                 if frame is not None and frame.ndim == 2 and frame.dtype == np.uint16:
@@ -446,6 +486,9 @@ class CameraService:
                 elif frame is not None and frame.shape[2] == 4:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 if frame is not None:
+                    self._record_decoded_frame(
+                        (time.perf_counter() - decode_started) * 1000.0
+                    )
                     self._accept_frame(
                         frame,
                         str(active_topic),

@@ -251,6 +251,47 @@ def test_device_data_not_implied_by_configuration(tmp_path, monkeypatch, server)
     finally: recorder.close()
 
 
+def test_silent_action_before_start_does_not_block_capture():
+    task = task_document(source_format='LEROBOT_V3')
+    snapshot = snapshot_document(task, dict(recording_id='r', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    topics = ('/observation/joint_states', '/action/joint_states')
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type='sensor_msgs/msg/JointState', outputs=['record'])
+                                    for topic in topics]}}
+    # The action mux only publishes after the operator takes control. Starting
+    # the recording must be allowed while that command stream is still idle.
+    check_device(snapshot, cfg, SimpleNamespace(lerobot_fps=15), {
+        '/observation/joint_states': {'has_data': True, 'hz': 100, 'state': 'ok'},
+        '/action/joint_states': {'has_data': False, 'hz': 0, 'state': 'no_data'},
+    })
+
+
+def test_required_masked_auxiliary_source_does_not_block_capture():
+    task = task_document(source_format='LEROBOT_V3')
+    task['capture_plan']['output']['features']['observation.base.pose'] = {
+        'dtype': 'float32', 'shape': [7],
+        'names': ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'], 'units': [],
+        'role': 'numeric', 'required': True, 'missing': 'presence_and_validity',
+        'validity_feature': None, 'media': {},
+    }
+    snapshot = snapshot_document(task, dict(recording_id='masked-base', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    snapshot['effective_adapter']['feature_sources']['observation.base.pose'] = 'observation.base.pose'
+    snapshot['snapshot_sha256'] = digest({k: v for k, v in snapshot.items() if k != 'snapshot_sha256'})
+    topics = {
+        '/observation/joint_states': 'sensor_msgs/msg/JointState',
+        '/action/joint_states': 'sensor_msgs/msg/JointState',
+        '/observation/base/pose': 'geometry_msgs/msg/PoseStamped',
+    }
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type=kind, outputs=['record'])
+                                    for topic, kind in topics.items()]}}
+    check_device(snapshot, cfg, SimpleNamespace(lerobot_fps=15), {
+        '/observation/joint_states': {'has_data': True, 'hz': 100, 'state': 'ok'},
+        '/action/joint_states': {'has_data': False, 'hz': 0, 'state': 'no_data'},
+        '/observation/base/pose': {'has_data': False, 'hz': 0, 'state': 'no_data'},
+    })
+
+
 def test_required_camera_gate_preserves_configuration_without_requiring_scheme_rate():
     task = task_document(); snapshot = snapshot_document(task, dict(recording_id='r', expected_plan_revision=1, source_format='MCAP'))
     snapshot['effective_adapter']['configuration']['cameras'] = [dict(camera_id='head', topic='/head', message_type='sensor_msgs/msg/Image', required=True)]
@@ -279,6 +320,17 @@ def test_original_167_frames_at_15hz_and_optional_absence():
     assert 'action.base.velocity' not in episodes[0][0][1]
     streams['observation.images.head'] = [(stamps[1], 'real-image.png')]
     with pytest.raises(UploadError, match='CAPTURE_SOURCE_GAPS_UNSUPPORTED'): preserved_episode(streams, 15, {})
+
+
+def test_preserved_episode_masks_fully_absent_auxiliary_stream():
+    stamps = [1_000_000_000, 1_100_000_000]
+    streams = {
+        'observation.state': [(stamp, [float(index)]) for index, stamp in enumerate(stamps)],
+        'action': [(stamp, [float(index)]) for index, stamp in enumerate(stamps)],
+        'observation.base.pose': [],
+    }
+    rows = preserved_episode(streams, 10, {})[0]
+    assert [row[1]['observation.base.pose'] for row in rows] == [None, None]
 
 
 @pytest.mark.parametrize('scheme_frequency', [15, None])

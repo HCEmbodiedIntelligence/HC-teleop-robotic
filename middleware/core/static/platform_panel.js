@@ -249,7 +249,7 @@
         const trainingState = { READY: '就绪', NOT_READY: '未就绪', BLOCKED: '待处理', PENDING: '准备中', NOT_REQUESTED: '尚未请求' };
         const receipt = job ? `数据：${dataState[job.data_status] || '状态未知'}；${annotation[job.annotation_status] || '标注状态未知'}；训练交付：${trainingState[job.training_status] || '状态未知'}` : '';
         const formatLabel = { mcap: 'MCAP', lerobot: 'LeRobot v3', mcap_mp4: 'MCAP＋MP4 原始包' }[record.format];
-        const values = [record.path.split('/').pop() || '启动中', record.binding?.task?.name || record.preparation?.checked?.task?.name || '未选择任务',
+        const values = [record.display_name || record.path.split('/').pop() || '启动中', record.binding?.task?.name || record.preparation?.checked?.task?.name || '未选择任务',
           formatLabel || (job?.kind === 'hc_lerobot' ? 'LeRobot v3' : 'MCAP'),
           uploaded ? '已上传' : labels[job?.state || record.state] || job?.state || record.state,
           processingLabels[job?.processing_state] || job?.processing_state || '尚未开始',

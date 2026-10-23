@@ -27,6 +27,8 @@ def upload_tick(cfg):
 def seal_task_artifact(job, fmt, directory, state_dir, cfg):
     directory, state_dir = Path(directory), Path(state_dir)
     identity = artifact_identity(job, fmt)
+    upload = ((job.get('upload_requested') and fmt in job.get('upload_formats', upload_formats(job)))
+              or bool(job['binding'] and job['binding']['auto_upload'] and fmt in upload_formats(job)))
     source = Path(job['path'])
     snapshot = artifact_snapshot(job, fmt)
     if fmt == 'lerobot':
@@ -71,7 +73,7 @@ def seal_task_artifact(job, fmt, directory, state_dir, cfg):
         # A crash may occur after the durable job acquired its first
         # task, before the local-only descriptor was updated. Recover
         # only that transition; an existing task is immutable.
-        if job['binding']:
+        if job['binding'] and upload:
             binding_id = job['binding']['binding_id']
             if descriptor.get('binding_id') not in (None, binding_id):
                 raise UploadError('TASK_BINDING_MISMATCH', '已封存归属不能改变')
@@ -87,7 +89,10 @@ def seal_task_artifact(job, fmt, directory, state_dir, cfg):
             profile_id=job['local_robot']['profile_id'],
             config_fingerprint=job['local_robot']['config_fingerprint'],
             source_artifact_id=job['recording_id'] if identity != job['recording_id'] else None, native_session_id=job['recording_id'] if fmt == 'mcap_mp4' else None, native_completion_marker='recording-complete.json' if fmt == 'mcap_mp4' else None,
-            binding_id=job['binding']['binding_id'] if job['binding'] else None,
+            # A locally saved secondary format is still sealed and validated,
+            # but must remain unbound so background legacy/auto scans cannot
+            # silently enqueue a format the operator did not select.
+            binding_id=job['binding']['binding_id'] if job['binding'] and upload else None,
             capture_started_at=job['started_at'], capture_ended_at=job['ended_at'],
             completed_at=now())
         if job['binding']:
@@ -98,8 +103,6 @@ def seal_task_artifact(job, fmt, directory, state_dir, cfg):
         from humanoid_upload.artifacts import inspect_ready
         inspect_ready(descriptor, cfg)
         atomic_json(descriptor_path, descriptor)
-    upload = ((job.get('upload_requested') and fmt in job.get('upload_formats', upload_formats(job)))
-              or bool(job['binding'] and job['binding']['auto_upload'] and fmt in upload_formats(job)))
     if upload:
         enqueue_ready(descriptor, cfg)
     return 'queued' if upload else 'ready'

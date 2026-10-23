@@ -76,7 +76,6 @@ class MiddlewareRuntime:
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
-        self.websocket_peers: dict[web.WebSocketResponse, str] = {}
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
@@ -375,31 +374,13 @@ class MiddlewareRuntime:
         except Exception:
             return
         dead = []
-        vr_peer = self.vr.status().get("peer") if self.vr is not None else None
-        vr_host = str(vr_peer[0]) if vr_peer else ""
-        # Recording acknowledgements already use the dedicated VR UDP channel.
-        # Sending the same state transition over the PICO WebSocket makes the
-        # headset run its save handler on the video/UI path and stalls RTCP for
-        # tens of seconds. Keep WebSocket delivery for dashboard clients only.
-        skip_vr_recording_event = safe_event.get("kind") in {
-            "recording_started",
-            "recording_stopped",
-            "recording_status",
-        }
         for ws in tuple(self.websockets):
-            if (
-                skip_vr_recording_event
-                and vr_host
-                and self.websocket_peers.get(ws) == vr_host
-            ):
-                continue
             try:
                 await ws.send_str(message)
             except (ConnectionError, RuntimeError):
                 dead.append(ws)
         for ws in dead:
             self.websockets.discard(ws)
-            self.websocket_peers.pop(ws, None)
 
     def _on_pose(self, packet: Any) -> None:
         left_input = getattr(packet, "left_input", None)
@@ -958,7 +939,6 @@ def create_app(store: ConfigStore) -> web.Application:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
         await ws.prepare(request)
         runtime.websockets.add(ws)
-        runtime.websocket_peers[ws] = str(request.remote or "")
         await ws.send_json(envelope("connected", "middleware", runtime.status()))
         try:
             async for message in ws:
@@ -990,7 +970,6 @@ def create_app(store: ConfigStore) -> web.Application:
                     break
         finally:
             runtime.websockets.discard(ws)
-            runtime.websocket_peers.pop(ws, None)
             simulation.set_viewer(ws, False)
         return ws
 
@@ -1078,6 +1057,17 @@ def create_app(store: ConfigStore) -> web.Application:
         return response
 
     async def precheck_recording(_request: web.Request) -> web.Response:
+        if runtime.recording_ros is not None:
+            try:
+                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
+                # Frequency checks need more than one sample. Keep this work off
+                # the WebRTC/media path while the recorder warms up.
+                await asyncio.sleep(1.9)
+            except (RuntimeError, TimeoutError) as exc:
+                return web.json_response(
+                    {"ok": False, "ready": False, "reason": str(exc), "issues": []},
+                    status=503,
+                )
         subs = store.value.get("ros", {}).get("subscriptions", [])
         recording_topics = [
             item for item in subs
@@ -1145,12 +1135,15 @@ def create_app(store: ConfigStore) -> web.Application:
                 data = await request.json()
             except Exception:
                 pass
+        if runtime.recording_ros is not None:
+            try:
+                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
+            except (RuntimeError, TimeoutError) as exc:
+                return web.json_response({"ok": False, "reason": str(exc)}, status=503)
         if runtime.platform is None and runtime.upload_error:
             if (data.get('selection') or {}).get('mode', 'local') != 'local':
                 return web.json_response({'ok': False, 'code': 'PLATFORM_UNAVAILABLE',
                     'reason': '平台模块尚未安装，可暂不关联平台任务录制到本机'}, status=409)
-            if runtime.recording_ros is not None:
-                runtime.recording_ros.prepare_recording()
         force = bool(data.get("force", False))
         filename = str(data.get("filename", "")).strip()
 

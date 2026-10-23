@@ -612,13 +612,16 @@ function cameraMonitorSummary(stream,health) {
   if(stream.error)return `异常：${stream.error}`;
   const inputFps=cameraActualFps(stream,health);
   const sendFps=Number(stream.webrtc_send_fps);
+  const decodedFps=Number(stream.decoded_fps)||0;
+  const decodeMs=Number(stream.jpeg_decode_ms)||0;
   const safeSendFps=Number.isFinite(sendFps)&&sendFps>0?sendFps:0;
   const codec=stream.webrtc_codec||stream.codec||'未知';
   const bitrate=Number(stream.webrtc_bitrate_mbps)||0;
   const target=Number(stream.webrtc_target_bitrate_mbps)||0;
   const loss=Number(stream.webrtc_fraction_lost_pct)||0;
   const rtt=stream.webrtc_rtt_ms==null?'--':`${Number(stream.webrtc_rtt_ms).toFixed(1)} ms`;
-  return `${inputFps>0?'正在接收':'等待图像'} · ROS输入 ${inputFps.toFixed(1)} FPS · 头显发送 ${safeSendFps.toFixed(1)} FPS · ${codec} ${bitrate.toFixed(2)}/${target.toFixed(2)} Mbps · 丢包 ${loss.toFixed(2)}% · RTT ${rtt} · 头显连接 ${stream.peers||0}`;
+  const encodeMs=Number(stream.webrtc_encode_ms)||0;
+  return `${inputFps>0?'正在接收':'等待图像'} · ROS输入 ${inputFps.toFixed(1)} FPS · JPEG解码 ${decodedFps.toFixed(1)} FPS/${decodeMs.toFixed(1)} ms · 头显发送 ${safeSendFps.toFixed(1)} FPS · H264 ${encodeMs.toFixed(1)} ms · ${codec} ${bitrate.toFixed(2)}/${target.toFixed(2)} Mbps · 丢包 ${loss.toFixed(2)}% · RTT ${rtt} · 头显连接 ${stream.peers||0}`;
 }
 function renderCameraStatus(camera,health={}) {
   for(const element of $$('[data-camera-status]')){

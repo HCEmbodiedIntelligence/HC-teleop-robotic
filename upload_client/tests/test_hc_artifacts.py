@@ -387,3 +387,16 @@ def test_deleted_artifact_is_not_reported_ready(hc_cfg):
     with ArtifactLocks(hc_cfg['artifact_state_dir']).delete(d['artifact_id']):
         shutil.rmtree(d['root'])
     assert svc.jobs()[0]['artifact_state']=='deleted'
+
+
+def test_fast_checksum_matches_reference(tmp_path):
+    from humanoid_upload.bundle import checksum, CRC_TABLE
+    data = b'Quick brown fox jumps over lazy dog' * 1000 + b'\x00\xff\x88\x12'
+    target = tmp_path / 'sample.bin'
+    target.write_bytes(data)
+    res = checksum(target)
+    ref_crc = (1 << 64) - 1
+    for byte in data:
+        ref_crc = CRC_TABLE[(ref_crc ^ byte) & 255] ^ (ref_crc >> 8)
+    assert res['crc64'] == str(ref_crc ^ ((1 << 64) - 1))
+    assert res['size_bytes'] == len(data)

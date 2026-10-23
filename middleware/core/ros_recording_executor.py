@@ -109,6 +109,22 @@ def _health_snapshot(
     return result
 
 
+def _should_release_subscriptions(
+    *,
+    has_subscriptions: bool,
+    capture_seen: bool,
+    accepting: bool,
+    now: float,
+    prepared_until: float,
+) -> bool:
+    """Release idle inputs after capture, or after an abandoned precheck."""
+    return bool(
+        has_subscriptions
+        and not accepting
+        and (capture_seen or now >= prepared_until)
+    )
+
+
 def _raw_recording_process(
     config: dict[str, Any],
     subscriptions: list[dict[str, Any]],
@@ -117,6 +133,7 @@ def _raw_recording_process(
     dropped_counter: Any,
     stop_event: Any,
     reset_event: Any,
+    subscriptions_ready_event: Any,
     status_queue: Any,
     ingress_resources: Any,
 ) -> None:
@@ -140,6 +157,10 @@ def _raw_recording_process(
         from .topic_recorder import enqueue_record
         return enqueue_record(ingress_resources, event)
 
+    ros_subscriptions: list[Any] = []
+    prepared_until = 0.0
+    capture_seen = False
+
     def publish_status(state: str, error: str | None = None) -> None:
         now = time.monotonic()
         _put_latest(
@@ -147,7 +168,7 @@ def _raw_recording_process(
             {
                 "state": state,
                 "active": accepting_event.is_set(),
-                "active_subscriptions": len(subscriptions),
+                "active_subscriptions": len(ros_subscriptions),
                 "subscriptions": [str(item["topic"]) for item in subscriptions],
                 "topic_health": _health_snapshot(
                     subscriptions, timestamps, message_counts, now
@@ -173,71 +194,111 @@ def _raw_recording_process(
         node = rclpy.create_node(node_name, context=context)
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
-        ros_subscriptions = []
 
-        for item in subscriptions:
-            topic = str(item["topic"])
-            msg_type = str(item["type"])
-            max_hz = float(item.get("max_hz", 0.0))
-            message_type = get_message(msg_type)
+        def activate_subscriptions() -> None:
+            nonlocal prepared_until, capture_seen
+            prepared_until = time.monotonic() + 30.0
+            capture_seen = accepting_event.is_set()
+            if ros_subscriptions:
+                gate.reset()
+                for key in counters:
+                    counters[key] = 0
+                subscriptions_ready_event.set()
+                return
+            gate.reset()
+            for topic in timestamps:
+                timestamps[topic].clear()
+                message_counts[topic] = 0
+            for key in counters:
+                counters[key] = 0
+            for item in subscriptions:
+                topic = str(item["topic"])
+                msg_type = str(item["type"])
+                max_hz = float(item.get("max_hz", 0.0))
+                message_type = get_message(msg_type)
 
-            def callback(
-                raw_data: bytes,
-                *,
-                topic: str = topic,
-                msg_type: str = msg_type,
-                max_hz: float = max_hz,
-            ) -> None:
-                now = time.monotonic()
-                counters["received"] += 1
-                message_counts[topic] += 1
-                timestamps[topic].append(now)
-                if not accepting_event.is_set():
-                    return
-                if not gate.allow(topic, max_hz, now):
-                    counters["throttled"] += 1
-                    return
-                if not isinstance(raw_data, bytes):
-                    counters["serialization_errors"] += 1
-                    return
-                try:
-                    if not enqueue(
-                        {
-                            "kind": "ros_message",
-                            "topic": topic,
-                            "msg_type": msg_type,
-                            "_raw": raw_data,
-                            "stamp_ns": time.time_ns(),
-                        }
-                    ):
+                def callback(
+                    raw_data: bytes,
+                    *,
+                    topic: str = topic,
+                    msg_type: str = msg_type,
+                    max_hz: float = max_hz,
+                ) -> None:
+                    now = time.monotonic()
+                    counters["received"] += 1
+                    message_counts[topic] += 1
+                    timestamps[topic].append(now)
+                    if not accepting_event.is_set():
                         return
-                    counters["recorded"] += 1
-                except queue.Full:
-                    counters["rejected"] += 1
-                    _counter_add(dropped_counter)
+                    if not gate.allow(topic, max_hz, now):
+                        counters["throttled"] += 1
+                        return
+                    if not isinstance(raw_data, bytes):
+                        counters["serialization_errors"] += 1
+                        return
+                    try:
+                        if not enqueue(
+                            {
+                                "kind": "ros_message",
+                                "topic": topic,
+                                "msg_type": msg_type,
+                                "_raw": raw_data,
+                                "stamp_ns": time.time_ns(),
+                            }
+                        ):
+                            return
+                        counters["recorded"] += 1
+                    except queue.Full:
+                        counters["rejected"] += 1
+                        _counter_add(dropped_counter)
 
-            ros_subscriptions.append(
-                node.create_subscription(
-                    message_type,
-                    topic,
-                    callback,
-                    recording_subscription_qos(item),
-                    raw=True,
+                ros_subscriptions.append(
+                    node.create_subscription(
+                        message_type,
+                        topic,
+                        callback,
+                        recording_subscription_qos(item),
+                        raw=True,
+                    )
                 )
-            )
+            subscriptions_ready_event.set()
+            publish_status("ready")
 
-        publish_status("running")
+        def deactivate_subscriptions() -> None:
+            nonlocal capture_seen
+            for subscription in ros_subscriptions:
+                node.destroy_subscription(subscription)
+            ros_subscriptions.clear()
+            capture_seen = False
+            subscriptions_ready_event.clear()
+            publish_status("standby")
+
+        publish_status("standby")
         last_status = time.monotonic()
         while not stop_event.is_set():
             if reset_event.is_set():
                 reset_event.clear()
-                gate.reset()
-                for key in counters:
-                    counters[key] = 0
-            executor.spin_once(timeout_sec=0.02)
+                activate_subscriptions()
+            accepting = accepting_event.is_set()
+            if accepting:
+                capture_seen = True
+            elif _should_release_subscriptions(
+                has_subscriptions=bool(ros_subscriptions),
+                capture_seen=capture_seen,
+                accepting=accepting,
+                now=time.monotonic(),
+                prepared_until=prepared_until,
+            ):
+                deactivate_subscriptions()
+            if ros_subscriptions:
+                executor.spin_once(timeout_sec=0.02)
+            else:
+                stop_event.wait(0.05)
             now = time.monotonic()
             if now - last_status >= 0.5:
-                publish_status("running")
+                publish_status(
+                    "recording" if accepting else "ready" if ros_subscriptions else "standby"
+                )
                 last_status = now
     except Exception as exc:
         publish_status(
@@ -276,6 +337,7 @@ class RosRecordingExecutor:
         self._mp = mp.get_context("spawn")
         self._stop_event = self._mp.Event()
         self._reset_event = self._mp.Event()
+        self._subscriptions_ready_event = self._mp.Event()
         self._status_queue = self._mp.Queue(maxsize=4)
         self._process: Any = None
         self._gate = RateGate()
@@ -301,6 +363,7 @@ class RosRecordingExecutor:
         resources = self.recorder.ipc_resources()
         event_queue, accepting_event, dropped_counter = resources[:3]
         self._stop_event.clear()
+        self._subscriptions_ready_event.clear()
         self._process = self._mp.Process(
             target=_raw_recording_process,
             args=(
@@ -311,6 +374,7 @@ class RosRecordingExecutor:
                 dropped_counter,
                 self._stop_event,
                 self._reset_event,
+                self._subscriptions_ready_event,
                 self._status_queue,
                 resources,
             ),
@@ -366,6 +430,11 @@ class RosRecordingExecutor:
         return dict(self.status().get("topic_health", {}))
 
     def prepare_recording(self) -> None:
+        if not self.config.get("enabled", True):
+            return
+        if self._process is None:
+            self.start()
+        self._subscriptions_ready_event.clear()
         self._gate.reset()
         self._reset_event.set()
         with self._lock:
@@ -375,6 +444,13 @@ class RosRecordingExecutor:
                 throttled=0,
                 rejected=0,
                 serialization_errors=0,
+            )
+        if not self._subscriptions_ready_event.wait(timeout=5.0):
+            self._refresh_status()
+            error = self._status.get("error")
+            raise TimeoutError(
+                "ROS recording subscriptions did not become ready within 5 seconds"
+                + (f": {error}" if error else "")
             )
 
     def _handle_message(

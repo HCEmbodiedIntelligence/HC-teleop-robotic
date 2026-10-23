@@ -11,18 +11,20 @@ from aiortc.codecs import h264
 class FastH264Encoder(h264.H264Encoder):
     """aiortc H.264 encoder tuned for low-latency ARM teleoperation."""
 
-    # REMB estimates can move by more than 10% on every feedback cycle.  The
-    # stock aiortc encoder responds by recreating libx264, which emits another
-    # large IDR frame.  On a headset this becomes a self-reinforcing loop:
-    # IDR burst -> queue/loss -> lower REMB/PLI -> another IDR burst.  Only
-    # reopen for a material, sustained bitrate change.
-    BITRATE_REOPEN_THRESHOLD = 0.50
-    BITRATE_REOPEN_INTERVAL = 15.0
+    # REMB is receiver feedback, not a request to reset the video codec.  A
+    # short headset stall during MCAP finalization can drive REMB to aiortc's
+    # 500 kbps floor. Reopening x264 at that value emits a new IDR and traps
+    # the stream in a low-FPS / high-RTT feedback loop. Keep one codec context
+    # for the complete peer session; only a dimension change requires reopen.
 
     def __init__(self) -> None:
         super().__init__()
         self._configured_bitrate: int | None = None
-        self._last_reopen_at = 0.0
+        self.average_encode_ms = 0.0
+        self.last_payload_bytes = 0
+        self.frames_encoded = 0
+        self.force_keyframe_requests = 0
+        self.forced_keyframes = 0
 
     def _close_codec(self) -> None:
         self.buffer_data = b""
@@ -30,24 +32,14 @@ class FastH264Encoder(h264.H264Encoder):
         self.codec = None
         self._configured_bitrate = None
 
-    def _bitrate_reopen_due(self, now: float) -> bool:
-        if self._configured_bitrate is None:
-            return False
-        relative_change = (
-            abs(self.target_bitrate - self._configured_bitrate)
-            / self._configured_bitrate
-        )
-        return (
-            relative_change >= self.BITRATE_REOPEN_THRESHOLD
-            and now - self._last_reopen_at >= self.BITRATE_REOPEN_INTERVAL
-        )
-
     def _encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
-        now = time.monotonic()
+        encode_started = time.perf_counter()
+        if force_keyframe:
+            self.force_keyframe_requests += 1
+            self.forced_keyframes += 1
         if self.codec and (
             frame.width != self.codec.width
             or frame.height != self.codec.height
-            or self._bitrate_reopen_due(now)
         ):
             self._close_codec()
 
@@ -86,11 +78,18 @@ class FastH264Encoder(h264.H264Encoder):
             }
             self.codec.profile = "Baseline"
             self._configured_bitrate = configured_bitrate
-            self._last_reopen_at = now
 
         data_to_send = b""
         for package in self.codec.encode(frame):
             data_to_send += bytes(package)
+        elapsed_ms = (time.perf_counter() - encode_started) * 1000.0
+        self.average_encode_ms = (
+            elapsed_ms
+            if not self.frames_encoded
+            else self.average_encode_ms * 0.9 + elapsed_ms * 0.1
+        )
+        self.last_payload_bytes = len(data_to_send)
+        self.frames_encoded += 1
         if data_to_send:
             yield from self._split_bitstream(data_to_send)
 
