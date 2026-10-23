@@ -581,14 +581,22 @@ class TaskRecorder(CorrectionSupport):
     def delete_recording(self, filename):
         with self.lock:
             from .recording_datasets import resolve_dataset
-            target = resolve_dataset(self.directory, filename)
+            job = next((job for job in self.jobs.values() if Path(job['path']).name == filename
+                        or 'lerobot:' + Path(job['path']).stem == filename
+                        or 'bundle:' + Path(job['path']).stem == filename), None)
+            try:
+                target = resolve_dataset(self.directory, filename)
+            except FileNotFoundError:
+                if job and (job.get('started_at') is None or job.get('state') in ('prepared', 'prepare_failed')):
+                    job.update(state='deleted', error=None)
+                    (self.state_dir / f"{job['recording_id']}.json").unlink(missing_ok=True)
+                    self.jobs.pop(job['recording_id'], None)
+                    return {'deleted': filename, 'freed_bytes': 0}
+                raise
             for queued_job in self.platform.upload.queue.jobs():
                 root = Path(queued_job['root'])
                 if root == target or any(root/a['path'] == target for a in queued_job['manifest']['assets']):
                     raise ValueError('录制仍被上传队列引用，不能删除')
-            job = next((job for job in self.jobs.values() if Path(job['path']).name == filename
-                        or 'lerobot:' + Path(job['path']).stem == filename
-                        or 'bundle:' + Path(job['path']).stem == filename), None)
             if job:
                 if job['state'] in ('starting', 'armed', 'recording', 'stopping'):
                     raise ValueError('录制尚未结束，不能删除')

@@ -442,6 +442,34 @@ def test_historical_lerobot_uses_source_capture_and_its_own_format(tmp_path, mon
     finally: recorder.close()
 
 
+def test_delete_unstarted_prepared_recording_without_mcap_file(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
+    recorder = TaskRecorder(raw, service)
+    try:
+        # Create a job that failed at preparation / check_device before starting
+        job = {
+            'recording_id': 'aborted-job-1',
+            'state': 'prepared',
+            'started_at': None,
+            'path': str(tmp_path / 'data' / 'teleop_aborted.mcap'),
+            'error': 'test error',
+        }
+        recorder.jobs[job['recording_id']] = job
+        recorder.save(job)
+        assert (recorder.state_dir / 'aborted-job-1.json').is_file()
+        assert len(recorder.records()) == 1
+
+        res = recorder.delete_recording('teleop_aborted.mcap')
+        assert res['deleted'] == 'teleop_aborted.mcap'
+        assert not (recorder.state_dir / 'aborted-job-1.json').exists()
+        assert len(recorder.records()) == 0
+    finally:
+        recorder.close()
+
+
+
 def test_historical_lerobot_matches_source_mcap_with_custom_suffix(tmp_path, monkeypatch):
     cfg, service = create_service(tmp_path, monkeypatch)
     service.connect('http://platform.invalid/#robot-connect='+'c'*48)
