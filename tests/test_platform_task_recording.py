@@ -6,6 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -617,6 +618,34 @@ def test_upload_history_only_exposes_selected_format_and_dataset_name():
     assert len(rows) == 1
     assert rows[0]['format'] == 'lerobot'
     assert rows[0]['display_name'] == 'teleop_20261023_135933'
+
+
+def test_capture_check_wakes_recording_inputs_before_reading_health():
+    task = task_document(source_format='LEROBOT_V3')
+    snapshot = snapshot_document(task, dict(recording_id='capture', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    topics = ('/observation/joint_states', '/action/joint_states')
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type='sensor_msgs/msg/JointState', outputs=['record'])
+                                    for topic in topics]}}
+    recorder = TaskRecorder.__new__(TaskRecorder)
+    recorder.platform = SimpleNamespace(config=cfg)
+    awake = False
+    health_reads = 0
+    def prepare():
+        nonlocal awake
+        awake = True
+    recorder.prepare_recording = prepare
+    def health():
+        nonlocal health_reads
+        health_reads += 1
+        ready = awake and health_reads >= 3
+        return {
+            '/observation/joint_states': {'has_data': ready, 'state': 'ok' if ready else 'no_data'},
+            '/action/joint_states': {'has_data': False, 'state': 'no_data'},
+        }
+    recorder.capture_health = health
+    recorder.prepare_and_check([snapshot], SimpleNamespace(lerobot_fps=15))
+    assert awake and health_reads == 3
 
 
 def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,24 @@ class TaskRecorder(CorrectionSupport):
     def upload_format(job):
         return job.get('upload_format') or ('mcap' if job['format'] == 'both' else job['format'])
 
+    def prepare_and_check(self, snapshots, writer):
+        """Wake recorder-owned ROS inputs before validating their live data."""
+        warmup = self.prepare_recording is not None
+        if warmup:
+            self.prepare_recording()
+        deadline = time.monotonic() + (2.0 if warmup else 0.0)
+        from .capture_requirements import check_device
+        while True:
+            try:
+                health = self.capture_health() if self.capture_health else {}
+                for snapshot in snapshots:
+                    check_device(snapshot, self.platform.config, writer, health)
+                return
+            except UploadError as error:
+                if error.code != 'CAPTURE_REQUIRED_DATA_MISSING' or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.05)
+
     def start(self, filename='', metadata=None, selection=None, *, _prepared_writer=None):
         with self.lock:
             if self.corrections and _prepared_writer is None:
@@ -122,6 +141,7 @@ class TaskRecorder(CorrectionSupport):
                 self.save(job)
                 self.jobs[identity] = job
             identity = job['recording_id']
+            inputs_prepared = False
             try:
                 if job['format'] != writer.save_format:
                     raise UploadError('CAPTURE_FORMAT_MISMATCH', '准备重试期间录制格式已变化，请恢复原格式')
@@ -158,17 +178,16 @@ class TaskRecorder(CorrectionSupport):
                         job['capture_snapshot'] = self.platform.prepare(preparation['checked'], preparation['command'])
                         job['state'] = 'prepared'
                         self.save(job)
-                    from .capture_requirements import check_device
-                    check_device(job['capture_snapshot'], self.platform.config, writer,
-                                 self.capture_health() if self.capture_health else {})
+                    snapshots_to_check = [job['capture_snapshot']]
                     if self.upload_format(job) == 'both':
                         snapshots = job.setdefault('capture_snapshots', {'MCAP': job['capture_snapshot']})
                         if 'LEROBOT_V3' not in snapshots:
                             other = job['lerobot_preparation']
                             snapshots['LEROBOT_V3'] = self.platform.prepare(other['checked'], other['command'])
                             self.save(job)
-                        check_device(snapshots['LEROBOT_V3'], self.platform.config, writer,
-                                     self.capture_health() if self.capture_health else {})
+                        snapshots_to_check.append(snapshots['LEROBOT_V3'])
+                    self.prepare_and_check(snapshots_to_check, writer)
+                    inputs_prepared = True
                     if not job['binding']:
                         job['binding'] = self.platform.bind(preparation['checked'])
                         self.save(job)
@@ -197,7 +216,8 @@ class TaskRecorder(CorrectionSupport):
                 # permission to start again over possibly existing raw bytes.
                 job.update(state='starting', started_at=now(), error=None, code=None)
                 self.save(job)
-                if self.prepare_recording is not None: self.prepare_recording()
+                if not inputs_prepared and self.prepare_recording is not None:
+                    self.prepare_recording()
                 writer.lerobot_task = binding['task']['name'] if binding else self.default_lerobot_task
                 job['path'] = writer.start(job['chosen_filename'], capture_metadata)
                 job['state'] = 'armed' if _prepared_writer else 'recording'
