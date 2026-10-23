@@ -279,7 +279,7 @@ function renderStatus(data) {
   setState('#cameraState', cam.state);
   setText(
     '#cameraMeta',
-    cam.error || `实际帧率 ${cameraActualFps(cam,ros.topic_health?.[cam.topic]).toFixed(1)} FPS · 头显连接 ${cam.peers||0}`
+    cam.error || cameraMonitorSummary(cam,ros.topic_health?.[cam.topic])
   );
   setText('#wsClients',data.websocket_clients||0);
   const recording=data.recording||{};
@@ -519,8 +519,10 @@ function cameraActualFps(stream,health) {
 function cameraMonitorSummary(stream,health) {
   if(!stream)return '未启用 / 尚未应用';
   if(stream.error)return `异常：${stream.error}`;
-  const fps=cameraActualFps(stream,health);
-  return `${fps>0?'正在接收':'等待图像'} · 实际帧率 ${fps.toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
+  const inputFps=cameraActualFps(stream,health);
+  const sendFps=Number(stream.webrtc_send_fps);
+  const safeSendFps=Number.isFinite(sendFps)&&sendFps>0?sendFps:0;
+  return `${inputFps>0?'正在接收':'等待图像'} · ROS输入 ${inputFps.toFixed(1)} FPS · 头显发送 ${safeSendFps.toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
 }
 function renderCameraStatus(camera,health={}) {
   for(const element of $$('[data-camera-status]')){
