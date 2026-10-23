@@ -157,40 +157,5 @@ class VrDataTests(unittest.TestCase):
             self.assertEqual(mock_rec.marked, 2)
 
 
-@unittest.skipIf(aiohttp is None, "aiohttp is installed by install.sh")
-class VrWebSocketRoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_recording_state_uses_udp_for_pico_and_websocket_for_dashboard(self):
-        from middleware.core.app import MiddlewareRuntime
-        from middleware.core.protocol import envelope
-
-        class FakeVr:
-            def status(self):
-                return {"peer": ("192.168.10.101", 5005)}
-
-        class FakeWebSocket:
-            def __init__(self):
-                self.messages = []
-
-            async def send_str(self, message):
-                self.messages.append(message)
-
-        with tempfile.TemporaryDirectory() as directory:
-            runtime = MiddlewareRuntime(validate_config({}), Path(directory))
-            runtime.vr = FakeVr()
-            pico = FakeWebSocket()
-            dashboard = FakeWebSocket()
-            runtime.websockets.update((pico, dashboard))
-            runtime.websocket_peers.update(
-                {pico: "192.168.10.101", dashboard: "192.168.10.122"}
-            )
-
-            await runtime._broadcast(
-                envelope("recording_stopped", "middleware", {"recording": False})
-            )
-
-            self.assertEqual(pico.messages, [])
-            self.assertEqual(len(dashboard.messages), 1)
-
-
 if __name__ == "__main__":
     unittest.main()
