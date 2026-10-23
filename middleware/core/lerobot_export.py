@@ -302,8 +302,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 source_topics.setdefault(key, topic)
     if not names or not raw_cameras.get('action'):
         raise ValueError('LeRobot requires recorded /observation/joint_states and /action/joint_states; missing grid samples are explicitly masked')
-    first_action_names = (list(dict.fromkeys(name for _, message in raw_cameras['action'] for name in message.name))
-                          if correction else list(raw_cameras['action'][0][1].name))
+    observed_action_names = list(dict.fromkeys(
+        name for _, message in raw_cameras['action'] for name in message.name
+    ))
+    first_action_names = observed_action_names
     if not first_action_names:
         raise ValueError('Action has no joint names')
     # A command may intentionally omit passive/free joints in the feedback.
@@ -311,7 +313,9 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     action_names = [name for name in names if name in first_action_names]
     action_names.extend(name for name in first_action_names if name not in names)
     if snapshot:
-        action_names = first_action_names
+        action_feature = next((declaration for name, declaration in snapshot['output']['features'].items()
+                               if snapshot['effective_adapter']['feature_sources'].get(name, name) == 'action'), None)
+        action_names = list(action_feature.get('names') or first_action_names) if action_feature else first_action_names
     action_axis_samples = []
     for key, samples in raw_cameras.items():
         stream_names = (names if key == 'observation.state' else action_names if key == 'action'
@@ -328,6 +332,25 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                     aggregate.append((stamp, [values.get(name, 0.) for name in stream_names]))
                     action_axis_samples.append((stamp, [times.get(name, -1) for name in stream_names]))
                 streams[key] = aggregate
+            elif key == 'action':
+                # /action/joint_states is intentionally a partial command: an
+                # inactive subsystem is omitted so it cannot be driven. Keep a
+                # stable union (or the frozen task schema), hold only the stored
+                # numeric placeholder, and expose per-axis validity so absence
+                # is never interpreted as a command.
+                aggregate = []
+                held = {}
+                for stamp, message in samples:
+                    if (len(message.name) != len(message.position)
+                            or len(set(message.name)) != len(message.name)):
+                        raise ValueError('JointState names/positions malformed')
+                    current = {name: float(value) for name, value in zip(message.name, message.position)}
+                    if not all(math.isfinite(value) for value in current.values()):
+                        raise ValueError('JointState contains non-finite positions')
+                    aggregate.append((stamp, [current.get(name, held.get(name, 0.0)) for name in action_names]))
+                    action_axis_samples.append((stamp, [name in current for name in action_names]))
+                    held.update(current)
+                streams[key] = aggregate
             else:
                 streams[key] = [(stamp, joint_vector(message, stream_names)) for stamp, message in samples]
         except ValueError as error:
@@ -337,6 +360,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             streams[key] = []
             source_topics[key] = topic
             numeric_names[key] = action_map[topic]['names']
+    partial_action = bool(action_axis_samples) and any(not all(sample[1]) for sample in action_axis_samples)
     progress.update("对齐时间轴", 25, force=True)
     episodes = []
     origin = recording_start
@@ -395,6 +419,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                     audit['rejected_frames'] += 1
                     audit['retained_frames'] -= 1
                     continue
+            elif partial_action:
+                axis_sample = latest_sample(action_axis_samples, stamp, sample_max_age('action'))
+                row['action_valid'] = ([bool(value) for value in axis_sample[1]] if axis_sample
+                                       else [False] * len(action_names))
             rows.append(row)
         if rows:
             episodes.append(rows)
@@ -403,7 +431,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     action_names = action_names + [name for item in action_sources for name in item['names']]
     if len(set(action_names)) != len(action_names):
         raise ValueError('action source joint names overlap')
-    manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
+    manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'action_axis_validity': partial_action, 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
     if snapshot: manifest["capture_snapshot"] = snapshot
     if session:
         manifest['session'] = session
@@ -484,7 +512,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     features['observation.recording_time'] = {'dtype': 'float64', 'shape': (1,), 'names': ['seconds_since_first_log_time']}
     if manifest.get('correction') or manifest.get('session'):
         features['intervention'] = {'dtype': 'bool', 'shape': (1,), 'names': ['human_action']}
-    if manifest.get('correction'):
+    if manifest.get('correction') or manifest.get('action_axis_validity'):
         features['action.valid'] = {'dtype': 'bool', 'shape': (len(joint_names['action']),), 'names': joint_names['action']}
     if 'sync_audit' in manifest:
         for field in ('source_available', 'source_valid', 'source_age'):
@@ -533,7 +561,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
             frame['observation.recording_time'] = np.asarray([row['grid_time']], dtype=np.float64)
             if manifest.get('correction') or manifest.get('session'):
                 frame['intervention'] = np.asarray([True if manifest.get('correction') else row['intervention']], dtype=bool)
-            if manifest.get('correction'):
+            if manifest.get('correction') or manifest.get('action_axis_validity'):
                 frame['action.valid'] = np.asarray(row['action_valid'], dtype=bool)
             if 'sync_audit' in manifest:
                 for field in ('source_available', 'source_valid', 'source_age'):
@@ -560,6 +588,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     synchronization['action_joint_names'] = joint_names['action']
     synchronization['action_sources'] = manifest.get('action_sources', [])
     synchronization['action_semantics'] = manifest.get('action_semantics', 'upstream_command_not_execution')
+    synchronization['action_axis_validity'] = bool(manifest.get('action_axis_validity'))
     synchronization['joint_alignment'] = 'observation.state uses feedback joints; action uses commanded joints; ordered by joint name, no feedback substituted for absent commands'
     synchronization['task'] = manifest['task']
     synchronization['source_frame_ids'] = manifest.get('source_frame_ids', {})
