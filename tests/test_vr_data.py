@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 
 try:
@@ -84,9 +85,14 @@ class VrDataTests(unittest.TestCase):
             runtime = MiddlewareRuntime(validate_config({}), Path(directory))
             mock_rec = MockRecorder()
             runtime.recorder = mock_rec
-            runtime._record_commands = type(
-                "ImmediateCommands", (), {"submit": staticmethod(lambda fn: fn())}
-            )()
+            class ImmediateCommands:
+                @staticmethod
+                def submit(operation):
+                    future = Future()
+                    future.set_result(operation())
+                    return future
+
+            runtime._record_commands = ImmediateCommands()
 
             # 1. Left X button pressed (bit 0 = 1) -> triggers start recording
             packet_x = PosePacket(
