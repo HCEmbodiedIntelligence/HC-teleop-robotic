@@ -149,7 +149,7 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 
 ### 话题录制
 
-“话题录制”页从 ROS Graph 读取当前话题和消息类型，可直接添加自定义消息，也可在“系统配置 → HC 标准 ROS 2 接口”中切换内置消息是否录制。点击“保存录制配置”后写回 `middleware/config.yaml`；启用录制时，消息按启动会话写入 `runtime/topic_recordings/`。MCAP 录制使用独立 ROS Context 和多线程执行器，不与 Dashboard 健康检测或 WebRTC 视频回调共用执行器。X1 默认只录制规范化压缩相机话题；同源 `/io_teleop` 别名和大体积未压缩回退流默认不勾选，仍可在界面按需启用。
+“话题录制”页从 ROS Graph 读取当前话题和消息类型，可直接添加自定义消息，也可在“系统配置 → HC 标准 ROS 2 接口”中切换内置消息是否录制。点击“保存录制配置”后写回 `middleware/config.yaml`；启用录制时，消息按启动会话写入 `runtime/topic_recordings/`。MCAP 录制使用独立 ROS Context 和多线程执行器，不与 Dashboard 健康检测或 WebRTC 视频回调共用执行器。X1 默认录制规范化彩色/深度压缩图像、`/observation/cameras/head/calibration` 内参 JSON、`/observation/cameras/head/extrinsics` 外参 JSON，以及机器人基座坐标系中的 `/observation/head/pose` 实际头部相机位姿和 `/action/head/pose` 目标位姿。中间件从 HC_X1 原始标定消息无修改转发两条标准相机观测话题，并将 `/status/head/tracking_poses` 的 `[actual, target]` 拆分为两条标准 PoseStamped；新格式 MCAP 转为旧格式时可将这两个 Pose 分别补到反馈和目标双臂 Pose 后作为第三项，无需回放 TF 重建。其他同源 `/io_teleop` 图像别名和大体积未压缩回退流默认不勾选，仍可在界面按需启用。
 
 ### 自动上传到数据平台
 
@@ -181,13 +181,28 @@ uploads:
 
 录制页可选择 MCAP、LeRobot 或两者同时保存，并设置数据集帧率和任务描述。MCAP 保留原始话题（包括 `/vrdata`）；LeRobot 在停止录制后异步生成，相机保存为 H.264 MP4，状态和动作保存为 Parquet。录制页及数据集管理页显示转换阶段、百分比和处理数量，完成后支持特征查看、相机视频预览、完整 ZIP 下载及删除。
 
-LeRobot 是可选依赖，需要先安装 `uv`，然后在项目根目录运行：
+LeRobot 是可选依赖。在项目根目录运行：
 
 ```bash
 ./tools/setup_lerobot.sh
 ```
 
-该脚本创建 Python 3.12 的 `.venv-lerobot` 环境，安装固定版本 `lerobot==0.4.3` 和 CPU PyTorch；ROS 继续使用系统 Python。也可通过 `LEROBOT_PYTHON` 指定兼容的独立解释器。原始 MCAP 不会因转换失败而删除；仅选 LeRobot 时，原始文件位于录制目录的 `.lerobot_sources/`，成功数据集位于 `lerobot/<录制名称>/`。
+脚本优先使用 `PATH` 中的 `uv`，其次查找 `~/.local/bin/uv`；仍未找到时会通过
+`python3 -m pip install --user uv` 自动安装。随后创建 Python 3.12 的
+`.venv-lerobot` 环境，安装固定版本 `lerobot==0.4.3` 和 CPU PyTorch；ROS
+继续使用系统 Python。无需激活该虚拟环境，中间件会在每次开始 LeRobot
+录制时检查并直接调用其中的解释器。也可通过 `LEROBOT_PYTHON` 指定兼容的
+独立解释器。
+
+安装完成后可执行只读检查：
+
+```bash
+.venv-lerobot/bin/python -c \
+  "import lerobot,av,pyarrow,torch; from lerobot.datasets.lerobot_dataset import LeRobotDataset; print(lerobot.__version__, torch.__version__)"
+```
+
+原始 MCAP 不会因转换失败而删除；仅选 LeRobot 时，原始文件位于录制目录的
+`.lerobot_sources/`，成功数据集位于 `lerobot/<录制名称>/`。
 
 一次录制对应一个 episode，按 MCAP 消息接收时间的完整范围生成固定帧率时间轴。采样帧率不会提高相机实际采集频率。各字段只选择当前时间及之前的最后一个样本；过期值保留并标记无效，首次收到数据之前使用明确标记的零值/黑图占位，不借用未来数据，也不因短暂缺失删帧或切分 episode。
 

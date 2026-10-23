@@ -46,6 +46,12 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
             client.addTransceiver('video', direction='recvonly')
             await client.setLocalDescription(await client.createOffer())
             answer = await self.camera.offer({'sdp': client.localDescription.sdp, 'type': 'offer'})
+            lines = answer['sdp'].splitlines()
+            first_payload = next(line for line in lines if line.startswith('m=video ')).split()[3]
+            first_codec = next(
+                line for line in lines if line.startswith(f'a=rtpmap:{first_payload} ')
+            )
+            self.assertIn(' H264/', first_codec)
             await client.setRemoteDescription(RTCSessionDescription(**answer))
             track = await asyncio.wait_for(track_ready, 10)
             frame = await asyncio.wait_for(track.recv(), 10)

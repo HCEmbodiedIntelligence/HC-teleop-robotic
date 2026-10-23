@@ -10,6 +10,8 @@ from middleware.core.config import (
     ConfigError, ConfigStore, ROBOT_MIDDLEWARE_DEFAULTS,
     validate_robot_middleware,
 )
+from middleware.core.ros_bridge import DEFAULT_TOPIC_STANDARDS
+from middleware.core.ros_recording_executor import recording_subscriptions
 
 
 def write_yaml(path, value):
@@ -112,6 +114,36 @@ def test_package_validation_fills_missing_fields_without_mutating_defaults():
     assert result['vr'] == {'pose_timeout_ms': 600}
     assert result['ros']['command_mux']['output_topic'] == '/action/joint_states'
     assert ROBOT_MIDDLEWARE_DEFAULTS == original
+
+
+def test_x1_records_camera_metadata_and_head_poses_for_legacy_conversion():
+    profile_path = Path(__file__).resolve().parents[1] / 'adapters/robots/x1/middleware.yaml'
+    profile = yaml.safe_load(profile_path.read_text())
+    subscriptions = {
+        item['topic']: item for item in recording_subscriptions(profile['ros'])
+    }
+
+    for topic in (
+        '/observation/cameras/head/calibration',
+        '/observation/cameras/head/extrinsics',
+    ):
+        item = subscriptions[topic]
+        assert item['type'] == 'std_msgs/msg/String'
+        assert item['qos_reliability'] == 'reliable'
+        assert item['max_hz'] == 0.0
+        assert DEFAULT_TOPIC_STANDARDS[topic] == {
+            'target_hz': 2.0,
+            'min_hz': 0.2,
+        }
+
+    for topic in ('/observation/head/pose', '/action/head/pose'):
+        item = subscriptions[topic]
+        assert item['type'] == 'geometry_msgs/msg/PoseStamped'
+        assert item['max_hz'] == 0.0
+        assert DEFAULT_TOPIC_STANDARDS[topic] == {
+            'target_hz': 60.0,
+            'min_hz': 20.0,
+        }
 
 
 def test_legacy_profile_without_middleware_file_retains_host_settings(deployment):

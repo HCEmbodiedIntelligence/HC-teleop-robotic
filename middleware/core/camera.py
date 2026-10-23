@@ -538,7 +538,7 @@ class CameraService:
 
         try:
             transceiver = next(item for item in pc.getTransceivers() if item.sender == sender)
-            requested_codec = str(camera.config.get("codec", "H264")).lower()
+            requested_codec = str(self.config.get("codec", "H264")).lower()
             requested_mime = f"video/{requested_codec}"
             preferred = [
                 codec
