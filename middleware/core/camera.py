@@ -67,6 +67,7 @@ class CameraService:
             "webrtc_target_bitrate_mbps": 0.0,
             "webrtc_encode_ms": 0.0,
             "webrtc_encoded_frame_kb": 0.0,
+            "webrtc_forced_keyframes": 0,
             "webrtc_packets_sent": 0,
             "webrtc_remote_packets_lost": 0,
             "webrtc_fraction_lost_pct": 0.0,
@@ -381,6 +382,7 @@ class CameraService:
             self._status["webrtc_target_bitrate_mbps"] = 0.0
             self._status["webrtc_encode_ms"] = 0.0
             self._status["webrtc_encoded_frame_kb"] = 0.0
+            self._status["webrtc_forced_keyframes"] = 0
             self._status["webrtc_packets_sent"] = 0
             self._status["webrtc_remote_packets_lost"] = 0
             self._status["webrtc_fraction_lost_pct"] = 0.0
@@ -444,6 +446,9 @@ class CameraService:
                         changes["webrtc_encoded_frame_kb"] = round(
                             float(encoded_bytes) / 1024.0, 2
                         )
+                    forced_keyframes = getattr(encoder, "forced_keyframes", None)
+                    if forced_keyframes is not None:
+                        changes["webrtc_forced_keyframes"] = int(forced_keyframes)
                 if changes:
                     self._set_status(**changes)
                 await asyncio.sleep(1.0)

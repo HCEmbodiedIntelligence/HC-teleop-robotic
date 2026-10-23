@@ -23,6 +23,8 @@ class FastH264Encoder(h264.H264Encoder):
         self.average_encode_ms = 0.0
         self.last_payload_bytes = 0
         self.frames_encoded = 0
+        self.force_keyframe_requests = 0
+        self.forced_keyframes = 0
 
     def _close_codec(self) -> None:
         self.buffer_data = b""
@@ -32,6 +34,9 @@ class FastH264Encoder(h264.H264Encoder):
 
     def _encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
         encode_started = time.perf_counter()
+        if force_keyframe:
+            self.force_keyframe_requests += 1
+            self.forced_keyframes += 1
         if self.codec and (
             frame.width != self.codec.width
             or frame.height != self.codec.height
