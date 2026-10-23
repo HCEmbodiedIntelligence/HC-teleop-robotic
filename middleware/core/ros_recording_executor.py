@@ -135,6 +135,7 @@ def _raw_recording_process(
     reset_event: Any,
     subscriptions_ready_event: Any,
     status_queue: Any,
+    ingress_resources: Any,
 ) -> None:
     """Receive serialized ROS messages without deserializing them."""
     _lower_recording_priority()
@@ -155,6 +156,11 @@ def _raw_recording_process(
     ros_subscriptions: list[Any] = []
     prepared_until = 0.0
     capture_seen = False
+
+    def enqueue(event: dict[str, Any]) -> bool:
+        from .topic_recorder import enqueue_record
+
+        return enqueue_record(ingress_resources, event)
     def publish_status(state: str, error: str | None = None) -> None:
         now = time.monotonic()
         _put_latest(
@@ -231,7 +237,7 @@ def _raw_recording_process(
                         counters["serialization_errors"] += 1
                         return
                     try:
-                        event_queue.put_nowait(
+                        if not enqueue(
                             {
                                 "kind": "ros_message",
                                 "topic": topic,
@@ -239,7 +245,8 @@ def _raw_recording_process(
                                 "_raw": raw_data,
                                 "stamp_ns": time.time_ns(),
                             }
-                        )
+                        ):
+                            return
                         counters["recorded"] += 1
                     except queue.Full:
                         counters["rejected"] += 1
@@ -353,7 +360,8 @@ class RosRecordingExecutor:
     def start(self) -> None:
         if not self.config.get("enabled", True) or self._process is not None:
             return
-        event_queue, accepting_event, dropped_counter = self.recorder.ipc_resources()
+        resources = self.recorder.ipc_resources()
+        event_queue, accepting_event, dropped_counter = resources[:3]
         self._stop_event.clear()
         self._subscriptions_ready_event.clear()
         self._process = self._mp.Process(
@@ -368,6 +376,7 @@ class RosRecordingExecutor:
                 self._reset_event,
                 self._subscriptions_ready_event,
                 self._status_queue,
+                resources,
             ),
             name="ros-cdr-recorder",
             daemon=True,

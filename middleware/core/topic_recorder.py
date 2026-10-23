@@ -57,6 +57,31 @@ def _counter_add(counter: Any, value: int = 1) -> None:
         counter.value += int(value)
 
 
+def enqueue_record(resources: tuple[Any, ...], event: dict[str, Any]) -> bool:
+    """Accept one event atomically so stop can wait for every feeder byte."""
+    target, accepting, dropped, lock, accepted, queued_bytes, budget = resources
+    raw = event.get("_raw")
+    size = (
+        len(raw) + 1024
+        if isinstance(raw, bytes)
+        else len(json.dumps(event, ensure_ascii=False).encode()) + 1024
+    )
+    with lock:
+        if not accepting.is_set():
+            return False
+        if _counter_get(queued_bytes) + size > budget:
+            _counter_add(dropped)
+            return False
+        try:
+            target.put_nowait({**event, "_queue_bytes": size})
+        except queue.Full:
+            _counter_add(dropped)
+            return False
+        _counter_add(queued_bytes, size)
+        _counter_add(accepted)
+        return True
+
+
 def _get_msg_def(msg_type: str) -> bytes:
     """Recursively resolve ROS 2 message definition and all nested type definitions."""
     try:
@@ -144,6 +169,10 @@ def _mcap_writer_process(
     error_queue: Any,
     ready_event: Any,
     metadata: dict[str, str],
+    finish_event: Any,
+    accepted: Any,
+    queued_bytes: Any,
+    ingress_lock: Any,
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
     _lower_recording_priority()
@@ -160,9 +189,12 @@ def _mcap_writer_process(
             ready_event.set()
             try:
                 while True:
-                    event = event_queue.get()
-                    if event is None:
+                    if finish_event.is_set() and _counter_get(messages) >= _counter_get(accepted):
                         break
+                    try:
+                        event = event_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
 
                     topic = str(event.get("topic") or "/events")
                     msg_type = str(
@@ -195,7 +227,11 @@ def _mcap_writer_process(
                     else:
                         payload = event.get("payload")
                         if payload is None:
-                            payload = event
+                            payload = {
+                                key: value
+                                for key, value in event.items()
+                                if not key.startswith("_")
+                            }
                         json_bytes = json.dumps(
                             payload,
                             ensure_ascii=False,
@@ -221,7 +257,9 @@ def _mcap_writer_process(
                             data=json_bytes,
                             publish_time=stamp_ns,
                         )
-                    _counter_add(messages)
+                    with ingress_lock:
+                        _counter_add(messages)
+                        _counter_add(queued_bytes, -int(event.get("_queue_bytes", 0)))
             finally:
                 writer.finish()
     except Exception as exc:
@@ -342,7 +380,12 @@ class TopicRecorder:
         self._lerobot_path = ""
         self.path: Path | None = None
         self._mp = mp.get_context("spawn")
-        self._queue = self._mp.Queue(maxsize=8192)
+        self._queue = self._mp.Queue(maxsize=int(config.get("queue_capacity", 8192)))
+        self._ingress_lock = self._mp.RLock()
+        self._accepted = self._mp.Value("Q", 0)
+        self._queued_bytes = self._mp.Value("Q", 0)
+        self._byte_budget = int(config.get("queue_bytes", 128 * 1024**2))
+        self._finish_event = self._mp.Event()
         self._accepting_event = self._mp.Event()
         self._messages = self._mp.Value("Q", 0)
         self._dropped = self._mp.Value("Q", 0)
@@ -360,9 +403,17 @@ class TopicRecorder:
         self._capture_identity = None
         self.task_managed = False
 
-    def ipc_resources(self) -> tuple[Any, Any, Any]:
+    def ipc_resources(self) -> tuple[Any, ...]:
         """Resources inherited by the raw ROS subscription process."""
-        return self._queue, self._accepting_event, self._dropped
+        return (
+            self._queue,
+            self._accepting_event,
+            self._dropped,
+            self._ingress_lock,
+            self._accepted,
+            self._queued_bytes,
+            self._byte_budget,
+        )
 
     def _drain_queue(self, target: Any) -> None:
         while True:
@@ -411,6 +462,9 @@ class TopicRecorder:
             self._drain_queue(self._queue)
             self._drain_queue(self._error_queue)
             self._ready_event.clear()
+            self._finish_event.clear()
+            _counter_set(self._accepted, 0)
+            _counter_set(self._queued_bytes, 0)
             self._last_error = None
             _counter_set(self._messages, 0)
             _counter_set(self._dropped, 0)
@@ -423,6 +477,10 @@ class TopicRecorder:
                     self._error_queue,
                     self._ready_event,
                     self._active_metadata,
+                    self._finish_event,
+                    self._accepted,
+                    self._queued_bytes,
+                    self._ingress_lock,
                 ),
                 name="mcap-writer",
                 daemon=True,
@@ -448,21 +506,13 @@ class TopicRecorder:
         process = self._process
         if process is None:
             return self.status()
-        self._accepting_event.clear()
         capture_ended_at = datetime.now(timezone.utc).isoformat()
-        while True:
-            try:
-                self._queue.put_nowait(None)
-                break
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    continue
-                _counter_add(self._dropped)
-        process.join(timeout=30.0)
-        if process.is_alive():
-            raise TimeoutError("MCAP writer did not finish within 30 seconds")
+        # Queue.put() returns before its feeder writes to the pipe. Freeze all
+        # producers first, then let the writer consume the accepted count.
+        with self._ingress_lock:
+            self._accepting_event.clear()
+            self._finish_event.set()
+        process.join()
         self._process = None
         self.status()  # Drain writer errors before exporting a closed source.
         if process.exitcode != 0 and not self._last_error:
@@ -571,14 +621,7 @@ class TopicRecorder:
         )
 
     def record(self, event: dict[str, Any]) -> bool:
-        if not self._accepting_event.is_set():
-            return False
-        try:
-            self._queue.put_nowait(event)
-            return True
-        except queue.Full:
-            _counter_add(self._dropped)
-            return False
+        return enqueue_record(self.ipc_resources(), event)
 
     def status(self) -> dict[str, Any]:
         self._poll_export()
@@ -595,6 +638,9 @@ class TopicRecorder:
                 "path": str(self.path) if self.path else "",
                 "active_file": self.path.name if self.path and active else "",
                 "messages": _counter_get(self._messages),
+                "accepted": _counter_get(self._accepted),
+                "queued_bytes": _counter_get(self._queued_bytes),
+                "queue_byte_budget": self._byte_budget,
                 "dropped": _counter_get(self._dropped),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",
