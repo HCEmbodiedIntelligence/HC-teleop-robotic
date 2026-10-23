@@ -23,6 +23,9 @@ class FastH264Encoder(h264.H264Encoder):
         super().__init__()
         self._configured_bitrate: int | None = None
         self._last_reopen_at = 0.0
+        self.average_encode_ms = 0.0
+        self.last_payload_bytes = 0
+        self.frames_encoded = 0
 
     def _close_codec(self) -> None:
         self.buffer_data = b""
@@ -43,6 +46,7 @@ class FastH264Encoder(h264.H264Encoder):
         )
 
     def _encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
+        encode_started = time.perf_counter()
         now = time.monotonic()
         if self.codec and (
             frame.width != self.codec.width
@@ -91,6 +95,14 @@ class FastH264Encoder(h264.H264Encoder):
         data_to_send = b""
         for package in self.codec.encode(frame):
             data_to_send += bytes(package)
+        elapsed_ms = (time.perf_counter() - encode_started) * 1000.0
+        self.average_encode_ms = (
+            elapsed_ms
+            if not self.frames_encoded
+            else self.average_encode_ms * 0.9 + elapsed_ms * 0.1
+        )
+        self.last_payload_bytes = len(data_to_send)
+        self.frames_encoded += 1
         if data_to_send:
             yield from self._split_bitstream(data_to_send)
 
