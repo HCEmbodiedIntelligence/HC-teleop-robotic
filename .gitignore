@@ -49,3 +49,4 @@ log_motion/
 /log/
 .deps
 .venv-lerobot
+*.so
