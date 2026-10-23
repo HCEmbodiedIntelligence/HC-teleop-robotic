@@ -1055,6 +1055,17 @@ def create_app(store: ConfigStore) -> web.Application:
         return response
 
     async def precheck_recording(_request: web.Request) -> web.Response:
+        if runtime.recording_ros is not None:
+            try:
+                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
+                # Frequency checks need more than one sample. Keep this work off
+                # the WebRTC/media path while the recorder warms up.
+                await asyncio.sleep(1.9)
+            except (RuntimeError, TimeoutError) as exc:
+                return web.json_response(
+                    {"ok": False, "ready": False, "reason": str(exc), "issues": []},
+                    status=503,
+                )
         subs = store.value.get("ros", {}).get("subscriptions", [])
         recording_topics = [
             item for item in subs
@@ -1122,12 +1133,15 @@ def create_app(store: ConfigStore) -> web.Application:
                 data = await request.json()
             except Exception:
                 pass
+        if runtime.recording_ros is not None:
+            try:
+                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
+            except (RuntimeError, TimeoutError) as exc:
+                return web.json_response({"ok": False, "reason": str(exc)}, status=503)
         if runtime.platform is None and runtime.upload_error:
             if (data.get('selection') or {}).get('mode', 'local') != 'local':
                 return web.json_response({'ok': False, 'code': 'PLATFORM_UNAVAILABLE',
                     'reason': '平台模块尚未安装，可暂不关联平台任务录制到本机'}, status=409)
-            if runtime.recording_ros is not None:
-                runtime.recording_ros.prepare_recording()
         force = bool(data.get("force", False))
         filename = str(data.get("filename", "")).strip()
 
