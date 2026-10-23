@@ -31,6 +31,7 @@ def check_device(snapshot, config, recorder, health):
     # streams which must already be live to prove the device is available.
     action_topics = set()
     observation_topics = set()
+    maskable_topics = set()
     if snapshot['source_format'] in ('MCAP', 'CAPTURE_BUNDLE'):
         settings = adapter['configuration']
         roles = {feature['role'] for feature in output['features'].values() if feature.get('required', True)}
@@ -48,6 +49,8 @@ def check_device(snapshot, config, recorder, health):
         for name, source in settings.get('numeric_sources', {}).items():
             if output['features'].get(name, {}).get('required', True):
                 required[source['topic']] = source['message_type']
+                if output['features'].get(name, {}).get('missing') == 'presence_and_validity':
+                    maskable_topics.add(source['topic'])
                 if name == 'action' or name.startswith('action.'):
                     action_topics.add(source['topic'])
                 elif name == 'observation' or name.startswith('observation.'):
@@ -69,6 +72,14 @@ def check_device(snapshot, config, recorder, health):
                 raise UploadError('CAPTURE_SOURCE_UNSUPPORTED', f'本机导出器无法采集 {key}（来源 {source}）；请检查实例映射')
             required[topic] = ('sensor_msgs/msg/JointState' if source in ('observation.state', 'action')
                                else subscriptions.get(topic, {}).get('type'))
+            # "required" means the dataset column must exist. Auxiliary
+            # numeric sources with an explicit presence/validity policy may be
+            # unavailable on a robot; the exporter represents that honestly
+            # with a zero value and false availability/validity flags.
+            if (feature.get('missing') == 'presence_and_validity'
+                    and source not in ('observation.state', 'action')
+                    and not source.startswith('observation.images.')):
+                maskable_topics.add(topic)
             if source == 'action' or source.startswith('action.'):
                 action_topics.add(topic)
             elif source == 'observation.state' or source.startswith('observation.'):
@@ -83,6 +94,8 @@ def check_device(snapshot, config, recorder, health):
         if message_type and item.get('type') != message_type:
             raise UploadError('CAPTURE_STRUCTURE_MISMATCH', f'{topic} 消息类型与方案不一致')
         if topic in action_topics and topic not in observation_topics:
+            continue
+        if topic in maskable_topics:
             continue
         observed = health.get(topic, {})
         if not observed.get('has_data') or observed.get('state') in ('no_data', 'error'):

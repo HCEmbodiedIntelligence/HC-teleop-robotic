@@ -119,7 +119,8 @@ def preserved_episode(streams, fps, audit):
     rows = []
     for stamp, _ in timeline:
         selected = {key: latest_sample(samples, stamp, sample_max_age(key)) for key, samples in streams.items()}
-        missing = [key for key, value in selected.items() if value is None]
+        missing = [key for key, value in selected.items()
+                   if value is None and (streams[key] or required_stream(key))]
         if missing:
             raise UploadError('CAPTURE_SOURCE_GAPS_UNSUPPORTED', '当前 LeRobot 导出无法无损表达这些字段的帧内缺失：' + ', '.join(missing) + '；原始 MCAP 已保留')
         rows.append((stamp, selected))
@@ -285,6 +286,20 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                     raise RuntimeError(f'Cannot save staging image {filename}')
                 streams.setdefault(key, []).append((message.log_time, str(filename)))
                 source_topics[key] = topic
+    if snapshot:
+        # Preserve required auxiliary numeric columns even when their device
+        # source is entirely absent. The schema's presence_and_validity policy
+        # encodes this as zero values with source_available/source_valid = 0.
+        topic_by_numeric = {key: topic for topic, key in numeric_topics.items()}
+        feature_sources = snapshot['effective_adapter']['feature_sources']
+        for name, declaration in snapshot['output']['features'].items():
+            key = feature_sources.get(name, name)
+            topic = topic_by_numeric.get(key)
+            if (topic and declaration.get('required', True)
+                    and declaration.get('missing') == 'presence_and_validity'):
+                streams.setdefault(key, [])
+                numeric_names.setdefault(key, list(declaration.get('names') or []))
+                source_topics.setdefault(key, topic)
     if not names or not raw_cameras.get('action'):
         raise ValueError('LeRobot requires recorded /observation/joint_states and /action/joint_states; missing grid samples are explicitly masked')
     first_action_names = (list(dict.fromkeys(name for _, message in raw_cameras['action'] for name in message.name))
