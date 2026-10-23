@@ -3,6 +3,7 @@ import unittest
 from middleware.core.ros_recording_executor import (
     RateGate,
     RosRecordingExecutor,
+    _should_release_subscriptions,
     recording_subscriptions,
 )
 
@@ -43,6 +44,27 @@ class RosRecordingExecutorTests(unittest.TestCase):
         timestamps = [0.0, 0.0167, 0.0334, 0.0501, 0.0668]
         accepted = [gate.allow("/camera", 30.0, now) for now in timestamps]
         self.assertEqual(accepted, [True, False, True, False, True])
+
+    def test_subscriptions_release_as_soon_as_capture_stops(self):
+        self.assertTrue(
+            _should_release_subscriptions(
+                has_subscriptions=True,
+                capture_seen=True,
+                accepting=False,
+                now=5.0,
+                prepared_until=30.0,
+            )
+        )
+
+    def test_precheck_subscriptions_wait_until_grace_period_expires(self):
+        arguments = dict(
+            has_subscriptions=True,
+            capture_seen=False,
+            accepting=False,
+            prepared_until=30.0,
+        )
+        self.assertFalse(_should_release_subscriptions(now=29.9, **arguments))
+        self.assertTrue(_should_release_subscriptions(now=30.0, **arguments))
 
     def test_forwards_raw_cdr_only_while_recording(self):
         recorder = FakeRecorder(active=False)
