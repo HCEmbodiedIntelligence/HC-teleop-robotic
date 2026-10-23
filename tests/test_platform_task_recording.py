@@ -562,6 +562,10 @@ def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
     from middleware.core.export_progress import progress_path
     cfg, service, recorder = connected(tmp_path, monkeypatch)
     configure_lerobot_upload(recorder, service, monkeypatch)
+    # Keep this policy test deterministic; BackgroundProcess transport has its
+    # own coverage and does not affect which descriptor is upload-eligible.
+    monkeypatch.setattr(service.upload.artifact_process, 'call', lambda function, *args: function(*args))
+    monkeypatch.setattr('middleware.core.artifact_jobs.enqueue_ready', lambda descriptor, cfg: {'queued': True})
     def exported():
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -581,17 +585,23 @@ def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
     try:
         path = capture(recorder, choice(service, 'A'))
         assert Path(path).is_file()
-        jobs = service.upload.queue.jobs()
-        assert len(jobs) == 1
-        assert jobs[0]['manifest']['source_format'] == 'LEROBOT_V3'
-        assert jobs[0]['manifest']['declared_episode_count'] == 1
-        assert not any(a['path'].endswith('.mcap') for a in jobs[0]['manifest']['assets'])
-        assert recorder.records()[0]['format'] == 'both'
-        assert recorder.records()[0]['upload_format'] == 'lerobot'
+        record = recorder.records()[0]
+        assert record['format'] == 'both'
+        assert record['upload_format'] == 'lerobot'
         rows = recorder.upload_records()
         assert len(rows) == 1
         assert rows[0]['format'] == 'lerobot'
         assert not rows[0]['display_name'].endswith('.mcap')
+        selected = read_json(service.upload.state_dir / (record['recording_id'] + '.json'))
+        mcap = read_json(service.upload.state_dir / (record['recording_id'] + '-mcap.json'))
+        assert selected['kind'] == 'hc_lerobot'
+        assert selected['binding_id'] == record['binding']['binding_id']
+        assert mcap['binding_id'] is None
+        scanned = []
+        monkeypatch.setattr(service.upload, 'enqueue', lambda identity, binding_id, **kw: scanned.append(identity))
+        service.upload.cfg['auto_enqueue'] = True
+        assert service.upload.scan()['enqueued'] == 1
+        assert scanned == [record['recording_id']]
     finally:
         recorder.close()
 
