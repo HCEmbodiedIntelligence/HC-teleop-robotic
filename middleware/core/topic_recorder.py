@@ -848,13 +848,15 @@ class TopicRecorder(CorrectionSupport):
                                   and not path.name.startswith('.') and (path / marker).is_file())
         progress_dir = self.directory / 'lerobot'
         if progress_dir.is_dir() and not progress_dir.is_symlink():
+            from .export_progress import read_progress
             ready = {path.name for path in progress_dir.iterdir()
                      if path.is_dir() and (path / 'meta/info.json').is_file()}
             counts['lerobot'] += sum(1 for path in progress_dir.glob('.*.progress.json')
-                                     if path.name[1:-len('.progress.json')] not in ready)
+                                     if path.name[1:-len('.progress.json')] not in ready
+                                     and read_progress(path).get('state') in {'exporting', 'error'})
         return counts
 
-    def list_recordings(self, format_filter: str = 'all') -> list[dict[str, Any]]:
+    def list_recordings(self, format_filter: str = 'all', identifier: str = '', compact: bool = False) -> list[dict[str, Any]]:
         self._poll_export()
         self.directory.mkdir(parents=True, exist_ok=True)
         if format_filter not in {'all', 'mcap', 'lerobot', 'bundle'}:
@@ -870,6 +872,8 @@ class TopicRecorder(CorrectionSupport):
             if not p.is_file() or p.name.startswith("."):
                 continue
             if not (p.suffix in {".mcap", ".jsonl"}):
+                continue
+            if identifier and identifier != p.name:
                 continue
             try:
                 stat = p.stat()
@@ -890,10 +894,12 @@ class TopicRecorder(CorrectionSupport):
             created_iso = datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
             modified_iso = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-            meta = self._cached_inspection(
-                'file:' + str(p.resolve()), (stat.st_size, stat.st_mtime_ns),
-                lambda: _inspect_mcap_file(p),
-            ) if (p.suffix == ".mcap" and not is_cur) else {
+            cache_key = 'file:' + str(p.resolve())
+            cached = self._inspection_cache.get(cache_key)
+            meta = (cached[1] if compact and cached and cached[0] == (stat.st_size, stat.st_mtime_ns)
+                    else self._cached_inspection(cache_key, (stat.st_size, stat.st_mtime_ns),
+                                                 lambda: _inspect_mcap_file(p))) \
+                if (p.suffix == ".mcap" and not is_cur and (not compact or cached)) else {
                 "duration_sec": 0.0,
                 "duration_human": "正在写入…" if is_cur else "--",
                 "message_count": _counter_get(self._messages) if is_cur else 0,
@@ -925,6 +931,7 @@ class TopicRecorder(CorrectionSupport):
                 "robot_name": meta["robot_name"],
                 "controller_config": meta["controller_config"],
                 "free_joints": meta["free_joints"],
+                "details_available": p.suffix == '.mcap' and not is_cur,
                 "marked": bool(mark.get("marked", False)),
                 "marked_at": str(mark.get("marked_at", "")),
                 "mark_source": str(mark.get("mark_source", "")),
@@ -934,6 +941,8 @@ class TopicRecorder(CorrectionSupport):
         if format_filter in {'all', 'lerobot'} and datasets_dir.is_dir() and not datasets_dir.is_symlink():
             for dataset in datasets_dir.iterdir():
                 if dataset.is_dir() and not dataset.is_symlink() and not dataset.name.startswith("."):
+                    if identifier and identifier != 'lerobot:' + dataset.name:
+                        continue
                     try:
                         marker = dataset / 'meta/info.json'
                         stat = marker.stat()
@@ -944,12 +953,15 @@ class TopicRecorder(CorrectionSupport):
                     except (OSError, ValueError, KeyError, TypeError):
                         continue  # Incomplete/invalid exports are not ready datasets.
             from .recording_datasets import pending_datasets
-            files.extend(pending_datasets(datasets_dir, {item.get('id') for item in files}))
+            pending = pending_datasets(datasets_dir, {item.get('id') for item in files})
+            files.extend(item for item in pending if not identifier or item.get('id') == identifier)
         from .recording_datasets import inspect_bundle
         bundles_dir = self.directory / "bundles"
         if format_filter in {'all', 'bundle'} and bundles_dir.is_dir() and not bundles_dir.is_symlink():
             for bundle in bundles_dir.iterdir():
                 if bundle.is_dir() and not bundle.is_symlink() and not bundle.name.startswith('.'):
+                    if identifier and identifier != 'bundle:' + bundle.name:
+                        continue
                     try:
                         marker = bundle / 'session.json'
                         stat = marker.stat()

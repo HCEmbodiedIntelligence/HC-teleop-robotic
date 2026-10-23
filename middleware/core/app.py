@@ -1266,17 +1266,16 @@ def create_app(store: ConfigStore) -> web.Application:
                 "total_size_human": "0 B",
             })
         format_filter = request.query.get('format', 'all')
+        identifier = request.query.get('identifier', '')
+        compact = request.query.get('compact') == '1'
         try:
             files, format_counts = await asyncio.gather(
-                asyncio.to_thread(runtime.recorder.list_recordings, format_filter),
+                asyncio.to_thread(runtime.recorder.list_recordings, format_filter, identifier, compact),
                 asyncio.to_thread(runtime.recorder.recording_format_counts),
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
-        identifier = request.query.get('identifier')
-        if identifier:
-            files = [item for item in files if item.get('id', item.get('filename')) == identifier]
-        if request.query.get('compact') == '1':
+        if compact:
             files = [{key: value for key, value in item.items() if key not in {'channels', 'videos'}}
                      for item in files]
         total_bytes = sum(f["size_bytes"] for f in files)

@@ -1154,6 +1154,11 @@ function datasetIdentifier(file) {
   return file.id || file.filename;
 }
 
+async function fetchDatasetDetails(file) {
+  const result = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&identifier=${encodeURIComponent(datasetIdentifier(file))}`);
+  return result.files?.[0] || file;
+}
+
 function datasetSummaryValues(file) {
   const profile = file.profile_display_name || file.profile_id || file.robot_name || '未知（旧数据）';
   if (isLeRobotDataset(file)) return [
@@ -1330,12 +1335,15 @@ async function loadDatasets() {
       const group = document.createElement('div');
       group.className = 'btn-group';
 
-      if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.channels?.length || file.message_count)) {
+      if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.details_available || file.channels?.length || file.message_count)) {
         if (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') {
           const replayBtn = document.createElement('button');
           replayBtn.className = 'primary btn-sm';
           replayBtn.textContent = '重放';
-          replayBtn.onclick = () => openStartReplayDialog(file);
+          replayBtn.onclick = async () => {
+            try { openStartReplayDialog(await fetchDatasetDetails(file)); }
+            catch (error) { toast(`读取 MCAP 详情失败：${error.message}`, true); }
+          };
           group.append(replayBtn);
         }
 
@@ -1343,10 +1351,8 @@ async function loadDatasets() {
         detailBtn.className = 'btn-sm';
         detailBtn.textContent = '详情';
         detailBtn.onclick = async () => {
-          try {
-            const result = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&identifier=${encodeURIComponent(datasetIdentifier(file))}`);
-            showDatasetDetails(result.files?.[0] || file);
-          } catch (error) { toast(`读取数据集详情失败：${error.message}`, true); }
+          try { showDatasetDetails(await fetchDatasetDetails(file)); }
+          catch (error) { toast(`读取数据集详情失败：${error.message}`, true); }
         };
         group.append(detailBtn);
       }

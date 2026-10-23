@@ -583,8 +583,8 @@ class TaskRecorder(CorrectionSupport):
                 rows.append(row)
         return rows
 
-    def list_recordings(self, format_filter='all'):
-        files = self.recorder.list_recordings(format_filter)
+    def list_recordings(self, format_filter='all', identifier='', compact=False):
+        files = self.recorder.list_recordings(format_filter, identifier, compact)
         with self.lock:
             hidden = {Path(job['path']).name for job in self.jobs.values() if job['state'] == 'armed'}
             files = [item for item in files if item['filename'] not in hidden]
