@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -587,8 +588,25 @@ def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
         assert not any(a['path'].endswith('.mcap') for a in jobs[0]['manifest']['assets'])
         assert recorder.records()[0]['format'] == 'both'
         assert recorder.records()[0]['upload_format'] == 'lerobot'
+        rows = recorder.upload_records()
+        assert len(rows) == 1
+        assert rows[0]['format'] == 'lerobot'
+        assert not rows[0]['display_name'].endswith('.mcap')
     finally:
         recorder.close()
+
+
+def test_upload_history_only_exposes_selected_format_and_dataset_name():
+    recorder = TaskRecorder.__new__(TaskRecorder)
+    recorder.lock = threading.RLock()
+    recorder.jobs = {'capture': {
+        'recording_id': 'capture', 'path': '/data/teleop_20261023_135933.mcap',
+        'format': 'both', 'upload_format': 'lerobot', 'state': 'ready',
+    }}
+    rows = recorder.upload_records()
+    assert len(rows) == 1
+    assert rows[0]['format'] == 'lerobot'
+    assert rows[0]['display_name'] == 'teleop_20261023_135933'
 
 
 def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):

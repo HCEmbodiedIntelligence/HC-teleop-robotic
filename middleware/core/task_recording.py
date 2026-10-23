@@ -549,11 +549,17 @@ class TaskRecorder(CorrectionSupport):
     def upload_records(self):
         rows = []
         for job in self.records():
-            for fmt in job_artifact_formats(job):
+            # This table is an upload history, so only expose the format(s)
+            # frozen for upload. Other locally saved artifacts remain visible
+            # in the local recording list and must not look queued here.
+            for fmt in upload_formats(job):
                 artifact = job.get('artifacts', {}).get(fmt, {})
                 row = {**job, **artifact, 'recording_id': artifact_identity(job, fmt), 'format': fmt}
                 row['upload_target'] = ('lerobot:' + Path(job['path']).stem if fmt == 'lerobot' else
                                         'bundle:' + Path(job['path']).stem if fmt == 'mcap_mp4' else Path(job['path']).name)
+                row['display_name'] = (Path(job.get('dataset_path') or job['path']).stem
+                                       if fmt == 'lerobot' else Path(job['path']).stem
+                                       if fmt == 'mcap_mp4' else Path(job['path']).name)
                 rows.append(row)
         return rows
 

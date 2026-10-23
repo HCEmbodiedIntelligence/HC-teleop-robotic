@@ -251,6 +251,21 @@ def test_device_data_not_implied_by_configuration(tmp_path, monkeypatch, server)
     finally: recorder.close()
 
 
+def test_silent_action_before_start_does_not_block_capture():
+    task = task_document(source_format='LEROBOT_V3')
+    snapshot = snapshot_document(task, dict(recording_id='r', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    topics = ('/observation/joint_states', '/action/joint_states')
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type='sensor_msgs/msg/JointState', outputs=['record'])
+                                    for topic in topics]}}
+    # The action mux only publishes after the operator takes control. Starting
+    # the recording must be allowed while that command stream is still idle.
+    check_device(snapshot, cfg, SimpleNamespace(lerobot_fps=15), {
+        '/observation/joint_states': {'has_data': True, 'hz': 100, 'state': 'ok'},
+        '/action/joint_states': {'has_data': False, 'hz': 0, 'state': 'no_data'},
+    })
+
+
 def test_required_camera_gate_preserves_configuration_without_requiring_scheme_rate():
     task = task_document(); snapshot = snapshot_document(task, dict(recording_id='r', expected_plan_revision=1, source_format='MCAP'))
     snapshot['effective_adapter']['configuration']['cameras'] = [dict(camera_id='head', topic='/head', message_type='sensor_msgs/msg/Image', required=True)]
