@@ -42,6 +42,7 @@ class CameraService:
         self._decode_event = threading.Event()
         self._encoded_latest: bytes | None = None
         self._pcs: set[Any] = set()
+        self._stats_tasks: set[asyncio.Task[Any]] = set()
         self._frames_received = 0
         self._last_fps_calc = time.monotonic()
         self._fps_counter = 0
@@ -56,6 +57,13 @@ class CameraService:
             "capture_fps": 0.0,
             "webrtc_send_fps": 0.0,
             "webrtc_frames_sent": 0,
+            "webrtc_codec": "",
+            "webrtc_bitrate_mbps": 0.0,
+            "webrtc_target_bitrate_mbps": 0.0,
+            "webrtc_packets_sent": 0,
+            "webrtc_remote_packets_lost": 0,
+            "webrtc_fraction_lost_pct": 0.0,
+            "webrtc_rtt_ms": None,
             "peers": 0,
             "webrtc_state": "idle",
             "ice_state": "new",
@@ -137,6 +145,10 @@ class CameraService:
             self._set_status(error=f"decode error: {exc}")
 
     async def stop(self) -> None:
+        tasks = list(self._stats_tasks)
+        self._stats_tasks.clear()
+        for task in tasks:
+            task.cancel()
         pcs = list(self._pcs)
         self._pcs.clear()
         for pc in pcs:
@@ -340,6 +352,71 @@ class CameraService:
             self._webrtc_frames_sent = 0
             self._status["webrtc_send_fps"] = 0.0
             self._status["webrtc_frames_sent"] = 0
+            self._status["webrtc_codec"] = ""
+            self._status["webrtc_bitrate_mbps"] = 0.0
+            self._status["webrtc_target_bitrate_mbps"] = 0.0
+            self._status["webrtc_packets_sent"] = 0
+            self._status["webrtc_remote_packets_lost"] = 0
+            self._status["webrtc_fraction_lost_pct"] = 0.0
+            self._status["webrtc_rtt_ms"] = None
+
+    async def _monitor_sender_stats(self, pc: Any, sender: Any) -> None:
+        """Expose RTCP feedback so low headset FPS can be attributed correctly."""
+        previous_bytes: int | None = None
+        previous_at: float | None = None
+        try:
+            while pc in self._pcs and pc.connectionState not in ("failed", "closed"):
+                report = await sender.getStats()
+                outbound = next(
+                    (item for item in report.values() if item.type == "outbound-rtp" and item.kind == "video"),
+                    None,
+                )
+                remote = next(
+                    (item for item in report.values() if item.type == "remote-inbound-rtp" and item.kind == "video"),
+                    None,
+                )
+                now = time.monotonic()
+                changes: dict[str, Any] = {}
+                if outbound is not None:
+                    sent_bytes = int(outbound.bytesSent)
+                    if previous_bytes is not None and previous_at is not None and now > previous_at:
+                        changes["webrtc_bitrate_mbps"] = round(
+                            (sent_bytes - previous_bytes) * 8 / (now - previous_at) / 1_000_000,
+                            3,
+                        )
+                    previous_bytes, previous_at = sent_bytes, now
+                    changes["webrtc_packets_sent"] = int(outbound.packetsSent)
+                if remote is not None:
+                    changes.update(
+                        webrtc_remote_packets_lost=int(remote.packetsLost),
+                        # RTCP stores this as an unsigned 8-bit fraction of 256.
+                        webrtc_fraction_lost_pct=round(
+                            float(remote.fractionLost) * 100.0 / 256.0, 2
+                        ),
+                        webrtc_rtt_ms=(
+                            round(float(remote.roundTripTime) * 1000, 1)
+                            if remote.roundTripTime is not None
+                            else None
+                        ),
+                    )
+                encoder = getattr(sender, "_RTCRtpSender__encoder", None)
+                if encoder is not None:
+                    encoder_name = type(encoder).__name__
+                    changes["webrtc_codec"] = (
+                        "H264" if "H264" in encoder_name else "VP8" if "Vp8" in encoder_name else encoder_name
+                    )
+                    target_bitrate = getattr(encoder, "target_bitrate", None)
+                    if target_bitrate is not None:
+                        changes["webrtc_target_bitrate_mbps"] = round(
+                            float(target_bitrate) / 1_000_000, 3
+                        )
+                if changes:
+                    self._set_status(**changes)
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._set_status(webrtc_error=f"stats error: {type(exc).__name__}: {exc}")
 
     def _decode_loop_ros(self) -> None:
         active_topic = self.config.get("custom_topic", "") or self.config.get(
@@ -535,6 +612,9 @@ class CameraService:
                     self._set_status(webrtc_error="WebRTC connection failed; inspect ICE state and UDP connectivity")
 
         sender = pc.addTrack(self._create_video_track())
+        stats_task = asyncio.create_task(self._monitor_sender_stats(pc, sender))
+        self._stats_tasks.add(stats_task)
+        stats_task.add_done_callback(self._stats_tasks.discard)
 
         try:
             transceiver = next(item for item in pc.getTransceivers() if item.sender == sender)
