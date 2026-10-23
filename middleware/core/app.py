@@ -1256,7 +1256,7 @@ def create_app(store: ConfigStore) -> web.Application:
             return web.json_response({"recording": False, "enabled": False})
         return web.json_response(runtime.recorder.status())
 
-    async def get_recordings(_request: web.Request) -> web.Response:
+    async def get_recordings(request: web.Request) -> web.Response:
         if runtime.recorder is None:
             return web.json_response({
                 "files": [],
@@ -1265,7 +1265,20 @@ def create_app(store: ConfigStore) -> web.Application:
                 "total_size_bytes": 0,
                 "total_size_human": "0 B",
             })
-        files = await asyncio.to_thread(runtime.recorder.list_recordings)
+        format_filter = request.query.get('format', 'all')
+        try:
+            files, format_counts = await asyncio.gather(
+                asyncio.to_thread(runtime.recorder.list_recordings, format_filter),
+                asyncio.to_thread(runtime.recorder.recording_format_counts),
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        identifier = request.query.get('identifier')
+        if identifier:
+            files = [item for item in files if item.get('id', item.get('filename')) == identifier]
+        if request.query.get('compact') == '1':
+            files = [{key: value for key, value in item.items() if key not in {'channels', 'videos'}}
+                     for item in files]
         total_bytes = sum(f["size_bytes"] for f in files)
         if total_bytes < 1024:
             human = f"{total_bytes} B"
@@ -1281,6 +1294,8 @@ def create_app(store: ConfigStore) -> web.Application:
             "total_count": len(files),
             "total_size_bytes": total_bytes,
             "total_size_human": human,
+            "format": format_filter,
+            "format_counts": format_counts,
         })
 
     async def download_recording(request: web.Request) -> web.StreamResponse:

@@ -7,7 +7,7 @@ function element(tag='div') {
   return {tag,children:[],style:{},dataset:{},textContent:'',append(...items){this.children.push(...items);},setAttribute(key,value){this[key]=value;},showModal(){this.open=true;},pause(){this.paused=true;},load(){this.loaded=true;}};
 }
 function setup(files=[]) {
-  const fields=Object.fromEntries(['datasetRows','datasetsSummary','selectAllDatasets','selectedDatasetCount','batchDeleteDatasets','datasetDetailDialog','datasetDetailTitle','datasetDetailMeta','datasetDetailSummary','datasetDetailChannelRows','datasetDetailVideos'].map(key=>['#'+key,element()]));
+  const fields=Object.fromEntries(['datasetRows','datasetsSummary','datasetsTitle','datasetFormatTabs','datasetMcapCount','datasetLerobotCount','datasetBundleCount','selectAllDatasets','selectedDatasetCount','batchDeleteDatasets','datasetDetailDialog','datasetDetailTitle','datasetDetailMeta','datasetDetailSummary','datasetDetailChannelRows','datasetDetailVideos'].map(key=>['#'+key,element()]));
   const calls=[];
   const ctx=vm.createContext({document:{querySelector:s=>fields[s]||null,querySelectorAll:()=>[],createElement:element},confirm:()=>true});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../middleware/core/static/app.js'),'utf8').replace(/init\(\);\s*$/,''),ctx);
@@ -84,13 +84,14 @@ test('refresh does not overlap requests and preserves checked dataset IDs',async
 test('dataset polling runs only on visible dataset page',()=>{
   const {ctx}=setup();let count=0,clears=0;
   ctx.location={hash:'#datasets'};ctx.document.visibilityState='visible';
-  ctx.setInterval=(callback,ms)=>{assert.equal(ms,2000);ctx.tick=callback;return 7;};
-  ctx.clearInterval=()=>clears++;
+  ctx.setTimeout=(callback,ms)=>{assert.equal(ms,30000);ctx.tick=callback;return 7;};
+  ctx.clearTimeout=()=>clears++;
   ctx.loadDatasets=()=>count++;
   vm.runInContext("updateDatasetPolling('datasets')",ctx);
-  assert.equal(count,1);ctx.tick();assert.equal(count,2);
+  assert.equal(count,1);
+  vm.runInContext('scheduleDatasetPolling([])',ctx);ctx.tick();assert.equal(count,2);
   ctx.location.hash='#topics';ctx.tick();assert.equal(count,2);
-  vm.runInContext("updateDatasetPolling('topics')",ctx);assert.equal(clears,1);
+  vm.runInContext("updateDatasetPolling('topics')",ctx);
   ctx.location.hash='#datasets';ctx.document.visibilityState='hidden';
   vm.runInContext("updateDatasetPolling('datasets')",ctx);assert.equal(count,2);
 });

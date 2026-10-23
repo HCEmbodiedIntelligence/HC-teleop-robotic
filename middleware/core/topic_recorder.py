@@ -426,6 +426,7 @@ class TopicRecorder(CorrectionSupport):
         self.upload_service = None
         self._capture_identity = None
         self.task_managed = False
+        self._inspection_cache: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
 
     def ipc_resources(self) -> tuple:
         """Resources inherited by the raw ROS subscription process."""
@@ -822,9 +823,42 @@ class TopicRecorder(CorrectionSupport):
             )
         return result
 
-    def list_recordings(self) -> list[dict[str, Any]]:
+    def _cached_inspection(self, key: str, signature: tuple[int, int], inspect) -> dict[str, Any]:
+        cached = self._inspection_cache.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+        value = inspect()
+        self._inspection_cache[key] = (signature, value)
+        return value
+
+    def recording_format_counts(self) -> dict[str, int]:
+        """Count top-level artifacts without parsing their contents."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        counts = {'mcap': 0, 'lerobot': 0, 'bundle': 0}
+        counts['mcap'] = sum(1 for path in self.directory.iterdir()
+                              if path.is_file() and not path.name.startswith('.')
+                              and path.suffix in {'.mcap', '.jsonl'})
+        for key, folder, marker in (
+            ('lerobot', self.directory / 'lerobot', Path('meta/info.json')),
+            ('bundle', self.directory / 'bundles', Path('session.json')),
+        ):
+            if folder.is_dir() and not folder.is_symlink():
+                counts[key] = sum(1 for path in folder.iterdir()
+                                  if path.is_dir() and not path.is_symlink()
+                                  and not path.name.startswith('.') and (path / marker).is_file())
+        progress_dir = self.directory / 'lerobot'
+        if progress_dir.is_dir() and not progress_dir.is_symlink():
+            ready = {path.name for path in progress_dir.iterdir()
+                     if path.is_dir() and (path / 'meta/info.json').is_file()}
+            counts['lerobot'] += sum(1 for path in progress_dir.glob('.*.progress.json')
+                                     if path.name[1:-len('.progress.json')] not in ready)
+        return counts
+
+    def list_recordings(self, format_filter: str = 'all') -> list[dict[str, Any]]:
         self._poll_export()
         self.directory.mkdir(parents=True, exist_ok=True)
+        if format_filter not in {'all', 'mcap', 'lerobot', 'bundle'}:
+            raise ValueError('invalid recording format filter')
         files = []
         active_path = (
             self.path.resolve()
@@ -832,7 +866,7 @@ class TopicRecorder(CorrectionSupport):
             else None
         )
 
-        for p in self.directory.iterdir():
+        for p in self.directory.iterdir() if format_filter in {'all', 'mcap'} else ():
             if not p.is_file() or p.name.startswith("."):
                 continue
             if not (p.suffix in {".mcap", ".jsonl"}):
@@ -856,7 +890,10 @@ class TopicRecorder(CorrectionSupport):
             created_iso = datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
             modified_iso = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-            meta = _inspect_mcap_file(p) if (p.suffix == ".mcap" and not is_cur) else {
+            meta = self._cached_inspection(
+                'file:' + str(p.resolve()), (stat.st_size, stat.st_mtime_ns),
+                lambda: _inspect_mcap_file(p),
+            ) if (p.suffix == ".mcap" and not is_cur) else {
                 "duration_sec": 0.0,
                 "duration_human": "正在写入…" if is_cur else "--",
                 "message_count": _counter_get(self._messages) if is_cur else 0,
@@ -894,22 +931,32 @@ class TopicRecorder(CorrectionSupport):
             })
         from .recording_datasets import inspect_dataset
         datasets_dir = self.directory / "lerobot"
-        if datasets_dir.is_dir() and not datasets_dir.is_symlink():
+        if format_filter in {'all', 'lerobot'} and datasets_dir.is_dir() and not datasets_dir.is_symlink():
             for dataset in datasets_dir.iterdir():
                 if dataset.is_dir() and not dataset.is_symlink() and not dataset.name.startswith("."):
                     try:
-                        files.append(inspect_dataset(dataset))
+                        marker = dataset / 'meta/info.json'
+                        stat = marker.stat()
+                        files.append(self._cached_inspection(
+                            'lerobot:' + str(dataset.resolve()), (stat.st_size, stat.st_mtime_ns),
+                            lambda dataset=dataset: inspect_dataset(dataset),
+                        ))
                     except (OSError, ValueError, KeyError, TypeError):
                         continue  # Incomplete/invalid exports are not ready datasets.
             from .recording_datasets import pending_datasets
             files.extend(pending_datasets(datasets_dir, {item.get('id') for item in files}))
         from .recording_datasets import inspect_bundle
         bundles_dir = self.directory / "bundles"
-        if bundles_dir.is_dir() and not bundles_dir.is_symlink():
+        if format_filter in {'all', 'bundle'} and bundles_dir.is_dir() and not bundles_dir.is_symlink():
             for bundle in bundles_dir.iterdir():
                 if bundle.is_dir() and not bundle.is_symlink() and not bundle.name.startswith('.'):
                     try:
-                        files.append(inspect_bundle(bundle))
+                        marker = bundle / 'session.json'
+                        stat = marker.stat()
+                        files.append(self._cached_inspection(
+                            'bundle:' + str(bundle.resolve()), (stat.st_size, stat.st_mtime_ns),
+                            lambda bundle=bundle: inspect_bundle(bundle),
+                        ))
                     except (OSError, ValueError, KeyError, TypeError):
                         continue
         files.sort(key=lambda x: x["timestamp"], reverse=True)

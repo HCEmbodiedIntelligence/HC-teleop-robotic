@@ -583,17 +583,20 @@ class TaskRecorder(CorrectionSupport):
                 rows.append(row)
         return rows
 
-    def list_recordings(self):
-        files = self.recorder.list_recordings()
+    def list_recordings(self, format_filter='all'):
+        files = self.recorder.list_recordings(format_filter)
         with self.lock:
             hidden = {Path(job['path']).name for job in self.jobs.values() if job['state'] == 'armed'}
             files = [item for item in files if item['filename'] not in hidden]
+            by_identifier = {}
+            for job in self.jobs.values():
+                source = Path(job['path'])
+                by_identifier[source.name] = job
+                by_identifier['lerobot:' + source.stem] = job
+                by_identifier['bundle:' + source.stem] = job
             for item in files:
                 identifier = item.get('id') or item['filename']
-                job = next((job for job in self.jobs.values() if
-                    Path(job['path']).name == identifier or
-                    'lerobot:' + Path(job['path']).stem == identifier or
-                    'bundle:' + Path(job['path']).stem == identifier), None)
+                job = by_identifier.get(identifier)
                 if job:
                     if job['state'] in ('starting', 'recording', 'stopping'):
                         item['is_current'] = True

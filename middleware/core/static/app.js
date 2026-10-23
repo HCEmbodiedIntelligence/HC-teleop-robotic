@@ -1106,19 +1106,43 @@ async function loadTopics() {
 let datasetsData = { files: [] };
 let datasetLoading = false;
 let datasetPollTimer = null;
+let datasetFormat = 'mcap';
+const datasetFormatLabels = {mcap: 'MCAP', lerobot: 'LeRobot', bundle: 'MCAP＋MP4'};
 
 function datasetPageVisible() {
   return typeof location !== 'undefined' && location.hash === '#datasets' && document.visibilityState === 'visible';
 }
 
 function updateDatasetPolling(page) {
-  if (datasetPollTimer !== null) clearInterval(datasetPollTimer);
+  if (datasetPollTimer !== null) clearTimeout(datasetPollTimer);
   datasetPollTimer = null;
   if (page !== 'datasets' || document.visibilityState !== 'visible') return;
   loadDatasets();
-  datasetPollTimer = setInterval(() => {
+}
+
+function scheduleDatasetPolling(files, failed=false) {
+  if (datasetPollTimer !== null) clearTimeout(datasetPollTimer);
+  datasetPollTimer = null;
+  if (!datasetPageVisible()) return;
+  const busy = files.some(file => file.is_current || file.export_state === 'exporting');
+  datasetPollTimer = setTimeout(() => {
+    datasetPollTimer = null;
     if (datasetPageVisible()) loadDatasets();
-  }, 2000);
+  }, failed ? 5000 : busy ? 2000 : 30000);
+}
+
+function renderDatasetFormatTabs(counts={}) {
+  const values = {mcap: counts.mcap || 0, lerobot: counts.lerobot || 0, bundle: counts.bundle || 0};
+  if ($('#datasetMcapCount')) $('#datasetMcapCount').textContent = values.mcap;
+  if ($('#datasetLerobotCount')) $('#datasetLerobotCount').textContent = values.lerobot;
+  if ($('#datasetBundleCount')) $('#datasetBundleCount').textContent = values.bundle;
+  $$('[data-dataset-format]').forEach(button => {
+    const active = button.dataset.datasetFormat === datasetFormat;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    if (button.dataset.datasetFormat === 'bundle') button.hidden = values.bundle === 0;
+  });
+  if ($('#datasetsTitle')) $('#datasetsTitle').textContent = `${datasetFormatLabels[datasetFormat]} 数据集`;
 }
 
 
@@ -1200,12 +1224,13 @@ async function loadDatasets() {
   if (!body || datasetLoading) return;
   datasetLoading = true;
   try {
-    datasetsData = await api('/api/recordings');
+    datasetsData = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&compact=1`);
     const files = datasetsData.files || [];
+    renderDatasetFormatTabs(datasetsData.format_counts);
     const selected = new Set($$('#datasetRows input[type=checkbox]:checked').map(check => check.dataset.filename));
     body.textContent = '';
     if (summary) {
-      summary.textContent = `共 ${datasetsData.total_count || 0} 个数据集 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''}`;
+      summary.textContent = `${datasetFormatLabels[datasetFormat]} 共 ${datasetsData.total_count || 0} 个 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''}`;
     }
     if ($('#selectAllDatasets')) $('#selectAllDatasets').checked = false;
     updateSelectedDatasetCount();
@@ -1317,7 +1342,12 @@ async function loadDatasets() {
         const detailBtn = document.createElement('button');
         detailBtn.className = 'btn-sm';
         detailBtn.textContent = '详情';
-        detailBtn.onclick = () => showDatasetDetails(file);
+        detailBtn.onclick = async () => {
+          try {
+            const result = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&identifier=${encodeURIComponent(datasetIdentifier(file))}`);
+            showDatasetDetails(result.files?.[0] || file);
+          } catch (error) { toast(`读取数据集详情失败：${error.message}`, true); }
+        };
         group.append(detailBtn);
       }
 
@@ -1369,6 +1399,7 @@ async function loadDatasets() {
     toast(`加载数据集失败：${error.message}`, true);
   } finally {
     datasetLoading = false;
+    scheduleDatasetPolling(datasetsData.files || [], Boolean(summary?.textContent?.startsWith('读取数据集列表失败')));
   }
 }
 
@@ -1746,6 +1777,16 @@ async function init() {
     };
   }
   if($('#refreshDatasets')) $('#refreshDatasets').onclick = loadDatasets;
+  $$('[data-dataset-format]').forEach(button => {
+    button.onclick = async () => {
+      const selected = button.dataset.datasetFormat;
+      if (!datasetFormatLabels[selected] || selected === datasetFormat) return;
+      datasetFormat = selected;
+      renderDatasetFormatTabs(datasetsData.format_counts);
+      if ($('#datasetsSummary')) $('#datasetsSummary').textContent = `正在加载 ${datasetFormatLabels[selected]} 数据集…`;
+      await loadDatasets();
+    };
+  });
   if($('#selectAllDatasets')) {
     $('#selectAllDatasets').onchange = () => {
       const checked = $('#selectAllDatasets').checked;

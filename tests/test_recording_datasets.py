@@ -160,3 +160,17 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
             self.assertEqual(archive.read('mcap/capture.mcap'), b'mcap payload')
+
+    async def test_recording_list_filters_formats_and_compacts_rows(self):
+        raw = self.root / 'recordings/capture.mcap'
+        raw.write_bytes(b'mcap payload')
+        response = await self.client.get('/api/recordings?format=mcap&compact=1')
+        self.assertEqual(response.status, 200)
+        result = await response.json()
+        self.assertEqual([item['id'] for item in result['files']], ['capture.mcap'])
+        self.assertNotIn('channels', result['files'][0])
+        self.assertEqual(result['format_counts'], {'mcap': 1, 'lerobot': 1, 'bundle': 0})
+
+        result = await (await self.client.get('/api/recordings?format=lerobot')).json()
+        self.assertEqual([item['id'] for item in result['files']], ['lerobot:episode'])
+        self.assertIn('channels', result['files'][0])

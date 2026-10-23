@@ -13,6 +13,22 @@ from middleware.core.topic_recorder import TopicRecorder
 
 
 class TopicRecorderTests(unittest.TestCase):
+    def test_unchanged_mcap_inspection_is_cached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings"}, Path(directory))
+            recorder.directory.mkdir(parents=True)
+            (recorder.directory / 'cached.mcap').write_bytes(b'cached')
+            metadata = {
+                'duration_sec': 1.0, 'duration_human': '1.0s', 'message_count': 2,
+                'topic_count': 1, 'channels': [], 'avg_rate_hz': 2.0,
+                'profile_id': '', 'profile_display_name': '', 'robot_name': '',
+                'controller_config': '', 'free_joints': [],
+            }
+            with patch('middleware.core.topic_recorder._inspect_mcap_file', return_value=metadata) as inspect:
+                recorder.list_recordings('mcap')
+                recorder.list_recordings('mcap')
+            inspect.assert_called_once()
+
     def test_batch_lerobot_conversion_is_queued_in_one_process(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = TopicRecorder({"directory": "recordings", "lerobot_fps": 20}, Path(directory))

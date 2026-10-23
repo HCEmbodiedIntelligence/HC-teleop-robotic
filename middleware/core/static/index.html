@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=24-platform-reconnect">
+  <link rel="stylesheet" href="/static/styles.css?v=25-dataset-categories">
 </head>
 <body>
   <div class="app-topbar"><div class="brand"><span class="brand-mark">HC</span><div>Teleop<small>机器人遥操作</small></div></div><div class="topbar-meta"><span>机器人遥操作</span><span>HC Teleop</span></div></div>
@@ -131,7 +131,7 @@
       <article class="panel">
         <div class="panel-title">
           <div>
-            <h2>MCAP 录制数据集</h2>
+            <h2 id="datasetsTitle">MCAP 数据集</h2>
             <p id="datasetsSummary">正在加载数据集列表…</p>
           </div>
           <div class="dataset-actions">
@@ -143,6 +143,12 @@
             <button id="batchDownloadDatasets" disabled>批量下载</button>
             <button id="batchDeleteDatasets" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
           </div>
+        </div>
+
+        <div class="dataset-format-tabs" id="datasetFormatTabs" role="tablist" aria-label="数据集格式">
+          <button type="button" class="active" data-dataset-format="mcap" role="tab" aria-selected="true">MCAP <span id="datasetMcapCount">0</span></button>
+          <button type="button" data-dataset-format="lerobot" role="tab" aria-selected="false">LeRobot <span id="datasetLerobotCount">0</span></button>
+          <button type="button" data-dataset-format="bundle" role="tab" aria-selected="false" hidden>MCAP＋MP4 <span id="datasetBundleCount">0</span></button>
         </div>
 
         <div id="replayControlPanel" class="replay-control-panel hidden">
@@ -432,6 +438,6 @@
     </form>
   </dialog>
   <script src="/static/platform_panel.js?v=13-batch-datasets"></script>
-  <script src="/static/app.js?v=29-batch-datasets"></script>
+  <script src="/static/app.js?v=30-dataset-categories"></script>
 </body>
 </html>

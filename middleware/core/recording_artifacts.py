@@ -169,19 +169,19 @@ class RecordingArtifacts:
     def annotate(self, items):
         # Do not block UI on the worker's content hashing lock.
         jobs = sorted(self.jobs.values(), key=lambda job: job['capture_started_at'])
+        by_source, by_destination = {}, {}
+        for job in jobs:
+            by_source[Path(job['source']).name] = job
+            by_destination[Path(job['destination']).name] = job
         for item in items:
             dataset = item.get('id', '').startswith('lerobot:')
-            for job in reversed(jobs):
-                name = Path(job['destination'] if dataset else job['source']).name
-                if name != item.get('filename'):
-                    continue
-                kind = 'hc_lerobot' if dataset else 'hc_mcap'
-                if job['format'] == 'lerobot' and not dataset:
-                    continue
-                item['artifact_id'] = job['recording_id'] + ('-lerobot' if dataset else '-mcap')
-                item['upload_artifact_state'] = job['artifacts'].get(kind, job['state'])
-                item['upload_error'] = job.get('error')
-                break
+            job = (by_destination if dataset else by_source).get(item.get('filename'))
+            if not job or (job['format'] == 'lerobot' and not dataset):
+                continue
+            kind = 'hc_lerobot' if dataset else 'hc_mcap'
+            item['artifact_id'] = job['recording_id'] + ('-lerobot' if dataset else '-mcap')
+            item['upload_artifact_state'] = job['artifacts'].get(kind, job['state'])
+            item['upload_error'] = job.get('error')
         return items
 
     @contextmanager
