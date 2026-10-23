@@ -41,3 +41,4 @@ adapters/robots/*
 
 # Isolated optional LeRobot export environment
 .venv-lerobot/
+*.so
