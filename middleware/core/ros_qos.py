@@ -15,3 +15,23 @@ def subscription_qos(item: dict[str, Any]):
         # A single latest sample avoids building a stale-video backlog.
         return QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
     return qos_profile_sensor_data
+
+
+def recording_subscription_qos(item: dict[str, Any]):
+    """Buffer small state samples across a short recorder scheduling pause.
+
+    Live control and images retain their latest-sample policies. Recording a
+    100 Hz state stream with the sensor profile's depth of five loses history
+    after only 50 ms, before the capture's existing freshness checks can run.
+    This bounded history does not change reliability or freshness checks.
+    """
+    qos = subscription_qos(item)
+    if item.get('type') not in {
+        'sensor_msgs/msg/JointState', 'geometry_msgs/msg/PoseStamped',
+        'geometry_msgs/msg/TwistStamped', 'geometry_msgs/msg/WrenchStamped',
+        'nav_msgs/msg/Odometry',
+    }:
+        return qos
+    from rclpy.qos import QoSProfile
+    return QoSProfile(depth=max(64, qos.depth), history=qos.history,
+                      reliability=qos.reliability, durability=qos.durability)

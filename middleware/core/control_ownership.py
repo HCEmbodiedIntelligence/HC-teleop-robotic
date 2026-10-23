@@ -68,6 +68,9 @@ class ControlOwnership:
         self.input_time_ns = 0
         self.input_device = ''
         self.input_sequence = -1
+        self.preparing_capture = False
+        self.input_ready_stamp_ns = 0
+        self.capture_ready = lambda: False
         self.recording_error = ''
         self.release_ns = None
         self.metrics = deque(maxlen=10000)
@@ -110,25 +113,40 @@ class ControlOwnership:
         self._event('revoked')
         self.permit(self.token, 'revoke', self.cutoff_ns, self.active)
 
-    def enable(self):
+    def enable(self, *, preparing_capture=False):
         with self.lock:
             if self.active:
                 raise OwnershipConflict('intervention session already active')
             self.session = uuid.uuid4().hex
             self.input_armed = self.input_valid = self.gripped = self.resume_auto = False
             self.input_sequence = -1
+            self.preparing_capture = preparing_capture
+            self.input_ready_stamp_ns = 0
             self.recording_error = ''
             self._invalidate('HOLD', reason='session enabled; explicit start required')
             return self.snapshot()
 
+    def finish_capture_preparation(self, session_id):
+        with self.lock:
+            if not self.preparing_capture or self.session != session_id or self.state != 'HOLD':
+                return
+            self.preparing_capture = False
+            self.input_ready_stamp_ns = self.ros_clock()
+            # Samples observed while writers/subscriptions were starting must
+            # not arm a later held Grip. Require a fresh release after readiness.
+            self.input_armed = self.input_valid = self.gripped = False
+            self.reason = 'capture prepared; observe release before starting'
+            self._event('capture_ready')
+
     def disable(self):
         with self.lock:
+            self.preparing_capture = False
             self.resume_auto = False
             self._invalidate('OFF', reason='session disabled; output remains closed')
 
     def start_auto(self, *, recording_ready, control_ready):
         with self.lock:
-            if self.state != 'HOLD' or self.gripped or not self.input_armed or not self.input_valid:
+            if self.preparing_capture or self.state != 'HOLD' or self.gripped or not self.input_armed or not self.input_valid:
                 raise OwnershipConflict('start requires HOLD and a fresh observed release')
             if not recording_ready or not control_ready or not {'motion', 'teleop'} <= self.peers.keys():
                 raise OwnershipConflict('capture, feedback or control participants are not ready')
@@ -137,7 +155,7 @@ class ControlOwnership:
 
     def takeover(self):
         with self.lock:
-            if self.state not in {'AUTO', 'HOLD', 'RETURNING'}:
+            if self.preparing_capture or self.state not in {'AUTO', 'HOLD', 'RETURNING'}:
                 return False
             self.resume_auto = self.state == 'AUTO' or (self.state == 'RETURNING' and self.resume_auto)
             self.release_ns = None
@@ -191,6 +209,8 @@ class ControlOwnership:
                 return
             if not -50_000_000 <= age <= self.input_timeout_ns:
                 return
+            if self.active and stamp_ns < self.input_ready_stamp_ns:
+                return
             if device_instance != self.input_device:
                 if self.input_device and self.active:
                     self.fault('teleop input instance changed')
@@ -201,6 +221,9 @@ class ControlOwnership:
                 self.input_armed = False
                 if self.active:
                     self.fault('teleop input invalid/tracking lost')
+                return
+            if self.preparing_capture:
+                self.input_valid = self.input_armed = self.gripped = False
                 return
             previous = self.gripped
             self.gripped = bool(gripped)
@@ -275,7 +298,9 @@ class ControlOwnership:
 
     def watchdog(self):
         with self.lock:
-            if self.active and self.input_valid and self.clock()-self.input_time_ns > self.input_timeout_ns:
+            if self.preparing_capture and self.state == 'HOLD' and self.capture_ready():
+                self.finish_capture_preparation(self.session)
+            if not self.preparing_capture and self.active and self.input_valid and self.clock()-self.input_time_ns > self.input_timeout_ns:
                 self.input_valid = self.input_armed = False
                 self.fault('teleop input timeout')
             if self.state in {'AUTO', 'MANUAL'}:
@@ -324,6 +349,7 @@ class ControlOwnership:
             return dict(state=self.state, phase=self.phase, reason=self.reason,
                         **asdict(self.token), input_valid=self.input_valid,
                         input_armed=self.input_armed, gripped=self.gripped,
+                        preparing_capture=self.preparing_capture,
                         acknowledgements=sorted(self.acks), peers=dict(self.peers),
                         recording_error=self.recording_error, command_seq=self.command_seq,
                         cutoff_ns=self.cutoff_ns, sequence=self.event_seq,

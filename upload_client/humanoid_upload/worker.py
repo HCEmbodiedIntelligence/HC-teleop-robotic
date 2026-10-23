@@ -94,6 +94,12 @@ class Worker:
             if not item or any(asset["expected_" + key] != item[key] for key in ("size_bytes", "sha256", "crc64")) or asset["path"] != item["path"]:
                 raise UploadError("SERVER_ASSET_CONFLICT")
         state, terminal, action = state_for(upload["state"], upload["processing_status"], upload["quality_status"])
+        if (upload['state'] == 'COMMITTED' and manifest['source_format'] == 'MCAP'
+                and upload['processing_status'] == 'READY' and upload['quality_status'] == 'PENDING'):
+            # MCAP READY confirms continuous-recording preparation. Episode
+            # quality is unavailable until slicing; keep that distinction.
+            state, terminal, action = ('raw_committed', True,
+                'MCAP 原始录制已处理；请到平台完成切片并查看 Episode 质检结果，无需重传')
         if (upload["state"] == "COMMITTED" and self.cfg["processing_endpoint"]
                 and manifest['source_format'] == 'LEROBOT_V3'):
             terminal = False  # A crash must not strand a terminal result without its episode receipt.

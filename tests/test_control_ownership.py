@@ -201,3 +201,19 @@ def test_delayed_collision_result_is_rejected_after_revoke_and_reenable():
     finish.set()
     thread.join(2)
     assert result == [False] and committed == []
+
+
+def test_evidence_keeps_exact_command_time_separate_from_final_publication():
+    rig=Rig(); rig.auto(); rig.input(True); rig.ack(); rig.ack()
+    bridge=RosBridge({'command_mux': {'source': 'vr'}},lambda *args:None)
+    now=[100.11]
+    bridge._ros_now=lambda:now[0]
+    bridge.receive_hardware_ready(True)
+    bridge.ownership=rig.control
+    evidence=[]
+    bridge._action_sink=evidence.append
+    message=Obj(name=['axis'],position=[.1],header=Obj(stamp=Obj(sec=100,nanosec=100_000_123)))
+    def publish(_message): now[0]=100.12
+    assert bridge.forward_live_command('vr',message,publish,token=rig.control.token)
+    assert evidence[0]['command_stamp_ns']==100_100_000_123
+    assert evidence[0]['stamp_ns']==100_120_000_000

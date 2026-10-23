@@ -1,4 +1,4 @@
-"""Prearmed correction windows using main's TopicRecorder and TaskRecorder.
+"""Correction windows or full sessions using TopicRecorder and TaskRecorder.
 
 Writers and subscriptions live before AUTO. The ownership callback only claims
 a prepared slot and publishes an ordered boundary; normal close never joins a
@@ -19,6 +19,69 @@ import uuid
 
 from .topic_recorder import TopicRecorder, enqueue_record
 from .ros_recording_executor import recording_subscriptions, _put_latest
+
+
+class SessionRouter:
+    """One continuous capture, with explicit human-control intervals."""
+    def __init__(self, sink, bounds, metadata, *, late_ns):
+        self.sink, self.bounds, self.late_ns = sink, bounds, late_ns
+        self.metadata = metadata
+        self.windows = {'session': True}
+        self.interventions = {}
+        self.counts = {}
+        self.rejected_time = self.bytes = self.rejected = 0
+        self.required_topics = ()
+        self.max_age_ns = 250_000_000
+        self.ending = False
+        self._event('session_open', self.bounds(0)[0], **metadata)
+
+    def _event(self, kind, stamp_ns, **fields):
+        accepted = self.sink(dict(topic='/events/control/intervention', stamp_ns=stamp_ns,
+            payload=dict(fields, kind=kind, capture_mode='full_session')))
+        self.rejected += not accepted
+        return accepted
+
+    def open(self, event):
+        self.interventions[event['key']] = dict(event)
+        self._event('manual_open', event['start_ns'], **event)
+
+    def close(self, event):
+        interval = self.interventions.get(event['key'])
+        if interval is not None:
+            interval.update(event)
+        self._event('manual_close', event['end_ns'], **event)
+
+    def observe(self, topic, kind, raw, stamp_ns, received_ns, **_kwargs):
+        # Match ordinary continuous recording: preserve every received sample,
+        # including sources with missing/stale headers. Raw CDR keeps the header.
+        stamp_ns = received_ns
+        start, end = self.bounds(0)
+        if stamp_ns < start or (end and stamp_ns >= end):
+            return
+        accepted = self.sink(dict(topic=topic, msg_type=kind, _raw=raw, stamp_ns=stamp_ns))
+        self.counts[topic] = self.counts.get(topic, 0) + int(accepted)
+        self.rejected += not accepted
+
+    def action(self, evidence, _make_action):
+        # /action/joint_states already contains both program and human output.
+        # Keep human command evidence without duplicating that action stream.
+        accepted = self.sink(dict(topic='/events/control/action_evidence',
+            stamp_ns=evidence['stamp_ns'], payload=evidence))
+        self.rejected += not accepted
+        return accepted
+
+    def finish_due(self, now_ns):
+        start, end = self.bounds(0)
+        if not self.ending or now_ns < end + self.late_ns or not self.windows:
+            return []
+        quality = dict(counts=self.counts, rejected=self.rejected,
+                       grade='warning' if self.rejected else 'ok', outcome='unknown')
+        session = dict(self.metadata, start_ns=start, end_ns=end,
+                       interventions=list(self.interventions.values()))
+        if not self._event('session_close', end, **session, quality=quality):
+            quality.update(grade='warning', end_event_in_mcap=False)
+        self.windows.clear()
+        return [dict(slot=0, boundary=session, quality=quality)]
 
 
 class WindowRouter:
@@ -168,6 +231,7 @@ class WindowRouter:
                 # End metadata is also returned out-of-band and persisted by
                 # TaskRecorder; a saturated data queue cannot erase it.
                 quality['end_event_in_mcap'] = False
+                quality['grade'] = 'warning' if window['action_count'] else 'review'
             else:
                 quality['end_event_in_mcap'] = True
             completed.append(dict(slot=window['slot'], key=key, boundary=boundary, quality=quality))
@@ -182,7 +246,7 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
     from rclpy.serialization import deserialize_message, serialize_message
     from rosidl_runtime_py.utilities import get_message
     from sensor_msgs.msg import JointState
-    from .ros_qos import subscription_qos
+    from .ros_qos import recording_subscription_qos
     context = Context()
     node = executor = None
     try:
@@ -191,16 +255,27 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
         options = config.get('recording', {}).get('corrections', {})
-        router = WindowRouter([lambda event, resource=resource: enqueue_record(resource, event) for resource in resources],
-            lambda slot: tuple(shared_bounds[slot*2:slot*2+2]),
-            max_age_ns=int(options.get('observation_max_age_sec', .25)*1e9),
-            late_ns=int(options.get('late_message_sec', .2)*1e9),
-            cache_bytes=int(options.get('observation_cache_bytes', 64*1024**2)),
-            long_gap_ns=int(options.get('long_gap_sec', .2)*1e9))
-        subscriptions = [item for item in recording_subscriptions(config)
+        full_session = config.get('capture_mode') == 'full_session'
+        bounds = lambda slot: tuple(shared_bounds[slot*2:slot*2+2])
+        if full_session:
+            router = SessionRouter(lambda event: enqueue_record(resources[0], event), bounds,
+                config.get('session_metadata', {}), late_ns=int(options.get('late_message_sec', .2)*1e9))
+        else:
+            router = WindowRouter([lambda event, resource=resource: enqueue_record(resource, event) for resource in resources],
+                bounds, max_age_ns=int(options.get('observation_max_age_sec', .25)*1e9),
+                late_ns=int(options.get('late_message_sec', .2)*1e9),
+                cache_bytes=int(options.get('observation_cache_bytes', 64*1024**2)),
+                long_gap_ns=int(options.get('long_gap_sec', .2)*1e9))
+        observations = [item for item in recording_subscriptions(config)
                          if not item['topic'].startswith(('/action/', '/control/', '/events/', '/status/'))
                          and item['type'].startswith(('sensor_msgs/', 'geometry_msgs/'))]
-        router.required_topics = tuple(item['topic'] for item in subscriptions if item.get('required', True))
+        subscriptions = recording_subscriptions(config) if full_session else observations
+        if full_session:
+            for topic in ('/status/control/ownership', '/events/control/intervention'):
+                if not any(item['topic'] == topic for item in subscriptions):
+                    subscriptions.append(dict(topic=topic, type='std_msgs/msg/String'))
+        router.max_age_ns = int(options.get('observation_max_age_sec', .25)*1e9)
+        router.required_topics = tuple(item['topic'] for item in observations if item.get('required', True))
         seen = {}
         handles = []
 
@@ -210,7 +285,10 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
                     event = boundaries.get_nowait()
                 except queue.Empty:
                     break
-                (router.open if event['op'] == 'open' else router.close)(event)
+                if event['op'] == 'finish':
+                    router.ending = True
+                else:
+                    (router.open if event['op'] == 'open' else router.close)(event)
 
         for item in subscriptions:
             cls = get_message(item['type'])
@@ -222,7 +300,7 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
                 stamp = header.stamp.sec*1_000_000_000+header.stamp.nanosec if header else 0
                 seen[item['topic']] = dict(stamp_ns=stamp, received_ns=received)
                 router.observe(item['topic'], item['type'], bytes(raw), stamp, received)
-            handles.append(node.create_subscription(cls, item['topic'], receive, subscription_qos(item), raw=True))
+            handles.append(node.create_subscription(cls, item['topic'], receive, recording_subscription_qos(item), raw=True))
 
         def make_action(slot, evidence):
             msg = JointState(name=evidence['names'], position=evidence['positions'])
@@ -244,7 +322,7 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
             for result in router.finish_due(now):
                 completed.put(result)
             if time.monotonic()-last_health >= .05:
-                required = [item['topic'] for item in subscriptions if item.get('required', True)]
+                required = router.required_topics
                 issues = [topic for topic in required if topic not in seen or
                           not 0 <= now-seen[topic]['stamp_ns'] <= router.max_age_ns]
                 _put_latest(health, dict(ready=bool(required) and not issues, issues=issues,
@@ -262,7 +340,11 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
 
 
 class CorrectionSession:
-    def __init__(self, service, metadata):
+    def __init__(self, service, metadata, capture_mode='corrections_only'):
+        if capture_mode not in ('corrections_only', 'full_session'):
+            raise ValueError('capture_mode must be corrections_only or full_session')
+        self.capture_mode = capture_mode
+        self.full_session = capture_mode == 'full_session'
         self.service, self.metadata = service, copy.deepcopy(metadata)
         self.task_managed = hasattr(service, 'platform')
         self.jobs = {}
@@ -272,9 +354,11 @@ class CorrectionSession:
         self.count = int(self.config.get('prepared_slots', 4))
         if not 2 <= self.count <= 16:
             raise ValueError('corrections.prepared_slots must be between 2 and 16')
+        if self.full_session:
+            self.count = 1
         self.mp = mp.get_context('spawn')
         self.bounds = self.mp.Array('q', self.count*2)
-        self.boundaries = self.mp.Queue(maxsize=self.count*2+1)
+        self.boundaries = self.mp.Queue(maxsize=256 if self.full_session else self.count*2+1)
         self.actions = self.mp.Queue(maxsize=int(self.config.get('action_queue_items', 4096)))
         self.completed = self.mp.Queue(maxsize=self.count)
         self.health = self.mp.Queue(maxsize=4)
@@ -282,6 +366,7 @@ class CorrectionSession:
         self.lock = threading.RLock()
         self.slots, self.prepared = [], deque()
         self.active = None
+        self.manual_token = None
         self.state = 'PREPARING'
         self.error = ''
         self.source_health = {}
@@ -306,8 +391,20 @@ class CorrectionSession:
             recorder.task_managed = True
             self.slots.append(dict(recorder=recorder, job=None, state='preparing'))
             self._prepare_slot(index)
+        if self.full_session:
+            self.prepared.clear()
+            stamp = time.time_ns()
+            self.bounds[0:2] = [stamp, 0]
+            self.slots[0]['state'] = 'capturing'
+            self.slots[0]['job'].update(state='recording', capture_state='capturing',
+                started_at=datetime.fromtimestamp(stamp/1e9, timezone.utc).isoformat())
+            self.active = (0, None)
+            self.state = 'CAPTURING'
+            self._save(copy.deepcopy(self.slots[0]['job']))
         config = copy.deepcopy(self.service.ros_config)
         config['recording'] = copy.deepcopy(self.service.config)
+        config['capture_mode'] = self.capture_mode
+        config['session_metadata'] = self.metadata
         self.process = self.mp.Process(target=_capture_process,
             args=(config, [slot['recorder'].ipc_resources() for slot in self.slots], self.bounds,
                   self.boundaries, self.actions, self.completed, self.health, self.stopped),
@@ -325,9 +422,9 @@ class CorrectionSession:
         if shutil.disk_usage(self.service.directory).free < self.service.config.get('min_free_bytes', 268435456):
             raise RuntimeError('insufficient space to prepare correction slot')
         ident = uuid.uuid4().hex
-        metadata = {**self.metadata, 'capture_mode': 'corrections_only', 'outcome': 'unknown'}
+        metadata = {**self.metadata, 'capture_mode': self.capture_mode, 'outcome': 'unknown'}
         slot = self.slots[index]
-        filename = ident+'_correction.mcap'
+        filename = ident+('_session.mcap' if self.full_session else '_correction.mcap')
         if self.task_managed:
             self.service.start(filename, metadata, selection=self.selection, _prepared_writer=slot['recorder'])
             job = next(job for job in self.service.jobs.values() if job['chosen_filename'] == filename)
@@ -353,6 +450,12 @@ class CorrectionSession:
 
     def open(self, token, stamp_ns):
         with self.lock:
+            if self.full_session:
+                if self.closing or self.active is None or self.manual_token is not None:
+                    raise RuntimeError('session capture is not available')
+                self.boundaries.put_nowait(dict(op='open', key=token.key(), start_ns=stamp_ns, **asdict(token)))
+                self.manual_token = token
+                return self.slots[0]['job']['recording_id']
             if self.closing or self.active is not None or not self.prepared:
                 raise RuntimeError('no prepared correction slot available')
             index = self.prepared.popleft()
@@ -372,6 +475,13 @@ class CorrectionSession:
 
     def close(self, token, stamp_ns, last_command_seq, reason):
         with self.lock:
+            if self.full_session:
+                if self.manual_token != token:
+                    return
+                self.boundaries.put_nowait(dict(op='close', key=token.key(), end_ns=stamp_ns,
+                    last_command_seq=last_command_seq, reason=reason))
+                self.manual_token = None
+                return
             if self.active is None or self.active[1] != token:
                 return
             index = self.active[0]
@@ -391,6 +501,10 @@ class CorrectionSession:
             if self.active is None:
                 return
             index, token = self.active
+            if self.full_session:
+                token = self.manual_token
+                if token is None:
+                    return
             if any(evidence.get(k) != v for k,v in asdict(token).items()):
                 return
             try:
@@ -401,11 +515,13 @@ class CorrectionSession:
 
     def status(self):
         with self.lock:
-            ready = (not self.closing and bool(self.prepared) and self.source_health.get('ready', False)
+            available = bool(self.active) if self.full_session else bool(self.prepared)
+            ready = (not self.closing and available and self.source_health.get('ready', False)
                      and 0 <= time.monotonic_ns()-self.source_health.get('monotonic_ns', 0) <= 1_000_000_000
                      and self.process is not None and self.process.is_alive() and not self.error)
             state = self.state if self.active or self.closing else 'ARMED' if ready else 'PREPARING' if not self.error else 'DEGRADED'
-            return dict(state=state, ready=ready, prepared_slots=len(self.prepared), error=self.error,
+            return dict(state=state, ready=ready, capture_mode=self.capture_mode,
+                        prepared_slots=len(self.prepared), error=self.error,
                         sources=copy.deepcopy(self.source_health),
                         active=copy.deepcopy(self.slots[self.active[0]]['job']) if self.active else None)
 
@@ -437,12 +553,14 @@ class CorrectionSession:
                 index = result['slot']
                 slot, job = self.slots[index], self.slots[index]['job']
                 job['quality'] = result['quality']
-                job['metadata']['correction'] = {**result['boundary'], 'quality': result['quality']}
+                metadata_key = 'session' if self.full_session else 'correction'
+                job['metadata'][metadata_key] = {**result['boundary'], 'quality': result['quality']}
                 # The exporter started by stop() must see immutable correction
                 # bounds before reading the closed MCAP.
                 from .artifact_state import atomic_json
-                atomic_json(Path(job['path']).with_suffix('.correction.json'),
-                    {**job['metadata']['correction'], 'intervention': True, 'outcome': 'unknown'})
+                atomic_json(Path(job['path']).with_suffix('.'+metadata_key+'.json'),
+                    {**job['metadata'][metadata_key], 'capture_mode': self.capture_mode,
+                     'outcome': 'unknown', **({} if self.full_session else {'intervention': True})})
                 writer = slot['recorder'].stop()
                 if writer.get('error') or writer['messages'] != writer['accepted']:
                     job.update(capture_state='failed', state='interrupted', error=writer.get('error') or 'writer did not drain all accepted events')
@@ -465,7 +583,7 @@ class CorrectionSession:
                         job['state'] = 'ready'
                     self._save(copy.deepcopy(job))
                 slot['state'] = 'complete'
-                if not self.closing:
+                if not self.closing and not self.full_session:
                     self._prepare_slot(index)
         except Exception as exc:
             self.error, self.state = str(exc), 'DEGRADED'
@@ -476,8 +594,16 @@ class CorrectionSession:
 
     def stop(self):
         with self.lock:
-            if self.active:
+            if (self.manual_token if self.full_session else self.active):
                 raise ValueError('revoke manual control before stopping correction capture')
+            if self.full_session and self.active:
+                stamp = time.time_ns()
+                self.bounds[1] = stamp
+                self.boundaries.put_nowait(dict(op='finish'))
+                self.slots[0]['state'] = 'draining'
+                self.slots[0]['job'].update(state='stopping', capture_state='draining',
+                    ended_at=datetime.fromtimestamp(stamp/1e9, timezone.utc).isoformat())
+                self.active = None
             self.closing, self.state = True, 'STOPPED'
         if self.worker.ident is not None:
             self.worker.join()

@@ -14,6 +14,7 @@ from typing import Any
 
 from mcap.well_known import MessageEncoding, SchemaEncoding
 from mcap.writer import Writer as McapWriter
+from .background_process import background_environment
 
 
 _PRIMITIVE_TYPES = {
@@ -605,7 +606,6 @@ class TopicRecorder(CorrectionSupport):
         if snapshot:
             from humanoid_upload.capture_plan import validate_snapshot
             snapshot = validate_snapshot(snapshot, source_format='LEROBOT_V3')
-            fps = int(snapshot['output']['frequency_hz'])
             task = json.loads(self._active_metadata['platform_task'])['task']['name']
         command = [sys.executable, "-m", "middleware.core.lerobot_export",
                    str(self.path), str(destination), "--fps", str(fps),
@@ -618,6 +618,7 @@ class TopicRecorder(CorrectionSupport):
             self._export_process = subprocess.Popen(
                 command, cwd=Path(__file__).resolve().parents[2],
                 stdout=self._export_log, stderr=subprocess.STDOUT,
+                env=background_environment(),
             )
         except Exception as exc:
             self._export_log.close()

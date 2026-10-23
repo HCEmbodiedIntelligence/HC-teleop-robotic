@@ -1,5 +1,7 @@
 # Observation / action 标准接口
 
+VLA 接入的精简清单、Python 订阅/MCAP 录制 demo 及 LeRobot 转换命令见 [main 通用话题与 VLA 采集](VLA_MAIN_TOPICS.md)。
+
 公共控制接口已迁移至 /action、/observation、/control、/status。中间件 `ros.dataset_topics.enabled: true` 时同时发布以下分组投影。整机原子命令为 `/action/joint_states`，反馈为 `/observation/joint_states`；硬件不订阅分组投影，避免重复执行。
 需一起重启中间件、控制节点及对应仿真或硬件适配节点，旧进程不会自动更换话题。网页自定义话题录制规则中默认已选中这些话题以及 `/vrdata`、`/clock`，开始录制后写入同一个 MCAP。
 

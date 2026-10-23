@@ -39,14 +39,7 @@ def check_device(snapshot, config, recorder, health):
         for name, source in settings.get('numeric_sources', {}).items():
             if output['features'].get(name, {}).get('required', True):
                 required[source['topic']] = source['message_type']
-        clock_topic = (settings.get('state_topic') if settings.get('time_source') == 'STATE_LOG_TIME'
-                       else next((c['topic'] for c in settings.get('cameras', [])
-                                  if c['topic'] == settings.get('primary_camera')), None))
-        if settings.get('fps', output['frequency_hz']) != output['frequency_hz']:
-            raise UploadError('CAPTURE_FREQUENCY_MISMATCH', 'MCAP 适配器与方案频率不一致')
     else:
-        if recorder.lerobot_fps != output['frequency_hz']:
-            raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f'本机 LeRobot 配置 {recorder.lerobot_fps} Hz，方案要求 {output["frequency_hz"]} Hz；请显式修改采集配置')
         sources = {'observation.state': '/observation/joint_states', 'action': '/action/joint_states', **NUMERIC_TOPICS}
         sources.update({camera_feature(topic): topic for topic, item in subscriptions.items()
                         if item['type'] in ('sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage')
@@ -75,10 +68,5 @@ def check_device(snapshot, config, recorder, health):
         observed = health.get(topic, {})
         if not observed.get('has_data') or observed.get('state') in ('no_data', 'error'):
             raise UploadError('CAPTURE_REQUIRED_DATA_MISSING', f'未检测到方案必需话题 {topic} 的实时数据；请检查设备发布')
-        rate = observed.get('hz', 0)
-        cap = item.get('max_hz', 0)
-        if cap and cap + 0.01 < rate:
-            raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f'{topic} 录制限频 {cap} Hz 低于实际 {rate} Hz；无法保留原频率')
-        preserve = adapter.get('configuration', {}).get('alignment_policy', 'PRESERVE') == 'PRESERVE'
-        if preserve and topic == clock_topic and abs(rate - output['frequency_hz']) > max(0.5, output['frequency_hz'] * 0.05):
-            raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f'{topic} 实际 {rate} Hz 与方案 {output["frequency_hz"]} Hz 不一致')
+        # Rates and local recording limits are runtime settings, not scheme gates.
+        # Historical snapshots may contain a sample rate; never require it here.

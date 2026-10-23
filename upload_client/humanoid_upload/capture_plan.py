@@ -52,7 +52,7 @@ def validate_snapshot(value, **expected):
         require(isinstance(adapter, dict) and adapter['source_format'] == value['source_format'])
         require(isinstance(adapter['configuration' if value['source_format'] != 'LEROBOT_V3' else 'feature_sources'], dict))
         output = value['output']
-        require(output['frequency_policy'] == 'PRESERVE' and output['frequency_hz'] > 0)
+        require(output['frequency_policy'] == 'PRESERVE')
         require(isinstance(output['features'], dict) and output['features'])
         require(datetime.fromisoformat(value['prepared_at'].replace('Z', '+00:00')).tzinfo)
         require(digest(output) == value['output_contract_sha256'])
@@ -73,8 +73,6 @@ def validate_lerobot_info(snapshot, info):
     """Compare actual definitions; optional absent features stay absent."""
     snapshot = validate_snapshot(snapshot, source_format='LEROBOT_V3')
     output, adapter = snapshot['output'], snapshot['effective_adapter']
-    if info.get('fps') != output['frequency_hz']:
-        raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f"实际 {info.get('fps')} Hz 与方案 {output['frequency_hz']} Hz 不一致；不自动重采样")
     if info.get('codebase_version') != adapter.get('codebase_version', 'v3.0'):
         raise UploadError('CAPTURE_FORMAT_MISMATCH', 'LeRobot 版本与任务方案不一致')
     features = info.get('features', {})

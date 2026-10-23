@@ -45,6 +45,9 @@ let profilesData = {active:'', profiles:[], standard_topics:{}};
 let ws = null;
 let pendingVrPose = null;
 let vrPoseFramePending = false;
+let interventionPending = false;
+let interventionStatus = null;
+let interventionCapture = null;
 const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', uploads:'上传管理', config:'系统配置'};
 let discoveredTopics = [];
 let latestTopicHealth = {};
@@ -158,18 +161,86 @@ function messageState(info) {
 }
 
 function renderIntervention(status,capture) {
+  interventionStatus=status;
+  interventionCapture=capture;
   const state=status?.state||'OFF';
   const supported=Boolean(status?.peers?.motion&&status?.peers?.teleop);
+  for(const button of $$('.source-switch button'))button.disabled=interventionPending||state!=='OFF';
+  setText('#controlSourceHint',state!=='OFF'?
+    'DAgger 会话正在管理控制源：右 Grip 接管，正常松手交还；退出会话后可手动切换。':
+    '用于普通控制时选择 VR、程序或外骨骼；DAgger 会话内由 Grip 自动接管和交还，无需手动切源。');
+  const captureMode=$('#interventionCaptureMode');
+  if(captureMode) {
+    if(capture?.capture_mode)captureMode.value=capture.capture_mode;
+    captureMode.disabled=interventionPending||state!=='OFF';
+    renderInterventionCaptureHint();
+  }
   const labels={OFF:'关闭',HOLD:'保持',AUTO:'程序控制',TAKEOVER:'正在接管',MANUAL:'人工控制',RETURNING:'正在交还',FAULT:'故障保持',ESTOP:'急停保持'};
   setText('#interventionState',labels[state]||state);
-  setText('#interventionReadiness',state==='OFF'?(supported?'先开启会话，等待观测和录制资源就绪。':'DAgger 需要启动 Motion 后端及 VR 接收器。'):
-    `${capture?.ready?'采集就绪':'采集准备中'} · 可用片段 ${capture?.prepared_slots||0} · ${status?.reason||''}${capture?.error?' · '+capture.error:''}${status?.recording_error?' · '+status.recording_error:''}`);
+  if(state==='OFF') {
+    setText('#interventionReadiness',interventionPending?'正在处理会话请求…':
+      supported?'先开启会话，等待观测和录制资源就绪。':'DAgger 需要启动 Motion 后端及 VR 接收器。');
+  } else {
+    const details=[state==='HOLD'?'会话已开启，机器人保持':labels[state]||state,
+      capture?.capture_mode==='full_session'?'正在连续录制整个会话':`仅人工接管片段 · 可用片段 ${capture?.prepared_slots||0}`,
+      capture?.ready?'采集就绪':'等待采集输入就绪'];
+    if(capture?.sources?.issues?.length) {
+      const names={'/observation/hands/joint_states':'手部关节反馈','/observation/hands/triggers':'手部输入反馈'};
+      const topics=capture.sources.issues.map(topic=>config?.ros?.subscriptions?.find(item=>item.topic===topic)?.description||names[topic]||DEFAULT_TOPIC_DESCRIPTIONS[topic]||topic);
+      details.push('等待观测：'+topics.join('、')+'。可退出会话后，在“话题录制”中调整不需要的观测项。');
+    }
+    if(!status?.input_valid)details.push('等待头显和双手柄的有效跟踪');
+    else if(status.gripped||!status.input_armed)details.push('请松开右 Grip，确认开始前的释放状态');
+    else if(state==='HOLD'&&capture?.ready)details.push('可点击“开始程序”，由外部程序发送动作');
+    if((state==='FAULT'||state==='ESTOP')&&status?.reason)details.push(status.reason);
+    if(capture?.error)details.push(capture.error);
+    if(status?.recording_error)details.push(status.recording_error);
+    setText('#interventionReadiness',details.join(' · '));
+  }
   for(const button of $$('[data-intervention]')) {
     const action=button.dataset.intervention;
-    button.disabled=action==='enable'?state!=='OFF'||!supported:action==='return'?
+    button.disabled=interventionPending||(action==='enable'?state!=='OFF'||!supported:action==='return'?
       !(state==='HOLD'&&capture?.ready&&status?.input_valid&&status?.input_armed&&!status?.gripped):
-      action==='hold'?state==='OFF'||state==='HOLD':state==='OFF';
+      action==='hold'?state==='OFF'||state==='HOLD':state==='OFF');
   }
+}
+
+function bindInterventionControls() {
+  const captureMode=$('#interventionCaptureMode');
+  if(captureMode)captureMode.onchange=renderInterventionCaptureHint;
+  for(const button of $$('[data-intervention]'))button.onclick=async()=>{
+    if(interventionPending)return;
+    interventionPending=true;
+    setText('#interventionError','');
+    renderIntervention(interventionStatus,interventionCapture);
+    try {
+      const status=await api('/api/control/ownership');
+      // getRandomValues also works on the LAN HTTP origins used by the Dashboard.
+      const requestId=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
+      const result=await api('/api/control/intervention/'+button.dataset.intervention, {
+        method:'POST', body:JSON.stringify({request_id:requestId, session_id:status.session_id,
+                                          ...(button.dataset.intervention==='enable'?{capture_mode:captureMode?.value||'corrections_only'}:{}),
+                                          expected_epoch:status.epoch})});
+      renderIntervention(result.ownership,result.capture);
+    } catch(error) {
+      setText('#interventionError','操作未完成：'+error.message);
+      toast(error.message,true);
+      try {
+        const status=await api('/api/control/ownership');
+        renderIntervention(status,status.capture);
+      } catch(_) {}
+    } finally {
+      interventionPending=false;
+      renderIntervention(interventionStatus,interventionCapture);
+    }
+  };
+}
+
+function renderInterventionCaptureHint() {
+  const full=$('#interventionCaptureMode')?.value==='full_session';
+  setText('#interventionCaptureHint',full?
+    '从开启会话到退出会话连续录制，包括程序运行、人工接管和暂停，并保留接管标记；使用“话题录制”中勾选的数据项。':
+    '每次人工接管单独保存；使用“话题录制”中勾选的数据项。');
 }
 
 function renderCommandMux(ros) {
@@ -416,7 +487,7 @@ function renderTeleopStatus(event) {
     const external=value.backend==='generic'||value.backend==='v23';
     const solver=value.generic_controller||{};
     const healthy=solver.solver_fresh&&solver.command_fresh;
-    const backendLabel=value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
+    const backendLabel=value.backend==='motion'?'Motion':value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
     const modeName=value.mode==='ik_rearming'?(rearmNames[solver.rearm_state]||'IK 重新武装'):(names[value.mode]||value.mode);
     setText('#teleopMode',value.enabled?modeName:'已停用');
     setText('#teleopBackend',external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel);
@@ -1503,16 +1574,7 @@ function bindSimulationControls() {
 }
 
 async function init() {
-  for(const button of $$('[data-intervention]'))button.onclick=async()=>{
-    button.disabled=true;
-    try {
-      const status=await api('/api/control/ownership');
-      const result=await api('/api/control/intervention/'+button.dataset.intervention, {
-        method:'POST', body:JSON.stringify({request_id:crypto.randomUUID(), session_id:status.session_id,
-                                          expected_epoch:status.epoch})});
-      renderIntervention(result.ownership,result.capture);
-    } catch(error){toast(error.message,true);}
-  };
+  bindInterventionControls();
   route();
   bindSimulationControls();
   loadSimulation();

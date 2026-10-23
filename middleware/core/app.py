@@ -238,6 +238,10 @@ class MiddlewareRuntime:
         self.recorder.configure_corrections(self.config['ros'])
         self.ros.ownership.open_segment = self.recorder.correction_open
         self.ros.ownership.close_segment = self.recorder.correction_close
+        def capture_ready():
+            capture = self.recorder.corrections
+            return bool(capture and capture.status()['ready'])
+        self.ros.ownership.capture_ready = capture_ready
         self.ros._action_sink = self.recorder.correction_action
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.recorder.prepare_recording = self.recording_ros.prepare_recording
@@ -315,7 +319,7 @@ class MiddlewareRuntime:
         if self.platform is not None:
             await asyncio.to_thread(self.platform.stop)
         elif self.uploads is not None:
-            await asyncio.to_thread(self.uploads.stop)
+            await asyncio.to_thread(getattr(self.uploads, 'close', self.uploads.stop))
         self.uploads = None
         try:
             import rclpy
@@ -476,7 +480,7 @@ class MiddlewareRuntime:
         if self.recorder is None:
             return
         if getattr(self.recorder, 'corrections', None):
-            self._log('info', '纠正采集使用 Grip 自动分段，X/Y 普通录制已停用')
+            self._log('info', 'DAgger 会话按所选范围录制，X/Y 普通录制已停用')
             return
         status = self.recorder.status()
         if status.get("recording", False):
@@ -1535,6 +1539,8 @@ def create_app(store: ConfigStore) -> web.Application:
                     if old is not None:
                         old.start()
                     raise
+                if old is not None:
+                    await asyncio.to_thread(old.close)
                 runtime.config["uploads"] = copy.deepcopy(saved["uploads"])
                 runtime.uploads = candidate
                 runtime.upload_error = None

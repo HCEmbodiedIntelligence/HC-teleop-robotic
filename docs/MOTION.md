@@ -32,3 +32,11 @@ HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
 此命令使用给定 profile 生成 Motion/SDK 参数，不启动硬件。`tools/run_robot_driver.sh` 供已迁移到统一接口的独立硬件包使用。不要在同一域混用旧原生名驱动与统一公共名接口。API、Servo 租约和 Move 动作语义详见 [机器人公共 API](ROBOT_PUBLIC_API.md)。
+
+## DAgger 录制范围
+
+在“人工干预与纠正采集”中，开启会话前选择录制范围：默认“仅人工接管片段”，每次右 Grip 接管单独保存；“整个会话”从开启到退出连续保存程序运行、人工接管及暂停期间的数据。两种模式都使用“话题录制”中勾选的数据项，会话期间不能更改范围。整段录制保留接管起止事件和会话元数据；MCAP + MP4 包包含 `intervention-session.json`，LeRobot 导出包含逐帧 `intervention` 标记（表示人工控制时段，不表示任务成功）。
+
+`POST /api/control/intervention/enable` 的可选字段 `capture_mode` 为 `corrections_only`（默认）或 `full_session`，其余请求身份与控制权校验保持一致。整段模式不会因缺少观测而丢弃已经收到的数据；开始程序仍要求必要观测、控制器和有效 VR 跟踪就绪。
+
+“控制源切换”用于普通控制时选择 VR、Move / Servo 程序或外骨骼。DAgger 会话内由控制权状态机自动切换，面板锁定；握住右 Grip 接管，从程序控制接管后正常松手自动交还。若从暂停状态接管，松手回到保持。选择程序控制或点击“开始程序”只开放相应控制入口，外部程序仍需持续发送动作。

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import time
 from concurrent.futures import ThreadPoolExecutor
+import pytest
 
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Header, String
@@ -17,7 +18,8 @@ from tests.correction_recording_support import service as RecordingService
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_path):
+@pytest.mark.parametrize('capture_mode', ['corrections_only', 'full_session'])
+def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_path, capture_mode):
     report = Path(os.environ.get('HC_INTERVENTION_REPORT', str(tmp_path/'rig')))
     with FakeRig(ROOT/'tests/fixtures/robot_api_six_dof', report) as rig:
         control = rig.bridge.ownership
@@ -71,6 +73,7 @@ def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_
         cfg['corrections'] = dict(prepared_slots=4, late_message_sec=.05)
         ros = dict(enabled=True, domain_id=rig.domain, subscriptions=[
             dict(topic='/observation/joint_states', type='sensor_msgs/msg/JointState', outputs=['record']),
+            dict(topic='/action/joint_states', type='sensor_msgs/msg/JointState', outputs=['record']),
             dict(topic='/test/color/image', type='sensor_msgs/msg/Image', outputs=['record'])])
         recorder = RecordingService(cfg, report, ros)
         control.open_segment = recorder.correction_open
@@ -79,7 +82,7 @@ def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_
         try:
             control.enable()
             with ThreadPoolExecutor(max_workers=1) as preparing:
-                future = preparing.submit(recorder.prepare_corrections, {'profile_id': rig.api.profile_id, 'simulation': True})
+                future = preparing.submit(recorder.prepare_corrections, {'profile_id': rig.api.profile_id, 'simulation': True}, capture_mode=capture_mode)
                 rig.until(future.done, 15)
                 future.result()
             rig.until(lambda: recorder.corrections.status()['ready'] and control.input_armed and len(control.peers) == 2, 15)
@@ -115,6 +118,32 @@ def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_
             rig.until(lambda: control.state == 'HOLD')
             assert not rig.bridge._command_output_enabled
             control.disable()
+            if capture_mode == 'full_session':
+                with ThreadPoolExecutor(max_workers=1) as closing:
+                    future = closing.submit(recorder.stop_corrections)
+                    rig.until(future.done, 20)
+                    future.result()
+                jobs = recorder.records()
+                assert len(jobs) == 1
+                job = jobs[0]
+                assert job['capture_state'] == 'source_complete'
+                session = json.loads(Path(job['path']).with_suffix('.session.json').read_text())
+                intervals = session['interventions']
+                assert len(intervals) == count+1
+                assert not Path(job['path']).with_suffix('.correction.json').exists()
+                with open(job['path'], 'rb') as stream:
+                    messages = list(make_reader(stream).iter_messages())
+                actions = [msg.log_time for _, channel, msg in messages if channel.topic == '/action/joint_states']
+                assert any(not any(i['start_ns'] <= stamp < i['end_ns'] for i in intervals) for stamp in actions)
+                assert any(any(i['start_ns'] <= stamp < i['end_ns'] for i in intervals) for stamp in actions)
+                observations = [msg.log_time for _, channel, msg in messages if channel.topic == '/observation/joint_states']
+                assert min(observations) < intervals[0]['start_ns']
+                assert max(observations) >= intervals[-1]['end_ns']
+                events = [json.loads(msg.data) for _, channel, msg in messages
+                          if channel.message_encoding == 'json' and channel.topic == '/events/control/intervention']
+                assert sum(event['kind'] == 'manual_open' for event in events) == count+1
+                assert sum(event['kind'] == 'session_close' for event in events) == 1
+                return
             # Keep DDS spinning while background files complete, independent
             # of control return. No camera/hardware service is started here.
             rig.until(lambda: len(recorder.corrections.jobs) == count+1 and

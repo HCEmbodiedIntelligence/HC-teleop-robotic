@@ -115,8 +115,7 @@ def preserved_episode(streams, fps, audit):
         raise UploadError('CAPTURE_STRUCTURE_MISMATCH', '状态时间戳不是严格递增')
     if len(stamps) > 1:
         actual_hz = (len(stamps) - 1) * 1e9 / (stamps[-1] - stamps[0])
-        if abs(actual_hz - fps) > max(0.5, fps * .05):
-            raise UploadError('CAPTURE_FREQUENCY_MISMATCH', f'原始状态 {actual_hz:.3f} Hz 与方案 {fps} Hz 不一致')
+        audit['source_frequency_hz'] = actual_hz
     rows = []
     for stamp, _ in timeline:
         selected = {key: latest_sample(samples, stamp, sample_max_age(key)) for key, samples in streams.items()}
@@ -167,13 +166,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     snapshot = lerobot_snapshot(metadata)
     if snapshot:
         from humanoid_upload.capture_plan import validate_snapshot
-        from humanoid_upload.common import UploadError
         expected_id = metadata.get('recording_id')
         if metadata.get('capture_snapshots'):
             expected_id += '-lerobot'
         validate_snapshot(snapshot, source_format='LEROBOT_V3', recording_id=expected_id)
-        if snapshot['output']['frequency_hz'] != fps:
-            raise UploadError('CAPTURE_FREQUENCY_MISMATCH', '导出频率与已固定方案不同；不自动重采样')
 
     progress = progress or ExportProgress(None)
     progress.update("读取 MCAP", 0, force=True)
@@ -199,6 +195,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     }
     raw_cameras = {}
     correction = None
+    session = None
+    session_sidecar = source.with_suffix('.session.json')
+    if session_sidecar.is_file():
+        session = json.loads(session_sidecar.read_text())
     sidecar = source.with_suffix('.correction.json')
     if sidecar.is_file():
         correction = json.loads(sidecar.read_text())
@@ -219,7 +219,9 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             topic = channel.topic
             if channel.message_encoding == 'json' and topic in ('/events/control/intervention', '/events/recording/sample_provenance'):
                 event = json.loads(message.data)
-                if event.get('kind') == 'manual_close':
+                if event.get('kind') == 'session_close' and event.get('capture_mode') == 'full_session':
+                    session = session or event
+                elif event.get('kind') == 'manual_close' and event.get('capture_mode') != 'full_session':
                     correction = correction or event
                 elif event.get('role') == 'initial_observation':
                     first_observations[event['topic']] = event
@@ -346,6 +348,9 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             placeholders[key] = [0.0] * (len(names) if key == 'observation.state' else len(action_names) if key == 'action' else len(numeric_names[key]))
     aligned = (preserved_episode(streams, fps, audit) if snapshot else
                synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages))
+    if snapshot and audit.get('source_frequency_hz'):
+        # LeRobot uses an integer nominal rate; original timestamps remain in rows.
+        fps = max(1, round(audit['source_frequency_hz']))
     for episode in aligned:
         rows = []
         for stamp, selected in episode:
@@ -358,6 +363,9 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                          'source_available': [float(selected[key] is not None) for key in keys],
                          'source_valid': [float(selected[key] is not None and ages[i] <= max_ages.get(key, sample_max_age(key)) / 1e9) for i, key in enumerate(keys)],
                          'source_age': ages, 'grid_time': (stamp - origin) / 1e9}
+            if session:
+                row['intervention'] = any(interval['start_ns'] <= stamp < interval.get('end_ns', session['end_ns'])
+                                           for interval in session.get('interventions', []))
             if correction:
                 axis_times = latest_sample(action_axis_samples, stamp, None)
                 valid = [value >= 0 and 0 <= stamp-value <= sample_max_age('action')
@@ -382,6 +390,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
         raise ValueError('action source joint names overlap')
     manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
     if snapshot: manifest["capture_snapshot"] = snapshot
+    if session:
+        manifest['session'] = session
     if correction:
         manifest.update(correction=correction, initial_observations=first_observations,
                         action_semantics='HC final sent goal; measured feedback is observation.state; outcome unknown')
@@ -416,6 +426,7 @@ def encode_episode_mp4(image_dir: Path, destination: Path, fps: int, on_frame=No
         stream.width, stream.height = width, height
         stream.pix_fmt = "yuv420p" if width % 2 == 0 and height % 2 == 0 else "yuv444p"
         stream.codec_context.max_b_frames = 0
+        stream.codec_context.thread_count = 1
         stream.codec_context.gop_size = fps
         stream.codec_context.time_base = Fraction(1, fps)
         for index, filename in enumerate(files):
@@ -456,8 +467,9 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
         features[key] = {'dtype': 'video', 'shape': tuple(shape), 'names': ['height', 'width', 'channels']}
     features['observation.source_time'] = {'dtype': 'float64', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
     features['observation.recording_time'] = {'dtype': 'float64', 'shape': (1,), 'names': ['seconds_since_first_log_time']}
-    if manifest.get('correction'):
+    if manifest.get('correction') or manifest.get('session'):
         features['intervention'] = {'dtype': 'bool', 'shape': (1,), 'names': ['human_action']}
+    if manifest.get('correction'):
         features['action.valid'] = {'dtype': 'bool', 'shape': (len(joint_names['action']),), 'names': joint_names['action']}
     if 'sync_audit' in manifest:
         for field in ('source_available', 'source_valid', 'source_age'):
@@ -504,8 +516,9 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
                 frame[key] = np.asarray(Image.open(value).convert('RGB')) if key in manifest['dimensions'] else np.asarray(value, dtype=features[key]['dtype'])
             frame['observation.source_time'] = np.asarray(row['source_times'], dtype=np.float64)
             frame['observation.recording_time'] = np.asarray([row['grid_time']], dtype=np.float64)
+            if manifest.get('correction') or manifest.get('session'):
+                frame['intervention'] = np.asarray([True if manifest.get('correction') else row['intervention']], dtype=bool)
             if manifest.get('correction'):
-                frame['intervention'] = np.asarray([True], dtype=bool)
                 frame['action.valid'] = np.asarray(row['action_valid'], dtype=bool)
             if 'sync_audit' in manifest:
                 for field in ('source_available', 'source_valid', 'source_age'):
@@ -548,6 +561,9 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
             clock='MCAP log_time equals original source header or final HC send time; receive provenance retained in source',
             selection='one correction identity; continuous valid subepisodes split at gaps; recording_time preserves original offsets',
             intervention_semantics='true means human action, not success; outcome unknown')
+    if manifest.get('session'):
+        synchronization.update(session=manifest['session'],
+            intervention_semantics='true during human-control intervals; false outside; not a success label')
     (destination / 'meta' / 'teleop_sync.json').write_text(json.dumps(synchronization, ensure_ascii=False, indent=2))
     return {'path': str(destination), 'format': 'lerobot', 'frames': len(loaded), 'episodes': len(manifest['episodes']), 'fps': manifest['fps'], 'cameras': list(manifest['dimensions']), 'episode_lengths': [len(episode) for episode in manifest['episodes']], 'image_storage': 'mp4_h264', 'sync_audit': manifest.get('sync_audit', {})}
 

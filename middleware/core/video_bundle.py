@@ -1,13 +1,15 @@
 """Close a ROS capture as sensor MCAP plus RGB MP4, retaining every frame timestamp."""
 import hashlib
 import json
+import os
+import shutil
 from contextlib import ExitStack
 from fractions import Fraction
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from humanoid_upload.bundle import checksum
-from humanoid_upload.common import atomic_json, canonical, read_json, UploadError
+from humanoid_upload.common import atomic_json, canonical, read_json, Limiter, UploadError
 
 VERSION = 'hc-topic-video/v1'
 
@@ -17,23 +19,27 @@ def ensure_available():
     av.codec.Codec('libx264', 'w')
 
 
-def prepare(source, target, job):
+def prepare(source, target, job, *, read_bytes_per_second=16*1024**2):
     """Conversion is offline. Source MCAP is retained for recovery, never overwritten."""
     import av
     import numpy as np
-    from mcap.reader import make_reader
+    from mcap.records import Channel, Message, Metadata, Schema
+    from mcap.stream_reader import StreamReader
     from mcap.writer import Writer
     from .lerobot_export import decode_rgb
+
+    limiter = Limiter(read_bytes_per_second)
+    def file_checksum(path):
+        return checksum(path, limiter)
 
     source, target = Path(source), Path(target)
     if source.is_symlink() or any(p.is_symlink() for p in (*source.parents, target, *target.parents)):
         raise UploadError('UNSAFE_PATH')
     session_file = target / 'session.json'
-    source_hash = checksum(source)['sha256']
     if session_file.exists():
         session = read_json(session_file)
-        if session['source_sha256'] != source_hash or session['session_id'] != job['recording_id']:
-            raise UploadError('ARTIFACT_IDENTITY_CONFLICT', '原始包与源录制不一致')
+        if session['session_id'] != job['recording_id']:
+            raise UploadError('ARTIFACT_IDENTITY_CONFLICT', '原始包与录制身份不一致')
         manifest = read_json(target / 'manifest.json')
         if (manifest.get('session_sha256') != hashlib.sha256(canonical(session)).hexdigest()
                 or session.get('capture_snapshot') != job.get('capture_snapshot')):
@@ -42,7 +48,7 @@ def prepare(source, target, job):
             relative = Path(entry['path'])
             if relative.is_absolute() or '..' in relative.parts or (target / relative).is_symlink():
                 raise UploadError('UNSAFE_PATH')
-            if checksum(target / entry['path']) != {k: entry[k] for k in ('size_bytes', 'sha256', 'crc64')}:
+            if file_checksum(target / entry['path']) != {k: entry[k] for k in ('size_bytes', 'sha256', 'crc64')}:
                 raise UploadError('ASSET_INTEGRITY', '已整理原始包发生变化，不能覆盖')
     else:
         # A failed staging directory is retained as evidence, and a retry gets a new one.
@@ -53,12 +59,27 @@ def prepare(source, target, job):
         with ExitStack() as stack:
             original = stack.enter_context(source.open('rb'))
             output = stack.enter_context((staging / 'raw.mcap').open('wb'))
-            reader = make_reader(original, validate_crcs=True)
             writer = Writer(output, enable_crcs=True, enable_data_crcs=True)
             writer.start(profile=VERSION)
-            for metadata in reader.iter_metadata():
-                writer.add_metadata(metadata.name, metadata.metadata)
-            for schema, channel, message in reader.iter_messages(log_time_order=False):
+            source_schemas, source_channels = {}, {}
+            # The indexed reader's insertion-order queue can buffer every chunk
+            # before yielding a message. Read physical records once instead, so
+            # memory follows chunk/encoder size, not the full capture size.
+            for record in StreamReader(original, validate_crcs=True).records:
+                if isinstance(record, Schema):
+                    source_schemas[record.id] = record
+                    continue
+                if isinstance(record, Channel):
+                    source_channels[record.id] = record
+                    continue
+                if isinstance(record, Metadata):
+                    writer.add_metadata(record.name, record.metadata)
+                    continue
+                if not isinstance(record, Message):
+                    continue
+                message = record
+                channel = source_channels[message.channel_id]
+                schema = source_schemas[channel.schema_id] if channel.schema_id else None
                 payload, encoding = message.data, channel.message_encoding
                 is_image = schema and schema.name.endswith(('/Image', '/CompressedImage'))
                 value = None
@@ -91,6 +112,7 @@ def prepare(source, target, job):
                         video = container.add_stream('libx264', rate=Fraction(str(job.get('video_fps', 30))))
                         video.width, video.height = pixels.shape[1], pixels.shape[0]
                         video.pix_fmt = 'yuv420p'
+                        video.codec_context.thread_count = 1
                         video.time_base = video.codec_context.time_base = Fraction(1, 1_000_000)
                         video.options = {'preset': 'veryfast', 'crf': '18', 'bf': '0'}
                         videos[channel.id] = (container, video, relative)
@@ -125,20 +147,21 @@ def prepare(source, target, job):
                 for packet in video.encode():
                     container.mux(packet)
             writer.finish()
-        session = {'schema_version': VERSION, 'session_id': job['recording_id'], 'source_sha256': source_hash,
+        session = {'schema_version': VERSION, 'session_id': job['recording_id'],
                    'capture_started_at': job['started_at'], 'capture_ended_at': job['ended_at'],
                    'capture_snapshot': job.get('capture_snapshot'),
                    'videos': [{'path': entry[2], 'frame_count': counts[key]} for key, entry in videos.items()]}
         correction = source.with_suffix('.correction.json')
         if correction.is_file():
-            import shutil
             shutil.copyfile(correction, staging / 'correction.json')
-        committed = [{'path': p.relative_to(staging).as_posix(), **checksum(p)}
+        session_capture = source.with_suffix('.session.json')
+        if session_capture.is_file():
+            shutil.copyfile(session_capture, staging / 'intervention-session.json')
+        committed = [{'path': p.relative_to(staging).as_posix(), **file_checksum(p)}
                      for p in sorted(staging.rglob('*')) if p.is_file()]
         atomic_json(staging / 'manifest.json', {'state': 'completed', 'committed': committed,
                     'session_sha256': hashlib.sha256(canonical(session)).hexdigest()})
         atomic_json(staging / 'session.json', session)
-        import os
         for path in staging.rglob('*'):
             if path.is_file():
                 with path.open('rb') as stream:
@@ -160,7 +183,7 @@ def prepare(source, target, job):
     for path in sorted(target.rglob('*')):
         if not path.is_file() or path == marker_path:
             continue
-        relative, facts = path.relative_to(target).as_posix(), checksum(path)
+        relative, facts = path.relative_to(target).as_posix(), file_checksum(path)
         assets.append({'path': relative, 'size': facts['size_bytes'], 'sha256': facts['sha256'],
                        'crc64': int(facts['crc64']), 'part_count': 1, 'role': 'AUXILIARY',
                        'camera_id': None, 'media_type': 'video/mp4' if path.suffix == '.mp4' else

@@ -97,7 +97,10 @@ class InterventionTeleop:
         from std_msgs.msg import String
         if not success:
             self.ack_error = reason
-        if self.active and time.monotonic()-self.permit_time > .3:
+        # Only an open grant is a lease. During revoke/HOLD the output is
+        # already closed; starting capture workers must not expire a permission
+        # that was never granted. A later grant still needs a fresh token/stamp.
+        if self.active and self.phase == 'grant' and time.monotonic()-self.permit_time > .3:
             self.granted = False
             self.ack_error = 'control permit timeout'
         success, reason = not self.ack_error, self.ack_error

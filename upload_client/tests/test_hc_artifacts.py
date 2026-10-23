@@ -117,6 +117,27 @@ def test_mcap_commit_does_not_call_lerobot_processing(hc_cfg,monkeypatch):
     assert result['quality_status']=='PENDING'  # Upload success is not QC success.
 
 
+def test_prepared_mcap_without_episode_quality_is_not_an_upload_error(hc_cfg, monkeypatch):
+    descriptor = ready(hc_cfg)
+    queue = Queue(hc_cfg['queue_directory'])
+    job = queue.enqueue_artifact(descriptor, hc_cfg)
+    api = OfflinePlatform()
+    monkeypatch.setattr('humanoid_upload.worker.Http', lambda cfg: api)
+    Worker(queue, hc_cfg).tick()
+    puts = api.puts
+    # MCAP preparation registers a continuous recording. Episode QC follows
+    # explicit slicing, so its aggregate quality legitimately remains pending.
+    api.upload.update(processing_status='READY', quality_status='PENDING')
+    queue.retry(job['id'])
+    Worker(queue, hc_cfg).tick()
+    result = queue.jobs()[0]
+    assert result['state'] == 'raw_committed'
+    assert result['terminal'] and result['quality_status'] == 'PENDING'
+    assert result['episodes'] == [] and result['code'] is None
+    assert '切片' in result['next_action']
+    assert api.puts == puts and api.creates == 1
+
+
 @pytest.mark.parametrize('mutation',['hash','missing','truncated','escape','symlink','duplicate','time','raw_marker'])
 def test_reject_incomplete_unsafe(mutation,hc_cfg):
     d=ready(hc_cfg,'platform_raw' if mutation=='raw_marker' else 'hc_mcap'); path=Path(d['root'])/d['files'][0]['path']
@@ -184,29 +205,40 @@ def test_api_secret_rejection(hc_cfg):
     asyncio.run(run())
 
 @pytest.mark.parametrize('kind',['hc_mcap','hc_lerobot','platform_raw'])
-def test_real_http_transport_on_loopback(kind,hc_cfg,monkeypatch):
-    """Exercise Http, actual multipart byte reads and lost commit response offline."""
+@pytest.mark.parametrize('lost_response',['create','authorize','put','put_incomplete','complete','commit'])
+def test_real_http_transport_on_loopback(kind,lost_response,hc_cfg,monkeypatch):
+    """Real loopback HTTP disconnects at each upload stage; durable queue restart."""
     import io
     import json
     import socket
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    platform=OfflinePlatform(); platform.fail_commit=True
+    platform=OfflinePlatform()
+    dropped=[]
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*_): pass
+        def disconnect(self,stage):
+            if stage!=lost_response or dropped: return False
+            dropped.append(stage)
+            self.connection.shutdown(socket.SHUT_RDWR); self.connection.close()
+            return True
         def do_GET(self): self.handle_api()
         def do_POST(self): self.handle_api()
         def do_PUT(self):
             assert self.headers.get('Authorization') is None
+            if lost_response=='put_incomplete' and not dropped:
+                self.rfile.read(int(self.headers['Content-Length'])//2)
+                self.disconnect('put_incomplete'); return
             data=self.rfile.read(int(self.headers['Content-Length']))
             platform.put(self.path.removeprefix('/objects/'),io.BytesIO(data),len(data))
+            if self.disconnect('put'): return
             self.send_response(200); self.send_header('ETag','test'); self.send_header('Content-Length','0'); self.end_headers()
         def handle_api(self):
             assert self.headers['Authorization']=='Bearer synthetic-hc-test'
             raw=self.rfile.read(int(self.headers.get('Content-Length',0)))
             suffix=self.path.removeprefix('/api/v1/robot-ingest/uploads')
-            try: result=platform.api(self.command,suffix,json.loads(raw) if raw else None)
-            except UploadError:
-                self.connection.shutdown(socket.SHUT_RDWR); self.connection.close(); return
+            result=platform.api(self.command,suffix,json.loads(raw) if raw else None)
+            stage='create' if not suffix else 'authorize' if suffix.endswith(':authorize-parts') else 'complete' if suffix.endswith(':complete') else 'commit' if suffix.endswith(':commit') else 'get'
+            if self.disconnect(stage): return
             if 'authorizations' in result:
                 for grant in result['authorizations']: grant['url']=base+'/objects/'+grant['url']
             body=json.dumps(result).encode()
@@ -220,11 +252,29 @@ def test_real_http_transport_on_loopback(kind,hc_cfg,monkeypatch):
         Worker(q,hc_cfg).tick(); assert q.jobs()[0]['state']=='retry_wait'
         q=Queue(hc_cfg['queue_directory']); q.retry(job['id']); Worker(q,hc_cfg).tick()
         result=q.jobs()[0]
+        assert dropped==[lost_response] and result['id']==job['id']
         assert result['server_state']=='COMMITTED' and result['quality_status']=='PENDING'
-        assert platform.creates==1 and platform.puts==len(job['manifest']['assets'])
+        # A lost create response repeats the same immutable request identity.
+        assert platform.creates==(2 if lost_response=='create' else 1)
+        assert platform.upload['client_upload_id']==job['id']
+        assert platform.puts==len(job['manifest']['assets'])
         assert result['uploaded_bytes']==sum(a['size_bytes'] for a in job['manifest']['assets'])
     finally:
         server.shutdown(); server.server_close(); thread.join()
+
+
+def test_shutdown_after_put_resumes_without_retransmitting_accepted_bytes(hc_cfg,monkeypatch):
+    descriptor=ready(hc_cfg)
+    queue=Queue(hc_cfg['queue_directory']); job=queue.enqueue_artifact(descriptor,hc_cfg)
+    stopped=threading.Event(); platform=OfflinePlatform(); platform.put_hook=stopped.set
+    monkeypatch.setattr('humanoid_upload.worker.Http',lambda cfg:platform)
+    Worker(queue,hc_cfg,should_stop=stopped.is_set).tick()
+    assert queue.jobs()[0]['code']=='SERVICE_STOPPING'
+    assert queue.jobs()[0]['state']=='retry_wait' and platform.puts==1
+    stopped.clear(); platform.put_hook=None
+    queue=Queue(hc_cfg['queue_directory']); queue.retry(job['id']); Worker(queue,hc_cfg).tick()
+    assert queue.jobs()[0]['server_state']=='COMMITTED'
+    assert queue.jobs()[0]['id']==job['id'] and platform.puts==1 and platform.creates==1
 
 
 def test_same_identity_changed_content_rejected(hc_cfg):

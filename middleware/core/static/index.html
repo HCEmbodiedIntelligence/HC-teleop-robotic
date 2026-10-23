@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=23-upload-layout">
+  <link rel="stylesheet" href="/static/styles.css?v=24-platform-reconnect">
 </head>
 <body>
   <div class="app-topbar"><div class="brand"><span class="brand-mark">HC</span><div>Teleop<small>机器人遥操作</small></div></div><div class="topbar-meta"><span>机器人遥操作</span><span>HC Teleop</span></div></div>
@@ -37,15 +37,21 @@
       </div>
       <div class="grid two">
         <article class="panel">
-          <div class="panel-title"><div><h2>人工干预与纠正采集</h2><p>开始程序后，握住右 Grip 接管，正常松手自动交还。每次接管单独保存。</p></div><span id="interventionState" class="tag">关闭</span></div>
+          <div class="panel-title"><div><h2>人工干预与纠正采集</h2><p>开始程序后，握住右 Grip 接管，正常松手自动交还。</p></div><span id="interventionState" class="tag">关闭</span></div>
+          <label>录制范围<select id="interventionCaptureMode" aria-describedby="interventionCaptureHint">
+            <option value="corrections_only">仅人工接管片段（默认）</option>
+            <option value="full_session">整个会话（程序运行 + 人工接管）</option>
+          </select></label>
+          <p id="interventionCaptureHint" class="form-help">每次人工接管单独保存；使用“话题录制”中勾选的数据项。</p>
           <p id="interventionReadiness" role="status">先开启会话，等待观测和录制资源就绪。</p>
+          <p id="interventionError" class="error" role="alert"></p>
           <button data-intervention="enable">开启会话</button>
           <button data-intervention="return" disabled>开始程序</button>
           <button data-intervention="hold" disabled>暂停</button>
           <button data-intervention="disable" disabled>退出会话</button>
         </article>
         <article class="panel source-panel">
-          <div class="panel-title"><div><h2>控制源切换</h2><p>只有选中的来源能够转发到机器人标准关节命令</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
+          <div class="panel-title"><div><h2>控制源切换</h2><p id="controlSourceHint">用于普通控制时选择 VR、程序或外骨骼；DAgger 会话内由 Grip 自动接管和交还，无需手动切源。</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
           <div class="source-switch">
             <button id="sourceVr" data-source="vr"><strong>VR / IK</strong><small id="vrSourceStatus">未检测</small></button>
             <button id="sourceMotion" data-source="motion"><strong>Move / Servo</strong><small>程序控制</small></button>
@@ -347,10 +353,14 @@
     <section class="page hidden" id="uploads">
       <article class="panel" id="platformPanel">
         <div class="panel-title"><div><h2>平台连接与上传设置</h2><p>所有录制都会先保存到本机，再根据任务和自动上传设置上传到平台。</p></div><a class="platform-page-link" href="#topics">配置本地保存格式 →</a></div>
-        <p class="platform-connection-status" id="platformConnection">正在读取连接…</p>
+        <div class="platform-connection-row">
+          <p class="platform-connection-status" id="platformConnection" role="status">正在读取连接…</p>
+          <button id="platformReconnect" type="button" hidden disabled>重新连接</button>
+        </div>
+        <p id="platformReconnectHint" class="form-help" hidden>已保存连接信息。断网或服务重启后，可直接重新连接，无需再次粘贴链接。</p>
         <p id="platformConnectMessage" role="alert"></p>
         <details><summary>连接设置</summary>
-          <p>在平台“数据源 → 机器人接入 → 接入详情”复制连接链接。</p>
+          <p>首次连接、更换平台或凭据失效时，在平台“数据源 → 机器人接入 → 接入详情”复制新的连接链接。</p>
           <label>连接链接<input id="platformLink" type="password" autocomplete="off" placeholder="粘贴连接链接"></label>
           <button class="primary" id="platformConnect" type="button">连接</button>
         </details>
@@ -418,7 +428,7 @@
       </div>
     </form>
   </dialog>
-  <script src="/static/platform_panel.js?v=11-capture-formats"></script>
-  <script src="/static/app.js?v=26-motion-source"></script>
+  <script src="/static/platform_panel.js?v=12-platform-reconnect"></script>
+  <script src="/static/app.js?v=28-session-capture"></script>
 </body>
 </html>

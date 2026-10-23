@@ -251,7 +251,7 @@ def test_device_data_not_implied_by_configuration(tmp_path, monkeypatch, server)
     finally: recorder.close()
 
 
-def test_fps_and_required_camera_gates_preserve_device_configuration():
+def test_required_camera_gate_preserves_configuration_without_requiring_scheme_rate():
     task = task_document(); snapshot = snapshot_document(task, dict(recording_id='r', expected_plan_revision=1, source_format='MCAP'))
     snapshot['effective_adapter']['configuration']['cameras'] = [dict(camera_id='head', topic='/head', message_type='sensor_msgs/msg/Image', required=True)]
     snapshot['snapshot_sha256'] = digest({k:v for k,v in snapshot.items() if k != 'snapshot_sha256'})
@@ -262,7 +262,10 @@ def test_fps_and_required_camera_gates_preserve_device_configuration():
     snapshot['effective_adapter']['configuration']['cameras'][0]['required'] = False
     snapshot['snapshot_sha256'] = digest({k:v for k,v in snapshot.items() if k != 'snapshot_sha256'})
     check_device(snapshot, cfg, SimpleNamespace(), {'/test':{'has_data':True,'hz':15}})
-    with pytest.raises(UploadError, match='CAPTURE_FREQUENCY_MISMATCH'): check_device(snapshot, cfg, SimpleNamespace(), {'/test':{'has_data':True,'hz':30}})
+    for hz in (15, 30, 99.5, 100):
+        check_device(snapshot, cfg, SimpleNamespace(), {'/test':{'has_data':True,'hz':hz}})
+    cfg['ros']['subscriptions'][0]['max_hz'] = 30
+    check_device(snapshot, cfg, SimpleNamespace(), {'/test':{'has_data':True,'hz':99.5}})
 
 
 def test_original_167_frames_at_15hz_and_optional_absence():
@@ -276,6 +279,30 @@ def test_original_167_frames_at_15hz_and_optional_absence():
     assert 'action.base.velocity' not in episodes[0][0][1]
     streams['observation.images.head'] = [(stamps[1], 'real-image.png')]
     with pytest.raises(UploadError, match='CAPTURE_SOURCE_GAPS_UNSUPPORTED'): preserved_episode(streams, 15, {})
+
+
+@pytest.mark.parametrize('scheme_frequency', [15, None])
+def test_99_5hz_recording_and_upload_accept_historical_or_frequency_free_plan(scheme_frequency):
+    task = task_document(source_format='LEROBOT_V3')
+    task['capture_plan']['output']['frequency_hz'] = scheme_frequency
+    snapshot = snapshot_document(task, dict(recording_id='different-rate', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    original = copy.deepcopy(snapshot)
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type='sensor_msgs/msg/JointState', outputs=['record'])
+                                    for topic in ('/observation/joint_states', '/action/joint_states')]}}
+    check_device(snapshot, cfg, SimpleNamespace(lerobot_fps=30),
+                 {item['topic']: {'has_data': True, 'hz': 99.5} for item in cfg['ros']['subscriptions']})
+    stamps = [10**12 + round(i * 1e9 / 99.5) for i in range(200)]
+    streams = {key: [(stamp, [i]) for i, stamp in enumerate(stamps)]
+               for key in ('observation.state', 'action')}
+    audit = {}
+    episodes = preserved_episode(streams, 15, audit)
+    assert [row[0] for row in episodes[0]] == stamps
+    assert audit['source_frequency_hz'] == pytest.approx(99.5)
+    info = dict(fps=100, codebase_version='v3.0', features={key: copy.deepcopy(value)
+                for key, value in snapshot['output']['features'].items() if value['required']})
+    assert validate_lerobot_info(snapshot, info)['observation.state']
+    assert snapshot == original
 
 
 def test_writer_owned_columns_need_no_device_topic_but_must_exist_in_output():
@@ -300,14 +327,13 @@ def test_writer_owned_columns_need_no_device_topic_but_must_exist_in_output():
         validate_lerobot_info(snapshot, info)
 
 
-@pytest.mark.parametrize('changed', ['names', 'units', 'shape', 'dtype', 'fps'])
+@pytest.mark.parametrize('changed', ['names', 'units', 'shape', 'dtype'])
 def test_lerobot_actual_structure_not_just_dimension(changed):
     task = task_document(source_format='LEROBOT_V3')
     snapshot = snapshot_document(task, dict(recording_id='r', expected_plan_revision=1, source_format='LEROBOT_V3'))
     info = dict(fps=15, codebase_version='v3.0', features={key: copy.deepcopy(value) for key,value in task['capture_plan']['output']['features'].items() if value['required']})
     assert validate_lerobot_info(snapshot, info)['action.base.velocity'] is False
-    if changed == 'fps': info['fps'] = 30
-    else: info['features']['action'][changed] = {'names':['other'], 'units':['deg'], 'shape':[2], 'dtype':'float64'}[changed]
+    info['features']['action'][changed] = {'names':['other'], 'units':['deg'], 'shape':[2], 'dtype':'float64'}[changed]
     with pytest.raises(UploadError): validate_lerobot_info(snapshot, info)
 
 
@@ -463,7 +489,7 @@ def test_export_process_uses_captured_frequency_and_task_after_defaults_change(s
     try:
         raw._start_lerobot_export()
         command = launch.call_args.args[0]
-        assert command[command.index('--fps')+1] == ('15' if source_format == 'LEROBOT_V3' else '30')
+        assert command[command.index('--fps')+1] == '30'
         assert command[command.index('--task')+1] == (task['name'] if source_format == 'LEROBOT_V3' else 'changed default')
         assert json.loads(raw._active_metadata['capture_snapshot']) == snapshot
     finally:

@@ -430,6 +430,10 @@ class RosBridge:
             if self.ownership.active:
                 evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9))
                 if evidence is not None:
+                    # Keep both times: stamp_ns is final publication, while
+                    # this exact integer stamp links evidence to the original
+                    # action in a continuous recording without guessing by age.
+                    evidence['command_stamp_ns'] = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
                     self._action_sink(evidence)
             self._mux_forwarded += 1
             return True

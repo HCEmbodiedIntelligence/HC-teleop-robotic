@@ -10,14 +10,16 @@ class CorrectionSupport:
         self.ros_config = copy.deepcopy(ros_config)
         self.correction_lock = threading.RLock()
 
-    def prepare_corrections(self, metadata=None):
+    def prepare_corrections(self, metadata=None, capture_mode='corrections_only'):
         from .correction_recording import CorrectionSession
         with self.correction_lock:
             if self.corrections is not None:
+                if self.corrections.capture_mode != capture_mode:
+                    raise ValueError('exit the intervention session before changing capture mode')
                 return self.corrections.status()
             if self.is_recording():
                 raise ValueError('stop ordinary recording before preparing corrections')
-            session = CorrectionSession(self, metadata or {})
+            session = CorrectionSession(self, metadata or {}, capture_mode)
             self.corrections = session
             try:
                 session.prepare()

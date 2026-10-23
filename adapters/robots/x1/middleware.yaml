@@ -377,5 +377,9 @@ ros:
     output_topic: /action/joint_states
     control_source_topic: /control/source
     hardware_ready_topic: /status/hardware/ready
+    hardware_enable_topic: /control/hardware/enabled
+    motion_topic: /control/motion/joint_targets
+    motion_permit_topic: /control/motion/permit
+    hardware_ready_timeout_sec: 0.5
 vr:
   pose_timeout_ms: 600

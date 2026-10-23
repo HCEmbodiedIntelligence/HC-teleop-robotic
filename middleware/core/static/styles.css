@@ -925,7 +925,10 @@ tbody tr:hover { background: #fafafa; }
 /* Upload management shares the dashboard's form and card components. */
 #uploads .platform-page-link { color: #1677ff; text-decoration: none; font-size: 13px; white-space: nowrap; }
 #uploads .platform-page-link:hover { text-decoration: underline; }
+#uploads .platform-connection-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 16px 0 8px; }
 #uploads .platform-connection-status { background: #fafafa; border: 1px solid #f0f0f0; border-radius: 4px; padding: 12px 16px; color: #595959; }
+#uploads .platform-connection-row .platform-connection-status { flex: 1 1 240px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+#platformReconnect { flex: 0 0 auto; }
 #platformPanel > details { margin: 16px 0; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }
 #platformPanel > details summary { color: #1677ff; cursor: pointer; }
 #platformPanel > details label { max-width: 900px; margin-bottom: 12px; }

@@ -8,7 +8,8 @@ from pathlib import Path
 from humanoid_upload.artifacts import ArtifactLocks, artifact_id
 from humanoid_upload.common import DEFAULTS, UploadError, atomic_json, canonical, read_json, validate_config
 from humanoid_upload.queue import Queue, public_job
-from humanoid_upload.worker import Worker
+from .background_process import BackgroundProcess, BackgroundProcessStopped
+from .artifact_jobs import enqueue_ready, upload_tick
 
 
 class UploadService:
@@ -20,8 +21,11 @@ class UploadService:
         self.data_directory = str(Path(data_directory).resolve())
         self.request_raw_seal = request_raw_seal
         self._guard = threading.RLock()
+        self._lifecycle = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+        self.artifact_process = BackgroundProcess('hc-artifact-worker')
+        self.upload_process = BackgroundProcess('hc-upload-worker')
         self.error = None
         self.scan_errors = {}
         self.cfg = {**DEFAULTS, 'auto_enqueue': False, **{k: v for k, v in config.items() if k != 'enabled'},
@@ -108,7 +112,7 @@ class UploadService:
             cfg = validate_config({**self.cfg, **self.bindings[identity]})
             return {**cfg, 'artifact_state_dir': str(self.state_dir), 'binding_id': identity}
 
-    def enqueue(self, identity, binding_id=None):
+    def enqueue(self, identity, binding_id=None, *, _process=None):
         self.require_enabled()
         path = self.state_dir / (artifact_id(identity) + '.json')
         if path.is_symlink():
@@ -123,7 +127,7 @@ class UploadService:
         if frozen and binding_id and frozen != binding_id:
             raise UploadError('TASK_BINDING_MISMATCH')
         cfg = self._config(frozen or binding_id)
-        return public_job(self.queue.enqueue_artifact(descriptor, cfg))
+        return (_process or self.artifact_process).call(enqueue_ready, descriptor, cfg)
 
     def seal_raw(self, recording_id, binding_id=None):
         self.require_enabled()
@@ -131,18 +135,23 @@ class UploadService:
             raise UploadError('RAW_SEAL_UNAVAILABLE', '录制封存服务尚未接入')
         return self.request_raw_seal(artifact_id(recording_id), self.binding_snapshot(binding_id))
 
-    def scan(self):
+    def scan(self, *, _process=None):
         self.require_enabled()
         errors, count = {}, 0
         if self.cfg['auto_enqueue']:
+            # Already queued immutable artifacts are validated by the upload
+            # worker. Do not hash all historical recordings every scan period.
+            queued = {job.get('artifact_id') for job in self.queue.jobs()}
             for path in sorted(self.state_dir.glob('*.json')):
+                if path.stem in queued:
+                    continue
                 try:
                     if path.is_symlink():
                         raise UploadError('UNSAFE_PATH')
                     descriptor = read_json(path)
                     if not descriptor.get('binding_id'):
                         continue  # Never assign historical files to a new page default.
-                    self.enqueue(path.stem, descriptor['binding_id'])
+                    self.enqueue(path.stem, descriptor['binding_id'], _process=_process)
                     count += 1
                 except UploadError as error:
                     errors[path.stem] = error.code
@@ -155,20 +164,22 @@ class UploadService:
     def step(self, scan=True):
         self.require_enabled()
         if scan:
-            self.scan()
+            self.scan(_process=self.upload_process)
         # Frozen cfg overrides page defaults for every existing job.
         jobs = self.queue.jobs(due=True)
         if jobs:
             cfg = {**DEFAULTS, **self.cfg, **jobs[0]['frozen']}
-            with self.queue.worker_lock():
-                Worker(self.queue, cfg, should_stop=self._stop.is_set).tick()
+            self.upload_process.call(upload_tick, cfg)
 
     def start(self):
-        if not self.enabled or (self._thread and self._thread.is_alive()):
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name='hc-upload', daemon=True)
-        self._thread.start()
+        with self._lifecycle:
+            if not self.enabled or (self._thread and self._thread.is_alive()):
+                return
+            if self.upload_process.closed:
+                self.upload_process = BackgroundProcess('hc-upload-worker')
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name='hc-upload', daemon=True)
+            self._thread.start()
 
     def _run(self):
         next_scan = 0
@@ -179,6 +190,9 @@ class UploadService:
                     next_scan = time.monotonic() + self.cfg['scan_seconds']
                 self.step(scan=scan)
                 self.error = None
+            except BackgroundProcessStopped:
+                if not self._stop.is_set():
+                    self.error = 'UPLOAD_WORKER_STOPPED'
             except UploadError as error:
                 self.error = error.code
             except Exception:
@@ -186,11 +200,17 @@ class UploadService:
             self._stop.wait(min(self.cfg['scan_seconds'], self.cfg['poll_seconds']))
 
     def stop(self):
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-        # A timed-out network read still owns its lease; never claim it is released.
-        return {'stopped': not self._thread or not self._thread.is_alive()}
+        with self._lifecycle:
+            self._stop.set()
+            self.upload_process.close()
+            if self._thread:
+                self._thread.join(timeout=5)
+            # Child exit releases file leases, including after a stuck transport.
+            return {'stopped': not self._thread or not self._thread.is_alive()}
+
+    def close(self):
+        self.stop()
+        self.artifact_process.close()
 
     def artifact_usage(self, identity):
         self.require_enabled()
@@ -226,6 +246,7 @@ class UploadService:
 
     def status(self):
         return {'enabled': self.enabled, 'running': bool(self._thread and self._thread.is_alive()),
+                'processes': {'artifacts': self.artifact_process.status(), 'upload': self.upload_process.status()},
                 'error': self.error, 'scan_errors': copy.deepcopy(self.scan_errors),
                 'default_binding': self.binding_snapshot() if self.default_binding_id else None,
                 'binding_values': copy.deepcopy(self.bindings.get(self.default_binding_id) or
@@ -252,7 +273,7 @@ def main():
     async def start(_app):
         await asyncio.to_thread(service.start)
     async def stop(_app):
-        await asyncio.to_thread(service.stop)
+        await asyncio.to_thread(service.close)
     app.on_startup.append(start)
     app.on_cleanup.append(stop)
     web.run_app(app, host=args.host, port=args.port)

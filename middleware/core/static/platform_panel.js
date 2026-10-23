@@ -3,7 +3,7 @@
   const el = id => document.getElementById(id);
   let state = { connection: null, recent: null }, selected = '', page = 1, total = 0;
   let tasks = [], requestId = null, refreshGeneration = 0, active = false;
-  let connecting = false;
+  let connecting = false, reconnecting = false, verificationFailed = false;
   let connectionGeneration = 0;
   let selectionSave = Promise.resolve(), selectionVersion = 0, pendingSelection = 0, selectionError = null;
   let historyTarget = null, historySelected = '', historyPage = 1;
@@ -62,7 +62,7 @@
     if (!plan) return '这个任务尚未配置采集方案，请在平台补充后使用。';
     const scheme = plan.scheme ? `${plan.scheme.scheme_id} v${plan.scheme.version}` : '未命名方案';
     const optional = Object.values(plan.output?.features || {}).filter(feature => feature.required === false).length;
-    return `${scheme} · ${plan.source_format} · ${plan.output?.frequency_hz} Hz · 映射 v${plan.mapping_version}` +
+    return `${scheme} · ${plan.source_format} · 映射 v${plan.mapping_version}` +
       ` · ${optional ? `${optional} 项可选` : '无可选项'}` +
       (task.selectable === false ? ` · 暂不可用：${task.reason || '请在平台检查方案'}` : '');
   }
@@ -118,7 +118,7 @@
       const target = el(id);
       if (target) target.disabled = active;
     }
-    el('platformConnect').disabled = active || connecting;
+    connectionControls();
     if (!pendingSelection && !selectionError && recording?.recording_selection &&
         JSON.stringify(recording.recording_selection) !== JSON.stringify(state.recording_selection)) {
       state.recording_selection = recording.recording_selection;
@@ -160,14 +160,23 @@
     }
   }
   window.platformSyncLocalFormat = syncUploadFormatOptions;
+  function connectionControls() {
+    el('platformConnect').disabled = active || connecting || reconnecting;
+    el('platformReconnect').disabled = connecting || reconnecting || !state.connection;
+    el('platformReconnect').hidden = !state.connection;
+    el('platformReconnect').textContent = reconnecting ? '正在重新连接…' : '重新连接';
+    el('platformReconnectHint').hidden = !state.connection;
+  }
   function renderConnection() {
     const connection = state.connection;
+    const status = reconnecting ? '正在重新连接…' : verificationFailed ? '连接未恢复' : connection?.verified ? '已连接' : '等待验证';
     el('platformConnection').textContent = connection
-      ? `平台：${connection.platform_name} · 机器人：${connection.robot_name} · ${connection.verified ? '已连接' : '等待验证'}`
+      ? `平台：${connection.platform_name} · 机器人：${connection.robot_name} · ${status}`
       : '尚未连接平台';
     el('platformAuto').checked = state.auto_upload === true;
     const localFmt = state.local_format || document.getElementById('topicRecordingFormat')?.value || 'both';
     syncUploadFormatOptions(localFmt);
+    connectionControls();
   }
   async function refreshTasks() {
     if (!state.connection) return;
@@ -308,22 +317,44 @@
   }
   window.platformUploadHistory = openHistory;
   async function init() {
+    el('platformReconnect').onclick = async () => {
+      if (connecting || reconnecting || !state.connection) return;
+      connectionGeneration++;
+      reconnecting = true;
+      renderConnection();
+      connectionMessage('正在使用已保存的连接信息重新连接平台…');
+      try {
+        const result = await post('verify');
+        // Only refresh connection health. Task choices, pending saves and the
+        // current recording keep their original state throughout a reconnect.
+        state.connection = result.connection;
+        state.error = result.error;
+        verificationFailed = false;
+        connectionMessage('重新连接成功，已沿用保存的连接信息。');
+        await refreshTasks();
+        await refreshRecords();
+      } catch (error) {
+        verificationFailed = true;
+        connectionMessage(`重新连接失败：${error.message}。已保存的连接信息仍保留。` +
+          (error.retryable ? '网络恢复后可再次点击“重新连接”，无需重新粘贴链接。' : ''), true);
+      } finally { reconnecting = false; renderConnection(); }
+    };
     el('platformConnect').onclick = async () => {
-      if (connecting || active) return;
+      if (connecting || reconnecting || active) return;
       connectionGeneration++;
       connecting = true;
-      el('platformConnect').disabled = true;
+      connectionControls();
       const link = el('platformLink').value;
       el('platformLink').value = '';
       connectionMessage('正在连接平台…');
-      try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null;
+      try { await selectionSave; state = await post('connect', { link }); requestId = null; selectionError = null; verificationFailed = false;
         connectionMessage('连接成功，请选择采集任务。');
         renderSelection(); renderConnection(); await refreshTasks(); }
       catch (error) {
         connectionMessage(`连接失败：${error.message}。${state.connection ? '原连接设置已保留。' : ''}` +
           (error.retryable ? '排除故障后，可重新粘贴同一链接重试；若链接已过期，请重新生成。' : ''), true);
       }
-      finally { connecting = false; el('platformConnect').disabled = active; }
+      finally { connecting = false; connectionControls(); }
     };
     el('platformRefresh').onclick = () => void refreshTasks();
     el('platformSearch').oninput = () => { page = 1; void refreshTasks(); };
@@ -377,8 +408,12 @@
             const verified = await post('verify');
             if (generation === connectionGeneration) { state = verified; renderConnection(); }
           } catch (error) {
-            if (generation === connectionGeneration)
-              connectionMessage(`当前连接验证失败：${error.message}`, true);
+            if (generation === connectionGeneration) {
+              verificationFailed = true;
+              renderConnection();
+              connectionMessage(`当前连接验证失败：${error.message}。` +
+                (error.retryable ? '网络恢复后点击“重新连接”即可，无需重新粘贴链接。' : ''), true);
+            }
           }
         }
         if (generation === connectionGeneration) { await refreshTasks(); await refreshRecords(); }

@@ -1,6 +1,12 @@
 import copy
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from adapters.core.intervention import ClutchInput
+import pytest
+
+from adapters.core.intervention import ClutchInput, InterventionTeleop
+from middleware.core.control_ownership import ControlToken
 
 
 def packet(sequence, grip):
@@ -41,3 +47,21 @@ def test_hysteresis_reordered_packets_and_profile_mapping():
     assert clutch.sample(frame) == (True, True)
     frame = packet(4, 0.)
     assert clutch.sample(frame) == (True, False)
+
+
+@pytest.mark.parametrize('phase', ['revoke', 'grant'])
+def test_only_an_active_grant_expires_when_permit_heartbeat_is_late(phase):
+    receiver = InterventionTeleop.__new__(InterventionTeleop)
+    receiver.active, receiver.granted = True, phase == 'grant'
+    receiver.phase, receiver.ack_error = phase, ''
+    receiver.permit_time = 1.
+    receiver.instance = 'test-teleop'
+    receiver.token = ControlToken('controller', 'session', 1, 'vr' if phase == 'grant' else '')
+    receiver.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1_400_000_000)))
+    receiver.ack_pub = Mock()
+    with patch('adapters.core.intervention.time.monotonic', return_value=1.4):
+        receiver.heartbeat()
+    ack = json.loads(receiver.ack_pub.publish.call_args.args[0].data)
+    assert not receiver.granted
+    assert ack['success'] == (phase == 'revoke')
+    assert ack['reason'] == ('' if phase == 'revoke' else 'control permit timeout')

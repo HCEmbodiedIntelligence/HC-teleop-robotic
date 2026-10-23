@@ -98,6 +98,51 @@ def test_single_link_saved_secret_and_retry_request_survive_restart(tmp_path, mo
     assert restored.state['current'] == first
 
 
+@pytest.mark.parametrize('code', ['NETWORK_TIMEOUT', 'ROBOT_CREDENTIAL_REVOKED'])
+def test_saved_connection_reverifies_after_failure_and_restart_without_a_link(tmp_path, monkeypatch, code):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect=' + 'c' * 48)
+    service.set_recording_selection(choice(service, 'A'))
+    service.set_auto(False)
+    before = copy.deepcopy(service.state)
+    credential_path = next((tmp_path / 'queue/credentials').glob('*.token'))
+    credential = credential_path.read_bytes()
+    original = service.request
+
+    def offline(*args, **kwargs):
+        raise UploadError(code, retry=code == 'NETWORK_TIMEOUT')
+
+    monkeypatch.setattr(service, 'request', offline)
+    with pytest.raises(UploadError, match=code):
+        service.verify()
+    assert service.status()['connection']['verified'] is False
+    assert service.error == code
+    assert service.state['current'] == before['current']
+    assert service.recording_selection() == before['recording_selection']
+    assert service.state['auto_upload'] is False
+    assert credential_path.read_bytes() == credential
+    if code == 'ROBOT_CREDENTIAL_REVOKED':
+        return  # Revocation needs a replacement credential; retry cannot revive it.
+
+    calls = []
+
+    def recovered(connection, method, endpoint, *args, **kwargs):
+        calls.append((method, endpoint, connection['credential_ref']))
+        return original(connection, method, endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(service, 'request', recovered)
+    assert service.verify()['connection']['verified'] is True
+    assert service.error is None
+    restored = PlatformConnection(cfg, tmp_path, tmp_path / 'data', identity_provider=lambda: dict(LOCAL))
+    monkeypatch.setattr(restored, 'request', recovered)
+    assert restored.status()['connection']['verified'] is False
+    assert restored.verify()['connection']['verified'] is True
+    assert restored.state == before
+    assert calls == [('GET', 'me', 'file:' + str(credential_path))] * 2
+    assert credential_path.read_bytes() == credential
+    assert len(list(credential_path.parent.glob('*.token'))) == 1
+
+
 @pytest.mark.parametrize('failed', [False, True])
 def test_old_verification_cannot_replace_a_new_connection(tmp_path, monkeypatch, failed):
     import threading
@@ -553,6 +598,38 @@ def test_explicit_upload_to_new_task_preserves_original(tmp_path, monkeypatch):
         finish(recorder)
         assert again['recording_id'] == result['recording_id']
         assert len(service.upload.queue.jobs()) == 2
+    finally:
+        recorder.close()
+
+
+def test_historical_bundle_upload_preserves_original_package_and_retries(tmp_path, monkeypatch):
+    _, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_upload_format('mcap_mp4')
+        source = Path(capture(recorder, {'mode': 'local'}))
+        original = copy.deepcopy(next(iter(recorder.jobs.values())))
+        original_root = recorder.directory / 'bundles' / source.stem
+        original_files = {p.relative_to(original_root): p.read_bytes()
+                          for p in original_root.rglob('*') if p.is_file()}
+        assert original_files and original['state'] == 'ready'
+        result = recorder.upload_recording(original['recording_id'], choice(service, 'B'),
+                                           'CAPTURE_BUNDLE', True)
+        finish(recorder)
+        job = recorder.jobs[result['recording_id']]
+        assert job['state'] == 'queued', job.get('error')
+        descriptor = read_json(service.upload.state_dir / (job['recording_id'] + '.json'))
+        root = Path(descriptor['root'])
+        assert root != original_root
+        assert read_json(root / 'session.json')['session_id'] == job['recording_id']
+        assert read_json(root / 'recording-complete.json')['collection_task_id'] == 'B'
+        assert recorder.jobs[original['recording_id']] == original
+        assert {p.relative_to(original_root): p.read_bytes()
+                for p in original_root.rglob('*') if p.is_file()} == original_files
+        again = recorder.upload_recording(original['recording_id'], choice(service, 'B'),
+                                          'CAPTURE_BUNDLE', True)
+        finish(recorder)
+        assert again['recording_id'] == job['recording_id']
+        assert len(service.upload.queue.jobs()) == 1
     finally:
         recorder.close()
 

@@ -194,10 +194,12 @@ class PlatformConnection:
             local = self.identity_provider()
             if info.get('local_robot') and info['local_robot'] != local:
                 raise UploadError('LOCAL_ROBOT_MISMATCH', '请检查当前机器人配置，不能以连接绕过模型校验')
-        except UploadError:
+        except UploadError as error:
             with self._lock:
                 if generation != self._connection_generation:
                     return self.status()
+                self.state['connections'][connection_id]['verified'] = False
+                self.error = error.code
             raise
         with self._lock:
             if generation == self._connection_generation:
@@ -331,6 +333,7 @@ class PlatformConnection:
                     | {'id': current}) if connection else None,
                     'recent': copy.deepcopy(self.state['recent']), 'error': self.error,
                     'recording_selection': self.recording_selection(),
+                    'processes': {'artifacts': self.upload.artifact_process.status(), 'upload': self.upload.upload_process.status()},
                     'auto_upload': self.state['auto_upload'], 'upload_format': self.state['upload_format'], 'jobs': self.upload.jobs()}
 
     def start(self):
@@ -354,7 +357,10 @@ class PlatformConnection:
 
     def _resume_legacy(self):
         if not self.legacy_auto or not self.state['worker_enabled']: return
+        queued = {job.get('artifact_id') for job in self.upload.queue.jobs()}
         for path in self.upload.state_dir.glob('*.json'):
+            if self._heartbeat_stop.is_set(): return
+            if path.stem in queued: continue
             try:
                 descriptor = read_json(path)
                 # Only complete legacy captures with an existing frozen binding.
@@ -367,4 +373,4 @@ class PlatformConnection:
     def stop(self):
         self._heartbeat_stop.set()
         if self._heartbeat_thread: self._heartbeat_thread.join(timeout=1)
-        self.upload.stop()
+        self.upload.close()

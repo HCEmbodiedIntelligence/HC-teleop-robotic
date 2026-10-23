@@ -5,9 +5,39 @@ import zipfile
 
 import pytest
 
-from middleware.core.correction_recording import WindowRouter
+from middleware.core.correction_recording import WindowRouter, SessionRouter
 from middleware.core.control_ownership import ControlToken
 from tests.correction_recording_support import local_service as service
+
+
+def test_full_session_retains_program_manual_and_paused_data_with_multiple_boundaries():
+    saved = []
+    bounds = [1_000, 0]
+    router = SessionRouter(lambda event: saved.append(event) or True, lambda _: bounds,
+                           {'session_id': 'one'}, late_ns=10)
+    router.observe('/action/joint_states', 'joint', b'program-before', 1_020, 1_020)
+    router.open(dict(key='manual-1', start_ns=1_050))
+    router.observe('/action/joint_states', 'joint', b'human-one', 1_060, 1_060)
+    router.close(dict(key='manual-1', end_ns=1_100, reason='release'))
+    router.observe('/action/joint_states', 'joint', b'program-after', 1_120, 1_120)
+    router.open(dict(key='manual-2', start_ns=1_200))
+    router.observe('/action/joint_states', 'joint', b'human-two', 1_220, 1_220)
+    router.close(dict(key='manual-2', end_ns=1_250, reason='hold'))
+    router.observe('/observation/joint_states', 'joint', b'paused-feedback', 1_300, 1_300)
+    router.observe('/custom/headerless', 'custom', b'headerless', 0, 1_301)
+    bounds[1] = 1_400
+    router.ending = True
+    router.observe('/action/joint_states', 'joint', b'outside', 1_400, 1_401)
+    assert not router.finish_due(1_409)
+    done = router.finish_due(1_410)
+    assert len(done) == 1 and len(done[0]['boundary']['interventions']) == 2
+    assert [item['_raw'] for item in saved if '_raw' in item] == [
+        b'program-before', b'human-one', b'program-after', b'human-two', b'paused-feedback', b'headerless']
+    events = [item['payload'] for item in saved if 'payload' in item]
+    assert [event['kind'] for event in events] == [
+        'session_open', 'manual_open', 'manual_close', 'manual_open', 'manual_close', 'session_close']
+    assert all(event['capture_mode'] == 'full_session' for event in events)
+    assert not router.finish_due(1_500)
 
 
 def router_fixture():
