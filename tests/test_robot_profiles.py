@@ -116,6 +116,7 @@ class RobotProfileTests(unittest.TestCase):
             )
             self.assertEqual(teleop["body"]["waist_joint_names"], ["waist"])
             self.assertEqual(teleop["robot"]["urdf_path"], "urdf/robot.urdf")
+            self.assertNotIn("camera_metadata", teleop)
             self.assertTrue(profile["teleop_compatible"])
 
     def test_rejects_out_of_range_io_joint_index_without_creating_profile(self):

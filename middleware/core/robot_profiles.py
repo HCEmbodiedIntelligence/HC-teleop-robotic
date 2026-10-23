@@ -351,6 +351,8 @@ def _generate_arm_teleop_config(
     if not isinstance(template, dict):
         raise RobotProfileError("arm teleop template is invalid")
     result = copy.deepcopy(template)
+    # Camera frames and intrinsics sources belong to the source robot only.
+    result.pop("camera_metadata", None)
     robot = result["robot"]
     robot["urdf_path"] = f"urdf/{urdf_name}"
     base_pose = normalized.get("base_pose", {})

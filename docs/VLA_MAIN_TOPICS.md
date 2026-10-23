@@ -12,6 +12,8 @@
 | 动作，必录 | `/action/joint_states` | `sensor_msgs/msg/JointState` | 选中的绝对关节位置目标，目标 100 Hz；不是执行成功确认 |
 | RGB，VLA 按实际相机必录 | `/observation/cameras/{id}/color/compressed` | `sensor_msgs/msg/CompressedImage` | 目标 30 Hz；`id` 可为 `head/overhead/d405_left/d405_right` |
 | 深度，可选 | `/observation/cameras/{id}/depth/compressed` | `sensor_msgs/msg/CompressedImage` | 契约使用 PNG；按实际相机选择，不作为普通 RGB 视频 |
+| 头部相机内参 | `/observation/cameras/head/calibration` | `std_msgs/msg/String` | `hc_camera_calibration/v1` JSON；RGB/深度内参、畸变与分辨率 |
+| 头部相机外参 | `/observation/cameras/head/extrinsics` | `std_msgs/msg/String` | `hc_robot_camera_extrinsics/v1` JSON；`zhi_Link → camera_head` 的平移（m）与 XYZW 四元数 |
 | 手/夹爪反馈，可选 | `/observation/hands/joint_states` | `sensor_msgs/msg/JointState` | 目标 10 Hz；部分机型的夹爪反馈包含在整机关节状态中 |
 | 左右手/夹爪动作，可选 | `/action/left_hand/joint_states`、`/action/right_hand/joint_states` | `sensor_msgs/msg/JointState` | 目标 10 Hz；名称、开合单位和范围以机型配置为准 |
 | 底盘动作，可选 | `/action/base/command` | `std_msgs/msg/Float64MultiArray` | 目标 60 Hz；速度模式为 `[yaw, forward, lateral]`，单位 `[rad/s, m/s, m/s]` |
@@ -71,6 +73,8 @@ export ROS_LOCALHOST_ONLY=0    # 跨机器；同机隔离仿真设为 1
 ```
 
 用 `ros2 topic list -t` 确认现场名称与类型。脚本复用项目 `.deps` 中的 `mcap` 和消息定义解析器；默认只读显示无需 mcap。文件不覆盖已有录制；Ctrl+C 正常封存。状态、动作或所选相机整段无消息时，录制退出码为 2，并列出缺失源，已收到的数据仍保留。消息数量大于零也不代表时序完整或已通过训练数据质检。
+
+需要相机内外参时，另加 `--topic /observation/cameras/head/calibration std_msgs/msg/String` 和 `--topic /observation/cameras/head/extrinsics std_msgs/msg/String`。X1 在启用 `ros.dataset_topics.enabled` 后自动生成；数据来源、坐标方向与断流行为见[相机内外参接口](dataset_topics.md)。
 
 ## 转为训练数据
 

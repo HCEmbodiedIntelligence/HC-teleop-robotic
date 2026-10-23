@@ -229,7 +229,9 @@ class MiddlewareRuntime:
         dataset_config = self.config["ros"].get("dataset_topics", {})
         if dataset_config.get("enabled", False):
             from .dataset_topics import load_joint_groups
+            from .camera_metadata import load_camera_metadata
             dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
+            dataset_config["camera_metadata"] = load_camera_metadata(self.config, self.config_dir)
         self.ros = RosBridge(
             self.config["ros"],
             self.emit,

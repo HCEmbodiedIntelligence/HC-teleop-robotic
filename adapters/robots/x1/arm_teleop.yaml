@@ -33,6 +33,16 @@ robot:
     Joint5_L: 0.0
     Joint6_L: 0.0
     Joint7_L: 0.0
+camera_metadata:
+  enabled: true
+  camera: eye  # Preserve the historical hc_camera_calibration/v1 camera ID.
+  common_frame: zhi_Link
+  camera_frame: camera_head
+  max_age_sec: 1.0
+  # First fresh source wins. Point these at the actual driver's CameraInfo.
+  camera_info_topics:
+    rgb: [/observation/cameras/head/color/camera_info, /cameras/head/color/camera_info]
+    depth: [/observation/cameras/head/depth/camera_info, /cameras/head/depth/camera_info]
 arms:
   # base_link 用于统一显示目标；generic_task_base_link 是 v23 求解器的肩部任务基座；
   # ee_link 是受控 TCP。关节列表顺序必须与反馈和求解器配置一致。

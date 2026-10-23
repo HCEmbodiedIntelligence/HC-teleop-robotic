@@ -39,14 +39,10 @@ class DatasetTopics:
         self.publisher('/observation/head/pose', PoseStamped)
         self.publisher('/action/head/pose', PoseStamped)
         subscribe(PoseArray, '/status/head/tracking_poses', self.robot_head)
-        for source, target in (
-            ('/io_teleop/camera_head/calibration',
-             '/observation/cameras/head/calibration'),
-            ('/io_teleop/camera_head/extrinsics',
-             '/observation/cameras/head/extrinsics'),
-        ):
-            self.publisher(target, String)
-            subscribe(String, source, lambda msg, t=target: self.relay(t, msg))
+        from .camera_metadata import CameraMetadata
+        self.camera_metadata = CameraMetadata(node, config.get('camera_metadata', {}))
+        self.publishers.update(self.camera_metadata.publishers)
+        self.subscriptions.extend(self.camera_metadata.subscriptions)
         for source, target in (
             ('/io_teleop/state_ee_wrenches', '/observation/ee_wrenches'),
             ('/io_teleop/vibration_feedback_exo',

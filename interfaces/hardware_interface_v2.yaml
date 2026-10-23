@@ -23,6 +23,8 @@ hardware_subscribes:
   - {topic: /action/left_hand/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, timeout_ms: 500}
   - {topic: /action/right_hand/joint_states, type: sensor_msgs/msg/JointState, required: false, target_hz: 10, timeout_ms: 500}
 middleware_publishes:
+  - {topic: /observation/cameras/head/calibration, type: std_msgs/msg/String, schema: hc_camera_calibration/v1, required: false, target_hz: 2, reliability: reliable, durability: transient_local, depth: 1}
+  - {topic: /observation/cameras/head/extrinsics, type: std_msgs/msg/String, schema: hc_robot_camera_extrinsics/v1, required: false, target_hz: 2, reliability: reliable, meaning: camera_frame_pose_in_common_frame}
   - {topic: /observation/joint_states, type: sensor_msgs/msg/JointState, names: public, preserves_source_stamp: true}
   - {topic: /action/joint_states, type: sensor_msgs/msg/JointState, names: public, meaning: selected_target_not_measured_state}
   - {topic: /status/robot/info, type: std_msgs/msg/String, schema: hc-robot-api/v1, reliability: reliable, durability: transient_local, depth: 1}

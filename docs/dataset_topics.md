@@ -18,6 +18,22 @@ VLA 接入的精简清单、Python 订阅/MCAP 录制 demo 及 LeRobot 转换命
 | `/observation/base/pose` | PoseStamped | `/observation/base/pose` |
 | `/action/base/velocity` | TwistStamped | `/action/base/command` |
 | `/observation/headset/pose` | PoseStamped | `/vrdata` 的 poses.head |
+| `/observation/cameras/head/calibration` | String（JSON） | 相机 CameraInfo，或旧驱动的 calibration 消息 |
+| `/observation/cameras/head/extrinsics` | String（JSON） | `zhi_Link → camera_head` 的 TF，或实测关节 + URDF；兼容旧驱动的 extrinsics 消息 |
+
+两条相机话题恢复旧接口的 JSON schema：`hc_camera_calibration/v1` 和 `hc_robot_camera_extrinsics/v1`。客户端只需把 `calibration_topic`、`extrinsics_topic` 换成上表的新名称。X1 默认启用，修改后重启中间件生效；网页录制默认已包含这两条话题。
+
+```bash
+# 先 source ROS 环境，ROS_DOMAIN_ID 与运行端一致（仿真以网页显示为准）。
+ros2 topic echo /observation/cameras/head/calibration --once
+ros2 topic echo /observation/cameras/head/extrinsics --once
+```
+
+内参包含 `camera=eye`、`resolution.color/depth`、`rgb/depth.fx/fy/cx/cy`、畸变模型与系数，以及各自的 CameraInfo 话题、`frame_id` 和原始 `stamp`。只收到 RGB 时只提供 RGB，不补造深度参数。来源在当前 Profile 的 `arm_teleop.yaml → camera_metadata.camera_info_topics` 配置，每个列表按顺序选择仍有新消息的来源。默认订阅 `/observation/cameras/head/{color,depth}/camera_info`，并兼容 `/cameras/head/{color,depth}/camera_info`；其他驱动需填写实际的 CameraInfo 话题。
+
+外参保留 `common_frame=zhi_Link` 与 `transforms[]`；每项有 `parent_frame`、`child_frame`、`translation_m` 和 XYZW 顺序的 `rotation_xyzw`。其方向为 `p_parent = R × p_child + t`。`source=tf` 表示直接使用 TF；`source=urdf_joint_states` 表示由实测关节反馈计算模型中的相机安装位姿，**不是额外完成了手眼标定**，也不会把 URDF 相机坐标系冒充驱动的 optical frame。消息顶层 `stamp` 保留 TF 或关节反馈时间，头部运动时外参随之变化。
+
+本地生成频率为 2 Hz，使用 Reliable 发布；内参同时采用 Transient Local 保存最近一条，方便后加入的订阅者读取。计算外参需要完整且新鲜的头部关节反馈，默认 1 秒超时；缺失、过期或非法数据时停止生成对应消息，不发布零位或单位矩阵占位。无相机时不会生成内参。内参订阅者读取保留样本时应检查样本内的 `stamp`。若旧 `/io_teleop/camera_head/{calibration,extrinsics}` 仍在发布，优先原样转发，避免同一时间混用两种来源。
 
 关节按配置的名称顺序抽取，源消息缺少任一组内关节时不发布该组。
 position/velocity/effort 中源消息未提供的数组保持为空，不能将空数组解释为零。
