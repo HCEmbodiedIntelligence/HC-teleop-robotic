@@ -138,6 +138,9 @@
             <button id="importMcapBtn">导入 MCAP</button>
             <input type="file" id="importMcapInput" accept=".mcap" style="display:none;">
             <button id="refreshDatasets">刷新列表</button>
+            <button id="batchConvertLerobot" disabled>批量转为 LeRobot</button>
+            <button id="batchUploadDatasets" disabled>批量上传</button>
+            <button id="batchDownloadDatasets" disabled>批量下载</button>
             <button id="batchDeleteDatasets" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
           </div>
         </div>
@@ -428,7 +431,7 @@
       </div>
     </form>
   </dialog>
-  <script src="/static/platform_panel.js?v=12-platform-reconnect"></script>
-  <script src="/static/app.js?v=28-session-capture"></script>
+  <script src="/static/platform_panel.js?v=13-batch-datasets"></script>
+  <script src="/static/app.js?v=29-batch-datasets"></script>
 </body>
 </html>

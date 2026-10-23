@@ -1184,6 +1184,9 @@ function updateSelectedDatasetCount() {
   const count = checked.length;
   if ($('#selectedDatasetCount')) $('#selectedDatasetCount').textContent = count;
   if ($('#batchDeleteDatasets')) $('#batchDeleteDatasets').disabled = count === 0;
+  if ($('#batchDownloadDatasets')) $('#batchDownloadDatasets').disabled = count === 0;
+  if ($('#batchUploadDatasets')) $('#batchUploadDatasets').disabled = count === 0;
+  if ($('#batchConvertLerobot')) $('#batchConvertLerobot').disabled = !checked.some(cb => cb.dataset.convertible === 'true');
   const all = $$('#datasetRows input[type=checkbox]:not(:disabled)');
   if ($('#selectAllDatasets')) {
     $('#selectAllDatasets').checked = all.length > 0 && checked.length === all.length;
@@ -1227,6 +1230,10 @@ async function loadDatasets() {
       const check = document.createElement('input');
       check.type = 'checkbox';
       check.dataset.filename = datasetIdentifier(file);
+      check.dataset.sourceFormat = isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP';
+      check.dataset.displayName = file.filename;
+      check.dataset.uploadIdentity = file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file);
+      check.dataset.convertible = String(!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE' && String(file.filename).endsWith('.mcap'));
       check.disabled = datasetUnavailable(file);
       check.checked = !check.disabled && selected.has(datasetIdentifier(file));
       check.onchange = updateSelectedDatasetCount;
@@ -1765,6 +1772,42 @@ async function init() {
       } catch (err) {
         toast(`批量删除失败：${err.message}`, true);
       }
+    };
+  }
+  if($('#batchConvertLerobot')) {
+    $('#batchConvertLerobot').onclick = async () => {
+      const selected = $$('#datasetRows input[type=checkbox]:checked')
+        .map(cb => cb.dataset.filename);
+      if (!selected.length) return;
+      try {
+        const res = await api('/api/recordings/batch-convert-lerobot', {
+          method: 'POST', body: JSON.stringify({ filenames: selected }),
+        });
+        const skipped = res.skipped?.length || 0;
+        toast(`已加入 LeRobot 转换队列 ${res.accepted?.length || 0} 个${skipped ? `，跳过 ${skipped} 个` : ''}`);
+        await loadDatasets();
+      } catch (err) { toast(`批量转换失败：${err.message}`, true); }
+    };
+  }
+  if($('#batchDownloadDatasets')) {
+    $('#batchDownloadDatasets').onclick = () => {
+      const selected = $$('#datasetRows input[type=checkbox]:checked').map(cb => cb.dataset.filename);
+      if (!selected.length) return;
+      const form = document.createElement('form'); form.method = 'POST'; form.action = '/api/recordings/batch-download';
+      const input = document.createElement('input'); input.type = 'hidden'; input.name = 'filenames';
+      input.value = JSON.stringify(selected); form.append(input); document.body.append(form); form.submit(); form.remove();
+      toast(`正在打包下载 ${selected.length} 个数据集`);
+    };
+  }
+  if($('#batchUploadDatasets')) {
+    $('#batchUploadDatasets').onclick = async () => {
+      const checked = $$('#datasetRows input[type=checkbox]:checked');
+      if (!checked.length) return;
+      const formats = new Set(checked.map(cb => cb.dataset.sourceFormat));
+      if (formats.size !== 1) { toast('批量上传需选择同一种格式的数据集', true); return; }
+      const targets = checked.map(cb => ({ identity: cb.dataset.uploadIdentity,
+        name: cb.dataset.displayName, source_format: cb.dataset.sourceFormat }));
+      await window.platformUploadBatch?.(targets, [...formats][0]);
     };
   }
   if($('#importMcapBtn') && $('#importMcapInput')) {

@@ -9,7 +9,7 @@ from urllib.parse import quote
 from aiohttp.test_utils import TestClient, TestServer
 from middleware.core.config import ConfigStore
 from middleware.core.topic_recorder import TopicRecorder
-from middleware.core.recording_datasets import resolve_dataset
+from middleware.core.recording_datasets import archive_datasets, resolve_dataset
 
 
 def make_dataset(root, name='episode'):
@@ -29,6 +29,21 @@ def make_dataset(root, name='episode'):
 
 
 class DatasetFilesTests(unittest.TestCase):
+    def test_archive_mixed_dataset_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            make_dataset(root)
+            (root / 'capture.mcap').write_bytes(b'mcap payload')
+            archive = archive_datasets(root, ['capture.mcap', 'lerobot:episode'])
+            try:
+                with zipfile.ZipFile(archive) as output:
+                    self.assertEqual(output.read('mcap/capture.mcap'), b'mcap payload')
+                    self.assertEqual(
+                        output.read('lerobot/episode/videos/observation.images.eye/chunk-000/file-000.mp4'),
+                        b'video payload')
+            finally:
+                archive.unlink(missing_ok=True)
+
     def test_list_and_delete_dataset_keeps_source_and_other_formats(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -126,3 +141,22 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         result = await response.json()
         self.assertEqual(result['deleted'], [item['id']])
         self.assertFalse(self.dataset.exists())
+
+    async def test_batch_download_returns_one_mixed_zip(self):
+        raw = self.root / 'recordings/capture.mcap'
+        raw.write_bytes(b'mcap payload')
+        response = await self.client.post('/api/recordings/batch-download', json={
+            'filenames': ['capture.mcap', 'lerobot:episode'],
+        })
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.headers['Content-Disposition'].endswith('.zip"'))
+        with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+            self.assertEqual(archive.read('mcap/capture.mcap'), b'mcap payload')
+            self.assertIn('lerobot/episode/meta/info.json', archive.namelist())
+
+        response = await self.client.post('/api/recordings/batch-download', data={
+            'filenames': json.dumps(['capture.mcap']),
+        })
+        self.assertEqual(response.status, 200)
+        with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+            self.assertEqual(archive.read('mcap/capture.mcap'), b'mcap payload')

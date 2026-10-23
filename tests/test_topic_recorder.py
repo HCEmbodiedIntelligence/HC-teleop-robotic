@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mcap.reader import make_reader
 from rclpy.serialization import deserialize_message, serialize_message
@@ -12,6 +13,27 @@ from middleware.core.topic_recorder import TopicRecorder
 
 
 class TopicRecorderTests(unittest.TestCase):
+    def test_batch_lerobot_conversion_is_queued_in_one_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings", "lerobot_fps": 20}, Path(directory))
+            recorder.directory.mkdir(parents=True)
+            (recorder.directory / 'one.mcap').write_bytes(b'one')
+            (recorder.directory / 'two.mcap').write_bytes(b'two')
+
+            class Process:
+                pid = 31415
+
+            with patch('middleware.core.lerobot_export.ensure_export_available'), \
+                    patch('middleware.core.topic_recorder.subprocess.Popen', return_value=Process()) as spawn:
+                result = recorder.convert_recordings_to_lerobot(['one.mcap', 'two.mcap'])
+
+            self.assertEqual(result['accepted'], ['one.mcap', 'two.mcap'])
+            self.assertEqual(result['pid'], 31415)
+            spawn.assert_called_once()
+            spec_path = Path(spawn.call_args.args[0][-1])
+            spec = json.loads(spec_path.read_text())
+            self.assertEqual([Path(item['source']).name for item in spec['items']], ['one.mcap', 'two.mcap'])
+            self.assertEqual([item['fps'] for item in spec['items']], [20, 20])
     def test_records_16bit_png_depth_as_ros2_cdr(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = TopicRecorder({"directory": "recordings"}, Path(directory))

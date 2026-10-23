@@ -305,9 +305,13 @@
     } catch (error) { el('platformHistoryError').textContent = error.message; }
   }
   async function openHistory(identity, name, source_format = 'MCAP') {
+    return openHistoryBatch([{ identity, name, source_format }], source_format);
+  }
+  async function openHistoryBatch(targets, source_format) {
     if (!state.connection) { message('请先连接平台，再为历史录制选择任务'); return; }
-    historyTarget = { identity, connection_id: state.connection.id, source_format }; historySelected = ''; historyPage = 1;
-    el('platformHistoryName').textContent = name; el('platformHistoryError').textContent = '';
+    historyTarget = { targets, connection_id: state.connection.id, source_format }; historySelected = ''; historyPage = 1;
+    el('platformHistoryName').textContent = targets.length === 1 ? targets[0].name : `已选择 ${targets.length} 个数据集：${targets.map(item => item.name).join('、')}`;
+    el('platformHistoryError').textContent = '';
     el('platformHistoryFormat').textContent = `本次上传格式：${source_format === 'LEROBOT_V3' ? 'LeRobot 数据集' : 'MCAP 原始录制'}`;
     el('platformHistorySearch').value = '';
     el('platformHistoryUpload').disabled = true;
@@ -316,6 +320,7 @@
     await historyTasks();
   }
   window.platformUploadHistory = openHistory;
+  window.platformUploadBatch = openHistoryBatch;
   async function init() {
     el('platformReconnect').onclick = async () => {
       if (connecting || reconnecting || !state.connection) return;
@@ -386,10 +391,21 @@
         el('platformHistoryUpload').disabled = true;
         el('platformHistoryClose').disabled = true;
         el('platformHistoryUpload').textContent = '正在提交…';
-        await post('upload-recording', { recording_id: historyTarget.identity, selection: { mode: 'platform',
-          connection_id: historyTarget.connection_id, task_id: historySelected },
-          source_format: historyTarget.source_format, new_upload: true });
-        el('platformHistoryDialog').close(); await refreshRecords();
+        const selection = { mode: 'platform', connection_id: historyTarget.connection_id, task_id: historySelected };
+        const targets = historyTarget.targets;
+        if (targets.length === 1) {
+          await post('upload-recording', { recording_id: targets[0].identity, selection,
+            source_format: historyTarget.source_format, new_upload: true });
+          el('platformHistoryDialog').close();
+        } else {
+          const result = await post('upload-recordings', { selection,
+            recordings: targets.map(item => ({ recording_id: item.identity, source_format: item.source_format })) });
+          if (result.failed?.length) {
+            el('platformHistoryError').textContent = `已提交 ${result.uploaded?.length || 0} 个，失败 ${result.failed.length} 个：` +
+              result.failed.map(item => `${item.recording_id}: ${item.reason}`).join('；');
+          } else el('platformHistoryDialog').close();
+        }
+        await refreshRecords();
       } catch (error) { el('platformHistoryError').textContent = error.message; }
       finally {
         el('platformHistoryUpload').textContent = '选择并上传';

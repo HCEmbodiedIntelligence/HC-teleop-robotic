@@ -70,6 +70,25 @@ def register_platform_routes(app, runtime):
                     result = await asyncio.to_thread(runtime.recorder.upload_recording,
                                                       body['recording_id'], body.get('selection'),
                                                       body.get('source_format'), body.get('new_upload') is True)
+                elif operation == 'upload-recordings':
+                    recordings = body.get('recordings')
+                    selection = body.get('selection')
+                    if (not isinstance(recordings, list) or not 1 <= len(recordings) <= 100
+                            or not isinstance(selection, dict)):
+                        raise ValueError()
+                    uploaded, failed = [], []
+                    for item in recordings:
+                        try:
+                            if not isinstance(item, dict) or set(item) != {'recording_id', 'source_format'}:
+                                raise ValueError()
+                            response = await asyncio.to_thread(
+                                runtime.recorder.upload_recording, item['recording_id'], selection,
+                                item['source_format'], True)
+                            uploaded.append({'recording_id': item['recording_id'], **response})
+                        except UploadError as error:
+                            failed.append({'recording_id': item.get('recording_id', ''),
+                                           'code': error.code, 'reason': error.action})
+                    result = {'ok': not failed, 'uploaded': uploaded, 'failed': failed}
                 elif operation == 'retry-upload':
                     await asyncio.to_thread(platform.upload.queue.retry, body['job_id'])
                     with platform._lock:

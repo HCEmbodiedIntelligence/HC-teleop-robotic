@@ -8,9 +8,11 @@ import subprocess
 import sys
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from mcap.well_known import MessageEncoding, SchemaEncoding
 from mcap.writer import Writer as McapWriter
@@ -429,6 +431,72 @@ class TopicRecorder(CorrectionSupport):
         """Resources inherited by the raw ROS subscription process."""
         return (self._queue, self._accepting_event, self._dropped, self._ingress_lock,
                 self._accepted, self._queued_bytes, self._byte_budget)
+
+    def convert_recordings_to_lerobot(self, identifiers):
+        """Validate and enqueue a sequential, detached historical conversion batch."""
+        from .export_progress import progress_path, read_progress
+        from .lerobot_export import ensure_export_available
+        from .recording_datasets import resolve_dataset
+
+        if not isinstance(identifiers, list) or not identifiers or len(identifiers) > 100:
+            raise ValueError('请选择 1–100 个数据集')
+        ensure_export_available()
+        accepted, skipped, items = [], [], []
+        active_path = self.path.resolve() if self.is_recording() and self.path else None
+        for identifier in dict.fromkeys(str(value) for value in identifiers):
+            try:
+                target = resolve_dataset(self.directory, identifier)
+                if target.suffix != '.mcap' or not target.is_file():
+                    raise ValueError('仅 MCAP 文件可以转换为 LeRobot')
+                if active_path and target.resolve() == active_path:
+                    raise ValueError('文件仍在录制中')
+                destination = self.directory / 'lerobot' / target.stem
+                if (destination / 'meta/info.json').is_file():
+                    skipped.append({'id': identifier, 'reason': 'LeRobot 数据集已存在'})
+                    continue
+                progress = read_progress(progress_path(destination))
+                if progress.get('state') == 'exporting' and progress.get('pid'):
+                    try:
+                        os.kill(int(progress['pid']), 0)
+                        skipped.append({'id': identifier, 'reason': '正在转换或排队中'})
+                        continue
+                    except (OSError, ValueError):
+                        pass
+                if destination.exists():
+                    raise ValueError('存在未完成的同名 LeRobot 目录，请先检查或删除')
+                metadata = read_recording_metadata(target)
+                task = self.lerobot_task
+                if metadata.get('platform_task'):
+                    try:
+                        task = json.loads(metadata['platform_task'])['task']['name']
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                robot_type = metadata.get('profile_id') or metadata.get('robot_name') or 'x1'
+                items.append({'source': str(target.resolve()), 'destination': str(destination.resolve()),
+                              'fps': self.lerobot_fps, 'task': str(task),
+                              'robot_type': str(robot_type),
+                              'action_sources': deepcopy(self.action_sources)})
+                accepted.append(identifier)
+            except (ValueError, FileNotFoundError) as error:
+                skipped.append({'id': identifier, 'reason': str(error)})
+        if not items:
+            return {'ok': True, 'accepted': accepted, 'skipped': skipped, 'pid': None}
+        batch_dir = self.directory / '.batch_jobs'
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        spec_path = batch_dir / f'lerobot-{uuid4().hex}.json'
+        temporary = spec_path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps({'items': items}, ensure_ascii=False), encoding='utf-8')
+        temporary.replace(spec_path)
+        root = Path(__file__).resolve().parents[2]
+        log_path = spec_path.with_suffix('.log')
+        with log_path.open('ab') as log:
+            command = [sys.executable, '-m', 'middleware.core.batch_lerobot_export', str(spec_path)]
+            if sys.platform.startswith('linux'):
+                command = ['nice', '-n', '10', *command]
+            process = subprocess.Popen(command, cwd=root, env=background_environment(),
+                                       stdout=log, stderr=subprocess.STDOUT,
+                                       start_new_session=(os.name == 'posix'))
+        return {'ok': True, 'accepted': accepted, 'skipped': skipped, 'pid': process.pid}
 
     def _drain_queue(self, target: Any) -> None:
         while True:

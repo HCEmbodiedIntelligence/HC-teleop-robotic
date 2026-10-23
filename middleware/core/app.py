@@ -9,6 +9,7 @@ import os
 import socket
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1367,6 +1368,51 @@ def create_app(store: ConfigStore) -> web.Application:
                                   if failure else {})})
         return web.json_response({"ok": True, "deleted": deleted, "failed": failed})
 
+    async def batch_convert_lerobot(request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        data = await request.json() if request.can_read_body else {}
+        try:
+            result = await asyncio.to_thread(
+                runtime.recorder.convert_recordings_to_lerobot, data.get('filenames')
+            )
+            return web.json_response(result, status=202 if result.get('accepted') else 200)
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
+            return web.json_response({'ok': False, 'error': str(exc)}, status=400)
+
+    async def batch_download_recordings(request: web.Request) -> web.StreamResponse:
+        from .recording_datasets import archive_datasets
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        if request.content_type == 'application/json':
+            data = await request.json() if request.can_read_body else {}
+            filenames = data.get('filenames') if isinstance(data, dict) else None
+        else:
+            form = await request.post()
+            try:
+                filenames = json.loads(str(form.get('filenames', '[]')))
+            except (TypeError, ValueError):
+                filenames = None
+        try:
+            archive = await asyncio.to_thread(
+                archive_datasets, runtime.recorder.directory, filenames
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        try:
+            response = web.StreamResponse(headers={
+                'Content-Disposition': f'attachment; filename="hc-datasets-{datetime.now().strftime("%Y%m%d-%H%M%S")}.zip"',
+                'Content-Type': 'application/zip', 'Content-Length': str(archive.stat().st_size),
+            })
+            await response.prepare(request)
+            with archive.open('rb') as handle:
+                while chunk := await asyncio.to_thread(handle.read, 256 * 1024):
+                    await response.write(chunk)
+            await response.write_eof()
+            return response
+        finally:
+            archive.unlink(missing_ok=True)
+
     async def start_replay(request: web.Request) -> web.Response:
         if runtime.player is None:
             raise web.HTTPServiceUnavailable(text="player is not initialized")
@@ -1588,6 +1634,8 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)
     app.router.add_delete("/api/recordings/{filename}", delete_recording)
     app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
+    app.router.add_post("/api/recordings/batch-convert-lerobot", batch_convert_lerobot)
+    app.router.add_post("/api/recordings/batch-download", batch_download_recordings)
     app.router.add_post("/api/replay/start", start_replay)
     app.router.add_post("/api/replay/pause", pause_replay)
     app.router.add_post("/api/replay/resume", resume_replay)

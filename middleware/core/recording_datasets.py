@@ -96,6 +96,35 @@ def archive_dataset(target: Path) -> Path:
         raise
 
 
+def archive_datasets(directory: Path, identifiers: list[str]) -> Path:
+    """Create one collision-free ZIP for a validated mixed dataset selection."""
+    if (not isinstance(identifiers, list) or not identifiers or len(identifiers) > 200
+            or not all(isinstance(value, str) for value in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        raise ValueError('invalid dataset selection')
+    targets = [(identifier, resolve_dataset(directory, identifier)) for identifier in identifiers]
+    with tempfile.NamedTemporaryFile(prefix='hc-datasets-', suffix='.zip', delete=False) as handle:
+        archive = Path(handle.name)
+    try:
+        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as output:
+            for identifier, target in targets:
+                if identifier.startswith('lerobot:'):
+                    prefix = Path('lerobot') / target.name
+                elif identifier.startswith('bundle:'):
+                    prefix = Path('capture_bundle') / target.name
+                else:
+                    prefix = Path('mcap')
+                if target.is_file():
+                    output.write(target, prefix / target.name)
+                else:
+                    for path in dataset_files(target):
+                        output.write(path, prefix / path.relative_to(target))
+        return archive
+    except BaseException:
+        archive.unlink(missing_ok=True)
+        raise
+
+
 def dataset_video(target: Path, relative: str) -> Path:
     candidate = target / relative
     if candidate.suffix != '.mp4' or candidate not in dataset_files(target) or not candidate.resolve().is_relative_to((target / 'videos').resolve()):

@@ -14,6 +14,38 @@ from middleware.core.platform_api import register_platform_routes
 
 
 class PlatformErrorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_upload_continues_after_one_recording_fails(self):
+        calls = []
+
+        def upload(recording_id, selection, source_format, new_upload):
+            calls.append((recording_id, source_format, new_upload))
+            if recording_id == 'broken':
+                raise UploadError('SOURCE_MISSING', '本地数据不存在')
+            return {'ok': True}
+
+        platform = SimpleNamespace(error=None)
+        runtime = SimpleNamespace(platform=platform, recorder=SimpleNamespace(upload_recording=upload))
+        app = web.Application()
+        register_platform_routes(app, runtime)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post('/api/platform/upload-recordings', json={
+                'selection': {'mode': 'platform', 'connection_id': 'connection', 'task_id': 'task'},
+                'recordings': [
+                    {'recording_id': 'first', 'source_format': 'MCAP'},
+                    {'recording_id': 'broken', 'source_format': 'MCAP'},
+                    {'recording_id': 'last', 'source_format': 'MCAP'},
+                ],
+            })
+            self.assertEqual(response.status, 200)
+            result = await response.json()
+            self.assertEqual([item['recording_id'] for item in result['uploaded']], ['first', 'last'])
+            self.assertEqual(result['failed'], [{
+                'recording_id': 'broken', 'code': 'SOURCE_MISSING', 'reason': '本地数据不存在',
+            }])
+            self.assertEqual(calls, [
+                ('first', 'MCAP', True), ('broken', 'MCAP', True), ('last', 'MCAP', True),
+            ])
+
     async def test_missing_connection_service_reports_recovery_action(self):
         app = web.Application()
         register_platform_routes(app, SimpleNamespace(platform=None))
