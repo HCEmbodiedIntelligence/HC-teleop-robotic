@@ -180,6 +180,7 @@
       ? `平台：${connection.platform_name} · 机器人：${connection.robot_name} · ${status}`
       : '尚未连接平台';
     el('platformEnabled').checked = enabled;
+    el('platformEnabledLabel').textContent = enabled ? '上传已开启' : '启用上传';
     el('platformAuto').checked = state.auto_upload === true;
     el('platformAuto').disabled = !enabled || active;
     el('platformTasks').disabled = !enabled || active;

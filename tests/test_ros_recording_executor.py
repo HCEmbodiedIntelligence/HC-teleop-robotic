@@ -4,6 +4,7 @@ from middleware.core.ros_recording_executor import (
     RateGate,
     RosRecordingExecutor,
     _should_release_subscriptions,
+    idle_monitoring_subscriptions,
     recording_subscriptions,
 )
 
@@ -33,6 +34,37 @@ class RosRecordingExecutorTests(unittest.TestCase):
             }
         )
         self.assertEqual([item["topic"] for item in selected], ["/keep"])
+
+    def test_idle_monitor_keeps_only_small_record_only_topics(self):
+        subscriptions = [
+            {
+                "topic": "/joints",
+                "type": "sensor_msgs/msg/JointState",
+                "outputs": ["record"],
+            },
+            {
+                "topic": "/camera",
+                "type": "sensor_msgs/msg/CompressedImage",
+                "outputs": ["record"],
+            },
+            {
+                "topic": "/cloud",
+                "type": "sensor_msgs/msg/PointCloud2",
+                "outputs": ["record"],
+            },
+            {
+                "topic": "/dashboard",
+                "type": "std_msgs/msg/String",
+                "outputs": ["websocket", "record"],
+            },
+        ]
+
+        selected = idle_monitoring_subscriptions(subscriptions)
+
+        self.assertEqual(
+            [item["topic"] for item in selected],
+            ["/joints", "/dashboard"],
+        )
 
     def test_rate_gate_does_not_halve_jittery_30_hz_input(self):
         gate = RateGate()

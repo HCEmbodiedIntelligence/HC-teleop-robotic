@@ -130,6 +130,29 @@ class TopicRecorderTests(unittest.TestCase):
             self.assertEqual(item["robot_name"], "openarmx")
             self.assertEqual(item["free_joints"], ["openarmx_right_joint1"])
 
+            compact = recorder.list_recordings("mcap", compact=True)[0]
+            self.assertEqual(compact["profile_id"], "openarmx")
+            reloaded = TopicRecorder({"directory": "recordings"}, Path(directory))
+            with patch(
+                "middleware.core.topic_recorder._inspect_mcap_file",
+                side_effect=AssertionError("persistent compact cache was not used"),
+            ):
+                compact_after_restart = reloaded.list_recordings(
+                    "mcap", compact=True
+                )[0]
+            self.assertEqual(compact_after_restart["profile_id"], "openarmx")
+
+            reloaded._inspection_cache_path(recorder.path).unlink()
+            reloaded._inspection_cache.clear()
+            pending = reloaded.list_recordings("mcap", compact=True)[0]
+            self.assertTrue(pending["inspection_pending"])
+            reloaded._inspection_process.join(timeout=5)
+            self.assertFalse(reloaded._inspection_process.is_alive())
+            reloaded._inspection_cache.clear()
+            indexed = reloaded.list_recordings("mcap", compact=True)[0]
+            self.assertFalse(indexed["inspection_pending"])
+            self.assertEqual(indexed["profile_id"], "openarmx")
+
             with recorder.path.open("rb") as stream:
                 metadata = list(make_reader(stream).iter_metadata())
             self.assertEqual(len(metadata), 1)

@@ -779,7 +779,10 @@ class MiddlewareRuntime:
         bridge_health = (
             self.ros.get_topic_health() if self.ros is not None else {}
         )
-        return {**recording_health, **bridge_health}
+        # The isolated raw subscriber measures source arrival rate without
+        # competing with control, WebSocket serialization or camera callbacks.
+        # Prefer it whenever both paths observe the same recorded topic.
+        return {**bridge_health, **recording_health}
 
     def status(self) -> dict[str, Any]:
         recording_executor_status = (
@@ -789,8 +792,8 @@ class MiddlewareRuntime:
         )
         ros_status = self.ros.status() if self.ros else {"state": "stopped"}
         ros_status["topic_health"] = {
-            **recording_executor_status.get("topic_health", {}),
             **ros_status.get("topic_health", {}),
+            **recording_executor_status.get("topic_health", {}),
         }
         camera_streams = [camera.status() for camera in self.cameras.values()]
         camera_status = (

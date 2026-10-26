@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=25-dataset-categories">
+  <link rel="stylesheet" href="/static/styles.css?v=27-upload-master">
 </head>
 <body>
   <div class="app-topbar"><div class="brand"><span class="brand-mark">HC</span><div>Teleop<small>机器人遥操作</small></div></div><div class="topbar-meta"><span>机器人遥操作</span><span>HC Teleop</span></div></div>
@@ -35,8 +35,20 @@
         <article><label>关节命令</label><strong id="jointCommandState">--</strong><span id="jointCommandMeta">等待 /action/joint_states</span></article>
         <article><label>关节反馈</label><strong id="jointFeedbackState">--</strong><span id="jointFeedbackMeta">等待 /observation/joint_states</span></article>
       </div>
+      <article class="panel control-pipeline-panel">
+        <div class="panel-title"><div><h2>实时控制链路</h2><p>按数据流顺序显示各环节频率，目标控制频率为 100 Hz。</p></div><span id="controlPipelineBadge" class="tag">正在检测</span></div>
+        <div class="pipeline-diagnosis" id="controlPipelineDiagnosis" role="status"><i></i><span>正在读取 VR、逆解、命令仲裁和硬件反馈…</span></div>
+        <div class="control-pipeline" aria-label="实时控制链路频率">
+          <div class="pipeline-stage" id="pipelineVr"><span class="pipeline-index">1</span><div><label>VR 姿态</label><strong id="pipelineVrRate">--</strong><small id="pipelineVrMeta">/vrdata · 目标 60 Hz</small></div></div>
+          <div class="pipeline-stage" id="pipelineSolver"><span class="pipeline-index">2</span><div><label>逆解输出</label><strong id="pipelineSolverRate">--</strong><small id="pipelineSolverMeta">/control/solver/joint_targets</small></div></div>
+          <div class="pipeline-stage" id="pipelineMux"><span class="pipeline-index">3</span><div><label>命令仲裁</label><strong id="pipelineMuxRate">--</strong><small id="pipelineMuxMeta">VR 输入实时接收率</small></div></div>
+          <div class="pipeline-stage" id="pipelineAction"><span class="pipeline-index">4</span><div><label>仲裁输出</label><strong id="pipelineActionRate">--</strong><small id="pipelineActionMeta">/action/joint_states</small></div></div>
+          <div class="pipeline-stage" id="pipelineFeedback"><span class="pipeline-index">5</span><div><label>硬件反馈</label><strong id="pipelineFeedbackRate">--</strong><small id="pipelineFeedbackMeta">/observation/joint_states</small></div></div>
+        </div>
+        <p class="pipeline-footnote">仲裁输出是中间件更新目标的频率；HC_X1 的关节平滑器会继续以 100 Hz 向底层驱动下发。</p>
+      </article>
       <div class="grid two">
-        <article class="panel">
+        <article class="panel intervention-panel">
           <div class="panel-title"><div><h2>人工干预与纠正采集</h2><p>开始程序后，握住右 Grip 接管，正常松手自动交还。</p></div><span id="interventionState" class="tag">关闭</span></div>
           <label>录制范围<select id="interventionCaptureMode" aria-describedby="interventionCaptureHint">
             <option value="corrections_only">仅人工接管片段（默认）</option>
@@ -366,6 +378,10 @@
           <p class="platform-connection-status" id="platformConnection" role="status">正在读取连接…</p>
           <button id="platformReconnect" type="button" hidden disabled>重新连接</button>
         </div>
+        <div class="platform-master-control">
+          <div><strong>平台上传总开关</strong><small>关闭时不扫描、不重试、不发送心跳；本地录制继续可用。</small></div>
+          <label class="toggle"><input id="platformEnabled" type="checkbox"><span></span><b id="platformEnabledLabel">启用上传</b></label>
+        </div>
         <p id="platformReconnectHint" class="form-help" hidden>已保存连接信息。断网或服务重启后，可直接重新连接，无需再次粘贴链接。</p>
         <p id="platformConnectMessage" role="alert"></p>
         <details><summary>连接设置</summary>
@@ -381,10 +397,6 @@
         <div class="recording-actions"><button id="platformRefresh">刷新</button><button id="platformPrev" disabled>上一页</button><span id="platformPage"></span><button id="platformNext" disabled>下一页</button></div>
         <p id="platformDescription"></p>
         <div class="form-grid">
-          <div>
-            <label class="toggle"><input id="platformEnabled" type="checkbox"><span></span>启用平台上传功能</label>
-            <p class="form-help">关闭后停止上传、扫描、重试、平台心跳和记录刷新；本地录制继续可用。</p>
-          </div>
           <div>
             <label class="toggle"><input id="platformAuto" type="checkbox"><span></span>录制结束后自动上传</label>
             <p class="form-help">仅对已选择平台任务的录制生效。关闭后仍保存到本机，可在下方记录中手动上传。</p>
@@ -441,7 +453,7 @@
       </div>
     </form>
   </dialog>
-  <script src="/static/platform_panel.js?v=14-upload-toggle"></script>
-  <script src="/static/app.js?v=30-dataset-categories"></script>
+  <script src="/static/platform_panel.js?v=15-master-toggle"></script>
+  <script src="/static/app.js?v=32-control-rate"></script>
 </body>
 </html>

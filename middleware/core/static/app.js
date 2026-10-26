@@ -52,6 +52,9 @@ const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据
 let discoveredTopics = [];
 let latestTopicHealth = {};
 const jointMonitor = {command:new Map(), feedback:new Map()};
+let jointMonitorRenderTimer = null;
+let pipelineCounterSample = null;
+let latestPipelineActionRate = null;
 const standardTopicStandards = {
   vr_frame: { target_hz: 60, min_hz: 30 },
   joint_state: { target_hz: 100, min_hz: 50 },
@@ -302,6 +305,14 @@ function renderJointMonitor() {
   setText('#jointMonitorCount',`${names.length} 个关节`);
 }
 
+function scheduleJointMonitorRender() {
+  if(jointMonitorRenderTimer!==null)return;
+  jointMonitorRenderTimer=setTimeout(()=>{
+    jointMonitorRenderTimer=null;
+    if(!$('#overview')?.classList.contains('hidden'))renderJointMonitor();
+  },100);
+}
+
 function updateJointMonitor(event,kind) {
   const names=event.payload?.name||[], positions=event.payload?.position||[];
   if(!Array.isArray(names)||!Array.isArray(positions)||names.length!==positions.length)return;
@@ -311,7 +322,72 @@ function updateJointMonitor(event,kind) {
     const value=Number(positions[index]);
     if(Number.isFinite(value))target.set(String(name),value);
   });
-  renderJointMonitor();
+  scheduleJointMonitorRender();
+}
+
+function renderControlPipeline(ros) {
+  const health=ros.topic_health||{}, mux=ros.command_mux||{};
+  const source=mux.source||'vr';
+  const now=performance.now();
+  const count=Number(mux.received?.[source]||0);
+  const forwarded=Number(mux.forwarded||0);
+  let muxHz=null;
+  let forwardedHz=null;
+  if(pipelineCounterSample&&count>=pipelineCounterSample.count&&forwarded>=pipelineCounterSample.forwarded) {
+    const seconds=(now-pipelineCounterSample.time)/1000;
+    if(seconds>=0.35&&seconds<=5) {
+      muxHz=(count-pipelineCounterSample.count)/seconds;
+      forwardedHz=(forwarded-pipelineCounterSample.forwarded)/seconds;
+    }
+  }
+  pipelineCounterSample={time:now,count,forwarded};
+  if(Number.isFinite(mux.received_hz?.[source]))muxHz=Number(mux.received_hz[source]);
+  if(Number.isFinite(mux.forwarded_hz))forwardedHz=Number(mux.forwarded_hz);
+
+  const topicRate=(topic,target)=>{
+    const item=health[topic];
+    return {hz:item?.has_data?Number(item.hz||0):0,target,hasData:Boolean(item?.has_data),
+      gap:Number.isFinite(item?.max_gap_ms)?Number(item.max_gap_ms):null};
+  };
+  const stages=[
+    ['pipelineVr',topicRate('/vrdata',60)],
+    ['pipelineSolver',topicRate('/control/solver/joint_targets',100)],
+    ['pipelineMux',{hz:muxHz??0,target:100,hasData:muxHz!==null||Number(mux.last_received_age?.[source])<=1.8,gap:null}],
+    ['pipelineAction',forwardedHz!==null?{hz:forwardedHz,target:100,hasData:Number(mux.last_received_age?.[source])<=1.8,gap:null}:topicRate('/action/joint_states',100)],
+    ['pipelineFeedback',topicRate('/observation/joint_states',100)],
+  ];
+  const paused=mux.output_enabled===false;
+  for(const [id,item] of stages) {
+    const element=$('#'+id), rate=$('#'+id+'Rate'), meta=$('#'+id+'Meta');
+    if(!element||!rate)continue;
+    const ratio=item.target?item.hz/item.target:0;
+    const optionalUnavailable=id==='pipelineSolver'&&!item.hasData;
+    const state=optionalUnavailable?'neutral':!item.hasData?'bad':ratio>=.8?'good':ratio>=.5?'warn':'bad';
+    element.className=`pipeline-stage ${paused&&id!=='pipelineVr'?'idle':state}`;
+    rate.textContent=item.hasData?`${item.hz.toFixed(1)} Hz`:optionalUnavailable?'未监控':'无数据';
+    if(meta) {
+      const base=meta.dataset.base||(meta.dataset.base=meta.textContent);
+      meta.textContent=`${base}${item.gap!==null?` · 最大间隔 ${item.gap.toFixed(1)} ms`:''}`;
+    }
+  }
+
+  const vr=stages[0][1], solver=stages[1][1], input=stages[2][1], action=stages[3][1], feedback=stages[4][1];
+  latestPipelineActionRate=action.hasData?action.hz:null;
+  let state='good', label='链路稳定', diagnosis='控制命令与硬件反馈频率正常。';
+  if(ros.state!=='running') {state='bad';label='ROS 异常';diagnosis='ROS 2 中间件未正常运行。';}
+  else if(paused) {state='idle';label='输出已暂停';diagnosis='命令输出当前被急停门控关闭。';}
+  else if(!vr.hasData||vr.hz<30) {state='bad';label='VR 输入异常';diagnosis='VR 姿态数据不足，检查头显连接和跟踪状态。';}
+  else if(solver.hasData&&solver.hz<80) {state='warn';label='逆解掉速';diagnosis='VR 输入正常，但逆解输出未达到 80 Hz。';}
+  else if(!input.hasData) {state='idle';label='等待采样';diagnosis='正在计算命令仲裁的实时接收率。';}
+  else if(input.hasData&&input.hz<80) {state='warn';label='控制节点掉速';diagnosis='逆解正常，但控制节点送入命令仲裁的频率偏低。';}
+  else if(!action.hasData||action.hz<80) {state='bad';label='命令转发掉速';diagnosis='上游控制正常，但最终下发频率偏低，请检查命令仲裁。';}
+  else if(!feedback.hasData||feedback.hz<80) {state='bad';label='硬件反馈掉速';diagnosis='命令下发正常，但硬件反馈频率偏低。';}
+  const rejected=Number(mux.rejected||0), forwardedTotal=Number(mux.forwarded||0);
+  const total=rejected+forwardedTotal;
+  const rejectText=total?`累计转发 ${forwardedTotal.toLocaleString()}，拒绝 ${rejected.toLocaleString()}。`:'';
+  const banner=$('#controlPipelineDiagnosis'), badge=$('#controlPipelineBadge');
+  if(banner){banner.className=`pipeline-diagnosis ${state}`;banner.querySelector('span').textContent=`${diagnosis} ${rejectText}`.trim();}
+  if(badge){badge.textContent=label;badge.className=`tag pipeline-badge ${state}`;}
 }
 
 let safetyOutputEnabled=null;
@@ -362,6 +438,7 @@ function renderStatus(data) {
   setState('#rosState',ros.state);
   setText('#rosMeta',`${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`);
   renderCommandMux(ros);
+  renderControlPipeline(ros);
   renderIntervention(ros.ownership, (data.recording?.status||data.recording)?.corrections);
   renderSafetyButton(ros);
   setState('#vrState', vr.state);
@@ -398,7 +475,9 @@ function renderStatus(data) {
   }
   if (ros.topic_health) {
     latestTopicHealth = ros.topic_health;
-    const commandInfo=messageState(ros.topic_health['/action/joint_states']);
+    const commandInfo=latestPipelineActionRate===null?messageState(ros.topic_health['/action/joint_states']):
+      latestPipelineActionRate>=80?['正常',`${latestPipelineActionRate.toFixed(1)} Hz`,'running']:
+      ['偏低',`${latestPipelineActionRate.toFixed(1)} Hz`,'warning'];
     const feedbackInfo=messageState(ros.topic_health['/observation/joint_states']);
     setState('#jointCommandState',commandInfo[0]);
     setText('#jointCommandMeta',commandInfo[1]+' · /action/joint_states');
@@ -1124,7 +1203,7 @@ function scheduleDatasetPolling(files, failed=false) {
   if (datasetPollTimer !== null) clearTimeout(datasetPollTimer);
   datasetPollTimer = null;
   if (!datasetPageVisible()) return;
-  const busy = files.some(file => file.is_current || file.export_state === 'exporting');
+  const busy = files.some(file => file.is_current || file.export_state === 'exporting' || file.inspection_pending);
   datasetPollTimer = setTimeout(() => {
     datasetPollTimer = null;
     if (datasetPageVisible()) loadDatasets();
@@ -1160,7 +1239,7 @@ async function fetchDatasetDetails(file) {
 }
 
 function datasetSummaryValues(file) {
-  const profile = file.profile_display_name || file.profile_id || file.robot_name || '未知（旧数据）';
+  const profile = file.profile_display_name || file.profile_id || file.robot_name || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
   if (isLeRobotDataset(file)) return [
     ['机器人', profile], ['数据大小', file.size_human || '--'],
     ['时长', file.duration_human || '--'], ['总帧数', String(file.frames ?? file.total_frames ?? 0)],
@@ -1282,10 +1361,10 @@ async function loadDatasets() {
       const profileCell = document.createElement('td');
       const profileTag = document.createElement('span');
       profileTag.className = 'tag';
-      profileTag.textContent = file.profile_display_name || file.profile_id || '未知（旧数据）';
+      profileTag.textContent = file.profile_display_name || file.profile_id || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
       profileTag.title = file.profile_id
         ? `Profile: ${file.profile_id}${file.robot_name ? ` · Robot: ${file.robot_name}` : ''}`
-        : '该文件没有 HC Teleop Profile metadata';
+        : file.inspection_pending ? '后台正在读取 MCAP 元数据' : '该文件没有 HC Teleop Profile metadata';
       if (!file.profile_id) {
         profileTag.style.color = 'var(--muted)';
         profileTag.style.borderColor = 'var(--border)';
@@ -1298,12 +1377,12 @@ async function loadDatasets() {
 
       const durationCell = document.createElement('td');
       durationCell.style.font = '12px monospace';
-      durationCell.textContent = file.duration_human || '--';
+      durationCell.textContent = file.inspection_pending ? '分析中…' : (file.duration_human || '--');
 
       const msgCountCell = document.createElement('td');
       msgCountCell.style.font = '12px monospace';
       msgCountCell.style.color = 'var(--cyan)';
-      msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : '--');
+      msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--');
 
       const topicsCell = document.createElement('td');
       topicsCell.style.fontSize = '12px';
@@ -1312,7 +1391,7 @@ async function loadDatasets() {
       } else if (file.topic_count) {
         topicsCell.textContent = `${file.topic_count} 个话题 (${file.avg_rate_hz || 0} Hz)`;
       } else {
-        topicsCell.textContent = file.is_current ? '录制中…' : '--';
+        topicsCell.textContent = file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--';
       }
 
       const timeCell = document.createElement('td');

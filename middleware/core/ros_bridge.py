@@ -89,8 +89,9 @@ class TopicHealthTracker:
         with self._lock:
             messages = self.messages
             last_stamp = self.last_stamp
-            timestamps_len = len(self._timestamps)
-            dt = (self._timestamps[-1] - self._timestamps[0]) if timestamps_len >= 2 else 0.0
+            timestamps = list(self._timestamps)
+            timestamps_len = len(timestamps)
+            dt = (timestamps[-1] - timestamps[0]) if timestamps_len >= 2 else 0.0
 
         if not timestamps_len or (now - last_stamp > 1.8):
             hz = 0.0
@@ -110,6 +111,14 @@ class TopicHealthTracker:
             state = "ok"
             message = f"正常 ({hz:.1f} Hz)"
 
+        intervals = [later - earlier for earlier, later in zip(timestamps, timestamps[1:])]
+        max_gap_ms = round(max(intervals) * 1000.0, 1) if intervals else None
+        if intervals:
+            ordered = sorted(intervals)
+            p95_gap_ms = round(ordered[int((len(ordered) - 1) * 0.95)] * 1000.0, 1)
+        else:
+            p95_gap_ms = None
+
         return {
             "topic": self.topic,
             "type": self.msg_type,
@@ -122,6 +131,8 @@ class TopicHealthTracker:
             "state": state,
             "message": message,
             "last_received_age": round(now - last_stamp, 2) if last_stamp > 0 else None,
+            "max_gap_ms": max_gap_ms,
+            "p95_gap_ms": p95_gap_ms,
         }
 
 
@@ -178,6 +189,10 @@ class RosBridge:
         self._replay_active = False
         self._mux_received = {"vr": 0, "exoskeleton": 0, "motion": 0}
         self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0, "motion": 0.0}
+        self._mux_received_times = {
+            "vr": deque(maxlen=300), "exoskeleton": deque(maxlen=300), "motion": deque(maxlen=300)
+        }
+        self._mux_forwarded_times: deque[float] = deque(maxlen=300)
         self._mux_forwarded = 0
         self._mux_rejected = 0
         domain_id = int(config.get("domain_id", 0))
@@ -206,6 +221,12 @@ class RosBridge:
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
+            def recent_rate(samples: deque[float]) -> float:
+                recent = [stamp for stamp in samples if now - stamp <= 2.0]
+                if len(recent) < 2 or now - recent[-1] > 1.0:
+                    return 0.0
+                return round((len(recent) - 1) / (recent[-1] - recent[0]), 1)
+
             result = dict(self._status)
             result['ownership'] = self.ownership.snapshot()
             result["topic_health"] = {
@@ -232,11 +253,16 @@ class RosBridge:
                     "control_source_topic", "/control/source"
                 ),
                 "received": dict(self._mux_received),
+                "received_hz": {
+                    source: recent_rate(samples)
+                    for source, samples in self._mux_received_times.items()
+                },
                 "last_received_age": {
                     source: round(now - stamp, 2) if stamp else None
                     for source, stamp in self._mux_last_received.items()
                 },
                 "forwarded": self._mux_forwarded,
+                "forwarded_hz": recent_rate(self._mux_forwarded_times),
                 "rejected": self._mux_rejected,
             }
             return result
@@ -405,6 +431,7 @@ class RosBridge:
         with self._lock:
             self._mux_received[source] += 1
             self._mux_last_received[source] = now
+            self._mux_received_times[source].append(now)
             ready = self._ready_locked(now)
             if (not valid or stamp <= max(self._source_cutoff, self._source_stamps.get(source, 0))
                     or not ready or not self._command_output_enabled
@@ -436,6 +463,7 @@ class RosBridge:
                     evidence['command_stamp_ns'] = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
                     self._action_sink(evidence)
             self._mux_forwarded += 1
+            self._mux_forwarded_times.append(time.monotonic())
             return True
 
     def _enqueue(self, command: str, data: Any) -> bool:

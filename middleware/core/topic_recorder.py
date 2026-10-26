@@ -378,6 +378,41 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
         }
 
 
+def _inspection_cache_path(recording_path: Path) -> Path:
+    return recording_path.parent / f".{recording_path.name}.inspection.json"
+
+
+def _write_inspection_cache(
+    recording_path: Path,
+    signature: tuple[int, int],
+    value: dict[str, Any],
+) -> None:
+    destination = _inspection_cache_path(recording_path)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {"signature": list(signature), "value": value},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+
+
+def _index_mcap_files(paths: list[str]) -> None:
+    """Build compact-list summaries away from WebRTC and control threads."""
+    _lower_recording_priority()
+    for value in paths:
+        path = Path(value)
+        try:
+            stat = path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+            _write_inspection_cache(path, signature, _inspect_mcap_file(path))
+        except (OSError, ValueError, TypeError):
+            continue
+
+
 from .correction_support import CorrectionSupport
 
 
@@ -427,6 +462,7 @@ class TopicRecorder(CorrectionSupport):
         self._capture_identity = None
         self.task_managed = False
         self._inspection_cache: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+        self._inspection_process: Any = None
 
     def ipc_resources(self) -> tuple:
         """Resources inherited by the raw ROS subscription process."""
@@ -625,6 +661,22 @@ class TopicRecorder(CorrectionSupport):
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self._artifacts.close(self._capture_identity, self._last_error, capture_ended_at)
         self._capture_identity = None
+        # The dataset page deliberately uses a compact listing so hundreds of
+        # historical MCAP files do not get opened on every refresh. Cache the
+        # one file that just closed, including its embedded robot metadata, so
+        # the compact row is complete immediately and after a server restart.
+        if self.path is not None and not self._last_error and self.path.is_file():
+            try:
+                stat = self.path.stat()
+                cache_key = "file:" + str(self.path.resolve())
+                self._cached_inspection(
+                    cache_key,
+                    (stat.st_size, stat.st_mtime_ns),
+                    lambda: _inspect_mcap_file(self.path),
+                    self._inspection_cache_path(self.path),
+                )
+            except OSError:
+                pass
         if self.save_format in ("lerobot", "both") and not self._last_error:
             self._start_lerobot_export()
         return self.status()
@@ -823,12 +875,72 @@ class TopicRecorder(CorrectionSupport):
             )
         return result
 
-    def _cached_inspection(self, key: str, signature: tuple[int, int], inspect) -> dict[str, Any]:
+    @staticmethod
+    def _inspection_cache_path(recording_path: Path) -> Path:
+        return _inspection_cache_path(recording_path)
+
+    def _load_persistent_inspection(
+        self,
+        key: str,
+        signature: tuple[int, int],
+        persistent_path: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            stored = json.loads(persistent_path.read_text(encoding="utf-8"))
+            stored_signature = tuple(stored.get("signature", ()))
+            stored_value = stored.get("value")
+            if stored_signature == signature and isinstance(stored_value, dict):
+                self._inspection_cache[key] = (signature, stored_value)
+                return stored_value
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return None
+
+    def _schedule_compact_index(self, paths: list[Path]) -> None:
+        process = self._inspection_process
+        if process is not None and process.is_alive():
+            return
+        if process is not None:
+            process.join(timeout=0)
+        unique = sorted(
+            {path.resolve() for path in paths if path.is_file()},
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if not unique:
+            self._inspection_process = None
+            return
+        self._inspection_process = self._mp.Process(
+            target=_index_mcap_files,
+            args=([str(path) for path in unique],),
+            name="mcap-indexer",
+            daemon=True,
+        )
+        self._inspection_process.start()
+
+    def _cached_inspection(
+        self,
+        key: str,
+        signature: tuple[int, int],
+        inspect,
+        persistent_path: Path | None = None,
+    ) -> dict[str, Any]:
         cached = self._inspection_cache.get(key)
         if cached and cached[0] == signature:
             return cached[1]
+        if persistent_path is not None:
+            stored_value = self._load_persistent_inspection(
+                key, signature, persistent_path
+            )
+            if stored_value is not None:
+                return stored_value
         value = inspect()
         self._inspection_cache[key] = (signature, value)
+        if persistent_path is not None:
+            try:
+                _write_inspection_cache(Path(key.removeprefix("file:")), signature, value)
+            except OSError:
+                pass
         return value
 
     def recording_format_counts(self) -> dict[str, int]:
@@ -862,6 +974,7 @@ class TopicRecorder(CorrectionSupport):
         if format_filter not in {'all', 'mcap', 'lerobot', 'bundle'}:
             raise ValueError('invalid recording format filter')
         files = []
+        compact_index_queue: list[Path] = []
         active_path = (
             self.path.resolve()
             if (self.path and self.is_recording())
@@ -896,9 +1009,22 @@ class TopicRecorder(CorrectionSupport):
 
             cache_key = 'file:' + str(p.resolve())
             cached = self._inspection_cache.get(cache_key)
+            persistent_cache = self._inspection_cache_path(p)
+            if compact and not cached and persistent_cache.is_file():
+                self._load_persistent_inspection(
+                    cache_key, (stat.st_size, stat.st_mtime_ns), persistent_cache
+                )
+                cached = self._inspection_cache.get(cache_key)
+            inspection_pending = bool(
+                compact and p.suffix == ".mcap" and not is_cur
+                and not (cached and cached[0] == (stat.st_size, stat.st_mtime_ns))
+            )
+            if inspection_pending:
+                compact_index_queue.append(p)
             meta = (cached[1] if compact and cached and cached[0] == (stat.st_size, stat.st_mtime_ns)
                     else self._cached_inspection(cache_key, (stat.st_size, stat.st_mtime_ns),
-                                                 lambda: _inspect_mcap_file(p))) \
+                                                 lambda: _inspect_mcap_file(p),
+                                                 persistent_cache)) \
                 if (p.suffix == ".mcap" and not is_cur and (not compact or cached)) else {
                 "duration_sec": 0.0,
                 "duration_human": "正在写入…" if is_cur else "--",
@@ -932,6 +1058,7 @@ class TopicRecorder(CorrectionSupport):
                 "controller_config": meta["controller_config"],
                 "free_joints": meta["free_joints"],
                 "details_available": p.suffix == '.mcap' and not is_cur,
+                "inspection_pending": inspection_pending,
                 "marked": bool(mark.get("marked", False)),
                 "marked_at": str(mark.get("marked_at", "")),
                 "mark_source": str(mark.get("mark_source", "")),
@@ -971,6 +1098,8 @@ class TopicRecorder(CorrectionSupport):
                         ))
                     except (OSError, ValueError, KeyError, TypeError):
                         continue
+        if compact_index_queue:
+            self._schedule_compact_index(compact_index_queue)
         files.sort(key=lambda x: x["timestamp"], reverse=True)
         return self._artifacts.annotate(files)
 
@@ -979,6 +1108,10 @@ class TopicRecorder(CorrectionSupport):
         try:
             return self.stop()
         finally:
+            if self._inspection_process is not None:
+                self._inspection_process.terminate()
+                self._inspection_process.join(timeout=2)
+                self._inspection_process = None
             self._artifacts.shutdown()
 
     def delete_recording(self, filename: str) -> None:
@@ -1012,6 +1145,11 @@ class TopicRecorder(CorrectionSupport):
         if active_path is not None and target == active_path:
             raise ValueError(f"cannot delete actively recording file: {filename}")
         target.unlink()
+        self._inspection_cache.pop("file:" + str(target.resolve()), None)
+        try:
+            self._inspection_cache_path(target).unlink()
+        except FileNotFoundError:
+            pass
         try:
             self._mark_path(target).unlink()
         except FileNotFoundError:
