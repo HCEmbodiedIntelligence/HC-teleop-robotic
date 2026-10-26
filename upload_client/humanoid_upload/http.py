@@ -50,16 +50,16 @@ def network_error(error, timeout):
     if isinstance(reason, ssl.SSLCertVerificationError):
         return UploadError('TLS_CERTIFICATE_INVALID', '平台 HTTPS 证书验证失败，请检查证书、域名和系统时间')
     if isinstance(reason, ssl.SSLError):
-        return UploadError('TLS_CONNECTION_FAILED', '平台 HTTPS 握手失败，请检查 HTTPS 地址和证书配置', retry=True)
+        return UploadError('TLS_CONNECTION_FAILED', '平台 HTTPS 握手失败，请检查 HTTPS 地址和证书配置', retry=True, platform_retry=True)
     if isinstance(reason, (TimeoutError, socket.timeout)):
-        return UploadError('NETWORK_TIMEOUT', f'连接平台超时（等待 {timeout:g} 秒），请检查平台地址、网络和代理设置后重试', retry=True)
+        return UploadError('NETWORK_TIMEOUT', f'连接平台超时（等待 {timeout:g} 秒），请检查平台地址、网络和代理设置后重试', retry=True, platform_retry=True)
     if isinstance(reason, socket.gaierror):
-        return UploadError('NETWORK_DNS_FAILED', '无法解析平台域名，请检查连接链接中的域名及采集端 DNS 设置', retry=True)
+        return UploadError('NETWORK_DNS_FAILED', '无法解析平台域名，请检查连接链接中的域名及采集端 DNS 设置', retry=True, platform_retry=True)
     if isinstance(reason, ConnectionRefusedError) or getattr(reason, 'errno', None) == errno.ECONNREFUSED:
-        return UploadError('NETWORK_CONNECTION_REFUSED', '平台或代理拒绝连接，请检查地址、端口及服务是否启动', retry=True)
+        return UploadError('NETWORK_CONNECTION_REFUSED', '平台或代理拒绝连接，请检查地址、端口及服务是否启动', retry=True, platform_retry=True)
     if getattr(reason, 'errno', None) in {errno.ENETUNREACH, errno.EHOSTUNREACH}:
-        return UploadError('NETWORK_UNREACHABLE', '无法到达平台网络，请检查采集端网络、路由和防火墙设置', retry=True)
-    return UploadError('NETWORK_UNCERTAIN', '网络连接失败或连接中断，请检查平台地址、网络和代理设置后重试', retry=True)
+        return UploadError('NETWORK_UNREACHABLE', '无法到达平台网络，请检查采集端网络、路由和防火墙设置', retry=True, platform_retry=True)
+    return UploadError('NETWORK_UNCERTAIN', '网络连接失败或连接中断，请检查平台地址、网络和代理设置后重试', retry=True, platform_retry=True)
 
 
 def retry_after(value):
@@ -111,10 +111,11 @@ class Http:
                     try:
                         return json.loads(raw)
                     except ValueError:
-                        raise UploadError("RESPONSE_INVALID", "响应不完整，按原 UUID 对账", retry=True) from None
+                        raise UploadError("RESPONSE_INVALID", "响应不完整，按原 UUID 对账", retry=True,
+                                          platform_retry=True) from None
                 # A missing ETag is uncertain, authorize-parts will reconcile.
                 if not response.headers.get("ETag"):
-                    raise UploadError("PUT_RESPONSE_UNCERTAIN", retry=True)
+                    raise UploadError("PUT_RESPONSE_UNCERTAIN", retry=True, platform_retry=True)
                 return None
         except HTTPError as error:
             after = retry_after(error.headers.get("Retry-After"))
@@ -134,7 +135,7 @@ class Http:
                               "平台服务或网络代理暂时不可用，请检查服务及代理设置后重试" if error.code in {502, 503} else
                               "平台服务发生错误，请稍后重试或联系平台管理员")
                     action += f"（HTTP {error.code}）"
-                raise UploadError(code, action, retry=True, after=after) from None
+                raise UploadError(code, action, retry=True, after=after, platform_retry=True) from None
             if error.code == 409 and not code.startswith('CAPTURE_') and code not in {"CLIENT_UPLOAD_ID_CONFLICT", "ASSET_SHA256_MISMATCH", "ASSET_CRC64_MISMATCH", "TASK_OWNERSHIP_CHANGED", "COLLECTION_TASK_INACTIVE", "TASK_NOT_READY", "LOCAL_ROBOT_MISMATCH", "CONNECTION_TICKET_USED", "CONNECTION_PERMISSION_CHANGED", "ROBOT_MODEL_REQUIRED", "ROBOT_MODEL_UNAVAILABLE", "ROBOT_IDENTITY_DISABLED"}:
                 raise UploadError(code, "先查询服务端事实；持续冲突请核对资产", retry=True, after=after, conflict=True) from None
             action = "检查平台任务、会话及文件校验结果；修复后显式 retry"

@@ -23,7 +23,8 @@ def _work(delay):
 
 
 def _public_error():
-    raise UploadError('LOCAL_CONTENT_CHANGED', '保留原文件', retry=True, after=7, conflict=True)
+    raise UploadError('LOCAL_CONTENT_CHANGED', '保留原文件', retry=True, after=7,
+                      conflict=True, platform_retry=True)
 
 
 def _private_error():
@@ -60,6 +61,7 @@ def test_preserves_public_errors_and_worker_survives_task_failure():
         error = caught.value
         assert (error.code, error.action, error.retry, error.after, error.conflict) == (
             'LOCAL_CONTENT_CHANGED', '保留原文件', True, 7, True)
+        assert error.platform_retry is True
         with pytest.raises(BackgroundProcessError, match='ValueError') as caught:
             worker.call(_private_error)
         assert 'credential' not in str(caught.value)

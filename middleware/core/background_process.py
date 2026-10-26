@@ -76,7 +76,7 @@ def _serve(connection, stop):
                 from humanoid_upload.common import UploadError
                 if isinstance(error, UploadError):
                     result = {'upload_error': {key: getattr(error, key) for key in (
-                        'code', 'action', 'retry', 'after', 'conflict')}}
+                        'code', 'action', 'retry', 'after', 'conflict', 'platform_retry')}}
                 else:
                     # Never pass a transport body or credential into the UI.
                     result = {'error': type(error).__name__}

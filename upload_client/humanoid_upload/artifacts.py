@@ -12,6 +12,34 @@ from .common import Limiter, UploadError, atomic_json, canonical, read_json, val
 from .capture_plan import OWNERSHIP_FIELDS, reference, validate_snapshot, validate_lerobot_info
 
 
+def asset_stat_snapshot(root, assets):
+    """Cheaply identify the exact files covered by an already verified manifest.
+
+    Full checksums remain authoritative.  This snapshot only avoids repeating
+    them while the file identity and kernel-maintained change timestamps are
+    unchanged.
+    """
+    root = Path(root)
+    result = []
+    try:
+        for asset in assets:
+            path = root / asset['path']
+            value = path.stat()
+            if path.is_symlink() or not stat.S_ISREG(value.st_mode):
+                return None
+            result.append({
+                'path': asset['path'],
+                'size': value.st_size,
+                'device': value.st_dev,
+                'inode': value.st_ino,
+                'mtime_ns': value.st_mtime_ns,
+                'ctime_ns': value.st_ctime_ns,
+            })
+    except (KeyError, OSError, TypeError):
+        return None
+    return result
+
+
 def artifact_id(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', value):
         raise UploadError('ARTIFACT_ID_INVALID')
@@ -240,4 +268,3 @@ def manifest_for_ready(descriptor, cfg, client_id):
         manifest['capture_plan'] = reference(snapshot)
     validate(manifest, 'robot-ingest-manifest')
     return root, marker, manifest
-

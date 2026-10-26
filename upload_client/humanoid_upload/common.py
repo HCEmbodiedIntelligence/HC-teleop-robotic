@@ -11,9 +11,11 @@ from urllib.parse import urlsplit
 
 class UploadError(Exception):
     """Only public codes/actions: never log a transport exception or response body."""
-    def __init__(self, code, action="检查导出并重新生成完成包", *, retry=False, after=0, conflict=False):
+    def __init__(self, code, action="检查导出并重新生成完成包", *, retry=False, after=0,
+                 conflict=False, platform_retry=False):
         self.code, self.action, self.retry, self.after = code, action, retry, after
         self.conflict = conflict
+        self.platform_retry = platform_retry
         super().__init__(code)
 
 

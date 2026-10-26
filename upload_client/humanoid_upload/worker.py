@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .bundle import manifest_for
-from .artifacts import ArtifactLocks, manifest_for_ready
+from .artifacts import ArtifactLocks, asset_stat_snapshot, manifest_for_ready
 from .common import UploadError, canonical, validate
 from .http import Http
 
@@ -196,10 +196,15 @@ class Worker:
 
     def verify(self, job, cfg):
         self.check_cancelled(job)
+        snapshot = asset_stat_snapshot(job['root'], job['manifest']['assets'])
+        if snapshot is not None and snapshot == job.get('verified_assets'):
+            return
         _, _, manifest = (manifest_for_ready(job['descriptor'], cfg, job['id']) if job.get('descriptor')
                           else manifest_for(job["root"], cfg, job["id"]))
         if canonical(manifest) != canonical(job["manifest"]):
             raise UploadError("LOCAL_CONTENT_CHANGED", "保留旧队列；用新 export_id 重新导出")
+        job['verified_assets'] = asset_stat_snapshot(job['root'], job['manifest']['assets'])
+        self.queue.save(job)
 
     @staticmethod
     def recording_capacity(job,http):
@@ -305,9 +310,14 @@ class Worker:
         for job in self.queue.jobs(due=True):
             if self.should_stop():
                 break
+            platform = job['frozen']['platform_base_url']
+            gate = self.queue.platform_backoff(platform)
+            if gate is not None and gate['next_at'] > time.time():
+                continue
             try:
                 self.process(job)
                 job["attempts"] = 0
+                self.queue.clear_platform_backoff(platform)
             except UploadError as error:
                 job["attempts"] += 1
                 retry = error.retry and (not self.cfg["max_attempts"] or job["attempts"] < self.cfg["max_attempts"])
@@ -318,6 +328,20 @@ class Worker:
                 delay = max(error.after, min(self.cfg["retry_max_seconds"], delay*random.uniform(1, 1.2)))
                 job.update(state="retry_wait" if retry else "needs_attention", terminal=not retry,
                            next_at=time.time()+delay if retry else 0, code=error.code, next_action=error.action)
+                if retry and error.platform_retry:
+                    failures = (gate or {}).get('failures', 0) + 1
+                    # A queue-wide outage must back off more aggressively than
+                    # one job.  After several failures this becomes one cheap
+                    # recovery attempt every five minutes, while explicit
+                    # operator retry can still clear the circuit immediately.
+                    platform_delay = min(
+                        300,
+                        self.cfg["retry_base_seconds"] * 2**min(failures - 1, 20),
+                    )
+                    platform_delay = max(error.after, platform_delay * random.uniform(1, 1.2))
+                    self.queue.set_platform_backoff(
+                        platform, failures, time.time() + platform_delay, error.code
+                    )
             except (OSError, ValueError, KeyError, TypeError):
                 job.update(state="needs_attention", terminal=True, next_at=0,
                            code="LOCAL_OR_PROTOCOL_ERROR", next_action="检查本地文件/磁盘及平台协议；修复后显式 retry")

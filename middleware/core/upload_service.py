@@ -251,6 +251,7 @@ class UploadService:
                 'default_binding': self.binding_snapshot() if self.default_binding_id else None,
                 'binding_values': copy.deepcopy(self.bindings.get(self.default_binding_id) or
                     {key: self.cfg.get(key, '') for key in self.binding_fields}),
+                'platform_backoffs': self.queue.platform_backoffs() if self.queue else {},
                 'auto_enqueue': bool(self.cfg['auto_enqueue']), 'jobs': self.jobs()}
 
 

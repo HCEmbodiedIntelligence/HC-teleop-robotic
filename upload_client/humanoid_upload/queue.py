@@ -27,6 +27,8 @@ class Queue:
                        "terminal INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0)")
             db.execute("CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY, job_id TEXT, "
                        "at REAL, state TEXT, code TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS platform_backoff (platform TEXT PRIMARY KEY, "
+                       "failures INTEGER NOT NULL, next_at REAL NOT NULL, code TEXT NOT NULL)")
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cancellations (job_id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS artifact_jobs (artifact_id TEXT PRIMARY KEY, job_id TEXT NOT NULL)")
@@ -143,6 +145,30 @@ class Queue:
             db.execute("INSERT INTO events(job_id,at,state,code) VALUES(?,?,?,?)",
                        (job["id"], job["updated_at"], job["state"], job.get("code")))
 
+    def platform_backoff(self, platform):
+        with self.connect() as db:
+            row = db.execute("SELECT failures,next_at,code FROM platform_backoff WHERE platform=?",
+                             (platform,)).fetchone()
+        return None if row is None else {'failures': row['failures'], 'next_at': row['next_at'],
+                                         'code': row['code']}
+
+    def platform_backoffs(self):
+        with self.connect() as db:
+            return {row['platform']: {'failures': row['failures'], 'next_at': row['next_at'],
+                                      'code': row['code']}
+                    for row in db.execute('SELECT platform,failures,next_at,code FROM platform_backoff')}
+
+    def set_platform_backoff(self, platform, failures, next_at, code):
+        with self.connect() as db:
+            db.execute("INSERT INTO platform_backoff VALUES(?,?,?,?) "
+                       "ON CONFLICT(platform) DO UPDATE SET failures=excluded.failures, "
+                       "next_at=excluded.next_at, code=excluded.code",
+                       (platform, failures, next_at, code))
+
+    def clear_platform_backoff(self, platform):
+        with self.connect() as db:
+            db.execute("DELETE FROM platform_backoff WHERE platform=?", (platform,))
+
     def cancelled(self, job_id):
         with self.connect() as db:
             return db.execute("SELECT 1 FROM cancellations WHERE job_id=?", (job_id,)).fetchone() is not None
@@ -183,6 +209,9 @@ class Queue:
                 db.execute("DELETE FROM cancellations WHERE job_id=?", (job_id,))
             job.update(terminal=False, next_at=0, attempts=0, code=None, state="queued", resume_requested=resume)
             self.save(job)
+            # An explicit operator retry is also an explicit request to test
+            # the platform now instead of waiting for the shared circuit.
+            self.clear_platform_backoff(job['frozen']['platform_base_url'])
             return job
 
 

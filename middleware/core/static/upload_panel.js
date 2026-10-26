@@ -42,7 +42,10 @@ window.mountUploadPanel = function (element) {
       const value = await call('');
       if (disposed) return;
       error.textContent = '';
+      const activeBackoff = Object.values(value.platform_backoffs || {}).find(item => Number(item.next_at) * 1000 > Date.now());
+      const retrySeconds = activeBackoff ? Math.max(1, Math.ceil(Number(activeBackoff.next_at) - Date.now() / 1000)) : 0;
       element.querySelector('[data-status]').textContent = !value.enabled ? '上传未启用，请勾选下方“启用上传”并保存；本地录制可继续使用' :
+        activeBackoff ? `平台连接异常，上传队列已暂停（${activeBackoff.code}）；约 ${retrySeconds} 秒后只重试一个任务` :
         `${value.running ? '上传服务运行中' : '上传服务未运行'}；自动入队${value.auto_enqueue ? '开启' : '关闭'}`;
       const settings = element.querySelector('[data-settings]');
       if (!settingsLoaded) {
