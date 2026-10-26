@@ -86,6 +86,46 @@ class PlatformErrorTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await pending
 
+    async def test_recording_history_is_compact_and_does_not_block_video_loop(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def records():
+            entered.set()
+            release.wait(2)
+            return [{
+                'recording_id': 'capture', 'path': '/data/capture.mcap', 'state': 'ready',
+                'format': 'lerobot', 'display_name': 'capture',
+                'binding': {'task': {'name': '抓取', 'capture_plan': {'large': 'x' * 10000}}},
+                'metadata': {'large': 'x' * 10000},
+            }]
+
+        upload = SimpleNamespace(jobs=lambda: [{
+            'id': 'upload', 'local_recording_id': 'capture', 'state': 'queued',
+            'next_action': '等待上传', 'manifest': {'large': 'x' * 10000},
+        }])
+        platform = SimpleNamespace(upload=upload)
+        runtime = SimpleNamespace(platform=platform, recorder=SimpleNamespace(upload_records=records))
+        app = web.Application()
+        register_platform_routes(app, runtime)
+
+        async def ping(request):
+            return web.json_response({'ok': True})
+
+        app.router.add_get('/ping', ping)
+        async with TestClient(TestServer(app)) as client:
+            pending = asyncio.create_task(client.get('/api/platform/recordings'))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                response = await asyncio.wait_for(client.get('/ping'), 1)
+                self.assertEqual(response.status, 200)
+            finally:
+                release.set()
+            response = await pending
+            payload = await response.json()
+            self.assertEqual(payload['items'][0]['binding'], {'task': {'name': '抓取'}})
+            self.assertNotIn('metadata', payload['items'][0])
+            self.assertNotIn('manifest', payload['jobs'][0])
+
     async def test_connection_failure_preserves_code_reason_and_retryability(self):
         for code, reason, retryable in (
             ('NETWORK_TIMEOUT', '连接平台超时，请检查网络', True),

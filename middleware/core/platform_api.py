@@ -9,6 +9,39 @@ from humanoid_upload.common import UploadError
 logger = logging.getLogger(__name__)
 
 
+def _platform_recordings(runtime, platform):
+    """Build the upload table without exposing heavyweight capture snapshots.
+
+    The browser polls this endpoint while teleoperation is active.  Returning
+    complete recording jobs used to serialize more than a megabyte every five
+    seconds on the aiohttp / WebRTC event loop, briefly starving video sends.
+    """
+    items = []
+    for record in runtime.recorder.upload_records():
+        binding = record.get('binding') or {}
+        checked = (record.get('preparation') or {}).get('checked') or {}
+        row = {key: record.get(key) for key in (
+            'recording_id', 'source_recording_id', 'path', 'state', 'error',
+            'format', 'upload_target', 'display_name', 'upload_format',
+        ) if record.get(key) is not None}
+        task = binding.get('task') or {}
+        if task.get('name'):
+            row['binding'] = {'task': {'name': task['name']}}
+        checked_task = checked.get('task') or {}
+        if checked_task.get('name'):
+            row['preparation'] = {'checked': {'task': {'name': checked_task['name']}}}
+        items.append(row)
+
+    jobs = []
+    for job in platform.upload.jobs():
+        jobs.append({key: job.get(key) for key in (
+            'id', 'local_recording_id', 'source_export_id', 'task_id', 'state',
+            'server_state', 'kind', 'data_status', 'annotation_status',
+            'training_status', 'processing_state', 'quality_state', 'next_action',
+        ) if job.get(key) is not None})
+    return {'items': items, 'jobs': jobs}
+
+
 def register_platform_routes(app, runtime):
     async def dispatch(request):
         if getattr(runtime, 'platform', None) is None:
@@ -38,7 +71,9 @@ def register_platform_routes(app, runtime):
                         raise ValueError()
                     result = await asyncio.to_thread(platform.tasks, **query)
                 elif operation == 'recordings':
-                    result = {'items': runtime.recorder.upload_records(), 'jobs': platform.upload.jobs()}
+                    # SQLite reads, job copies and capture-plan projection must
+                    # not run on the WebRTC event loop.
+                    result = await asyncio.to_thread(_platform_recordings, runtime, platform)
                 else:
                     raise web.HTTPNotFound()
             else:
