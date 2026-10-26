@@ -1,5 +1,5 @@
 server:
-  host: 172.168.200.30
+  host: 0.0.0.0
   port: 7876
 robot_profiles:
   root: ../adapters/robots
@@ -11,16 +11,25 @@ simulation:
   startup_timeout_sec: 120
 ros:
   enabled: true
-  domain_id: 14
+  domain_id: 13
   node_name: hc_teleop_middleware
   recording:
     directory: ../runtime/topic_recordings
-    format: both
+    format: mcap
     lerobot_fps: 15
     lerobot_task: 遥操作
     enabled: false
     artifact_state_dir: ../runtime/artifact_state
     upload_job_state_dir: ../runtime/recording_uploads
+    corrections:
+      prepared_slots: 4
+      action_queue_items: 4096
+      total_queue_bytes: 268435456
+      observation_cache_bytes: 67108864
+      observation_max_age_sec: 0.25
+      late_message_sec: 0.2
+      long_gap_sec: 0.2
+    action_sources: []
   dataset_topics:
     enabled: true
 vr:
@@ -35,8 +44,8 @@ vr:
 safety: {}
 camera: {}
 uploads:
-  enabled: true
-  auto_enqueue: true
+  enabled: false
+  auto_enqueue: false
   queue_directory: ../runtime/upload_queue
   platform_base_url: ''
   credential_ref: ''

@@ -19,7 +19,7 @@ control:
   method: retarget
   dt: 0.01
   # 阻尼用于抑制奇异位形附近的数值放大。
-  damping: 2.0e-03
+  damping: 5.0e-03
   # 机械臂初始参考姿态，同时用于零空间姿态偏好目标；留空时自动从同目录 arm_teleop.yaml 继承。
   joints_init:
     Joint1_R: -1.44
@@ -62,12 +62,12 @@ task:
       - io_teleop_ee_link_right
     - 10.0
     - 3.0
-    - 15.0
+    - 8.0
   - - - L_arm_0_Link
       - io_teleop_ee_link_left
     - 10.0
     - 3.0
-    - 15.0
+    - 8.0
   axis: []   # 不额外约束某一工具轴方向。
   # 零空间关节姿态任务格式：[[关节名称列表], 权重, 增益[, 目标关节角]]。
   # 若省略目标关节角，则自动继承 control.joints_init，在不影响末端精度的前提下持续吸引肘部/肩部回归初始自然屈臂位姿。

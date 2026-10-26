@@ -357,10 +357,10 @@ control:
   max_displacement: 0.9
   orientation_enabled: true
   orientation_weight: 0.35
-  target_position_deadband: 0.0
-  target_orientation_deadband: 0.0
-  target_filter_alpha: 0.75
-  command_joint_deadband: 0.0
+  target_position_deadband: 0.003
+  target_orientation_deadband: 0.01
+  target_filter_alpha: 0.4
+  command_joint_deadband: 0.0005
   # 抓取数据采集需要连续通过贴近本体与折腕姿态；按现场要求完全关闭
   # 几何碰撞拦截。关节位置/速度限位和急停仍由控制链路保留。
   collision_avoidance_enabled: false

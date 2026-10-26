@@ -13,7 +13,13 @@ def subscription_qos(item: dict[str, Any]):
 
     if item.get("qos_reliability") == "reliable":
         # A single latest sample avoids building a stale-video backlog.
-        return QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+        # State telemetry topics need a modest buffer to prevent dropping during JSON/WS dispatch.
+        depth = 10 if item.get("type") in {
+            "sensor_msgs/msg/JointState",
+            "geometry_msgs/msg/PoseArray",
+            "geometry_msgs/msg/PoseStamped",
+        } else 1
+        return QoSProfile(depth=depth, reliability=ReliabilityPolicy.RELIABLE)
     return qos_profile_sensor_data
 
 

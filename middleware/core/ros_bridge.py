@@ -488,6 +488,12 @@ class RosBridge:
             # work must not prevent Grip from revoking the final output lock.
             executor = MultiThreadedExecutor(num_threads=3, context=context)
             self._ownership_callback_group = MutuallyExclusiveCallbackGroup()
+            # The node's default callback group is mutually exclusive.  Keep
+            # actuator commands out of that group so status/recording traffic
+            # cannot reduce a 100 Hz control stream to a sporadic output.
+            self._command_callback_group = MutuallyExclusiveCallbackGroup()
+            from rclpy.callback_groups import ReentrantCallbackGroup
+            self._telemetry_callback_group = ReentrantCallbackGroup()
             executor.add_node(node)
             if self.camera_topics:
                 # BEST_EFFORT camera frames must not wait behind 100 Hz control,
@@ -533,7 +539,9 @@ class RosBridge:
 
                 subscriptions.append(
                     node.create_subscription(
-                        Bool, hardware_ready_topic, hardware_ready_cb, qos_profile_sensor_data
+                        Bool, hardware_ready_topic, hardware_ready_cb,
+                        QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
+                        callback_group=self._command_callback_group,
                     )
                 )
                 subscription_names.append(hardware_ready_topic)
@@ -608,7 +616,11 @@ class RosBridge:
 
                     subscriptions.append(
                         node.create_subscription(
-                            JointState, topic, mux_callback, qos_profile_sensor_data
+                            JointState,
+                            topic,
+                            mux_callback,
+                            qos_profile_sensor_data,
+                            callback_group=self._command_callback_group,
                         )
                     )
                     subscription_names.append(topic)
@@ -695,7 +707,8 @@ class RosBridge:
 
                 subscriptions.append(
                     (camera_node if is_webrtc_color and camera_node is not None else node).create_subscription(
-                        message_type, topic, callback, subscription_qos(item)
+                        message_type, topic, callback, subscription_qos(item),
+                        callback_group=self._telemetry_callback_group if not is_webrtc_color else None,
                     )
                 )
                 subscription_names.append(topic)
@@ -712,6 +725,7 @@ class RosBridge:
                     String, "/vrdata",
                     lambda message: vr_tracker.record_message(time.monotonic()),
                     qos_profile_sensor_data,
+                    callback_group=self._telemetry_callback_group,
                 ))
                 subscription_names.append("/vrdata")
 
@@ -725,9 +739,11 @@ class RosBridge:
                     daemon=True,
                 )
                 camera_executor_thread.start()
+            executor_thread = threading.Thread(target=executor.spin, name="ros-bridge-executor", daemon=True)
+            executor_thread.start()
             last_discovery = 0.0
             while not self._stop.is_set():
-                executor.spin_once(timeout_sec=0.02)
+                time.sleep(0.01)
                 self._drain_commands(node, publishers, get_message, set_message_fields)
                 now = time.monotonic()
                 if now - last_discovery >= 2.0:
@@ -758,6 +774,8 @@ class RosBridge:
                 # Humble's base shutdown waits active callbacks but does not
                 # join the ThreadPoolExecutor's already submitted callbacks.
                 executor._executor.shutdown(wait=True)
+            if 'executor_thread' in locals() and executor_thread is not None:
+                executor_thread.join(timeout=5.0)
             if robot_api_boundary is not None:
                 robot_api_boundary.close()
             if executor is not None and node is not None:
