@@ -12,6 +12,7 @@ class ConfigTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         store = ConfigStore(root / "middleware" / "config.yaml")
         config = store.load()
+        self.assertEqual(config["vr"]["web_pose_hz"], 10.0)
 
         self.assertEqual(config["robot_profiles"]["active"], "x1")
         profile_root = (store.path.parent / config["robot_profiles"]["root"]).resolve()

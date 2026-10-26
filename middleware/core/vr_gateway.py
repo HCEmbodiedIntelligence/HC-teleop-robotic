@@ -24,7 +24,7 @@ class VrGateway:
     def __init__(
         self,
         config: dict[str, Any],
-        on_pose: Callable[[Any], None],
+        on_pose: Callable[[Any, dict[str, Any]], None],
         on_event: Callable[[dict[str, Any], list[str]], None],
         on_timeout: Callable[[str], None],
     ):
@@ -269,7 +269,10 @@ class VrGateway:
                 continue
 
             try:
-                self.on_pose(pose)
+                # Reuse the dictionary already materialized by the receive
+                # thread.  Building it again used to allocate every nested
+                # pose/input list twice for each 60 Hz headset packet.
+                self.on_pose(pose, pose_dict)
                 self._increment("processed")
 
                 now = time.monotonic()

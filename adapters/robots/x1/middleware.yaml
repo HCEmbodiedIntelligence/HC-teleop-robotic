@@ -383,3 +383,5 @@ ros:
     hardware_ready_timeout_sec: 0.5
 vr:
   pose_timeout_ms: 600
+  # 网页姿态预览频率；不影响 /vrdata、100 Hz 控制或原始录制。
+  web_pose_hz: 10

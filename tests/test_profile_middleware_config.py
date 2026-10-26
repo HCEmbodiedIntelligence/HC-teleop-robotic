@@ -58,7 +58,7 @@ def test_gui_changes_save_to_package_and_survive_reload(deployment):
     store.save(config)
     package = yaml.safe_load(path.read_text())
     assert package['camera']['streams'][0]['fps'] == 24
-    assert package['vr'] == {'pose_timeout_ms': 700}
+    assert package['vr'] == {'pose_timeout_ms': 700, 'web_pose_hz': 10.0}
     host = yaml.safe_load(store.path.read_text())
     assert host['camera'] == {}
     assert 'subscriptions' not in host['ros']
@@ -111,7 +111,7 @@ def test_package_validation_fills_missing_fields_without_mutating_defaults():
     original = copy.deepcopy(ROBOT_MIDDLEWARE_DEFAULTS)
     result = validate_robot_middleware({'camera': {'enabled': True}})
     assert result['camera']['streams'] == []
-    assert result['vr'] == {'pose_timeout_ms': 600}
+    assert result['vr'] == {'pose_timeout_ms': 600, 'web_pose_hz': 10.0}
     assert result['ros']['command_mux']['output_topic'] == '/action/joint_states'
     assert ROBOT_MIDDLEWARE_DEFAULTS == original
 

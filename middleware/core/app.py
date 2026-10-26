@@ -77,6 +77,8 @@ class MiddlewareRuntime:
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
+        self._broadcast_pending: dict[str, dict[str, Any]] = {}
+        self._broadcast_drain_task: asyncio.Task | None = None
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
@@ -292,6 +294,14 @@ class MiddlewareRuntime:
             self._log("error", "upload unavailable: " + str(exc))
 
     async def stop(self) -> None:
+        if self._broadcast_drain_task is not None:
+            self._broadcast_drain_task.cancel()
+            try:
+                await self._broadcast_drain_task
+            except asyncio.CancelledError:
+                pass
+            self._broadcast_drain_task = None
+        self._broadcast_pending.clear()
         if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
             self.ros.ownership.disable()
         if self._safety_sync_task is not None:
@@ -350,8 +360,32 @@ class MiddlewareRuntime:
             self.vr.send_event(event)
         if "websocket" in outputs and self.loop is not None:
             self.loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self._broadcast(event))
+                self._schedule_broadcast, event
             )
+
+    def _schedule_broadcast(self, event: dict[str, Any]) -> None:
+        """Coalesce live telemetry without dropping state-change events."""
+        kind = str(event.get("kind", ""))
+        key = ""
+        if kind == "vr_pose":
+            key = kind
+        elif kind == "ros_message":
+            key = f"ros_message:{event.get('topic', '')}"
+        if not key:
+            asyncio.create_task(self._broadcast(event))
+            return
+        self._broadcast_pending[key] = event
+        if self._broadcast_drain_task is None or self._broadcast_drain_task.done():
+            self._broadcast_drain_task = asyncio.create_task(
+                self._drain_broadcast_pending()
+            )
+
+    async def _drain_broadcast_pending(self) -> None:
+        while self._broadcast_pending:
+            pending = tuple(self._broadcast_pending.values())
+            self._broadcast_pending.clear()
+            for event in pending:
+                await self._broadcast(event)
 
     async def _broadcast(self, event: dict[str, Any]) -> None:
         if not self.websockets:
@@ -383,7 +417,9 @@ class MiddlewareRuntime:
         for ws in dead:
             self.websockets.discard(ws)
 
-    def _on_pose(self, packet: Any) -> None:
+    def _on_pose(
+        self, packet: Any, pose_dict: dict[str, Any] | None = None
+    ) -> None:
         left_input = getattr(packet, "left_input", None)
         right_input = getattr(packet, "right_input", None)
 
@@ -453,12 +489,13 @@ class MiddlewareRuntime:
         if self.ros is None:
             return
         if self.config["vr"].get("publish_to_ros", True):
+            frame = pose_dict if pose_dict is not None else packet.as_dict()
             self.ros.publish(
                 self.config["vr"]["data_topic"],
                 "std_msgs/msg/String",
                 {
                     "data": json.dumps(
-                        {**packet.as_dict(), 'hc_received_ns': time.time_ns()},
+                        {**frame, 'hc_received_ns': time.time_ns()},
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "upload_client"))
 
 
 def main() -> None:
+    # ROS, UDP and WebRTC share this process.  A shorter GIL quantum keeps the
+    # asyncio video sender responsive while Python ROS callbacks run at 100 Hz.
+    switch_ms = float(os.environ.get("HC_PYTHON_SWITCH_INTERVAL_MS", "1"))
+    if not 0.1 <= switch_ms <= 20:
+        raise SystemExit("HC_PYTHON_SWITCH_INTERVAL_MS must be between 0.1 and 20")
+    sys.setswitchinterval(switch_ms / 1000.0)
+
     parser = argparse.ArgumentParser(description="ROS 2 / VR teleoperation middleware")
     parser.add_argument(
         "--config",

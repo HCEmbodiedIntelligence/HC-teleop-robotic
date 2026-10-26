@@ -37,7 +37,7 @@ class VrGatewayTests(unittest.TestCase):
         gateway=VrGateway(dict(enabled=True,listen_host='127.0.0.1',pose_port=_unused_udp_port(),
             discovery_port=_unused_udp_port(),outbound_host='',outbound_port=_unused_udp_port(),
             pose_timeout_ms=1000,processing_queue_size=32,web_pose_hz=20),
-            lambda pose:received.append(pose.sequence),lambda *_:None,lambda _:None)
+            lambda pose, _pose_dict:received.append(pose.sequence),lambda *_:None,lambda _:None)
         gateway.start()
         senders=[socket.socket(socket.AF_INET,socket.SOCK_DGRAM) for _ in range(2)]
         try:
@@ -85,7 +85,7 @@ class VrGatewayTests(unittest.TestCase):
             },
             # Deliberately slower than the safety timeout.  Before reception
             # and processing were separated, this caused a false emergency.
-            lambda _pose: time.sleep(0.2),
+            lambda _pose, _pose_dict: time.sleep(0.2),
             lambda _event, _outputs: None,
             timeouts.append,
         )
@@ -131,7 +131,7 @@ class VrGatewayTests(unittest.TestCase):
                 "processing_queue_size": 4,
                 "web_pose_hz": 20,
             },
-            lambda _pose: None,
+            lambda _pose, _pose_dict: None,
             lambda _event, _outputs: None,
             timeouts.append,
         )

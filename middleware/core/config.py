@@ -48,6 +48,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pose_timeout_ms": 200,
         "publish_to_ros": True,
         "data_topic": "/vrdata",
+        # Dashboard pose rendering is diagnostic only.  Keeping it below the
+        # camera/control rates prevents UI JSON from competing with WebRTC.
+        "web_pose_hz": 10.0,
     },
     "safety": {
         "enabled": True,
@@ -79,7 +82,7 @@ ROBOT_MIDDLEWARE_DEFAULTS: dict[str, Any] = {
         ],
         "command_mux": copy.deepcopy(DEFAULT_CONFIG["ros"]["command_mux"]),
     },
-    "vr": {"pose_timeout_ms": 600},
+    "vr": {"pose_timeout_ms": 600, "web_pose_hz": 10.0},
 }
 
 
@@ -118,6 +121,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     timeout = simulation.get("startup_timeout_sec")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 600:
         raise ConfigError("simulation.startup_timeout_sec must be between 0 and 600 seconds")
+
+    web_pose_hz = value["vr"].get("web_pose_hz", 10.0)
+    if (
+        isinstance(web_pose_hz, bool)
+        or not isinstance(web_pose_hz, (int, float))
+        or not 0 < web_pose_hz <= 60
+    ):
+        raise ConfigError("vr.web_pose_hz must be between 0 and 60")
+    value["vr"]["web_pose_hz"] = float(web_pose_hz)
 
     profile_config = value.get("robot_profiles")
     if not isinstance(profile_config, dict):
