@@ -618,6 +618,10 @@ def test_upload_history_only_exposes_selected_format_and_dataset_name():
     assert len(rows) == 1
     assert rows[0]['format'] == 'lerobot'
     assert rows[0]['display_name'] == 'teleop_20261023_135933'
+    summaries = recorder.upload_record_summaries()
+    assert summaries[0]['recording_id'] == rows[0]['recording_id']
+    assert summaries[0]['format'] == 'lerobot'
+    assert summaries[0]['display_name'] == 'teleop_20261023_135933'
 
 
 def test_capture_check_wakes_recording_inputs_before_reading_health():

@@ -583,6 +583,51 @@ class TaskRecorder(CorrectionSupport):
                 rows.append(row)
         return rows
 
+    def upload_record_summaries(self):
+        """Return only fields rendered by the live upload-history table.
+
+        Unlike ``upload_records``, this deliberately avoids deep-copying each
+        capture plan and metadata snapshot.  The dashboard polls this view
+        during teleoperation, when copying those immutable documents would
+        otherwise contend with the video encoder for the Python GIL.
+        """
+        rows = []
+        with self.lock:
+            jobs = tuple(self.jobs.values())
+            for job in jobs:
+                if job['state'] in ('armed', 'discarded'):
+                    continue
+                for fmt in upload_formats(job):
+                    artifact = job.get('artifacts', {}).get(fmt, {})
+                    source = Path(job['path'])
+                    row = {
+                        'recording_id': artifact_identity(job, fmt),
+                        'path': str(artifact.get('path') or job['path']),
+                        'state': artifact.get('state', job['state']),
+                        'format': fmt,
+                        'upload_target': (
+                            'lerobot:' + source.stem if fmt == 'lerobot' else
+                            'bundle:' + source.stem if fmt == 'mcap_mp4' else source.name
+                        ),
+                        'display_name': (
+                            Path(job.get('dataset_path') or job['path']).stem
+                            if fmt == 'lerobot' else source.stem
+                            if fmt == 'mcap_mp4' else source.name
+                        ),
+                    }
+                    for key in ('source_recording_id', 'error', 'upload_format'):
+                        value = artifact.get(key, job.get(key))
+                        if value is not None:
+                            row[key] = value
+                    task = (job.get('binding') or {}).get('task') or {}
+                    if task.get('name'):
+                        row['binding'] = {'task': {'name': task['name']}}
+                    checked_task = ((job.get('preparation') or {}).get('checked') or {}).get('task') or {}
+                    if checked_task.get('name'):
+                        row['preparation'] = {'checked': {'task': {'name': checked_task['name']}}}
+                    rows.append(row)
+        return rows
+
     def list_recordings(self, format_filter='all', identifier='', compact=False):
         files = self.recorder.list_recordings(format_filter, identifier, compact)
         with self.lock:

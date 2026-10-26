@@ -16,8 +16,10 @@ def _platform_recordings(runtime, platform):
     complete recording jobs used to serialize more than a megabyte every five
     seconds on the aiohttp / WebRTC event loop, briefly starving video sends.
     """
+    summary_reader = getattr(runtime.recorder, 'upload_record_summaries', None)
+    records = summary_reader() if summary_reader else runtime.recorder.upload_records()
     items = []
-    for record in runtime.recorder.upload_records():
+    for record in records:
         binding = record.get('binding') or {}
         checked = (record.get('preparation') or {}).get('checked') or {}
         row = {key: record.get(key) for key in (
