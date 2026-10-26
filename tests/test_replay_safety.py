@@ -36,6 +36,7 @@ class ReplaySafetyTests(unittest.TestCase):
     def test_replay_requires_readiness_and_disables_live_output_afterwards(self):
         self.assertFalse(self.bridge.begin_replay())
         self.bridge.receive_hardware_ready(True)
+        self.bridge._command_output_enabled = True
         self.assertTrue(self.bridge.begin_replay())
         self.assertTrue(
             self.bridge.publish_raw(

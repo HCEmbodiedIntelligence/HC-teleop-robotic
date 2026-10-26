@@ -34,16 +34,21 @@ def bridge_for(source='vr'):
 
 
 @pytest.mark.parametrize('source', ['vr', 'motion', 'exoskeleton'])
-def test_resume_enables_hardware_for_every_source_but_only_selected_vr(source):
+def test_vr_resume_defers_hardware_until_grip_while_other_sources_enable(source):
     bridge, wire = bridge_for(source), Wire()
     runtime = SimpleNamespace(
         config={'safety': {}, 'ros': {'command_mux': {'source': source}}},
         ros=bridge, player=None, emit=Mock(), _safety_reason='stopped')
     MiddlewareRuntime._on_safety_resume(runtime, 'test resume')
     wire.drain(bridge)
-    assert wire.values() == [True]
+    assert wire.values() == ([] if source == 'vr' else [True])
     assert wire.values('/control/teleop/enabled') == [source == 'vr']
     assert wire.values('/control/emergency_stop') == [False]
+    if source == 'vr':
+        assert not bridge.observe_vr_grips(0.0, 0.0)
+        assert bridge.observe_vr_grips(0.0, 1.0)
+        wire.drain(bridge)
+    assert wire.values() == [True]
     wire.drain(bridge)
     assert wire.values() == [True]  # No periodic re-enable of a subsequently stopped adapter.
 

@@ -183,6 +183,8 @@ def test_delayed_collision_result_is_rejected_after_revoke_and_reenable():
     bridge = RosBridge({'command_mux': {'source': 'motion'}}, lambda *args: None)
     bridge._ros_now = lambda: 100.1
     bridge.receive_hardware_ready(True)
+    bridge.set_command_output_enabled(True)
+    bridge._ros_now = lambda: 100.11
     entered, finish = threading.Event(), threading.Event()
     committed = []
     def prepare(message):
@@ -190,7 +192,7 @@ def test_delayed_collision_result_is_rejected_after_revoke_and_reenable():
         assert finish.wait(2)
         return message
     bridge._boundary = Obj(prepare=prepare, commit=lambda m: committed.append(m) or True)
-    message = Obj(name=['axis'], position=[.1], header=Obj(stamp=Obj(sec=100, nanosec=100_000_000)))
+    message = Obj(name=['axis'], position=[.1], header=Obj(stamp=Obj(sec=100, nanosec=110_000_000)))
     result = []
     thread = threading.Thread(target=lambda: result.append(
         bridge.forward_live_command('motion', message, lambda m: committed.append(m))))
@@ -209,6 +211,7 @@ def test_evidence_keeps_exact_command_time_separate_from_final_publication():
     now=[100.11]
     bridge._ros_now=lambda:now[0]
     bridge.receive_hardware_ready(True)
+    bridge._command_output_enabled = True
     bridge.ownership=rig.control
     evidence=[]
     bridge._action_sink=evidence.append

@@ -106,17 +106,8 @@ class RightStickBaseControlTests(unittest.TestCase):
 
             node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
 
-            # Base must be active!
-            self.assertTrue(len(published_base_commands) > 0)
-            latest = published_base_commands[-1]
-            yaw, fwd, lat = latest
-
-            # With right_stick_yaw_direction=-1.0 and stick_yaw=-1.0 (left), yaw must be positive (~0.45 rad/s)
-            self.assertAlmostEqual(yaw, 0.45, places=3)
-            # Forward and lateral MUST remain strictly 0.0 since left clutch was not held!
-            self.assertEqual(fwd, 0.0)
-            self.assertEqual(lat, 0.0)
-            # Body/waist must NOT be activated!
+            # No Grip owns the base, so stick deflection alone sends nothing.
+            self.assertEqual(published_base_commands, [])
             self.assertFalse(node.body.active)
 
             # Test independent left stick translation when left_stick_independent_base=True
@@ -124,9 +115,7 @@ class RightStickBaseControlTests(unittest.TestCase):
             published_base_commands.clear()
             now += 0.02
             node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
-            self.assertTrue(len(published_base_commands) > 0)
-            _, fwd_indep, _ = published_base_commands[-1]
-            self.assertAlmostEqual(fwd_indep, 0.35, places=2)
+            self.assertEqual(published_base_commands, [])
             self.assertFalse(node.body.active)  # Waist still not activated!
 
             # Reset left stick for subsequent right-stick tests
@@ -140,13 +129,7 @@ class RightStickBaseControlTests(unittest.TestCase):
             node.arms["right"].joy_stamp = now
             node._generic_control_tick(now, feedback_fresh=True, command=node._command_seed())
 
-            self.assertTrue(len(published_base_commands) > 0)
-            latest = published_base_commands[-1]
-            yaw, fwd, lat = latest
-            # Turning right must produce negative yaw (-0.45 rad/s)
-            self.assertAlmostEqual(yaw, -0.45, places=3)
-            self.assertEqual(fwd, 0.0)
-            self.assertEqual(lat, 0.0)
+            self.assertEqual(published_base_commands, [])
 
             # 4. Squeeze left clutch (left Grip = 1.0):
             # Now both translation (left stick) and rotation (right stick) should be active simultaneously!
@@ -186,4 +169,3 @@ class RightStickBaseControlTests(unittest.TestCase):
             self.assertEqual(latest, [0.0, 0.0, 0.0])
         finally:
             node.destroy_node()
-
