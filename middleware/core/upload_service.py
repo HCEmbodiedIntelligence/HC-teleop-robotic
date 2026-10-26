@@ -175,6 +175,8 @@ class UploadService:
         with self._lifecycle:
             if not self.enabled or (self._thread and self._thread.is_alive()):
                 return
+            if self.artifact_process.closed:
+                self.artifact_process = BackgroundProcess('hc-artifact-worker')
             if self.upload_process.closed:
                 self.upload_process = BackgroundProcess('hc-upload-worker')
             self._stop.clear()

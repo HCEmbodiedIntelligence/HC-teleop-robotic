@@ -68,7 +68,11 @@ class PlatformConnection:
             'version': 1, 'connections': {}, 'current': None, 'recent': None,
             'auto_upload': bool(legacy.get('auto_enqueue', False)),
             'worker_enabled': bool(legacy.get('enabled', False)),
+            'uploads_enabled': bool(legacy.get('enabled', True)),
         }
+        if 'uploads_enabled' not in self.state:
+            self.state['uploads_enabled'] = bool(legacy.get('enabled', True))
+            self.save()
         if 'upload_format' not in self.state:
             saved = config['ros']['recording'].get('format', 'mcap')
             self.state['upload_format'] = saved if saved in ('lerobot', 'mcap_mp4') else 'mcap'
@@ -90,6 +94,10 @@ class PlatformConnection:
     def save(self):
         atomic_json(self.path, self.state)
 
+    def require_uploads_enabled(self):
+        if not self.state.get('uploads_enabled', False):
+            raise UploadError('UPLOAD_DISABLED', '上传总开关已关闭；本地录制仍可使用')
+
     def connection(self, identity=None):
         with self._lock:
             identity = identity or self.state['current']
@@ -107,6 +115,7 @@ class PlatformConnection:
         return http.request(method, url, payload=payload)
 
     def connect(self, link):
+        self.require_uploads_enabled()
         try:
             parts = urlsplit(link.strip())
             ticket = parse_qs(parts.fragment, strict_parsing=True)['robot-connect'][0]
@@ -181,6 +190,7 @@ class PlatformConnection:
         return self.status()
 
     def verify(self):
+        self.require_uploads_enabled()
         with self._lock:
             connection_id = self.state['current']
             generation = self._connection_generation
@@ -211,6 +221,7 @@ class PlatformConnection:
         return self.status()
 
     def tasks(self, **query):
+        self.require_uploads_enabled()
         identity = query.pop('connection_id', None) or self.state['current']
         connection = self.connection(identity)
         source_format = self.source_format
@@ -228,6 +239,7 @@ class PlatformConnection:
             raise UploadError('RECORDING_SELECTION_REQUIRED', '请选择平台任务或留空保存到本机')
         if selection['mode'] == 'local':
             return None
+        self.require_uploads_enabled()
         identity = selection.get('connection_id')
         if not identity or not selection.get('task_id'):
             raise UploadError('TASK_REQUIRED', '请先选择采集任务')
@@ -251,6 +263,7 @@ class PlatformConnection:
                 'auto_upload': self.state['auto_upload'] and self.state['worker_enabled']}
 
     def bind(self, checked, *, remember=True):
+        self.require_uploads_enabled()
         with self._lock:
             identity = checked['connection_id']
             if remember and identity != self.state['current']:
@@ -272,6 +285,7 @@ class PlatformConnection:
 
     def prepare(self, checked, command):
         """Caller must durably save checked and command before this network call."""
+        self.require_uploads_enabled()
         connection = self.connection(checked['connection_id'])
         if self.identity_provider() != checked['local_robot']:
             raise UploadError('LOCAL_ROBOT_MISMATCH', '准备重试期间设备配置发生变化，请恢复原配置')
@@ -285,6 +299,8 @@ class PlatformConnection:
 
     def recording_selection(self):
         with self._lock:
+            if not self.state.get('uploads_enabled', False):
+                return {'mode': 'local'}
             # Older releases only remembered a recent upload task. That is not
             # consent to use it for future captures, so default to local capture.
             return copy.deepcopy(self.state.get('recording_selection', {'mode': 'local'}))
@@ -307,6 +323,7 @@ class PlatformConnection:
             return {'recording_selection': copy.deepcopy(value)}
 
     def set_upload_format(self, value):
+        self.require_uploads_enabled()
         if value not in ('mcap', 'mcap_mp4', 'lerobot', 'both'):
             raise UploadError('UPLOAD_FORMAT_INVALID', '请选择 MCAP、MCAP＋MP4 原始包、LeRobot 或双份上传')
         with self._lock:
@@ -315,6 +332,7 @@ class PlatformConnection:
         return self.status()
 
     def set_auto(self, enabled):
+        self.require_uploads_enabled()
         if type(enabled) is not bool:
             raise UploadError('UPLOAD_REQUEST_INVALID')
         with self._lock:
@@ -324,25 +342,57 @@ class PlatformConnection:
         if enabled: self.upload.start()
         return self.status()
 
+    def set_enabled(self, enabled):
+        if type(enabled) is not bool:
+            raise UploadError('UPLOAD_REQUEST_INVALID')
+        with self._lock:
+            self.state['uploads_enabled'] = enabled
+            self.state['worker_enabled'] = enabled
+            self.save()
+        if enabled:
+            self.upload.start()
+            self._start_heartbeat()
+        else:
+            self._stop_heartbeat()
+            # The artifact helper also finalizes local recordings; keep it
+            # available while stopping the network upload worker completely.
+            self.upload.stop()
+        return self.status()
+
     def status(self):
         with self._lock:
             current = self.state['current']
             connection = self.state['connections'].get(current)
+            enabled = self.state.get('uploads_enabled', False)
             return {'connection': ({k: connection[k] for k in
                     ('platform_base_url', 'platform_name', 'robot_id', 'robot_name', 'organization_id', 'verified')}
                     | {'id': current}) if connection else None,
                     'recent': copy.deepcopy(self.state['recent']), 'error': self.error,
                     'recording_selection': self.recording_selection(),
                     'processes': {'artifacts': self.upload.artifact_process.status(), 'upload': self.upload.upload_process.status()},
-                    'auto_upload': self.state['auto_upload'], 'upload_format': self.state['upload_format'], 'jobs': self.upload.jobs()}
+                    'uploads_enabled': enabled,
+                    'auto_upload': enabled and self.state['auto_upload'],
+                    'upload_format': self.state['upload_format'],
+                    'jobs': self.upload.jobs() if enabled else []}
 
     def start(self):
+        if not self.state.get('uploads_enabled', False):
+            return
         self._resume_legacy()
         if self.state['worker_enabled']: self.upload.start()
+        self._start_heartbeat()
+
+    def _start_heartbeat(self):
         if self._heartbeat_thread is None or not self._heartbeat_thread.is_alive():
             self._heartbeat_stop.clear()
             self._heartbeat_thread = threading.Thread(target=self._heartbeat, name='platform-heartbeat', daemon=True)
             self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self):
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=1)
+            self._heartbeat_thread = None
 
     def _heartbeat(self):
         while not self._heartbeat_stop.wait(60):
@@ -356,7 +406,8 @@ class PlatformConnection:
                 self.error = 'HEARTBEAT_UNAVAILABLE'
 
     def _resume_legacy(self):
-        if not self.legacy_auto or not self.state['worker_enabled']: return
+        if (not self.state.get('uploads_enabled', False) or not self.legacy_auto
+                or not self.state['worker_enabled']): return
         queued = {job.get('artifact_id') for job in self.upload.queue.jobs()}
         for path in self.upload.state_dir.glob('*.json'):
             if self._heartbeat_stop.is_set(): return
@@ -371,6 +422,5 @@ class PlatformConnection:
                 continue  # Preserve the original evidence for operator review.
 
     def stop(self):
-        self._heartbeat_stop.set()
-        if self._heartbeat_thread: self._heartbeat_thread.join(timeout=1)
+        self._stop_heartbeat()
         self.upload.close()

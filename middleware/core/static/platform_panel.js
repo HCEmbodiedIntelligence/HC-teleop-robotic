@@ -114,7 +114,7 @@
     active = Boolean(recording?.recording);
     const task = recording?.task_recording?.binding?.task;
     el('platformActive').textContent = active ? `正在录制：${task?.name || '未关联平台任务，保存到本机'}` : '';
-    for (const id of ['platformTasks', 'platformAuto', 'platformConnect', 'platformUploadFormat']) {
+    for (const id of ['platformEnabled', 'platformTasks', 'platformAuto', 'platformConnect', 'platformUploadFormat']) {
       const target = el(id);
       if (target) target.disabled = active;
     }
@@ -161,24 +161,35 @@
   }
   window.platformSyncLocalFormat = syncUploadFormatOptions;
   function connectionControls() {
-    el('platformConnect').disabled = active || connecting || reconnecting;
-    el('platformReconnect').disabled = connecting || reconnecting || !state.connection;
+    const enabled = state.uploads_enabled !== false;
+    el('platformEnabled').disabled = active;
+    el('platformConnect').disabled = !enabled || active || connecting || reconnecting;
+    el('platformReconnect').disabled = !enabled || connecting || reconnecting || !state.connection;
     el('platformReconnect').hidden = !state.connection;
     el('platformReconnect').textContent = reconnecting ? '正在重新连接…' : '重新连接';
     el('platformReconnectHint').hidden = !state.connection;
+    for (const id of ['platformRefresh', 'platformSearch', 'platformProject', 'platformPrev', 'platformNext']) {
+      el(id).disabled = !enabled;
+    }
   }
   function renderConnection() {
+    const enabled = state.uploads_enabled !== false;
     const connection = state.connection;
     const status = reconnecting ? '正在重新连接…' : verificationFailed ? '连接未恢复' : connection?.verified ? '已连接' : '等待验证';
-    el('platformConnection').textContent = connection
+    el('platformConnection').textContent = !enabled ? '平台上传功能已完全关闭' : connection
       ? `平台：${connection.platform_name} · 机器人：${connection.robot_name} · ${status}`
       : '尚未连接平台';
+    el('platformEnabled').checked = enabled;
     el('platformAuto').checked = state.auto_upload === true;
+    el('platformAuto').disabled = !enabled || active;
+    el('platformTasks').disabled = !enabled || active;
     const localFmt = state.local_format || document.getElementById('topicRecordingFormat')?.value || 'both';
     syncUploadFormatOptions(localFmt);
+    el('platformUploadFormat').disabled = !enabled || active;
     connectionControls();
   }
   async function refreshTasks() {
+    if (state.uploads_enabled === false) return;
     if (!state.connection) return;
     const generation = ++refreshGeneration;
     const connectionId = state.connection.id;
@@ -219,6 +230,12 @@
     }
   }
   async function refreshRecords() {
+    if (state.uploads_enabled === false) {
+      const body = el('platformRecordings'); body.replaceChildren();
+      const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 8;
+      cell.textContent = '上传总开关已关闭，不扫描、不重试、不刷新上传记录。'; row.append(cell); body.append(row);
+      return;
+    }
     try {
       const result = await call('recordings');
       const rows = result.items.slice().reverse();
@@ -308,6 +325,7 @@
     return openHistoryBatch([{ identity, name, source_format }], source_format);
   }
   async function openHistoryBatch(targets, source_format) {
+    if (state.uploads_enabled === false) { message('上传总开关已关闭，请先开启平台上传功能'); return; }
     if (!state.connection) { message('请先连接平台，再为历史录制选择任务'); return; }
     historyTarget = { targets, connection_id: state.connection.id, source_format }; historySelected = ''; historyPage = 1;
     el('platformHistoryName').textContent = targets.length === 1 ? targets[0].name : `已选择 ${targets.length} 个数据集：${targets.map(item => item.name).join('、')}`;
@@ -322,6 +340,17 @@
   window.platformUploadHistory = openHistory;
   window.platformUploadBatch = openHistoryBatch;
   async function init() {
+    el('platformEnabled').onchange = async () => {
+      const enabled = el('platformEnabled').checked;
+      el('platformEnabled').disabled = true;
+      try {
+        state = await post('enabled', { enabled });
+        requestId = null; selectionError = null; renderSelection(); renderConnection();
+        if (enabled) { await refreshTasks(); await refreshRecords(); }
+        else { await refreshRecords(); message('上传功能已关闭；本地录制与保存继续可用。'); }
+      } catch (error) { renderConnection(); message(error.message); }
+      finally { el('platformEnabled').disabled = active; }
+    };
     el('platformReconnect').onclick = async () => {
       if (connecting || reconnecting || !state.connection) return;
       connectionGeneration++;
@@ -419,7 +448,7 @@
       if (generation === connectionGeneration) {
         state = initial;
         renderSelection(); renderConnection();
-        if (state.connection) {
+        if (state.uploads_enabled !== false && state.connection) {
           try {
             const verified = await post('verify');
             if (generation === connectionGeneration) { state = verified; renderConnection(); }
@@ -440,9 +469,9 @@
         connectionMessage(error.message, true);
       }
     }
-    const visibleRefresh = () => { if (!document.hidden) { void refreshTasks(); void refreshRecords(); } };
+    const visibleRefresh = () => { if (!document.hidden && state.uploads_enabled !== false) { void refreshTasks(); void refreshRecords(); } };
     const timer = setInterval(visibleRefresh, 30000);
-    const progressTimer = setInterval(() => { if (!document.hidden) void refreshRecords(); }, 5000);
+    const progressTimer = setInterval(() => { if (!document.hidden && state.uploads_enabled !== false) void refreshRecords(); }, 5000);
     document.addEventListener('visibilitychange', visibleRefresh);
     window.addEventListener('pagehide', () => { clearInterval(timer); clearInterval(progressTimer); refreshGeneration++; }, { once: true });
   }

@@ -14,6 +14,27 @@ from middleware.core.platform_api import register_platform_routes
 
 
 class PlatformErrorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_master_switch_skips_record_history_work_when_disabled(self):
+        calls = []
+        platform = SimpleNamespace(state={'uploads_enabled': True})
+        platform.set_enabled = lambda enabled: (
+            platform.state.update(uploads_enabled=enabled) or
+            calls.append(enabled) or {'uploads_enabled': enabled}
+        )
+        recorder = SimpleNamespace(
+            is_recording=lambda: False,
+            upload_records=Mock(side_effect=AssertionError('disabled history must not be read')),
+        )
+        app = web.Application()
+        register_platform_routes(app, SimpleNamespace(platform=platform, recorder=recorder))
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post('/api/platform/enabled', json={'enabled': False})
+            self.assertEqual(response.status, 200)
+            self.assertEqual((await response.json())['uploads_enabled'], False)
+            response = await client.get('/api/platform/recordings')
+            self.assertEqual(await response.json(), {'items': [], 'jobs': [], 'disabled': True})
+        self.assertEqual(calls, [False])
+
     async def test_batch_upload_continues_after_one_recording_fails(self):
         calls = []
 
@@ -103,7 +124,7 @@ class PlatformErrorTests(unittest.IsolatedAsyncioTestCase):
             'id': 'upload', 'local_recording_id': 'capture', 'state': 'queued',
             'next_action': '等待上传', 'manifest': {'large': 'x' * 10000},
         }])
-        platform = SimpleNamespace(upload=upload)
+        platform = SimpleNamespace(upload=upload, state={'uploads_enabled': True})
         runtime = SimpleNamespace(platform=platform, recorder=SimpleNamespace(upload_records=records))
         app = web.Application()
         register_platform_routes(app, runtime)

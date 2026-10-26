@@ -1604,6 +1604,21 @@ def create_app(store: ConfigStore) -> web.Application:
         from .upload_api import register_upload_routes
 
         class UploadProxy:
+            def status(self):
+                if runtime.platform is not None and not runtime.platform.state.get('uploads_enabled', False):
+                    return {
+                        'enabled': False, 'running': False, 'auto_enqueue': False,
+                        'jobs': [], 'scan_errors': {}, 'platform_backoffs': {},
+                        'processes': {'artifacts': {'running': False}, 'upload': {'running': False}},
+                    }
+                if runtime.uploads is None:
+                    raise web.HTTPServiceUnavailable(
+                        text=json.dumps({'enabled': False, 'state': 'unavailable',
+                                         'error': runtime.upload_error or 'upload service unavailable'}),
+                        content_type='application/json',
+                    )
+                return runtime.uploads.status()
+
             def __getattr__(self, key):
                 if runtime.uploads is None:
                     raise web.HTTPServiceUnavailable(
@@ -1629,12 +1644,10 @@ def create_app(store: ConfigStore) -> web.Application:
                     saved = store.save(proposed)
                     runtime.config['uploads'] = copy.deepcopy(saved['uploads'])
                     platform = runtime.platform
-                    with platform._lock:
-                        platform.state.update(worker_enabled=body['enabled'], auto_upload=body['auto_enqueue'])
-                        platform.save()
-                    if body['enabled']: platform.upload.start()
-                    else: await asyncio.to_thread(platform.upload.stop)
-                    return {**platform.upload.status(), **body}
+                    await asyncio.to_thread(platform.set_enabled, body['enabled'])
+                    if body['enabled']:
+                        await asyncio.to_thread(platform.set_auto, body['auto_enqueue'])
+                    return {**UploadProxy().status(), **body}
                 upload_config = copy.deepcopy(proposed["uploads"])
                 queue_path = Path(upload_config["queue_directory"]).expanduser()
                 upload_config["queue_directory"] = str((store.path.parent / queue_path).resolve())

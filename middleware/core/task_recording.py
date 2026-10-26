@@ -345,6 +345,7 @@ class TaskRecorder(CorrectionSupport):
             str(self.directory), str(upload.state_dir), cfg)
 
     def upload_recording(self, identity, selection=None, source_format=None, new_upload=False):
+        self.platform.require_uploads_enabled()
         with self.lock:
             requested = identity
             job = self.jobs.get(identity)

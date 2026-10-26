@@ -75,7 +75,9 @@ def register_platform_routes(app, runtime):
                 elif operation == 'recordings':
                     # SQLite reads, job copies and capture-plan projection must
                     # not run on the WebRTC event loop.
-                    result = await asyncio.to_thread(_platform_recordings, runtime, platform)
+                    result = ({'items': [], 'jobs': [], 'disabled': True}
+                              if not platform.state.get('uploads_enabled', False)
+                              else await asyncio.to_thread(_platform_recordings, runtime, platform))
                 else:
                     raise web.HTTPNotFound()
             else:
@@ -89,6 +91,12 @@ def register_platform_routes(app, runtime):
                     raise ValueError()
                 if operation == 'connect':
                     result = await asyncio.to_thread(platform.connect, body['link'])
+                elif operation == 'enabled':
+                    if set(body) != {'enabled'} or type(body['enabled']) is not bool:
+                        raise ValueError()
+                    if runtime.recorder.is_recording():
+                        raise UploadError('ARTIFACT_BUSY', '请停止当前录制后修改上传总开关')
+                    result = await asyncio.to_thread(platform.set_enabled, body['enabled'])
                 elif operation == 'verify':
                     result = await asyncio.to_thread(platform.verify)
                 elif operation == 'upload-format':
@@ -127,6 +135,7 @@ def register_platform_routes(app, runtime):
                                            'code': error.code, 'reason': error.action})
                     result = {'ok': not failed, 'uploaded': uploaded, 'failed': failed}
                 elif operation == 'retry-upload':
+                    platform.require_uploads_enabled()
                     await asyncio.to_thread(platform.upload.queue.retry, body['job_id'])
                     with platform._lock:
                         platform.state['worker_enabled'] = True

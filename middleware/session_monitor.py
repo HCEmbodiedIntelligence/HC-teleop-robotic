@@ -26,7 +26,7 @@ from std_msgs.msg import Float64MultiArray, String
 
 
 class TeleopSessionMonitor(Node):
-    def __init__(self, log_path: str) -> None:
+    def __init__(self, log_path: str, *, monitor_camera: bool = False) -> None:
         super().__init__("teleop_session_monitor")
         self.log_file = open(log_path, "a", encoding="utf-8", buffering=1)
         self.last_status_str = ""
@@ -83,15 +83,17 @@ class TeleopSessionMonitor(Node):
             qos_profile_sensor_data,
         )
 
-        # 5. 相机图像流监控
-        self.create_subscription(
-            CompressedImage,
-            "/observation/cameras/head/color/compressed",
-            lambda msg: self.on_cam_frame("/observation/cameras/head/color/compressed"),
-            qos_profile_sensor_data,
-        )
-        # 周期性检查相机状态 (每 3 秒)
-        self.create_timer(3.0, self.check_camera_health)
+        # The main middleware already measures camera input, decode and WebRTC
+        # send rates.  A second Python subscriber deserializing every JPEG costs
+        # substantial CPU, so keep this legacy log probe opt-in for diagnostics.
+        if monitor_camera:
+            self.create_subscription(
+                CompressedImage,
+                "/observation/cameras/head/color/compressed",
+                lambda msg: self.on_cam_frame("/observation/cameras/head/color/compressed"),
+                qos_profile_sensor_data,
+            )
+            self.create_timer(3.0, self.check_camera_health)
 
     def log_entry(self, category: str, message: str) -> None:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -202,13 +204,15 @@ class TeleopSessionMonitor(Node):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Teleop session monitor and logger")
     parser.add_argument("--log-file", required=True, help="Destination log file path")
+    parser.add_argument("--monitor-camera", action="store_true",
+                        help="Enable the legacy full-image camera log probe")
     args = parser.parse_args()
 
     domain_id = int(os.environ.get("ROS_DOMAIN_ID", 14))
     rclpy.init(domain_id=domain_id)
     node = None
     try:
-        node = TeleopSessionMonitor(args.log_file)
+        node = TeleopSessionMonitor(args.log_file, monitor_camera=args.monitor_camera)
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass

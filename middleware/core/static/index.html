@@ -382,6 +382,10 @@
         <p id="platformDescription"></p>
         <div class="form-grid">
           <div>
+            <label class="toggle"><input id="platformEnabled" type="checkbox"><span></span>启用平台上传功能</label>
+            <p class="form-help">关闭后停止上传、扫描、重试、平台心跳和记录刷新；本地录制继续可用。</p>
+          </div>
+          <div>
             <label class="toggle"><input id="platformAuto" type="checkbox"><span></span>录制结束后自动上传</label>
             <p class="form-help">仅对已选择平台任务的录制生效。关闭后仍保存到本机，可在下方记录中手动上传。</p>
           </div>
@@ -437,7 +441,7 @@
       </div>
     </form>
   </dialog>
-  <script src="/static/platform_panel.js?v=13-batch-datasets"></script>
+  <script src="/static/platform_panel.js?v=14-upload-toggle"></script>
   <script src="/static/app.js?v=30-dataset-categories"></script>
 </body>
 </html>

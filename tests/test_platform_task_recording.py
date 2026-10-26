@@ -49,6 +49,28 @@ def connected(tmp_path, monkeypatch):
     return cfg, service, TaskRecorder(TopicRecorder(cfg['ros']['recording'], tmp_path), service)
 
 
+def test_upload_master_switch_disables_platform_work_and_preserves_local_capture(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    service.set_recording_selection(choice(service, 'A'))
+    try:
+        status = service.set_enabled(False)
+        assert status['uploads_enabled'] is False
+        assert status['jobs'] == []
+        assert service.recording_selection() == {'mode': 'local'}
+        assert service.state['worker_enabled'] is False
+        assert service.state['auto_upload'] is True
+        with pytest.raises(UploadError, match='UPLOAD_DISABLED'):
+            service.tasks()
+        with pytest.raises(UploadError, match='UPLOAD_DISABLED'):
+            recorder.upload_recording('missing')
+        path = capture(recorder, {'mode': 'local'})
+        assert Path(path).is_file()
+        assert service.set_enabled(True)['uploads_enabled'] is True
+        assert service.recording_selection()['task_id'] == 'A'
+    finally:
+        recorder.close()
+
+
 def choice(service, task, request_id=None):
     result = dict(mode='platform', connection_id=service.state['current'], task_id=task, expected_plan_revision=1)
     if request_id: result['request_id'] = request_id
