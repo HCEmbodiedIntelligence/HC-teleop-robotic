@@ -455,13 +455,16 @@ class RosBridge:
         rclpy = None
         node = None
         executor = None
+        camera_node = None
+        camera_executor = None
+        camera_executor_thread = None
         context = None
         robot_api_boundary = None
         try:
             import os
             import rclpy
             from rclpy.context import Context
-            from rclpy.executors import MultiThreadedExecutor
+            from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
             from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
             from rclpy.qos import (
                 DurabilityPolicy,
@@ -486,6 +489,17 @@ class RosBridge:
             executor = MultiThreadedExecutor(num_threads=3, context=context)
             self._ownership_callback_group = MutuallyExclusiveCallbackGroup()
             executor.add_node(node)
+            if self.camera_topics:
+                # BEST_EFFORT camera frames must not wait behind 100 Hz control,
+                # status and command callbacks.  A separate node/wait-set keeps
+                # DDS draining at the publisher rate while control remains on
+                # its existing executor and frequency.
+                camera_node = rclpy.create_node(
+                    self.config.get("node_name", "hc_teleop_middleware") + "_camera",
+                    context=context,
+                )
+                camera_executor = SingleThreadedExecutor(context=context)
+                camera_executor.add_node(camera_node)
             publishers: dict[tuple[str, str], Any] = {}
             subscriptions = []
             subscription_names = []
@@ -680,7 +694,7 @@ class RosBridge:
                         self._status["messages"] += 1
 
                 subscriptions.append(
-                    node.create_subscription(
+                    (camera_node if is_webrtc_color and camera_node is not None else node).create_subscription(
                         message_type, topic, callback, subscription_qos(item)
                     )
                 )
@@ -704,6 +718,13 @@ class RosBridge:
             with self._lock:
                 self._trackers = trackers
             self._set_status(state="running", subscriptions=subscription_names, error=None)
+            if camera_executor is not None:
+                camera_executor_thread = threading.Thread(
+                    target=camera_executor.spin,
+                    name="ros-camera-executor",
+                    daemon=True,
+                )
+                camera_executor_thread.start()
             last_discovery = 0.0
             while not self._stop.is_set():
                 executor.spin_once(timeout_sec=0.02)
@@ -724,6 +745,14 @@ class RosBridge:
             )
         finally:
             self._permit_sender = None
+            if camera_executor is not None:
+                camera_executor.shutdown(timeout_sec=5.0)
+            if camera_executor_thread is not None:
+                camera_executor_thread.join(timeout=5.0)
+            if camera_executor is not None and camera_node is not None:
+                camera_executor.remove_node(camera_node)
+            if camera_node is not None:
+                camera_node.destroy_node()
             if executor is not None:
                 executor.shutdown(timeout_sec=5.)
                 # Humble's base shutdown waits active callbacks but does not
