@@ -23,7 +23,7 @@ class CameraService:
       1. ROS 2 topic subscription (CompressedImage / Image, default or custom topics)
       2. Direct Intel RealSense USB pipeline fallback
       3. Real-time H.264 WebRTC streaming to PICO / Meta Quest VR headsets
-      4. Fresh-frame-only WebRTC output with monotonic arrival timestamps
+      4. Fresh-frame-only WebRTC output paced by camera capture timestamps
     """
 
     def __init__(self, config: dict[str, Any], domain_id: int = 14):
@@ -32,7 +32,9 @@ class CameraService:
         self._latest: Any = None
         self._frame_sequence = 0
         self._frame_arrival_ns = 0
+        self._frame_capture_ns = 0
         self._encoded_arrival_ns = 0
+        self._encoded_capture_ns = 0
         self._last_capture_at = 0.0
         self._last_send_at = 0.0
         self._lock = threading.Lock()
@@ -43,6 +45,7 @@ class CameraService:
         self._encoded_latest: bytes | None = None
         self._pcs: set[Any] = set()
         self._stats_tasks: set[asyncio.Task[Any]] = set()
+        self._frame_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._frames_received = 0
         self._last_fps_calc = time.monotonic()
         self._fps_counter = 0
@@ -114,6 +117,7 @@ class CameraService:
         if not self.config.get("enabled", False):
             return
         arrival_ns = time.monotonic_ns()
+        capture_ns = self._message_capture_ns(msg) or arrival_ns
         try:
             active_topic = self.config.get("custom_topic", "") or self.config.get("topic", "/observation/cameras/head/color/compressed")
             if active_topic and topic != active_topic and not topic.endswith(
@@ -131,6 +135,7 @@ class CameraService:
                 with self._lock:
                     self._encoded_latest = bytes(msg.data)
                     self._encoded_arrival_ns = arrival_ns
+                    self._encoded_capture_ns = capture_ns
                 self._decode_event.set()
                 return
             elif hasattr(msg, "data") and hasattr(msg, "encoding"):
@@ -148,7 +153,13 @@ class CameraService:
                         frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
 
             if frame is not None:
-                self._accept_frame(frame, topic, count_capture=False, arrival_ns=arrival_ns)
+                self._accept_frame(
+                    frame,
+                    topic,
+                    count_capture=False,
+                    arrival_ns=arrival_ns,
+                    capture_ns=capture_ns,
+                )
         except Exception as exc:
             self._set_status(error=f"decode error: {exc}")
 
@@ -173,6 +184,8 @@ class CameraService:
             await asyncio.to_thread(self._thread.join, 2.0)
             self._thread = None
         with self._lock:
+            waiters = list(self._frame_waiters)
+            self._frame_waiters.clear()
             self._latest = None
             self._frames_received = 0
             self._status["state"] = "stopped"
@@ -180,6 +193,20 @@ class CameraService:
             self._status["webrtc_send_fps"] = 0.0
             self._status["webrtc_frames_sent"] = 0
             self._status["peers"] = 0
+        for loop, event in waiters:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(event.set)
+
+    @staticmethod
+    def _message_capture_ns(msg: Any) -> int:
+        """Return the ROS capture stamp, or zero when the source has none."""
+        stamp = getattr(getattr(msg, "header", None), "stamp", None)
+        if stamp is None:
+            return 0
+        sec = int(getattr(stamp, "sec", 0) or 0)
+        nanosec = int(getattr(stamp, "nanosec", 0) or 0)
+        value = sec * 1_000_000_000 + nanosec
+        return value if value > 0 else 0
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -304,8 +331,10 @@ class CameraService:
         *,
         count_capture: bool = True,
         arrival_ns: int | None = None,
+        capture_ns: int | None = None,
     ) -> None:
         arrival_ns = time.monotonic_ns() if arrival_ns is None else arrival_ns
+        capture_ns = arrival_ns if capture_ns is None else capture_ns
         frame = self._normalize_frame(frame)
         if frame is None:
             return
@@ -315,6 +344,11 @@ class CameraService:
             self._latest = frame
             self._frame_sequence += 1
             self._frame_arrival_ns = arrival_ns
+            self._frame_capture_ns = capture_ns
+            waiters = list(self._frame_waiters)
+        for loop, event in waiters:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(event.set)
         if count_capture:
             self._record_capture_frame(topic)
 
@@ -467,6 +501,7 @@ class CameraService:
             with self._lock:
                 payload = self._encoded_latest
                 arrival_ns = self._encoded_arrival_ns
+                capture_ns = self._encoded_capture_ns
                 self._encoded_latest = None
             if not payload or np is None or cv2 is None:
                 continue
@@ -494,6 +529,7 @@ class CameraService:
                         str(active_topic),
                         count_capture=False,
                         arrival_ns=arrival_ns,
+                        capture_ns=capture_ns,
                     )
             except Exception as exc:
                 self._set_status(error=f"decode error: {exc}")
@@ -555,9 +591,19 @@ class CameraService:
             def __init__(self):
                 super().__init__()
                 self._sequence = 0
-                self._origin_ns = None
+                self._origin_capture_ns = None
                 self._last_pts = -1
                 self._dimensions = None
+                self._loop = asyncio.get_running_loop()
+                self._frame_event = asyncio.Event()
+                with camera._lock:
+                    camera._frame_waiters.add((self._loop, self._frame_event))
+
+            def stop(self):
+                with camera._lock:
+                    camera._frame_waiters.discard((self._loop, self._frame_event))
+                self._frame_event.set()
+                super().stop()
 
             async def recv(self):
                 # Each peer keeps its own cursor. No placeholders or repeated
@@ -566,18 +612,25 @@ class CameraService:
                     with camera._lock:
                         sequence = camera._frame_sequence
                         arrival_ns = camera._frame_arrival_ns
+                        capture_ns = camera._frame_capture_ns
                         image = camera._latest
                     if image is not None and sequence != self._sequence:
                         self._sequence = sequence
                         if time.monotonic_ns() - arrival_ns <= 1_800_000_000:
                             break
-                    await asyncio.sleep(0.005)
+                    self._frame_event.clear()
+                    # Close the clear/read race: a decoder may publish between
+                    # the snapshot above and Event.clear().
+                    with camera._lock:
+                        if camera._frame_sequence != self._sequence:
+                            continue
+                    await self._frame_event.wait()
                 else:
                     raise MediaStreamError
-                if self._origin_ns is None:
-                    self._origin_ns = arrival_ns
+                if self._origin_capture_ns is None:
+                    self._origin_capture_ns = capture_ns
                 pts = max(self._last_pts + 1,
-                          (arrival_ns - self._origin_ns) * 90000 // 1_000_000_000)
+                          (capture_ns - self._origin_capture_ns) * 90000 // 1_000_000_000)
                 self._last_pts = pts
                 h, w = image.shape[:2]
                 if self._dimensions is None:

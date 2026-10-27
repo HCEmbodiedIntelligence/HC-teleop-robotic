@@ -11,22 +11,38 @@ class FreshFrameTests(unittest.IsolatedAsyncioTestCase):
         self.camera=CameraService({'enabled':True,'width':64,'height':48})
         self.image=np.zeros((48,64,3),dtype=np.uint8)
 
-    async def test_no_placeholder_no_duplicates_and_variable_timestamps(self):
+    async def test_no_placeholder_no_duplicates_and_capture_timestamps(self):
         track=self.camera._create_video_track()
         pending=asyncio.create_task(track.recv())
         await asyncio.sleep(.04)
         self.assertFalse(pending.done())
         now=time.monotonic_ns()
-        self.camera._accept_frame(self.image,'test',arrival_ns=now)
+        self.camera._accept_frame(self.image,'test',arrival_ns=now,capture_ns=1_000_000_000)
         first=await asyncio.wait_for(pending,.5)
         pending=asyncio.create_task(track.recv())
         await asyncio.sleep(.08)  # Source below 30 fps must not be padded.
         self.assertFalse(pending.done())
-        self.camera._accept_frame(self.image,'test',arrival_ns=now+80_000_000)
+        self.camera._accept_frame(
+            self.image,'test',arrival_ns=now+80_000_000,capture_ns=1_033_333_333)
         second=await asyncio.wait_for(pending,.5)
-        self.assertEqual(second.pts-first.pts,7200)
+        self.assertEqual(second.pts-first.pts,2999)
         self.assertEqual(float(second.time_base),1/90000)
         self.assertEqual(self.camera._webrtc_frames_sent,2)
+        track.stop()
+
+    async def test_dds_arrival_jitter_does_not_change_rtp_timing(self):
+        track=self.camera._create_video_track()
+        now=time.monotonic_ns()
+        self.camera._accept_frame(
+            self.image,'test',arrival_ns=now,capture_ns=2_000_000_000)
+        first=await asyncio.wait_for(track.recv(),.5)
+        self.camera._accept_frame(
+            self.image,'test',arrival_ns=now+49_000_000,capture_ns=2_033_333_333)
+        second=await asyncio.wait_for(track.recv(),.5)
+        self.camera._accept_frame(
+            self.image,'test',arrival_ns=now+70_000_000,capture_ns=2_066_666_666)
+        third=await asyncio.wait_for(track.recv(),.5)
+        self.assertEqual([second.pts-first.pts,third.pts-second.pts],[2999,3000])
         track.stop()
 
     async def test_each_peer_receives_newest_frame_without_consuming_other_peer(self):
