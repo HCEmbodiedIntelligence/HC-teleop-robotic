@@ -591,8 +591,10 @@ class CameraService:
             def __init__(self):
                 super().__init__()
                 self._sequence = 0
-                self._origin_capture_ns = None
-                self._last_pts = -1
+                self._pts = 0
+                self._period = 1.0 / max(1.0, float(camera.config.get("fps", 30) or 30))
+                self._pts_step = max(1, round(90000 * self._period))
+                self._next_send_at = None
                 self._dimensions = None
                 self._loop = asyncio.get_running_loop()
                 self._frame_event = asyncio.Event()
@@ -606,18 +608,17 @@ class CameraService:
                 super().stop()
 
             async def recv(self):
-                # Each peer keeps its own cursor. No placeholders or repeated
-                # frames; slow encoders skip to the newest image, never backlog.
+                # Wait for the first real frame. Once started, send at a fixed
+                # cadence and always sample the newest decoded image. A short
+                # DDS/decode delay therefore repeats one frame instead of
+                # exposing a 50/17 ms stop-and-catch-up pattern to the headset.
                 while self.readyState == "live" and not camera._stop.is_set():
                     with camera._lock:
                         sequence = camera._frame_sequence
                         arrival_ns = camera._frame_arrival_ns
-                        capture_ns = camera._frame_capture_ns
                         image = camera._latest
-                    if image is not None and sequence != self._sequence:
-                        self._sequence = sequence
-                        if time.monotonic_ns() - arrival_ns <= 1_800_000_000:
-                            break
+                    if image is not None and time.monotonic_ns() - arrival_ns <= 1_800_000_000:
+                        break
                     self._frame_event.clear()
                     # Close the clear/read race: a decoder may publish between
                     # the snapshot above and Event.clear().
@@ -627,11 +628,29 @@ class CameraService:
                     await self._frame_event.wait()
                 else:
                     raise MediaStreamError
-                if self._origin_capture_ns is None:
-                    self._origin_capture_ns = capture_ns
-                pts = max(self._last_pts + 1,
-                          (capture_ns - self._origin_capture_ns) * 90000 // 1_000_000_000)
-                self._last_pts = pts
+
+                loop = asyncio.get_running_loop()
+                if self._next_send_at is None:
+                    self._next_send_at = loop.time()
+                else:
+                    self._next_send_at += self._period
+                    delay = self._next_send_at - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    elif delay < -self._period:
+                        # Never burst several late frames to catch up.
+                        self._next_send_at = loop.time()
+
+                with camera._lock:
+                    sequence = camera._frame_sequence
+                    arrival_ns = camera._frame_arrival_ns
+                    image = camera._latest
+                if image is None or time.monotonic_ns() - arrival_ns > 1_800_000_000:
+                    self._next_send_at = None
+                    return await self.recv()
+                self._sequence = sequence
+                pts = self._pts
+                self._pts += self._pts_step
                 h, w = image.shape[:2]
                 if self._dimensions is None:
                     self._dimensions = (w, h)
