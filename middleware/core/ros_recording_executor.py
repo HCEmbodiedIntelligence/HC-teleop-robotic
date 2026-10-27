@@ -20,28 +20,28 @@ def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-_HIGH_BANDWIDTH_MESSAGE_TYPES = {
-    "sensor_msgs/msg/CompressedImage",
-    "sensor_msgs/msg/Image",
-    "sensor_msgs/msg/PointCloud2",
+_IDLE_MONITOR_TOPICS = {
+    # RosBridge already measures camera input, VR input, final joint commands
+    # and hardware feedback.  The dashboard additionally needs this one stage
+    # to show the complete live control pipeline while no capture is active.
+    "/control/solver/joint_targets",
 }
 
 
 def idle_monitoring_subscriptions(
     subscriptions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Topics safe to count continuously in the isolated recorder process.
+    """Return the one recorder-only stage needed by the idle dashboard.
 
-    Images and point clouds stay on the camera/recording paths because even a
-    raw subscription makes DDS copy every large payload into this process.
-    Small topics are counted here even when the main bridge also consumes them:
-    its executor performs control and WebSocket work, so callback scheduling
-    there is not a reliable measurement of the publisher rate.
+    Keeping all small recording topics subscribed while idle used almost one
+    CPU core on X1.  More importantly, their reliable depth-64 queues could
+    back-pressure publishers whenever this low-priority process was delayed.
+    RosBridge already measures the other live pipeline stages.
     """
     return [
         item
         for item in subscriptions
-        if str(item.get("type", "")) not in _HIGH_BANDWIDTH_MESSAGE_TYPES
+        if str(item.get("topic", "")) in _IDLE_MONITOR_TOPICS
     ]
 
 
@@ -240,6 +240,7 @@ def _raw_recording_process(
         import rclpy
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
+        from rclpy.qos import qos_profile_sensor_data
         from .ros_qos import recording_subscription_qos
         from rosidl_runtime_py.utilities import get_message
 
@@ -251,7 +252,7 @@ def _raw_recording_process(
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
 
-        def create_subscription(item: dict[str, Any]) -> None:
+        def create_subscription(item: dict[str, Any], *, recording: bool) -> None:
             topic = str(item["topic"])
             if topic in ros_subscriptions:
                 return
@@ -298,9 +299,16 @@ def _raw_recording_process(
                 message_type,
                 topic,
                 callback,
-                recording_subscription_qos(item),
+                recording_subscription_qos(item)
+                if recording
+                else qos_profile_sensor_data,
                 raw=True,
             )
+
+        def destroy_subscriptions() -> None:
+            for subscription in ros_subscriptions.values():
+                node.destroy_subscription(subscription)
+            ros_subscriptions.clear()
 
         def activate_subscriptions() -> None:
             nonlocal prepared_until, capture_seen
@@ -312,23 +320,27 @@ def _raw_recording_process(
                 message_counts[topic] = 0
             for key in counters:
                 counters[key] = 0
+            # Idle monitoring uses best-effort latest-sample QoS so it can
+            # never stall a producer. Recording recreates every subscription
+            # with the configured reliable/history policy before becoming
+            # ready, preserving capture completeness.
+            destroy_subscriptions()
             for item in subscriptions:
-                create_subscription(item)
+                create_subscription(item, recording=True)
             subscriptions_ready_event.set()
             publish_status("ready")
 
         def deactivate_capture_subscriptions() -> None:
             nonlocal capture_seen
-            for topic in list(ros_subscriptions):
-                if topic in idle_topics:
-                    continue
-                node.destroy_subscription(ros_subscriptions.pop(topic))
+            destroy_subscriptions()
+            for item in idle_subscriptions:
+                create_subscription(item, recording=False)
             capture_seen = False
             subscriptions_ready_event.clear()
             publish_status("monitoring")
 
         for item in idle_subscriptions:
-            create_subscription(item)
+            create_subscription(item, recording=False)
         publish_status("monitoring" if ros_subscriptions else "standby")
         last_status = time.monotonic()
         while not stop_event.is_set():

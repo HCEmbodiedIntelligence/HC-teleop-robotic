@@ -35,27 +35,27 @@ class RosRecordingExecutorTests(unittest.TestCase):
         )
         self.assertEqual([item["topic"] for item in selected], ["/keep"])
 
-    def test_idle_monitor_keeps_only_small_record_only_topics(self):
+    def test_idle_monitor_keeps_only_missing_dashboard_pipeline_stage(self):
         subscriptions = [
             {
-                "topic": "/joints",
+                "topic": "/observation/joint_states",
                 "type": "sensor_msgs/msg/JointState",
                 "outputs": ["record"],
             },
             {
-                "topic": "/camera",
+                "topic": "/control/solver/joint_targets",
+                "type": "sensor_msgs/msg/JointState",
+                "outputs": ["record"],
+            },
+            {
+                "topic": "/action/joint_states",
+                "type": "sensor_msgs/msg/JointState",
+                "outputs": ["record"],
+            },
+            {
+                "topic": "/observation/cameras/head/color/compressed",
                 "type": "sensor_msgs/msg/CompressedImage",
                 "outputs": ["record"],
-            },
-            {
-                "topic": "/cloud",
-                "type": "sensor_msgs/msg/PointCloud2",
-                "outputs": ["record"],
-            },
-            {
-                "topic": "/dashboard",
-                "type": "std_msgs/msg/String",
-                "outputs": ["websocket", "record"],
             },
         ]
 
@@ -63,7 +63,7 @@ class RosRecordingExecutorTests(unittest.TestCase):
 
         self.assertEqual(
             [item["topic"] for item in selected],
-            ["/joints", "/dashboard"],
+            ["/control/solver/joint_targets"],
         )
 
     def test_rate_gate_does_not_halve_jittery_30_hz_input(self):
