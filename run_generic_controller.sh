@@ -47,6 +47,43 @@ PY
   exit 0
 fi
 
-exec "${CONTROLLER_PREFIX}/bin/python" -u \
-  "${V23_DIR}/script/control_v2_3_ros2.py" \
+CONTROLLER_COMMAND=(
+  "${CONTROLLER_PREFIX}/bin/python" -u
+  "${V23_DIR}/script/control_v2_3_ros2.py"
   "${CONFIG_V23}"
+)
+
+# X1 reserves CPUs 1-3 with isolcpus/nohz_full.  Keep the 100 Hz solver away
+# from camera, dashboard and desktop scheduling jitter when CPU 2 is part of
+# that reserved set. Other machines retain the scheduler's normal placement.
+# Set HC_V23_CPU to a CPU number to override, or to an empty value to disable.
+V23_CPU="${HC_V23_CPU-auto}"
+if [[ "${V23_CPU}" == auto ]]; then
+  V23_CPU=""
+fi
+if [[ -z "${HC_V23_CPU+x}" && -r /sys/devices/system/cpu/isolated ]]; then
+  isolated_cpus="$(cat /sys/devices/system/cpu/isolated)"
+  if /usr/bin/python3 - "${isolated_cpus}" <<'PY'
+import sys
+
+value = sys.argv[1]
+cpus = set()
+for part in value.split(','):
+    part = part.strip()
+    if not part:
+        continue
+    if '-' in part:
+        start, end = (int(item) for item in part.split('-', 1))
+        cpus.update(range(start, end + 1))
+    else:
+        cpus.add(int(part))
+raise SystemExit(0 if 2 in cpus else 1)
+PY
+  then
+    V23_CPU=2
+  fi
+fi
+if [[ -n "${V23_CPU}" ]]; then
+  exec taskset -c "${V23_CPU}" "${CONTROLLER_COMMAND[@]}"
+fi
+exec "${CONTROLLER_COMMAND[@]}"
