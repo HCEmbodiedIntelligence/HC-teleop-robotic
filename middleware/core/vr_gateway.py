@@ -11,6 +11,7 @@ from .network import enable_packet_info, receive_packet, reply_packet
 
 from .protocol import (
     DISCOVERY_REQUEST,
+    RELEASE_REQUEST,
     PacketError,
     decode_pose_packet,
     encode_json_packet,
@@ -40,11 +41,16 @@ class VrGateway:
         self._pose_queue: queue.Queue[tuple[Any, dict[str, Any]]] = queue.Queue(
             maxsize=max(2, int(config.get("processing_queue_size", 8)))
         )
+        self.exclusive_mode: bool = bool(config.get("exclusive_mode", True))
+        self.lease_timeout_s: float = float(config.get("lease_timeout_s", 3.0))
+        self._active_peer: tuple[str, int] | None = None
+        self._lease_expires_at: float = 0.0
         self._outbound: socket.socket | None = None
         self._lock = threading.Lock()
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", True) else "starting",
             "peer": None,
+            "active_peer": None,
             "last_packet_at": None,
             "tracking": {"head": False, "left": False, "right": False},
             "inputs": {
@@ -57,6 +63,7 @@ class VrGateway:
             "lost": 0,
             "old": 0,
             "invalid": 0,
+            "unauthorized_dropped": 0,
             "processing_dropped": 0,
             "processed": 0,
             "sent": 0,
@@ -93,13 +100,22 @@ class VrGateway:
             result["inputs"] = {
                 side: dict(value) for side, value in self._status["inputs"].items()
             }
+            result["active_peer"] = self._active_peer[0] if self._active_peer else None
+            result["is_locked"] = (
+                self.exclusive_mode
+                and self._active_peer is not None
+                and time.monotonic() < self._lease_expires_at
+            )
             return result
 
     def send_event(self, event: dict[str, Any]) -> bool:
         host = self.config.get("outbound_host") or ""
         if not host:
-            current = self.status().get("peer")
-            host = current[0] if current else ""
+            if self.exclusive_mode and self._active_peer is not None:
+                host = self._active_peer[0]
+            else:
+                current = self.status().get("peer")
+                host = current[0] if current else ""
         if not host:
             return False
         try:
@@ -163,11 +179,50 @@ class VrGateway:
                         except BlockingIOError:
                             break
                         if current_socket is discovery_socket:
-                            if packet.strip() == DISCOVERY_REQUEST:
-                                reply_packet(discovery_socket, response, sender, packet_info)
+                            cmd = packet.strip()
+                            if cmd == DISCOVERY_REQUEST:
+                                now = time.monotonic()
+                                is_busy = (
+                                    self.exclusive_mode
+                                    and self._active_peer is not None
+                                    and now < self._lease_expires_at
+                                    and sender[0] != self._active_peer[0]
+                                )
+                                if is_busy:
+                                    busy_resp = f"PICO_RECEIVER_BUSY|{self.config['pose_port']}|{self._active_peer[0]}".encode("ascii")
+                                    reply_packet(discovery_socket, busy_resp, sender, packet_info)
+                                else:
+                                    reply_packet(discovery_socket, response, sender, packet_info)
+                            elif cmd == RELEASE_REQUEST:
+                                if self._active_peer is not None and sender[0] == self._active_peer[0]:
+                                    print(f"[VrGateway] Active session released by {sender[0]} (discovery)", flush=True)
+                                    self._active_peer = None
+                                    self._lease_expires_at = 0.0
+                                    self._set_status(peer=None, active_peer=None)
+                            continue
+
+                        if packet.strip() == RELEASE_REQUEST:
+                            if self._active_peer is not None and sender[0] == self._active_peer[0]:
+                                print(f"[VrGateway] Active session released by {sender[0]} (pose)", flush=True)
+                                self._active_peer = None
+                                self._lease_expires_at = 0.0
+                                self._set_status(peer=None, active_peer=None)
                             continue
 
                         now = time.monotonic()
+                        if self.exclusive_mode:
+                            if self._active_peer is None or now >= self._lease_expires_at:
+                                if self._active_peer is None or self._active_peer[0] != sender[0]:
+                                    print(f"[VrGateway] Exclusive session acquired by {sender[0]}:{sender[1]}", flush=True)
+                                self._active_peer = sender
+                                self._lease_expires_at = now + self.lease_timeout_s
+                                self._set_status(active_peer=sender[0])
+                            elif sender[0] != self._active_peer[0]:
+                                self._increment("unauthorized_dropped")
+                                continue
+                            else:
+                                self._lease_expires_at = now + self.lease_timeout_s
+
                         try:
                             pose = decode_pose_packet(packet)
                         except PacketError:
@@ -214,8 +269,21 @@ class VrGateway:
                         elif tracking["head"]:
                             head_invalid_active = False
 
-                elapsed = time.monotonic() - last_packet_time
-                sample_elapsed = time.monotonic() - last_sample_progress_time
+                loop_now = time.monotonic()
+                if (
+                    self.exclusive_mode
+                    and self._active_peer is not None
+                    and loop_now >= self._lease_expires_at
+                ):
+                    print(
+                        f"[VrGateway] Exclusive session lease expired for {self._active_peer[0]}",
+                        flush=True,
+                    )
+                    self._active_peer = None
+                    self._set_status(peer=None, active_peer=None)
+
+                elapsed = loop_now - last_packet_time
+                sample_elapsed = loop_now - last_sample_progress_time
                 if ever_received and elapsed > timeout_seconds and not self.status()["timeout"]:
                     self._set_status(timeout=True)
                     self.on_timeout(f"no VR pose data for {elapsed * 1000:.0f} ms")

@@ -41,6 +41,8 @@ vr:
   outbound_port: 5007
   publish_to_ros: true
   data_topic: /vrdata
+  exclusive_mode: true
+  lease_timeout_s: 3.0
 safety: {}
 camera: {}
 uploads:
