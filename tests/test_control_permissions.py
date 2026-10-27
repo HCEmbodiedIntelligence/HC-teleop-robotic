@@ -16,56 +16,14 @@ def make_bridge():
     bridge = RosBridge({'enabled': True, 'command_mux': {'source': 'motion'}}, lambda *a: None)
     bridge._ros_now = lambda: 100.1
     bridge.receive_hardware_ready(True, 1.)
-    bridge.set_command_output_enabled(True)
-    bridge._ros_now = lambda: 100.11
     return bridge
-
-
-def make_vr_bridge():
-    bridge = RosBridge({'enabled': True, 'command_mux': {'source': 'vr'}}, lambda *a: None)
-    bridge._ros_now = lambda: 100.1
-    bridge.receive_hardware_ready(True, 1.)
-    bridge.set_command_output_enabled(True)
-    return bridge
-
-
-def test_a_resume_cannot_publish_until_release_then_fresh_grip():
-    bridge = make_vr_bridge()
-    sent = []
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=1.1):
-        # A alone and a Grip already held during A are both closed.
-        assert not bridge.forward_live_command('vr', message(), sent.append)
-        assert not bridge.observe_vr_grips(0.0, 1.0)
-        assert not bridge.forward_live_command('vr', message(), sent.append)
-
-        # Both released arms the physical latch; either fresh Grip may then
-        # control its existing left-body or right-arms path.
-        assert not bridge.observe_vr_grips(0.0, 0.0)
-        bridge._ros_now = lambda: 100.2
-        assert bridge.observe_vr_grips(0.0, 1.0)
-        bridge._ros_now = lambda: 100.21
-        assert bridge.forward_live_command('vr', message(100.21), sent.append)
-
-        # Releasing both Grips closes the final publisher immediately.
-        assert not bridge.observe_vr_grips(0.0, 0.0)
-        bridge._ros_now = lambda: 100.3
-        assert not bridge.forward_live_command('vr', message(100.3), sent.append)
-    assert len(sent) == 1
-
-
-def test_invalid_tracking_closes_vr_grip_gate():
-    bridge = make_vr_bridge()
-    bridge.observe_vr_grips(0.0, 0.0)
-    assert bridge.observe_vr_grips(1.0, 0.0)
-    assert not bridge.observe_vr_grips(1.0, 0.0, valid=False)
-    assert not bridge.status()['command_mux']['vr_grip_gate_open']
 
 
 def test_move_without_vr_grip_and_source_exclusion():
     bridge = make_bridge()
     sent = []
     with patch('middleware.core.ros_bridge.time.monotonic', return_value=1.1):
-        assert bridge.forward_live_command('motion', message(100.11), sent.append)
+        assert bridge.forward_live_command('motion', message(), sent.append)
         assert not bridge.forward_live_command('vr', message(), sent.append)
         assert not bridge.forward_live_command('motion', message(), sent.append)
     assert len(sent) == 1

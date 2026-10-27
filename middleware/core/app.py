@@ -436,24 +436,6 @@ class MiddlewareRuntime:
         if a_down:
             self._on_safety_resume("VR controller A button pressed")
 
-        # Feed the physical clutches directly into the final command mux. This
-        # is deliberately after A handling: pressing A while a Grip is already
-        # held cannot arm output until both Grips have first been released.
-        if self.ros is not None and hasattr(self.ros, "observe_vr_grips"):
-            try:
-                grip_valid = (
-                    int(getattr(packet, "protocol_version", 0)) >= 2
-                    and bool(packet.tracked("left"))
-                    and bool(packet.tracked("right"))
-                )
-            except (AttributeError, KeyError, TypeError, ValueError):
-                grip_valid = False
-            self.ros.observe_vr_grips(
-                getattr(left_input, "grip", 0.0),
-                getattr(right_input, "grip", 0.0),
-                valid=grip_valid,
-            )
-
         # Pressing both thumbsticks marks the active recording, or the most
         # recently completed recording.  Use the combined held edge so the
         # gesture still works when the two sticks are pressed a few frames apart.

@@ -175,13 +175,7 @@ class RosBridge:
         mux_config = config.get("command_mux", {})
         self._mux_enabled = bool(mux_config.get("enabled", True))
         self._command_source = str(mux_config.get("source", "vr"))
-        # A resume only arms the selected source. VR actuator output remains
-        # closed until a fresh physical Grip press has been observed.
-        self._command_output_enabled = False
-        self._vr_grip_gate_open = False
-        self._vr_grip_release_seen = False
-        self._vr_left_gripped = False
-        self._vr_right_gripped = False
+        self._command_output_enabled = True
         self._hardware_ready = False
         self._hardware_ready_last = -math.inf
         self._ready_timeout = float(mux_config.get('hardware_ready_timeout_sec', 0.5))
@@ -243,12 +237,6 @@ class RosBridge:
             result["command_mux"] = {
                 "enabled": self._mux_enabled,
                 "output_enabled": self._command_output_enabled,
-                "vr_grip_gate_open": self._vr_grip_gate_open,
-                "vr_grip_release_seen": self._vr_grip_release_seen,
-                "vr_grips": {
-                    "left": self._vr_left_gripped,
-                    "right": self._vr_right_gripped,
-                },
                 "hardware_ready": ready,
                 "hardware_ready_age": (now - self._hardware_ready_last
                                        if math.isfinite(self._hardware_ready_last) else None),
@@ -358,7 +346,6 @@ class RosBridge:
             if self._command_source != source:
                 self._revoke_locked()
                 self._command_output_enabled = False
-                self._reset_vr_grip_gate_locked()
             self._command_source = source
         return self._enqueue("control_source", source)
 
@@ -370,75 +357,8 @@ class RosBridge:
                 self.ownership.hold()
             self._revoke_locked()
             self._command_output_enabled = bool(enabled)
-            self._reset_vr_grip_gate_locked()
             epoch = self._output_epoch
         return self._enqueue("command_output", (bool(enabled), epoch))
-
-    def _reset_vr_grip_gate_locked(self) -> None:
-        self._vr_grip_gate_open = False
-        self._vr_grip_release_seen = False
-        self._vr_left_gripped = False
-        self._vr_right_gripped = False
-
-    def observe_vr_grips(
-        self, left: float, right: float, *, valid: bool = True
-    ) -> bool:
-        """Open VR output only after release followed by a fresh Grip press."""
-        mux_config = self.config.get("command_mux", {})
-        press = float(mux_config.get("vr_grip_threshold", 0.55))
-        release = float(mux_config.get("vr_grip_release_threshold", 0.50))
-        with self._lock:
-            previous_open = self._vr_grip_gate_open
-            previous_grips = (self._vr_left_gripped, self._vr_right_gripped)
-            try:
-                left_value, right_value = float(left), float(right)
-                sample_valid = (
-                    bool(valid)
-                    and math.isfinite(left_value)
-                    and math.isfinite(right_value)
-                    and 0.0 <= left_value <= 1.0
-                    and 0.0 <= right_value <= 1.0
-                    and 0.0 <= release < press <= 1.0
-                )
-            except (TypeError, ValueError):
-                sample_valid = False
-                left_value = right_value = 0.0
-            if not sample_valid:
-                self._reset_vr_grip_gate_locked()
-            else:
-                self._vr_left_gripped = left_value >= (
-                    release if self._vr_left_gripped else press
-                )
-                self._vr_right_gripped = right_value >= (
-                    release if self._vr_right_gripped else press
-                )
-                any_gripped = self._vr_left_gripped or self._vr_right_gripped
-                if not any_gripped:
-                    self._vr_grip_release_seen = True
-                    self._vr_grip_gate_open = False
-                else:
-                    self._vr_grip_gate_open = bool(
-                        self._command_output_enabled
-                        and self._command_source == "vr"
-                        and self._vr_grip_release_seen
-                    )
-            if (previous_open != self._vr_grip_gate_open or
-                    previous_grips != (self._vr_left_gripped, self._vr_right_gripped)):
-                # Fence targets prepared before either clutch transition,
-                # including switching directly from one hand to the other.
-                self._revoke_locked()
-                if self._vr_grip_gate_open:
-                    # VR resume is only an arm operation. The first fresh Grip
-                    # is the event that enables hardware execution.
-                    self._enqueue(
-                        "command_output", (True, self._output_epoch)
-                    )
-            return self._vr_grip_gate_open
-
-    def _source_gate_open_locked(self, source: str) -> bool:
-        # Intervention commands carry their own immutable ownership token and
-        # semantic clutch lease; the normal live-VR gate applies outside it.
-        return self.ownership.active or source != "vr" or self._vr_grip_gate_open
 
     def _revoke_locked(self) -> None:
         self._source_cutoff = self._ros_now()
@@ -515,7 +435,6 @@ class RosBridge:
             ready = self._ready_locked(now)
             if (not valid or stamp <= max(self._source_cutoff, self._source_stamps.get(source, 0))
                     or not ready or not self._command_output_enabled
-                    or not self._source_gate_open_locked(source)
                     or self._replay_active or self._command_source != source
                     or (self.ownership.active and not self.ownership.allows(token))):
                 self._mux_rejected += 1
@@ -524,7 +443,6 @@ class RosBridge:
         prepared = self._boundary.prepare(message) if self._boundary else message
         with self._lock:
             if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
-                    or not self._source_gate_open_locked(source)
                     or not self._ready_locked(time.monotonic()) or self._command_source != source
                     or self._replay_active or stamp <= self._source_stamps.get(source, 0)
                     or (self.ownership.active and not self.ownership.allows(token))):
@@ -697,7 +615,6 @@ class RosBridge:
                                                    self.ownership.cutoff_ns, True)
                             return
                         if (self._ready_locked(time.monotonic()) and self._command_output_enabled
-                                and self._source_gate_open_locked(self._command_source)
                                 and not self._replay_active and self._command_source in {'vr', 'motion'}):
                             header = Header()
                             header.stamp = node.get_clock().now().to_msg()
@@ -1136,9 +1053,6 @@ class RosBridge:
                         if (epoch != self._output_epoch or
                                 enabled != self._command_output_enabled):
                             continue  # A subsequent stop/source change revoked this request.
-                        if (enabled and self._command_source == "vr"
-                                and not self._vr_grip_gate_open):
-                            continue  # A only arms VR; fresh Grip enables hardware.
                         self._publish_hardware_enable_locked(node, publishers, enabled)
                     node.get_logger().info(
                         "Joint command output %s"

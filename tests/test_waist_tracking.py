@@ -236,9 +236,11 @@ class WaistTrackingTests(unittest.TestCase):
             # Fresh solver output was observed -> state is WAIT_RELEASE
             self.assertEqual(node.solver_rearm.state, "wait_release")
             self.assertTrue(node.solver_rearm.blocked)
-            # No clutch owns the robot, so even a zero/hold arm command must
-            # not be emitted while the solver is waiting for rearm.
-            self.assertEqual(published_commands, [])
+            # Arm positions should NOT be 1.23, but held at initial_joints
+            self.assertTrue(len(published_commands) > 0)
+            last_pub = dict(zip(published_commands[-1].name, published_commands[-1].position))
+            for name in all_arm_names:
+                self.assertAlmostEqual(last_pub[name], node.initial_joints[name])
 
             # 5. Now operator presses LEFT grip alone (left clutch = 1.0, right clutch = 0.0)
             now = node._monotonic()
@@ -278,9 +280,9 @@ class WaistTrackingTests(unittest.TestCase):
 
             self.assertTrue(len(published_commands) > 0)
             last_pub = dict(zip(published_commands[-1].name, published_commands[-1].position))
-            # Left Grip owns only the body; no arm hold targets are mixed in.
+            # Verify arms are STILL held at initial joints, NOT solver's 1.23!
             for name in all_arm_names:
-                self.assertNotIn(name, last_pub)
+                self.assertAlmostEqual(last_pub[name], node.initial_joints[name])
             # Verify waist joints ARE published and differ from initial_joints!
             waist_changed = any(
                 abs(last_pub[name] - node.initial_joints[name]) > 1e-4
@@ -692,3 +694,4 @@ class WaistTrackingTests(unittest.TestCase):
             )
         finally:
             node.destroy_node()
+

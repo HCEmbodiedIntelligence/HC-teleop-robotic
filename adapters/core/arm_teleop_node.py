@@ -131,8 +131,6 @@ class RobotArmTeleopNode(Node):
         self.waist_output_enabled = False
         self.waist_clutch_rearm_required = False
         self._prev_left_grip = False
-        self.arm_clutch_rearm_required = False
-        self._prev_right_grip = False
         self._prev_resume_requested = False
         self.solver_rearm = SolverRearmGate()
         self.hardware_ready = False
@@ -801,7 +799,6 @@ class RobotArmTeleopNode(Node):
         self.stop_reason = ""
         self.waist_output_enabled = False
         self.waist_clutch_rearm_required = True
-        self.arm_clutch_rearm_required = True
         if self.body.active:
             self.body.active = False
             self.body.reference_head = None
@@ -813,18 +810,10 @@ class RobotArmTeleopNode(Node):
             if name in self.joint_state:
                 self.last_command[name] = float(self.joint_state[name])
             self.generic_aux_command.pop(name, None)
-        for side in ("left", "right"):
-            self.generic_aux_command.pop(
-                self.config["grippers"][side]["sim_joint"], None
-            )
         now = self._monotonic()
         left_input_fresh = self._input_fresh(self.arms["left"], now)
         self._prev_left_grip = bool(
             left_input_fresh and self._clutch_pressed(self.arms["left"])
-        )
-        right_input_fresh = self._input_fresh(self.arms["right"], now)
-        self._prev_right_grip = bool(
-            right_input_fresh and self._clutch_pressed(self.arms["right"])
         )
         self.get_logger().info(
             f"{reason}: teleop re-enabled, waist output disabled until new left Grip edge"
@@ -947,13 +936,15 @@ class RobotArmTeleopNode(Node):
         if not arms_active:
             for arm in self.arms.values():
                 for name in arm.joint_names:
-                    merged.pop(name, None)
+                    merged[name] = float(
+                        self.last_command.get(
+                            name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
+                        )
+                    )
         merged.update(self.generic_aux_command)
         if not self.body.active:
             for name in self.body.joint_names:
                 merged.pop(name, None)
-        if not merged:
-            return
         if arms_active or self.body.active:
             if not self._collision_command_allowed(merged, now):
                 return
@@ -1079,13 +1070,8 @@ class RobotArmTeleopNode(Node):
         self.body.target_head_local = None
         self.waist_output_enabled = False
         self.waist_clutch_rearm_required = True
-        self.arm_clutch_rearm_required = True
         for name in self.body.joint_names:
             self.generic_aux_command.pop(name, None)
-        for side in ("left", "right"):
-            self.generic_aux_command.pop(
-                self.config["grippers"][side]["sim_joint"], None
-            )
         if send_base_zero:
             self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
 
@@ -1251,18 +1237,6 @@ class RobotArmTeleopNode(Node):
             self.waist_output_enabled = left_grip
 
         return self.waist_output_enabled
-
-    def _update_arm_clutch(self, now: float) -> bool:
-        right_input_fresh = self._input_fresh(self.arms["right"], now)
-        right_grip = right_input_fresh and self._clutch_pressed(self.arms["right"])
-        rising_edge = right_grip and not self._prev_right_grip
-        self._prev_right_grip = right_grip
-        if self.arm_clutch_rearm_required:
-            if rising_edge:
-                self.arm_clutch_rearm_required = False
-                return True
-            return False
-        return right_grip
 
     def _sync_model(self) -> None:
         for name, value in self.joint_state.items():
@@ -2696,18 +2670,7 @@ class RobotArmTeleopNode(Node):
         *,
         track_head_yaw: bool = True,
         left_clutch_active: bool = False,
-        control_engaged: bool | None = None,
     ) -> None:
-        if control_engaged is None:
-            # Production control ticks always pass the physical-clutch state.
-            control_engaged = True
-        if not control_engaged:
-            self.head_velocity_reference = None
-            self.last_head_velocity_time = None
-            self.head_base_state = "idle"
-            if hasattr(self, "_stop_base_if_pending"):
-                self._stop_base_if_pending()
-            return
         if getattr(self, "head_planar_follower", None) is not None:
             self._publish_head_planar_velocity(now, left_clutch_active and track_head_yaw)
             return
@@ -3181,7 +3144,9 @@ class RobotArmTeleopNode(Node):
             and bool(self.body_config.get("right_stick_yaw_enabled", True))
             and self._right_stick_yaw_active()
         )
-        arms_requested = self._update_arm_clutch(now)
+        arms_requested = right_input_fresh and self._clutch_pressed(
+            self.arms["right"]
+        )
         if self.solver_rearm.blocked:
             if right_input_fresh and self.solver_rearm.observe_clutch(arms_requested):
                 self.get_logger().info(
@@ -3246,7 +3211,6 @@ class RobotArmTeleopNode(Node):
                 now,
                 track_head_yaw=True,
                 left_clutch_active=left_base_requested,
-                control_engaged=left_base_requested or arms_requested,
             )
 
         arm_was_active = any(arm.active for arm in self.arms.values())
@@ -3274,13 +3238,8 @@ class RobotArmTeleopNode(Node):
             self.get_logger().info(
                 f"right clutch engaged: {self.backend} controller owns both arms"
             )
-        if arms_requested:
-            self._publish_generic_grippers(now)
-        else:
-            for side in ("left", "right"):
-                self.generic_aux_command.pop(
-                    self.config["grippers"][side]["sim_joint"], None
-                )
+        # 灵巧手指令始终常驻下发，食指扳机按压即可实时连续开合（无需持续按住 Grip 离合）
+        self._publish_generic_grippers(now)
 
         if self.backend == "motion":
             self._publish_motion_aux()
@@ -3355,7 +3314,7 @@ class RobotArmTeleopNode(Node):
             and bool(self.body_config.get("right_stick_yaw_enabled", True))
             and self._right_stick_yaw_active()
         )
-        arms_requested = self._update_arm_clutch(now)
+        arms_requested = right_input_fresh and self._clutch_pressed(self.arms["right"])
 
         right_stick_base = right_stick_active and (
             left_base_requested
@@ -3406,7 +3365,6 @@ class RobotArmTeleopNode(Node):
                 now,
                 track_head_yaw=True,
                 left_clutch_active=left_base_requested,
-                control_engaged=left_base_requested or arms_requested,
             )
 
         arm_was_active = any(arm.active for arm in self.arms.values())
