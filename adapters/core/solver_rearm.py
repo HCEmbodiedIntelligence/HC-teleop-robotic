@@ -16,6 +16,7 @@ class SolverRearmGate:
     def __init__(self) -> None:
         self.state = self.READY
         self.reset_cutoff_ns = 0
+        self.release_observed = False
 
     @property
     def blocked(self) -> bool:
@@ -24,6 +25,7 @@ class SolverRearmGate:
     def start_homing(self) -> None:
         self.state = self.HOMING
         self.reset_cutoff_ns = 0
+        self.release_observed = False
 
     def homing_complete(self) -> None:
         if self.state == self.HOMING:
@@ -62,11 +64,16 @@ class SolverRearmGate:
             return False
         if int(stamp_ns) <= self.reset_cutoff_ns:
             return False
-        self.state = self.WAIT_RELEASE
+        self.state = self.WAIT_PRESS if self.release_observed else self.WAIT_RELEASE
         return True
 
     def observe_clutch(self, pressed: bool) -> bool:
         """Require a physical release followed by a new press before rearming."""
+        if self.blocked and not pressed:
+            # A release observed during homing/reset is still a real physical
+            # release. Remember it, but never open control until fresh solver
+            # output has crossed the reset cutoff.
+            self.release_observed = True
         if self.state == self.WAIT_RELEASE and not pressed:
             self.state = self.WAIT_PRESS
             return False

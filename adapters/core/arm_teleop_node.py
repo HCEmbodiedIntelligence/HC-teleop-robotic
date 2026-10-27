@@ -3258,6 +3258,12 @@ class RobotArmTeleopNode(Node):
         if command is not None:
             self._sync_model()
             self._publish_actual_poses()
+        if self.solver_rearm.blocked and self._input_fresh(self.arms["right"], now):
+            right_grip = self._clutch_pressed(self.arms["right"])
+            if self.solver_rearm.observe_clutch(right_grip):
+                self.get_logger().info(
+                    "right Grip pressed after post-home reset; IK control rearmed"
+                )
         if getattr(self, 'intervention', None) and self.intervention.active:
             self.intervention.tick(now, feedback_fresh and self.hardware_ready)
             return
