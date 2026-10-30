@@ -357,6 +357,9 @@ class RobotArmTeleopNode(Node):
             )
             for side in ("left", "right")
         }
+        self.hand_trigger_pub = self.create_publisher(
+            PoseArray, "/observation/hands/triggers", 10
+        )
         self.create_subscription(
             JointState,
             self.control["joint_state_topic"],
@@ -764,6 +767,26 @@ class RobotArmTeleopNode(Node):
             arm.joy = message
             arm.joy_stamp = self._monotonic()
 
+    def _publish_hand_triggers(self, inputs: dict[str, Joy]) -> None:
+        message = PoseArray()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = "vr_hand_triggers_left_right"
+        message.poses = [Pose(), Pose()]
+        threshold = float(
+            self.config["grippers"].get("binary_trigger_threshold", 0.5)
+        )
+        for index, side in enumerate(("left", "right")):
+            joy = inputs.get(side)
+            trigger = (
+                float(np.clip(joy.axes[0], 0.0, 1.0))
+                if joy is not None and joy.axes
+                else 0.0
+            )
+            message.poses[index].position.x = trigger
+            message.poses[index].position.y = binary_trigger_state(trigger, threshold)
+            message.poses[index].orientation.w = 1.0
+        self.hand_trigger_pub.publish(message)
+
     def _vr_data_callback(self, message: String) -> None:
         if getattr(self, 'intervention', None):
             self.intervention.observe(message.data)
@@ -789,6 +812,7 @@ class RobotArmTeleopNode(Node):
             joy = frame.inputs.get(side)
             if joy is not None:
                 self._joy_callback(self.arms[side], joy)
+        self._publish_hand_triggers(frame.inputs)
         resume_rising = frame.resume_requested and not self._prev_resume_requested
         self._prev_resume_requested = frame.resume_requested
         if frame.resume_requested and not (getattr(self, 'intervention', None) and self.intervention.active) and (not self.enabled or self.stop_reason or resume_rising):
