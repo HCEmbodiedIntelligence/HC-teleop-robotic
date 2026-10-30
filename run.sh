@@ -219,7 +219,6 @@ if [[ "${MODE}" == sim ]]; then
     -r /io_teleop/target_finger_joints:=/action/hands/joint_targets
     -r /io_teleop/target_ee_poses:=/action/ee_poses
     -r /io_teleop/target_gripper_status:=/action/hands/gripper_status
-    -r /io_teleop/target_base_move:=/action/base/command
     -r /io_teleop/hardware_ready:=/status/hardware/ready
   )
 fi

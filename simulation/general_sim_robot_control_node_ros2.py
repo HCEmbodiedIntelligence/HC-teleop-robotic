@@ -186,7 +186,7 @@ class SimRobotController(Node, AssembledRobot):
         if "fixed_link" not in self.configs:
             self.target_base_move_sub = self.create_subscription(
                 Float64MultiArray,
-                f"/io_teleop/target_base_move",
+                "/action/base/command",
                 self.target_base_move_callback,
                 1,
             )

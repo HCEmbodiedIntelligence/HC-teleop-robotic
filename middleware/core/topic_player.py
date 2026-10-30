@@ -163,36 +163,38 @@ class TopicPlayer:
                     "/io_teleop/target_ee_poses",
                     "/io_teleop/controller_target_ee_poses",
                     "/io_teleop/actual_ee_poses",
-                    "/io_teleop/target_base_move",
-                    "/io_teleop/joint_cmd_finger_left",
-                    "/io_teleop/joint_cmd_finger_right",
                 }
+                legacy_drive_remap = {
+                    "/io_teleop/target_base_move": "/action/base/command",
+                    "/io_teleop/joint_cmd_finger_left": "/action/left_hand/joint_states",
+                    "/io_teleop/joint_cmd_finger_right": "/action/right_hand/joint_states",
+                }
+                drive_passthrough.update(legacy_drive_remap)
                 if "/io_teleop/joint_cmd" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/io_teleop/joint_cmd"
                     ]
-                    self._topic_remap = {
-                        "/io_teleop/joint_cmd": "/action/joint_states"
-                    }
+                    self._topic_remap = dict(legacy_drive_remap)
+                    self._topic_remap["/io_teleop/joint_cmd"] = "/action/joint_states"
                 elif "/action/joint_states" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/action/joint_states"
                     ]
-                    self._topic_remap = {}
+                    self._topic_remap = dict(legacy_drive_remap)
                 elif "/io_teleop/joint_cmd_arm" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/io_teleop/joint_cmd_arm"
                     ]
-                    self._topic_remap = {}
+                    self._topic_remap = dict(legacy_drive_remap)
                 elif "/control/solver/joint_targets" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/control/solver/joint_targets"
                     ]
-                    self._topic_remap = {}
+                    self._topic_remap = dict(legacy_drive_remap)
                 elif "/io_teleop/joint_states" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics

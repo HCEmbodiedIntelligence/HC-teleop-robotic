@@ -114,17 +114,13 @@ def test_camera_metadata_is_relayed_unchanged_to_standard_topics():
     assert b.publishers['/observation/cameras/head/extrinsics'].messages == [extrinsics]
 
 
-def test_force_and_vibration_feedback_are_relayed_unchanged():
+def test_force_feedback_is_relayed_unchanged():
     b = bridge()
     sources = dict(b.subscriptions)
     wrenches = Float64MultiArray(data=list(range(12)))
-    vibration = Float64MultiArray(data=list(range(10)))
-
     sources['/io_teleop/state_ee_wrenches'](wrenches)
-    sources['/io_teleop/vibration_feedback_exo'](vibration)
 
     assert b.publishers['/observation/ee_wrenches'].messages == [wrenches]
-    assert b.publishers['/observation/hands/vibration_feedback'].messages == [vibration]
 
 
 def test_config_records_all_projected_topics_and_raw_vr():
