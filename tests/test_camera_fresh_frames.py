@@ -11,7 +11,7 @@ class FreshFrameTests(unittest.IsolatedAsyncioTestCase):
         self.camera=CameraService({'enabled':True,'width':64,'height':48})
         self.image=np.zeros((48,64,3),dtype=np.uint8)
 
-    async def test_no_placeholder_then_fixed_rate_latest_frame(self):
+    async def test_no_placeholder_or_repeated_frame(self):
         track=self.camera._create_video_track()
         pending=asyncio.create_task(track.recv())
         await asyncio.sleep(.04)
@@ -21,26 +21,23 @@ class FreshFrameTests(unittest.IsolatedAsyncioTestCase):
         first=await asyncio.wait_for(pending,.5)
         pending=asyncio.create_task(track.recv())
         await asyncio.sleep(.08)
-        self.assertTrue(pending.done())  # A late source repeats the last frame.
+        self.assertFalse(pending.done())
+        self.camera.set_frame(self.image)
         second=await asyncio.wait_for(pending,.5)
-        self.assertEqual(second.pts-first.pts,3000)
+        self.assertGreater(second.pts-first.pts,6000)
         self.assertEqual(float(second.time_base),1/90000)
         self.assertEqual(self.camera._webrtc_frames_sent,2)
         track.stop()
 
-    async def test_dds_arrival_jitter_does_not_change_rtp_timing(self):
+    async def test_rtp_clock_follows_real_time_despite_source_stamp_jitter(self):
         track=self.camera._create_video_track()
-        now=time.monotonic_ns()
-        self.camera._accept_frame(
-            self.image,'test',arrival_ns=now,capture_ns=2_000_000_000)
-        first=await asyncio.wait_for(track.recv(),.5)
-        self.camera._accept_frame(
-            self.image,'test',arrival_ns=now+49_000_000,capture_ns=2_033_333_333)
-        second=await asyncio.wait_for(track.recv(),.5)
-        self.camera._accept_frame(
-            self.image,'test',arrival_ns=now+70_000_000,capture_ns=2_066_666_666)
-        third=await asyncio.wait_for(track.recv(),.5)
-        self.assertEqual([second.pts-first.pts,third.pts-second.pts],[3000,3000])
+        self.camera._accept_frame(self.image,'test',capture_ns=2_000_000_000)
+        first=await track.recv()
+        started=time.monotonic()
+        await asyncio.sleep(.075)
+        self.camera._accept_frame(self.image,'test',capture_ns=2_033_333_333)
+        second=await track.recv()
+        self.assertAlmostEqual((second.pts-first.pts)/90000,time.monotonic()-started,delta=.025)
         track.stop()
 
     async def test_each_peer_receives_newest_frame_without_consuming_other_peer(self):

@@ -1,0 +1,245 @@
+"""Old-topic ownership, measured feedback and no-recording regressions."""
+import asyncio
+import copy
+from pathlib import Path
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+import pytest
+
+pytest.importorskip('sensor_msgs.msg')
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Header
+
+from middleware.core.control_ownership import ControlOwnership
+from middleware.core.intervention_api import register_intervention_routes
+from middleware.core.legacy_control import LegacyTopicControl
+from middleware.core.ros_bridge import RosBridge
+from adapters.core.v23_intervention import V23Intervention
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_shipped_profile_loads_legacy_mode_and_recording_off():
+    from middleware.core.config import ConfigStore, validate_config, ConfigError
+    settings = ConfigStore(ROOT/'middleware/config.yaml').load()['ros']['intervention']
+    assert settings['legacy_topics'] is True
+    assert settings['automatic_recording'] is False
+    for field, value in [('automatic_recording', 'false'), ('max_arm_velocity_rad_s', float('nan'))]:
+        with pytest.raises(ConfigError):
+            validate_config({'ros': {'intervention': {field: value}}})
+
+
+def message(values, stamp=None):
+    result = JointState(name=list(values), position=list(values.values()))
+    ns = time.time_ns() if stamp is None else stamp
+    result.header.stamp.sec, result.header.stamp.nanosec = divmod(ns, 1_000_000_000)
+    return result
+
+
+class Rig:
+    def __init__(self):
+        self.wire = []
+        node = Mock()
+        node.get_clock.return_value.now.side_effect = lambda: SimpleNamespace(nanoseconds=time.time_ns())
+        node.create_publisher.side_effect = lambda kind, topic, qos: SimpleNamespace(
+            publish=lambda msg: self.wire.append((topic, copy.deepcopy(msg))))
+        self.bridge = RosBridge({'legacy_control_profile': str(ROOT/'adapters/robots/x1'),
+            'intervention': {'automatic_recording': False}}, lambda *a: None)
+        self.bridge._command_callback_group = self.bridge._telemetry_callback_group = None
+        with patch('adapters.core.collision_safety.ModelCollisionGuard') as guard:
+            guard.return_value.check.return_value = (True, None, False)
+            self.boundary = LegacyTopicControl(node, self.bridge, node.create_publisher(JointState, '/action/joint_states', 10))
+            self.boundary.collision = guard.return_value
+        self.bridge._boundary = self.boundary
+        self.control = self.bridge.ownership
+        self.control.open_segment = Mock(side_effect=AssertionError('recording must remain off'))
+        for peer in self.control.required_peers:
+            self.control.peer(peer, peer)
+        self.control.enable()
+        self.control.input(device_instance='vr', sequence=1, valid=True, gripped=False, stamp_ns=time.time_ns())
+        self.feed()
+        self.control.start_auto(recording_ready=False, control_ready=self.bridge.control_ready())
+        self.advance()
+        self.advance()
+
+    def feed(self):
+        b = self.boundary
+        positions = {n: float(b.teleop['robot']['initial_joints'][n]) for n in b.feedback_order}
+        msg = message(positions)
+        msg.velocity = [0.]*len(msg.name)
+        b.state(msg)
+        for side, names in b.hands.items():
+            b.hand_state(message(dict(zip(names, b.teleop['grippers'][side]['finger_open']))))
+        self.bridge.receive_hardware_ready(True)
+
+    def advance(self):
+        for peer in self.control.required_peers:
+            self.control.acknowledge(self.control.token, self.control.phase, peer, peer)
+        self.control.advance(control_ready=True, manual_ready=True)
+        if self.control.state in ('AUTO','MANUAL'):
+            self.bridge._command_source = self.control.token.source
+            self.bridge._source_cutoff = self.control.cutoff_ns*1e-9
+            self.bridge._command_output_enabled = True
+
+
+def test_own_arms_and_hands_share_stamp_and_are_all_revoked_without_recording():
+    r=Rig(); b=r.boundary
+    ns=time.time_ns()
+    arms={n:b.positions[n]+.01 for n in b.arms}
+    b.program(message(arms,ns), 'arms')
+    for side,names in b.hands.items():
+        b.program(message({n:b.positions[n] for n in names},ns),side)
+    assert {t for t,m in r.wire if t.startswith('/action/')} == {
+        '/action/joint_states','/action/right_hand/joint_states','/action/left_hand/joint_states'}
+    selected=[m for t,m in r.wire if t=='/action/joint_states'][-1]
+    assert max(abs(q-b.positions[n]) for n,q in zip(selected.name,selected.position)) <= .00251
+    r.control.input(device_instance='vr', sequence=2, valid=True, gripped=True, stamp_ns=time.time_ns())
+    r.advance();r.advance()
+    assert r.control.state=='MANUAL'
+    count=len(r.wire)
+    b.program(message(arms),'arms')
+    assert len(r.wire)==count
+    r.control.open_segment.assert_not_called()
+    assert not r.control.segment_open
+
+
+def test_own_feedback_order_and_waist_is_filtered_from_commands():
+    r=Rig();b=r.boundary
+    state=[m for t,m in r.wire if t=='/hc_teleop/joint_states'][-1]
+    assert tuple(state.name)==b.arms+('leg_1','leg_2','zhi')
+    b.program(message({n:b.positions[n] for n in reversed(b.feedback_order)}),'arms')
+    target=[m for t,m in r.wire if t=='/action/joint_states'][-1]
+    assert tuple(target.name)==b.arms
+
+
+def test_gate_rechecks_revoke_during_collision_work_and_rejects_old_generation():
+    r=Rig();b=r.boundary
+    def takeover(*args):
+        r.control.input(device_instance='vr', sequence=2, valid=True,
+                        gripped=True, stamp_ns=time.time_ns())
+        return True, None, False
+    b.collision.check.side_effect=takeover
+    before=len(r.wire)
+    b.program(message({n:b.positions[n] for n in b.arms}), 'arms')
+    assert len(r.wire)==before
+    assert r.control.state=='TAKEOVER'
+    old=r.control.token
+    r.control.hold()
+    b.receive_owned(message({n:b.positions[n] for n in b.arms}),old)
+    assert len(r.wire)==before
+
+
+@pytest.mark.parametrize('failure',['stale','nan','unknown','jump','collision'])
+def test_invalid_or_discontinuous_program_never_reaches_output(failure):
+    r=Rig();b=r.boundary
+    values={n:b.positions[n] for n in b.arms}
+    ns=time.time_ns()
+    if failure=='stale':ns-=1_000_000_000
+    if failure=='nan':values[b.arms[0]]=float('nan')
+    if failure=='unknown':values['unexpected_axis']=0.
+    if failure=='jump':values[b.arms[0]]+=.4
+    if failure=='collision':b.collision.check.return_value=(False,('arm','body'),False)
+    before=len(r.wire)
+    b.program(message(values,ns),'arms')
+    assert len(r.wire)==before
+
+
+def test_hands_use_open_loop_targets_and_keep_command_rate_limit():
+    r=Rig();b=r.boundary
+    for name in b.hand_names:
+        b.positions.pop(name, None)
+        b.received.pop(name, None)
+    names=b.hands['right']
+    closed=dict(zip(names,b.teleop['grippers']['right']['finger_closed']))
+    b.program(message(closed),'right')
+    sent=[m for t,m in r.wire if t=='/action/right_hand/joint_states']
+    assert len(sent)==1
+    assert sent[0].position==list(closed.values())
+    assert not b.status()['hands_ready']['right']
+    opened=dict(zip(names,b.teleop['grippers']['right']['finger_open']))
+    b.program(message(opened),'right')
+    sent=[m for t,m in r.wire if t=='/action/right_hand/joint_states']
+    assert len(sent)==2
+    assert max(abs(a-z) for a,z in zip(sent[0].position,sent[1].position)) <= b.teleop['grippers']['max_velocity']*.05+1e-9
+
+
+@pytest.mark.parametrize('failure',['stale','nan','limit','unknown','hold','arm_feedback'])
+def test_open_loop_hands_preserve_command_and_arm_safety_checks(failure):
+    r=Rig();b=r.boundary
+    values={n:b.positions[n] for n in b.hands['right']}
+    ns=time.time_ns()
+    if failure=='stale':ns-=1_000_000_000
+    if failure=='nan':values[b.hands['right'][0]]=float('nan')
+    if failure=='limit':values[b.hands['right'][0]]=100.
+    if failure=='unknown':values['unknown_finger']=0.
+    if failure=='hold':r.control.hold()
+    channel='right'
+    if failure=='arm_feedback':
+        values={n:b.positions[n] for n in b.arms}
+        b.received[b.arms[0]]=time.monotonic()-1
+        channel='arms'
+    before=len(r.wire)
+    b.program(message(values,ns),channel)
+    assert len(r.wire)==before
+
+
+def test_open_loop_hand_commit_rechecks_revocation():
+    r=Rig();b=r.boundary
+    prepared=b.prepare(message({n:b.positions[n] for n in b.hands['right']}))
+    assert prepared is not None
+    r.control.hold()
+    assert not b.commit(prepared)
+
+
+def test_v23_revoke_ack_waits_for_measured_reset_and_old_pose_is_rejected():
+    node=Mock()
+    node.controller.free_joint_names=['axis']
+    node.get_clock.return_value.now.side_effect=lambda: SimpleNamespace(nanoseconds=time.time_ns())
+    solver=V23Intervention(node)
+    control=ControlOwnership(recording_enabled=False, required_peers=('solver','teleop'))
+    for peer in control.required_peers:control.peer(peer,peer)
+    control.enable()
+    control.start_auto(recording_ready=False, control_ready=True)
+    token=control.token
+    assert token.source=='motion' and not control.input_valid
+    def permit(phase):
+        msg=Header(frame_id='#'.join((token.key(),phase,solver.instance,'teleop')))
+        msg.stamp=message({'axis':0.}).header.stamp
+        solver.permit(msg)
+    permit('revoke')
+    assert not solver.ready
+    node.controller.reset_to_feedback.assert_not_called()
+    solver.feedback(message({'axis':0.}))
+    assert solver.ready
+    node.controller.reset_to_feedback.assert_called_once()
+    permit('grant')
+    assert not solver.ready
+    assert not solver.authorized()
+    solver.feedback(message({'axis':0.}))
+    assert solver.ready
+    assert not solver.authorized()  # Program grant never enables VR IK.
+
+
+class NoRecorderApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_session_and_return_without_recorder_or_capture(self):
+        control=ControlOwnership(recording_enabled=False,required_peers=('solver','teleop'))
+        for peer in control.required_peers:control.peer(peer,peer)
+        runtime=SimpleNamespace(ros=SimpleNamespace(ownership=control,control_ready=lambda:True),
+            recorder=None, player=None, session_profile_metadata={})
+        runtime.ros.recover_intervention=lambda:None
+        app=web.Application();register_intervention_routes(app,runtime)
+        async with TestClient(TestServer(app)) as client:
+            for action in ('enable','return','disable'):
+                assert not control.input_valid
+                state=control.snapshot()
+                response=await client.post('/api/control/intervention/'+action,json=dict(
+                    request_id=action,session_id=state['session_id'],expected_epoch=state['epoch']))
+                assert response.status==202,await response.text()
+                payload=await response.json()
+                assert payload['capture'] is None
+                assert payload['ownership']['recording_enabled'] is False

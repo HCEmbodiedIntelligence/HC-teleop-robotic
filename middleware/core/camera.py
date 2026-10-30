@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any
 
+from .camera_metrics import CameraPipelineMetrics, instrument_sender
+
 try:
     import cv2
     import numpy as np
@@ -27,8 +29,13 @@ class CameraService:
     """
 
     def __init__(self, config: dict[str, Any], domain_id: int = 14):
+        self._metrics = CameraPipelineMetrics()
         self.config = config
         self.domain_id = int(domain_id)
+        self._rtc_loop = None
+        self._rtc_thread = None
+        self._rtc_ready = threading.Event()
+        self._offer_lock = None
         self._latest: Any = None
         self._frame_sequence = 0
         self._frame_arrival_ns = 0
@@ -47,13 +54,7 @@ class CameraService:
         self._stats_tasks: set[asyncio.Task[Any]] = set()
         self._frame_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._frames_received = 0
-        self._last_fps_calc = time.monotonic()
-        self._fps_counter = 0
-        self._decoded_last_fps_calc = time.monotonic()
-        self._decoded_fps_counter = 0
         self._last_decoded_at = 0.0
-        self._webrtc_last_fps_calc = time.monotonic()
-        self._webrtc_fps_counter = 0
         self._webrtc_frames_sent = 0
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", False) else "starting",
@@ -65,6 +66,12 @@ class CameraService:
             "jpeg_decode_ms": 0.0,
             "webrtc_send_fps": 0.0,
             "webrtc_frames_sent": 0,
+            "webrtc_frames_skipped": 0,
+            "decode_frames_overwritten": 0,
+            "fresh_frames_only": True,
+            "webrtc_feedback_received": False,
+            "webrtc_frame_age_ms": 0.0,
+            "webrtc_source_age_ms": None,
             "webrtc_codec": "",
             "webrtc_bitrate_mbps": 0.0,
             "webrtc_target_bitrate_mbps": 0.0,
@@ -133,6 +140,8 @@ class CameraService:
                 if not self._pcs:
                     return
                 with self._lock:
+                    if self._encoded_latest is not None:
+                        self._status["decode_frames_overwritten"] += 1
                     self._encoded_latest = bytes(msg.data)
                     self._encoded_arrival_ns = arrival_ns
                     self._encoded_capture_ns = capture_ns
@@ -163,7 +172,25 @@ class CameraService:
         except Exception as exc:
             self._set_status(error=f"decode error: {exc}")
 
-    async def stop(self) -> None:
+    def _ensure_rtc_loop(self):
+        if self._rtc_loop is not None:
+            return
+        def run():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._rtc_loop = loop
+            self._rtc_ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+                loop.close()
+        self._rtc_thread = threading.Thread(target=run, name="camera-webrtc", daemon=True)
+        self._rtc_thread.start()
+        self._rtc_ready.wait()
+
+    async def _close_peers(self):
         tasks = list(self._stats_tasks)
         self._stats_tasks.clear()
         for task in tasks:
@@ -175,6 +202,17 @@ class CameraService:
                 await pc.close()
             except Exception:
                 pass
+    async def stop(self) -> None:
+        if self._rtc_loop is not None:
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
+                self._close_peers(), self._rtc_loop))
+            self._rtc_loop.call_soon_threadsafe(self._rtc_loop.stop)
+            await asyncio.to_thread(self._rtc_thread.join, 5.0)
+            self._rtc_loop = None
+            self._rtc_thread = None
+            self._rtc_ready.clear()
+        else:
+            await self._close_peers()
         self._stop.set()
         self._decode_event.set()
         if self._decode_thread is not None and self._decode_thread.is_alive():
@@ -237,6 +275,10 @@ class CameraService:
             ),
             peers=len(self._pcs),
         )
+        result.update(self._metrics.snapshot())
+        if result["state"] in ("disabled", "stopped"):
+            for key in ("capture_fps", "decoded_fps", "webrtc_send_fps", "webrtc_submit_fps", "webrtc_output_fps"):
+                result[key] = 0.0
         return result
 
     def set_frame(self, image: Any) -> None:
@@ -305,24 +347,12 @@ class CameraService:
             self._status.update(changes)
 
     def _record_capture_frame(self, topic: str) -> None:
-        """Track source rate without forcing image decode/copy."""
-        now = time.monotonic()
+        """Count source callbacks without decoding/copying their images."""
+        self._metrics.record("capture")
         with self._lock:
             self._frames_received += 1
-            self._last_capture_at = now
-            self._fps_counter += 1
-            elapsed = now - self._last_fps_calc
-            if elapsed < 1.0:
-                return
-            fps = round(self._fps_counter / elapsed, 1)
-            self._last_fps_calc = now
-            self._fps_counter = 0
-            self._status.update(
-                capture_fps=fps,
-                topic=topic,
-                state="running",
-                error=None,
-            )
+            self._last_capture_at = time.monotonic()
+            self._status.update(topic=topic, state="running", error=None)
 
     def _accept_frame(
         self,
@@ -353,19 +383,10 @@ class CameraService:
             self._record_capture_frame(topic)
 
     def _record_decoded_frame(self, decode_ms: float) -> None:
-        """Track frames which completed JPEG/PNG decoding for WebRTC."""
-        now = time.monotonic()
+        self._metrics.record("decode")
         with self._lock:
-            self._last_decoded_at = now
-            self._decoded_fps_counter += 1
-            elapsed = now - self._decoded_last_fps_calc
+            self._last_decoded_at = time.monotonic()
             self._status["jpeg_decode_ms"] = round(float(decode_ms), 2)
-            if elapsed >= 1.0:
-                self._status["decoded_fps"] = round(
-                    self._decoded_fps_counter / elapsed, 1
-                )
-                self._decoded_last_fps_calc = now
-                self._decoded_fps_counter = 0
 
     def _normalize_frame(self, frame: Any) -> Any:
         """Make ROS frames match the configured WebRTC encoder dimensions."""
@@ -389,28 +410,23 @@ class CameraService:
         return frame
 
     def _record_webrtc_frame(self) -> None:
-        """Count frames actually requested by the active WebRTC sender."""
-        now = time.monotonic()
+        """Count fresh frames handed to the encoder, not receiver display."""
+        self._metrics.record("submit")
         with self._lock:
-            self._last_send_at = now
-            self._webrtc_fps_counter += 1
+            self._last_send_at = time.monotonic()
             self._webrtc_frames_sent += 1
-            elapsed = now - self._webrtc_last_fps_calc
-            if elapsed >= 1.0:
-                self._status["webrtc_send_fps"] = round(
-                    self._webrtc_fps_counter / elapsed, 1
-                )
-                self._status["webrtc_frames_sent"] = self._webrtc_frames_sent
-                self._webrtc_last_fps_calc = now
-                self._webrtc_fps_counter = 0
 
     def _reset_webrtc_rate(self) -> None:
+        self._metrics.reset_sender()
         with self._lock:
-            self._webrtc_last_fps_calc = time.monotonic()
-            self._webrtc_fps_counter = 0
             self._webrtc_frames_sent = 0
             self._status["webrtc_send_fps"] = 0.0
             self._status["webrtc_frames_sent"] = 0
+            self._status["webrtc_frames_skipped"] = 0
+            self._status["decode_frames_overwritten"] = 0
+            self._status["webrtc_feedback_received"] = False
+            self._status["webrtc_frame_age_ms"] = 0.0
+            self._status["webrtc_source_age_ms"] = None
             self._status["webrtc_codec"] = ""
             self._status["webrtc_bitrate_mbps"] = 0.0
             self._status["webrtc_target_bitrate_mbps"] = 0.0
@@ -450,6 +466,7 @@ class CameraService:
                     changes["webrtc_packets_sent"] = int(outbound.packetsSent)
                 if remote is not None:
                     changes.update(
+                        webrtc_feedback_received=True,
                         webrtc_remote_packets_lost=int(remote.packetsLost),
                         # RTCP stores this as an unsigned 8-bit fraction of 256.
                         webrtc_fraction_lost_pct=round(
@@ -591,9 +608,9 @@ class CameraService:
             def __init__(self):
                 super().__init__()
                 self._sequence = 0
-                self._pts = 0
+                self._pts = -1
+                self._clock_origin_ns = None
                 self._period = 1.0 / max(1.0, float(camera.config.get("fps", 30) or 30))
-                self._pts_step = max(1, round(90000 * self._period))
                 self._next_send_at = None
                 self._dimensions = None
                 self._loop = asyncio.get_running_loop()
@@ -608,69 +625,81 @@ class CameraService:
                 super().stop()
 
             async def recv(self):
-                # Wait for the first real frame. Once started, send at a fixed
-                # cadence and always sample the newest decoded image. A short
-                # DDS/decode delay therefore repeats one frame instead of
-                # exposing a 50/17 ms stop-and-catch-up pattern to the headset.
+                # Keep a real 90 kHz clock even when encoding/sending misses a
+                # slot. Counting every delivered frame as 1/30 s makes a 20 FPS
+                # stream's media clock run 33% slow and disrupts receiver playout.
                 while self.readyState == "live" and not camera._stop.is_set():
+                    if self._next_send_at is not None:
+                        delay = self._next_send_at - self._loop.time()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                    self._frame_event.clear()
                     with camera._lock:
                         sequence = camera._frame_sequence
                         arrival_ns = camera._frame_arrival_ns
+                        capture_ns = camera._frame_capture_ns
                         image = camera._latest
-                    if image is not None and time.monotonic_ns() - arrival_ns <= 1_800_000_000:
+                    now_ns = time.monotonic_ns()
+                    max_age_ns = int(max(1, float(camera.config.get("max_frame_age_ms", 250))) * 1_000_000)
+                    if (image is None or sequence == self._sequence
+                            or now_ns - arrival_ns > max_age_ns):
+                        # Publication after clear() leaves the event set. An old
+                        # frame is never repeated while the source is stalled.
+                        await self._frame_event.wait()
+                        continue
+                    if self.readyState != "live" or camera._stop.is_set():
                         break
-                    self._frame_event.clear()
-                    # Close the clear/read race: a decoder may publish between
-                    # the snapshot above and Event.clear().
+                    skipped = max(0, sequence - self._sequence - 1) if self._sequence else 0
+                    self._sequence = sequence
+                    if self._clock_origin_ns is None:
+                        self._clock_origin_ns = now_ns
+                    pts = max(self._pts + 1, (now_ns - self._clock_origin_ns) * 90000 // 1_000_000_000)
+                    self._pts = pts
+                    h, w = image.shape[:2]
+                    if self._dimensions is None:
+                        self._dimensions = (w, h)
+                    elif self._dimensions != (w, h):
+                        image = cv2.resize(image, self._dimensions)
+                    frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(image), format="bgr24")
+                    frame.pts = pts
+                    frame.time_base = Fraction(1, 90000)
+                    source_age_ms = (time.time_ns() - capture_ns) / 1_000_000
                     with camera._lock:
-                        if camera._frame_sequence != self._sequence:
-                            continue
-                    await self._frame_event.wait()
-                else:
-                    raise MediaStreamError
-
-                loop = asyncio.get_running_loop()
-                if self._next_send_at is None:
-                    self._next_send_at = loop.time()
-                else:
-                    self._next_send_at += self._period
-                    delay = self._next_send_at - loop.time()
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    elif delay < -self._period:
-                        # Never burst several late frames to catch up.
-                        self._next_send_at = loop.time()
-
-                with camera._lock:
-                    sequence = camera._frame_sequence
-                    arrival_ns = camera._frame_arrival_ns
-                    image = camera._latest
-                if image is None or time.monotonic_ns() - arrival_ns > 1_800_000_000:
-                    self._next_send_at = None
-                    return await self.recv()
-                self._sequence = sequence
-                pts = self._pts
-                self._pts += self._pts_step
-                h, w = image.shape[:2]
-                if self._dimensions is None:
-                    self._dimensions = (w, h)
-                elif self._dimensions != (w, h):
-                    image = cv2.resize(image, self._dimensions)
-                frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(image), format="bgr24")
-                frame.pts = pts
-                frame.time_base = Fraction(1, 90000)
-                camera._record_webrtc_frame()
-                return frame
+                        camera._status["webrtc_frames_skipped"] += skipped
+                        camera._status["webrtc_frame_age_ms"] = round((now_ns - arrival_ns) / 1_000_000, 2)
+                        camera._status["webrtc_source_age_ms"] = round(source_age_ms, 2) if 0 <= source_age_ms < 60_000 else None
+                    self._handoff_at = time.monotonic()
+                    camera._record_webrtc_frame()
+                    next_slot = (self._next_send_at + self._period
+                                 if self._next_send_at is not None else self._loop.time() + self._period)
+                    self._next_send_at = (next_slot if next_slot > self._loop.time()
+                                          else self._loop.time() + self._period)
+                    return frame
+                raise MediaStreamError
 
         return LatestFrameTrack()
 
     async def offer(self, data: dict[str, Any]) -> dict[str, str]:
+        # Keep RTP and encoder completions independent of HTTP/telemetry work.
+        self._ensure_rtc_loop()
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
+            self._offer(data), self._rtc_loop))
+
+    async def _offer(self, data: dict[str, Any]) -> dict[str, str]:
+        if self._offer_lock is None:
+            self._offer_lock = asyncio.Lock()
+        async with self._offer_lock:
+            return await self._offer_locked(data)
+
+    async def _offer_locked(self, data: dict[str, Any]) -> dict[str, str]:
         if self.status()["state"] not in ("running", "starting"):
             raise RuntimeError(self.status().get("error") or "camera service is not running")
         try:
             import av
             from aiortc import (
                 RTCPeerConnection,
+                RTCConfiguration,
+                RTCIceServer,
                 RTCRtpSender,
                 RTCSessionDescription,
                 VideoStreamTrack,
@@ -702,7 +731,13 @@ class CameraService:
             self._pcs.discard(old_pc)
 
         remote = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
-        pc = RTCPeerConnection()
+        # Robot/headset pairing is normally on the LAN. Avoid aiortc's public
+        # default STUN timeout on every connection; deployments needing NAT
+        # traversal can explicitly configure their ICE servers.
+        ice_servers = [RTCIceServer(**item) if isinstance(item, dict)
+                       else RTCIceServer(urls=item)
+                       for item in self.config.get("ice_servers", [])]
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers))
         self._pcs.add(pc)
         self._reset_webrtc_rate()
         self._set_status(
@@ -726,7 +761,9 @@ class CameraService:
                 if pc.connectionState == "failed":
                     self._set_status(webrtc_error="WebRTC connection failed; inspect ICE state and UDP connectivity")
 
-        sender = pc.addTrack(self._create_video_track())
+        track = self._create_video_track()
+        sender = pc.addTrack(track)
+        instrument_sender(pc, sender, track, self._metrics)
         stats_task = asyncio.create_task(self._monitor_sender_stats(pc, sender))
         self._stats_tasks.add(stats_task)
         stats_task.add_done_callback(self._stats_tasks.discard)

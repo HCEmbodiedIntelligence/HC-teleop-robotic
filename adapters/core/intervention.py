@@ -9,6 +9,7 @@ import time
 import uuid
 
 from middleware.core.control_ownership import ControlToken
+from middleware.core.protocol import is_sequence_newer
 
 
 class ClutchInput:
@@ -22,14 +23,20 @@ class ClutchInput:
         self.source_time = -math.inf
 
     def sample(self, value):
-        sequence = int(value['sequence'])
-        source_time = float(value['vr_timestamp'])
-        if sequence == self.sequence or source_time <= self.source_time:
+        sequence, source_time = value['sequence'], value['vr_timestamp']
+        if (type(sequence) is not int or not 0 <= sequence <= 0xffffffff
+                or type(source_time) not in (int, float) or not math.isfinite(source_time)):
+            raise ValueError('invalid VR input sequence or timestamp')
+        if ((self.sequence >= 0 and not is_sequence_newer(sequence, self.sequence))
+                or source_time <= self.source_time):
             return None
         self.sequence, self.source_time = sequence, source_time
         try:
             axis = value['inputs'][self.side][self.axis]
+            # The gateway reports head loss only once; every later manual
+            # sample must remain invalid until head tracking recovers.
             valid = (value.get('protocol_version', 0) >= 2 and
+                     value['tracking']['head'] is True and
                      type(axis) in (float, int) and math.isfinite(axis) and 0 <= axis <= 1)
             for side in ('left', 'right'):
                 pose = value['poses'][side]
@@ -58,40 +65,78 @@ class InterventionTeleop:
         self.phase = ''
         self.ack_error = ''
         self.permit_stamp = 0
+        self.cutoff = 0
         self.permit_time = -math.inf
         self.last_input = -math.inf
+        self._pause_held = self._resume_held = self._resume_armed = False
         self.grippers = {}
         self.triggers = {}
         self.ack_pub = node.create_publisher(String, '/status/control/ack', 100)
         self.input_pub = node.create_publisher(String, '/events/teleop/clutch', 100)
         self.pose_pub = node.create_publisher(PoseArray, '/internal/vr/owned_poses', 1)
         self.aux_pub = node.create_publisher(JointState, '/internal/vr/aux_joint_targets', 1)
+        self.owned_pub = node.create_publisher(JointState, '/internal/control/joint_targets', 10)
         node.create_subscription(Header, '/control/motion/permit', self.permit, 1)
+        self.home_pub = node.create_publisher(JointState, '/internal/vr/owned_home', 1)
+        node.create_subscription(Header, '/internal/vr/home_request', self.home_request, 1)
         node.create_timer(.1, self.heartbeat)
+        self.hand_feedback = {}
+        if node.backend == 'v23':
+            from rclpy.qos import qos_profile_sensor_data
+            node.create_subscription(JointState, '/observation/hands/joint_states', self.hands, qos_profile_sensor_data)
+
+    def hands(self, message):
+        stamp = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
+        if (len(message.name) != len(message.position) or len(set(message.name)) != len(message.name)
+                or not all(math.isfinite(v) for v in message.position)
+                or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= .25):
+            return
+        self.hand_feedback.update({name: (q, time.monotonic()) for name, q in zip(message.name, message.position)})
 
     def observe(self, payload):
         from std_msgs.msg import String
         try:
             value = json.loads(payload)
+            stamp = value['hc_received_ns']
+            if type(stamp) is not int or stamp <= 0:
+                raise ValueError('invalid HC reception timestamp')
             if time.monotonic()-self.last_input > .3 and float(value['vr_timestamp']) < self.input.source_time:
                 self.input = ClutchInput(self.node.control)
                 self.input_instance = uuid.uuid4().hex
                 self.granted = False
+                self._pause_held = self._resume_held = self._resume_armed = False
             sample = self.input.sample(value)
             if sample is None:
                 return
-            stamp = int(value['hc_received_ns'])
             age = self.node.get_clock().now().nanoseconds-stamp
             self.valid = sample[0] and -50_000_000 <= age <= 300_000_000
+            buttons = value['inputs']['right']
+            held, pressed = buttons.get('held_mask', 0), buttons.get('pressed_mask', 0)
+            valid_buttons = (type(held) is int and type(pressed) is int
+                             and 0 <= held <= 0x7ff and 0 <= pressed <= 0x7ff)
+            pause = resume = False
+            if self.valid and valid_buttons:
+                # A must be released before arming; B may stop on first input.
+                # Treat repeated pressed bits as held until a release sample.
+                a, b = bool((held | pressed) & 1), bool((held | pressed) & 2)
+                pause = b and not self._pause_held
+                resume = a and not self._resume_held and self._resume_armed and not b
+                if not a:
+                    self._resume_armed = True
+                self._pause_held, self._resume_held = b, a
+            else:
+                self._resume_armed = False
             self.last_input = time.monotonic()
             self.input_sequence += 1
             self.triggers = {side: fields['trigger'] for side, fields in value['inputs'].items()
                 if type(fields.get('trigger')) in (int, float) and math.isfinite(fields['trigger']) and 0 <= fields['trigger'] <= 1}
             self.input_pub.publish(String(data=json.dumps(dict(
                 device_instance=self.input_instance, sequence=self.input_sequence, source_sequence=value['sequence'], stamp_ns=stamp,
-                valid=self.valid, gripped=sample[1]))))
+                valid=self.valid, gripped=sample[1],
+                pause_requested=pause, resume_requested=resume))))
         except (KeyError, ValueError, TypeError):
             self.valid = False
+            self._resume_armed = False
 
     def heartbeat(self, success=True, reason=''):
         from std_msgs.msg import String
@@ -127,11 +172,20 @@ class InterventionTeleop:
             if not changed:
                 self.heartbeat()
                 return
+            self.cutoff = stamp
             self.granted = False
             self.node._release_all(send_base_zero=True)
             self.node.generic_aux_command.clear()
             self.node.homing = False
+            self.node.body.target_base = None
             self.token, self.phase = token, phase
+            if phase == 'grant':
+                self.node.control_source = token.source
+                self.node.source_feedback_pending = False
+            elif phase == 'off':
+                from std_msgs.msg import String
+                self.node.control_source = ''
+                self.node._control_source_callback(String(data='vr'))
             self.ack_error = ''
             self.grippers = {}
             if phase == 'grant' and token.source == 'vr':
@@ -147,6 +201,10 @@ class InterventionTeleop:
                 now-node.joint_state_stamp > min(.2, node.control['joint_state_timeout'])):
             raise ValueError('fresh tracked controllers and measured feedback required')
         node._sync_model()
+        if node.backend == 'v23':
+            for name, (q, stamp) in self.hand_feedback.items():
+                if now-stamp <= .25:
+                    node.joint_state[name] = q
         for arm in node.arms.values():
             if arm.pose is None or now-arm.pose_stamp > min(.2, node.control['pose_timeout']):
                 raise ValueError('arm tracking is stale')
@@ -155,7 +213,7 @@ class InterventionTeleop:
                 raise ValueError('relative arm reference unavailable')
         # These actuators have measured feedback and a checked final routing
         # path. A hand without that capability stays held; no guessed position.
-        if node.robot_api.driver['kind'] == 'openarmx_hc_robot_adapter':
+        if node.backend == 'v23' or node.robot_api.driver['kind'] == 'openarmx_hc_robot_adapter':
             for side, cfg in node.config['grippers'].items():
                 if side not in ('left', 'right'):
                     continue
@@ -165,12 +223,46 @@ class InterventionTeleop:
                         self.grippers[name] = [side, self.triggers[side], q, q,
                             cfg['finger_open'][index], cfg['finger_closed'][index]]
 
+    def can_home(self):
+        now = time.monotonic()
+        return (self.node.backend == 'v23' and self.active and self.granted
+                and self.phase == 'grant' and self.token.source == 'vr'
+                and self.valid and self.input.pressed and now-self.last_input <= .3
+                and now-self.permit_time <= .3 and self.node.hardware_ready)
+
+    def home_request(self, message):
+        stamp = message.stamp.sec*1_000_000_000 + message.stamp.nanosec
+        if (not self.can_home() or message.frame_id != self.token.key()
+                or stamp <= self.cutoff
+                or not -50_000_000 <= self.node.get_clock().now().nanoseconds-stamp <= 250_000_000):
+            return
+        if self.node._home_allowed():
+            self.node._set_generic_home_targets()
+
     def tick(self, now, feedback_fresh):
         """Dedicated intervention branch reuses arm mapping, holds body/base."""
         from sensor_msgs.msg import JointState
         node = self.node
         if (not self.granted or not self.valid or not self.input.pressed or not feedback_fresh or
                 now-self.last_input > .3 or now-self.permit_time > .3):
+            node._publish_status(now, feedback_fresh)
+            return
+        if node.homing and node.backend == 'v23':
+            command = dict(node.joint_state)
+            node._update_homing(command)
+            if not node._collision_command_allowed(command, now):
+                node._publish_status(now, feedback_fresh)
+                return
+            names = node._homing_joint_names()
+            msg = JointState(name=names, position=[float(command[n]) for n in names])
+            msg.header.stamp = node.get_clock().now().to_msg()
+            msg.header.frame_id = self.token.key()+'#home'
+            self.home_pub.publish(msg)
+            node.last_command.update(command)
+            if not node.homing:
+                from .solver_rearm import SolverRearmGate
+                node.solver_rearm = SolverRearmGate()
+                self.anchor()
             node._publish_status(now, feedback_fresh)
             return
         if any(not arm.active or arm.reference_vr is None or arm.reference_local_ee is None
@@ -195,7 +287,10 @@ class InterventionTeleop:
             msg = JointState(name=list(values), position=list(values.values()))
             msg.header.stamp = node.get_clock().now().to_msg()
             msg.header.frame_id = self.token.key()+'#'
-            self.aux_pub.publish(msg)
+            if node.backend == 'v23':
+                self.owned_pub.publish(msg)
+            else:
+                self.aux_pub.publish(msg)
         node._publish_status(now, feedback_fresh)
 
     def poses(self, message):

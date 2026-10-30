@@ -59,13 +59,26 @@ test('custom topic changes refresh selectors without losing pending choices',()=
   vm.runInContext("config.ros.subscriptions.push({topic:'/new',type:'sensor_msgs/msg/Image',outputs:['record']});renderCameraTopicOptions()",ctx);
   assert.equal(field(0).value,'/other');assert.ok(field(0).children.some(o=>o.value==='/new'));
 });
-test('monitor distinguishes no image, receiving and failed streams',()=>{
+test('monitor separates codec, transport, local skips and receiver display',()=>{
   const {ctx}=setup();
+  vm.runInContext("stream={capture_fps:30,decoded_fps:30,webrtc_submit_fps:28,webrtc_output_fps:27,fps_window_seconds:2,jpeg_decode_ms:4.2,webrtc_encode_ms:6.3,webrtc_submit_to_transport_ms:14.5,webrtc_transport_ms:3.1,decode_frames_overwritten:2,webrtc_frames_skipped:4,webrtc_feedback_received:true,webrtc_fraction_lost_pct:0,codec:'H264',peers:1}",ctx);
+  const text=vm.runInContext("cameraMonitorSummary(stream,{has_data:true,hz:16.4})",ctx);
+  assert.match(text,/同窗 2.0 s.*ROS输入 30.0 FPS.*图像解码 30.0 FPS.*编码输入 28.0 FPS.*RTP输出 27.0 FPS/);
+  assert.match(text,/H264编码器内 6.3 ms.*发送处理 14.5 ms.*其中传输调用 3.1 ms/);
+  assert.match(text,/本地覆盖 2 帧\/跳帧 4 帧.*网络丢包 0.00%.*头显显示帧率 未上报/);
+  assert.doesNotMatch(text,/头显发送/);
+  const help=vm.runInContext('cameraMonitorHelp(stream)',ctx);
+  assert.match(help,/排队.*线程唤醒.*加密.*UDP/);
+  assert.match(help,/不能重复相加.*不代表头显接收或显示/);
+});
+test('legacy and missing feedback are labeled without inventing measurements',()=>{
+  const {ctx}=setup();
+  assert.equal(vm.runInContext("cameraActualFps({capture_fps:60},{has_data:true,hz:16.4})",ctx),16.4);
+  const text=vm.runInContext("cameraMonitorSummary({capture_fps:60,webrtc_send_fps:25,webrtc_fraction_lost_pct:0},{has_data:true,hz:16.4})",ctx);
+  assert.match(text,/独立统计窗口.*ROS输入 16.4 FPS.*编码输入 25.0 FPS.*RTP输出 -- FPS/);
+  assert.match(text,/发送处理 -- ms/);
+  assert.match(text,/网络丢包 未收到反馈/);
   assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:0,peers:0})",ctx),/等待图像/);
-  assert.strictEqual(vm.runInContext("cameraActualFps({capture_fps:60,webrtc_send_fps:30},{has_data:true,hz:16.4})",ctx),16.4);
-  assert.strictEqual(vm.runInContext("cameraActualFps({capture_fps:60},{has_data:false,hz:60})",ctx),0);
-  assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:30,decoded_fps:28,jpeg_decode_ms:4.2,webrtc_send_fps:25,webrtc_encode_ms:6.3,peers:1})",ctx),/正在接收.*ROS输入 30.0 FPS.*JPEG解码 28.0 FPS\/4.2 ms.*头显发送 25.0 FPS.*H264 6.3 ms.*连接 1/);
-  assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:60,webrtc_send_fps:25},{has_data:true,hz:16.4})",ctx),/ROS输入 16.4 FPS.*头显发送 25.0 FPS/);
   assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:30},{has_data:false})",ctx),/等待图像.*0.0/);
   assert.match(vm.runInContext("cameraMonitorSummary({error:'decode failed'})",ctx),/异常.*decode failed/);
 });

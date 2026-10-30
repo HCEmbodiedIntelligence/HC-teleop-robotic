@@ -1,0 +1,294 @@
+"""X1 model-name topics selected by the existing HC ownership gate.
+
+The own gateway remains the only publisher on /hc_teleop command inputs.
+Selected targets use the existing /action hardware adapter; no Motion API is
+called here. Feedback and safety checks also apply when recording is disabled.
+"""
+import math
+from pathlib import Path
+import time
+from types import SimpleNamespace
+from xml.etree import ElementTree
+
+import yaml
+
+
+class LegacyTopicControl:
+    def __init__(self, node, bridge, output, *, feedback_node=None):
+        from sensor_msgs.msg import JointState
+        from rclpy.qos import qos_profile_sensor_data
+        from adapters.core.collision_safety import ModelCollisionGuard
+
+        self.node, self.bridge, self.output = node, bridge, output
+        profile = Path(bridge.config['legacy_control_profile'])
+        self.teleop = yaml.safe_load((profile/'arm_teleop.yaml').read_text())
+        self.settings = bridge.config.get('intervention', {})
+        self.max_age = .25
+        self.arm_velocity = float(self.settings.get('max_arm_velocity_rad_s', .25))
+        self.max_error = float(self.settings.get('max_target_error_rad', .30))
+        if not all(math.isfinite(x) and x > 0 for x in (self.arm_velocity, self.max_error)):
+            raise ValueError('legacy velocity and target error must be finite and positive')
+        self.arms = tuple(n for side in ('right', 'left') for n in self.teleop['arms'][side]['joint_names'])
+        self.waist = tuple(self.teleop['body']['waist_joint_names'])
+        self.feedback_order = self.arms + self.waist
+        self.home_joints = self.feedback_order + tuple(self.teleop['body'].get('neck_joint_names', []))
+        self.hands = {side: tuple(self.teleop['grippers'][side]['finger_joint_names']) for side in ('right','left')}
+        self.hand_names = set().union(*map(set, self.hands.values()))
+        self.sim_joints = {self.teleop['grippers'][side]['sim_joint'] for side in self.hands
+                           if self.teleop['grippers'][side].get('sim_joint')}
+        self.positions, self.sample_ns, self.received, self.speeds = {}, {}, {}, {}
+        self.last_command_stamp, self.last_command, self.command_time = {}, {}, {}
+        self.generation = None
+        self.last_rejection = ''
+        urdf = (profile/self.teleop['robot']['urdf_path']).resolve()
+        self.limits = {}
+        for joint in ElementTree.parse(urdf).getroot().findall('joint'):
+            if joint.attrib['type'] == 'fixed':
+                continue
+            limit = joint.find('limit')
+            self.limits[joint.attrib['name']] = ((-math.inf, math.inf) if joint.attrib['type'] == 'continuous'
+                else (float(limit.attrib['lower']), float(limit.attrib['upper'])))
+        for side, names in self.hands.items():
+            cfg = self.teleop['grippers'][side]
+            for name, opened, closed in zip(names, cfg['finger_open'], cfg['finger_closed']):
+                self.limits[name] = (min(opened, closed), max(opened, closed))
+        self.collision = None
+        if self.teleop['control'].get('collision_avoidance_enabled', True):
+            self.collision = ModelCollisionGuard(SimpleNamespace(urdf_path=urdf, teleop=self.teleop,
+                groups={'arms': self.arms, 'waist': self.waist}))
+        self.hand_pubs = {s: node.create_publisher(JointState, self.teleop['grippers'][s]['finger_topic'], 10)
+                          for s in self.hands}
+        self.subscriptions = []
+        def subscribe(kind, topic, callback, qos=qos_profile_sensor_data):
+            self.subscriptions.append(node.create_subscription(kind, topic, callback, qos,
+                callback_group=bridge._command_callback_group))
+        # Feedback and authority must keep draining while command preparation
+        # runs. Their existing bridge lock still serializes state and final send.
+        receiver = feedback_node or node
+        feedback_group = (bridge._ownership_callback_group if feedback_node is not None
+                          else bridge._command_callback_group)
+        for topic, callback in [('/observation/joint_states', self.state),
+                                ('/observation/hands/joint_states', self.hand_state)]:
+            self.subscriptions.append(receiver.create_subscription(
+                JointState, topic, callback, qos_profile_sensor_data,
+                callback_group=feedback_group))
+        subscribe(JointState, '/hc_teleop/joint_cmd', lambda msg: self.program(msg, 'arms'))
+        for side in self.hands:
+            subscribe(JointState, '/hc_teleop/joint_cmd_finger_'+side,
+                      lambda msg, side=side: self.program(msg, side))
+            subscribe(JointState, f'/control/vr/{side}_hand/joint_states',
+                      lambda msg, side=side: self.bridge.forward_live_command(
+                          'vr', self.select(msg, self.hands[side]), self.publish_selected))
+
+    @staticmethod
+    def stamp(message):
+        return message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
+
+    @staticmethod
+    def values(message):
+        if (not message.name or len(message.name) != len(message.position)
+                or len(set(message.name)) != len(message.name)
+                or not all(isinstance(n, str) and n for n in message.name)
+                or not all(math.isfinite(v) for v in message.position)):
+            raise ValueError('invalid joint names or positions')
+        return dict(zip(message.name, message.position))
+
+    def fresh(self, names):
+        now, wall = time.monotonic(), self.node.get_clock().now().nanoseconds
+        return all(n in self.positions and now-self.received[n] <= self.max_age
+                   and -.05 <= (wall-self.sample_ns[n])*1e-9 <= self.max_age for n in names)
+
+    def feedback_fresh(self):
+        return self.fresh(self.feedback_order)
+
+    def handover_ready(self):
+        return self.feedback_fresh() and all(n in self.speeds and abs(self.speeds[n]) <= .02 for n in self.arms)
+
+    def update_state(self, message, allowed):
+        values = self.values(message)
+        stamp, now = self.stamp(message), time.monotonic()
+        if not stamp or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age:
+            raise ValueError('stale measured feedback')
+        measured_velocity = dict(zip(message.name, message.velocity)) if len(message.velocity) == len(message.name) else {}
+        for name, value in values.items():
+            if name not in allowed or stamp <= self.sample_ns.get(name, 0):
+                continue
+            dt = (stamp-self.sample_ns.get(name, 0))*1e-9
+            speed = measured_velocity.get(name)
+            if speed is None and name in self.positions and .001 <= dt <= self.max_age:
+                speed = (value-self.positions[name])/dt
+            if speed is not None and math.isfinite(speed):
+                self.speeds[name] = speed
+            else:
+                self.speeds.pop(name, None)
+            self.positions[name], self.sample_ns[name], self.received[name] = value, stamp, now
+        return values
+
+    def state(self, message):
+        try:
+            with self.bridge._lock:
+                self.update_state(message, self.limits.keys()-self.hand_names)
+        except (ValueError, TypeError):
+            return
+
+    def hand_state(self, message):
+        try:
+            with self.bridge._lock:
+                self.update_state(message, self.hand_names)
+        except (ValueError, TypeError):
+            return
+
+    @staticmethod
+    def target_message(message, names, positions):
+        # Copy only JointState fields, without recursively reconstructing the
+        # entire generated ROS object on every projection and preparation.
+        target = type(message)(name=list(names), position=list(positions))
+        target.header.stamp.sec = message.header.stamp.sec
+        target.header.stamp.nanosec = message.header.stamp.nanosec
+        target.header.frame_id = message.header.frame_id
+        return target
+
+    @staticmethod
+    def select(message, names):
+        indices = {name:index for index,name in enumerate(message.name)}
+        selected = [n for n in names if n in indices]
+        target = LegacyTopicControl.target_message(
+            message, selected, [message.position[indices[n]] for n in selected])
+        for field in ('velocity', 'effort'):
+            source = getattr(message, field)
+            if len(source) == len(message.name):
+                setattr(target, field, [source[indices[n]] for n in selected])
+        return target
+
+    def program(self, message, channel):
+        try:
+            names = set(self.values(message))
+            allowed = set(self.feedback_order) if channel == 'arms' else set(self.hands[channel])
+            if not names <= allowed:
+                raise ValueError('unsupported own command joints')
+            selected = self.select(message, self.arms if channel == 'arms' else self.hands[channel])
+            with self.bridge._lock:
+                token = self.bridge.ownership.token if self.bridge.ownership.active else None
+                if self.bridge.ownership.active and self.bridge.ownership.state != 'AUTO':
+                    return
+            self.bridge.forward_live_command('motion', selected, self.publish_selected, token)
+        except (ValueError, TypeError) as exc:
+            self.last_rejection = str(exc)
+
+    def receive_owned(self, message, token, *, frame_id=None):
+        try:
+            names = set(self.values(message))
+            home = frame_id == 'home'
+            allowed = set(self.home_joints) if home else set(self.feedback_order) | self.hand_names
+            if token.source != 'vr' or not names <= allowed:
+                return
+            groups = (self.home_joints,) if home else (self.arms, *self.hands.values())
+            for group in groups:
+                if not names.intersection(group):
+                    continue
+                target = self.select(message, group)
+                if frame_id is not None:
+                    target.header.frame_id = frame_id
+                self.bridge.forward_live_command('vr', target, self.publish_selected, token)
+        except (ValueError, TypeError):
+            return
+
+    def prepare(self, message):
+        try:
+            values = self.values(message)
+            # VR also carries simulation-only gripper coordinates. Real hands
+            # already use their dedicated, gated finger command topics.
+            if set(values) & self.sim_joints:
+                message = self.select(message, [n for n in message.name if n not in self.sim_joints])
+                values = self.values(message)
+            stamp = self.stamp(message)
+            now = time.monotonic()
+            with self.bridge._lock:
+                # Hands retain the existing open-loop command path. Physical
+                # feedback is mandatory for arms/body, not for finger targets.
+                if not set(values) <= self.limits.keys() or not self.fresh(set(values)-self.hand_names):
+                    raise ValueError('required feedback missing/stale or unknown joints')
+                if not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age:
+                    raise ValueError('stale command')
+                if any(stamp <= self.last_command_stamp.get(n, 0) for n in values):
+                    raise ValueError('reordered command')
+                for name, value in values.items():
+                    lo, hi = self.limits[name]
+                    if not lo-1e-6 <= value <= hi+1e-6:
+                        raise ValueError('joint limit: '+name)
+                generation = self.bridge.ownership.token
+                active = self.bridge.ownership.active
+                if active:
+                    home = generation.source == 'vr' and message.header.frame_id == 'home'
+                    allowed = set(self.home_joints) if home else set(self.arms) | self.hand_names
+                    if not set(values) <= allowed:
+                        raise ValueError('body joints held during intervention')
+                # Program targets have an extra measured-error/slew envelope.
+                # A VR takeover keeps ordinary teleoperation targets unchanged;
+                # ownership fencing must not turn it into a second trajectory
+                # limiter after the normal teleoperation controller.
+                if active and generation.source == 'motion':
+                    for name, value in values.items():
+                        if name in self.arms and abs(value-self.positions[name]) > self.max_error:
+                            raise ValueError('target too far from measured position: '+name)
+                        reference = self.positions[name] if name in self.arms else value
+                        previous = self.last_command.get(name, reference) if generation == self.generation else reference
+                        dt = min(.05, max(.001, now-self.command_time.get(name, now-.01))) if generation == self.generation else .01
+                        speed = self.arm_velocity if name in self.arms else float(self.teleop['grippers']['max_velocity'])
+                        values[name] = min(previous+speed*dt, max(previous-speed*dt, value))
+                measured = dict(self.positions)
+            if self.collision and set(values) & set(self.arms):
+                if not self.feedback_fresh():
+                    raise ValueError('collision check requires fresh body feedback')
+                allowed, collision, _ = self.collision.check(measured, values)
+                if not allowed:
+                    raise ValueError('collision check refused: '+str(collision))
+            target = self.target_message(message, message.name, [values[n] for n in message.name])
+            # A rate-limited position target must not carry the original speed.
+            target.velocity, target.effort = [], []
+            return target, stamp, generation
+        except (ValueError, TypeError) as exc:
+            self.last_rejection = str(exc)
+            return None
+
+    def commit(self, prepared, *, intervention=False):
+        target, stamp, generation = prepared
+        if (not self.fresh(set(target.name)-self.hand_names) or generation != self.bridge.ownership.token
+                or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age
+                or any(stamp <= self.last_command_stamp.get(n, 0) for n in target.name)):
+            return False
+        if generation != self.generation:
+            self.last_command.clear()
+            self.command_time.clear()
+        self.generation = generation
+        self.last_command_stamp.update(dict.fromkeys(target.name, stamp))
+        self.last_command.update(zip(target.name, target.position))
+        self.command_time.update(dict.fromkeys(target.name, time.monotonic()))
+        self.last_rejection = ''
+        return True
+
+    def publish_selected(self, message):
+        names = set(message.name)
+        for side, group in self.hands.items():
+            if names <= set(group):
+                self.hand_pubs[side].publish(message)
+                return
+        self.output.publish(message)
+
+    def status(self):
+        now, wall = time.monotonic(), self.node.get_clock().now().nanoseconds
+        timing = {}
+        for name in self.feedback_order:
+            if name not in self.positions:
+                timing[name] = dict(missing=True)
+                continue
+            timing[name] = dict(receive_age_ms=(now-self.received[name])*1000,
+                                source_age_ms=(wall-self.sample_ns[name])/1e6)
+        return dict(mode='legacy_topics', last_rejection=self.last_rejection,
+                    feedback_ready=self.feedback_fresh(),
+                    feedback_timing_ms=timing,
+                    hands_ready={side:self.fresh(names) for side,names in self.hands.items()})
+
+    def close(self):
+        if self.collision:
+            self.collision.close()

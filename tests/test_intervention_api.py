@@ -26,7 +26,7 @@ class InterventionApiTests(unittest.IsolatedAsyncioTestCase):
         self.recorder = SimpleNamespace(corrections=None, is_recording=Mock(return_value=False),
                                         prepare_corrections=Mock(), stop_corrections=Mock())
         ros = SimpleNamespace(ownership=self.control, control_ready=lambda: True,
-                              recover_intervention=Mock())
+                              recover_intervention=Mock(side_effect=lambda: self.control.recover(control_ready=True)))
         runtime = SimpleNamespace(ros=ros, recorder=self.recorder, player=None, session_profile_metadata={})
         app = web.Application()
         register_intervention_routes(app, runtime)
@@ -111,7 +111,9 @@ class InterventionApiTests(unittest.IsolatedAsyncioTestCase):
         capture = self.recorder.corrections
         state = self.control.snapshot()
         self.assertEqual((await self.command('disable', **old_stop)).status, 202)
-        self.assertEqual(self.control.snapshot(), state)
+        current = self.control.snapshot()
+        self.assertGreaterEqual(current.pop('published_stamp_ns'), state.pop('published_stamp_ns'))
+        self.assertEqual(current, state)
         self.assertIs(self.recorder.corrections, capture)
         self.assertEqual(self.recorder.stop_corrections.call_count, 1)
 
@@ -181,10 +183,26 @@ class InterventionApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.control.state,'HOLD','held Grip during preparation must not become a new takeover')
         self.control.input(device_instance='vr',sequence=4,valid=True,gripped=False,stamp_ns=now[0])
         self.assertTrue(self.control.input_armed)
-        # Once preparation finishes, the original 300 ms watchdog still applies.
+        # Headset absence in HOLD only disarms manual takeover.
         now[0]+=301_000_000
         self.control.watchdog()
-        self.assertEqual(self.control.state,'FAULT')
+        self.assertEqual(self.control.state,'HOLD')
+        self.assertFalse(self.control.input_armed)
+
+    async def test_headless_start_and_explicit_recovery_never_grant_auto_implicitly(self):
+        self.recording_lifecycle()
+        self.assertEqual((await self.command('enable')).status, 202)
+        self.assertFalse(self.control.input_valid)
+        self.assertEqual(self.control.state, 'HOLD')
+        self.assertEqual((await self.command('return')).status, 202)
+        self.assertEqual(self.control.state, 'RETURNING')
+        self.control.fault('physical stop', estop=True)
+        self.assertEqual((await self.command('return', request_id='blocked')).status, 409)
+        self.assertEqual((await self.command('recover')).status, 202)
+        self.assertEqual(self.control.state, 'HOLD')
+        self.assertFalse(self.control.resume_auto)
+        self.assertEqual((await self.command('return', request_id='explicit-start')).status, 202)
+        self.assertEqual(self.control.state, 'RETURNING')
 
     async def test_estop_during_preparation_remains_latched_after_prepare_finishes(self):
         self.recording_lifecycle()

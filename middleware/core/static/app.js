@@ -167,48 +167,76 @@ function renderIntervention(status,capture) {
   interventionStatus=status;
   interventionCapture=capture;
   const state=status?.state||'OFF';
-  const supported=Boolean(status?.peers?.motion&&status?.peers?.teleop);
+  const supported=(status?.required_peers||['motion','teleop']).every(peer=>Boolean(status?.peers?.[peer]));
+  const recording=status?.recording_enabled!==false;
+  const captureReady=!recording||Boolean(capture?.ready);
   for(const button of $$('.source-switch button'))button.disabled=interventionPending||state!=='OFF';
   setText('#controlSourceHint',state!=='OFF'?
-    'DAgger 会话正在管理控制源：右 Grip 接管，正常松手交还；退出会话后可手动切换。':
-    '用于普通控制时选择 VR、程序或外骨骼；DAgger 会话内由 Grip 自动接管和交还，无需手动切源。');
+    'DAgger 接管正在管理控制源：右 Grip 接管，正常松手交还；退出 DAgger 后自动切回 VR。':
+    '用于普通控制时选择 VR、程序或外骨骼；DAgger 接管内由 Grip 自动接管和交还，无需手动切源。');
+  const homeButton=$('#interventionHome');
+  if(homeButton)homeButton.disabled=interventionPending||state!=='MANUAL'||!status?.gripped;
   const captureMode=$('#interventionCaptureMode');
   if(captureMode) {
     if(capture?.capture_mode)captureMode.value=capture.capture_mode;
-    captureMode.disabled=interventionPending||state!=='OFF';
+    captureMode.disabled=!recording||interventionPending||state!=='OFF';
     renderInterventionCaptureHint();
   }
-  const labels={OFF:'关闭',HOLD:'保持',AUTO:'程序控制',TAKEOVER:'正在接管',MANUAL:'人工控制',RETURNING:'正在交还',FAULT:'故障保持',ESTOP:'急停保持'};
+  const labels={OFF:'关闭',HOLD:'保持',AUTO:'模型/程序控制',TAKEOVER:'正在接管',MANUAL:'人工控制',RETURNING:'正在交还',FAULT:'故障保持',ESTOP:'急停保持'};
   setText('#interventionState',labels[state]||state);
   if(state==='OFF') {
     setText('#interventionReadiness',interventionPending?'正在处理会话请求…':
-      supported?'先开启会话，等待观测和录制资源就绪。':'DAgger 需要启动 Motion 后端及 VR 接收器。');
+      supported?(recording?'模型独立推理；先启用 DAgger，等待观测和录制资源就绪。':'模型独立推理；启用 DAgger后点击“开始模型控制”授权动作下发。'):'等待控制后端及接管接收进程就绪（不要求头显在线）。');
   } else {
-    const details=[state==='HOLD'?'会话已开启，机器人保持':labels[state]||state,
-      capture?.capture_mode==='full_session'?'正在连续录制整个会话':`仅人工接管片段 · 可用片段 ${capture?.prepared_slots||0}`,
-      capture?.ready?'采集就绪':'等待采集输入就绪'];
+    const details=[state==='HOLD'?'DAgger 已启用，机器人暂停':labels[state]||state,
+      !recording?'自动录制已关闭':capture?.capture_mode==='full_session'?'正在连续录制整个会话':`仅人工接管片段 · 可用片段 ${capture?.prepared_slots||0}`,
+      !recording?'仅控制权切换':capture?.ready?'采集就绪':'等待采集输入就绪'];
     if(capture?.sources?.issues?.length) {
       const names={'/observation/hands/joint_states':'手部关节反馈','/observation/hands/triggers':'手部输入反馈'};
       const topics=capture.sources.issues.map(topic=>config?.ros?.subscriptions?.find(item=>item.topic===topic)?.description||names[topic]||DEFAULT_TOPIC_DESCRIPTIONS[topic]||topic);
-      details.push('等待观测：'+topics.join('、')+'。可退出会话后，在“话题录制”中调整不需要的观测项。');
+      details.push('等待观测：'+topics.join('、')+'。可退出 DAgger后，在“话题录制”中调整不需要的观测项。');
     }
-    if(!status?.input_valid)details.push('等待头显和双手柄的有效跟踪');
-    else if(status.gripped||!status.input_armed)details.push('请松开右 Grip，确认开始前的释放状态');
-    else if(state==='HOLD'&&capture?.ready)details.push('可点击“开始程序”，由外部程序发送动作');
-    if((state==='FAULT'||state==='ESTOP')&&status?.reason)details.push(status.reason);
+    if(!status?.input_valid)details.push('VR 未就绪，仅人工接管不可用；不阻止模型/程序控制');
+    else if(!status.input_armed)details.push('人工接管前请先松开右 Grip');
+    if(status?.input_valid&&status.gripped)details.push('右 Grip 正握持，松开后可开始模型控制');
+    else if(state==='HOLD'&&captureReady&&supported)details.push('可点击“开始模型控制”授权动作下发；模型推理独立运行');
+    if(state==='FAULT'||state==='ESTOP') {
+      if(status?.reason)details.push(status.reason);
+      details.push('排除故障后点击“故障复位（保持暂停）”，再手动点击“开始模型控制”');
+    }
     if(capture?.error)details.push(capture.error);
     if(status?.recording_error)details.push(status.recording_error);
+    if(status?.legacy_control?.last_rejection)details.push('目标被保持：'+status.legacy_control.last_rejection);
+    for(const [side,ready] of Object.entries(status?.legacy_control?.hands_ready||{})) {
+      if(!ready)details.push((side==='left'?'左手':'右手')+'反馈未就绪，手部保持');
+    }
     setText('#interventionReadiness',details.join(' · '));
   }
   for(const button of $$('[data-intervention]')) {
     const action=button.dataset.intervention;
     button.disabled=interventionPending||(action==='enable'?state!=='OFF'||!supported:action==='return'?
-      !(state==='HOLD'&&capture?.ready&&status?.input_valid&&status?.input_armed&&!status?.gripped):
+      !(state==='HOLD'&&captureReady&&supported&&!(status?.input_valid&&status?.gripped)):
+      action==='recover'?!(state==='FAULT'||state==='ESTOP')||Boolean(status?.input_valid&&status?.gripped):
       action==='hold'?state==='OFF'||state==='HOLD':state==='OFF');
   }
 }
 
 function bindInterventionControls() {
+  const homeButton=$('#interventionHome');
+  if(homeButton)homeButton.onclick=async()=>{
+    if(interventionPending||homeButton.disabled)return;
+    interventionPending=true;
+    setText('#interventionError','');
+    renderIntervention(interventionStatus,interventionCapture);
+    try {
+      await api('/api/teleop/home',{method:'POST'});
+    } catch(error) {
+      setText('#interventionError','回零未完成：'+error.message);
+    } finally {
+      interventionPending=false;
+      renderIntervention(interventionStatus,interventionCapture);
+    }
+  };
   const captureMode=$('#interventionCaptureMode');
   if(captureMode)captureMode.onchange=renderInterventionCaptureHint;
   for(const button of $$('[data-intervention]'))button.onclick=async()=>{
@@ -240,10 +268,14 @@ function bindInterventionControls() {
 }
 
 function renderInterventionCaptureHint() {
+  if(interventionStatus?.recording_enabled===false) {
+    setText('#interventionCaptureHint','自动录制已关闭：接管与交还不会自动创建录制；手柄左 X 开始录制，左 Y 停止录制，与普通遥操作相同。');
+    return;
+  }
   const full=$('#interventionCaptureMode')?.value==='full_session';
   setText('#interventionCaptureHint',full?
-    '从开启会话到退出会话连续录制，包括程序运行、人工接管和暂停，并保留接管标记；使用“话题录制”中勾选的数据项。':
-    '每次人工接管单独保存；使用“话题录制”中勾选的数据项。');
+    '从启用 DAgger 到退出 DAgger 连续录制，包括模型动作执行、人工接管和暂停，并保留接管标记；使用“话题录制”中勾选的数据项。':
+    '自动录制开启时，每次人工接管（含接管回零）单独保存；使用“话题录制”中勾选的数据项。');
 }
 
 function renderCommandMux(ros) {
@@ -680,34 +712,42 @@ function collectCameraStreams() {
   });
   config.camera.source='ros';
 }
-// Measure the selected image topic, independently of configured/send FPS.
+// Prefer the pipeline's common window. Legacy servers still use topic health.
 function cameraActualFps(stream,health) {
-  if(health && !health.has_data)return 0;
-  const fps=Number(health ? health.hz : stream?.capture_fps);
+  const commonWindow=Number(stream?.fps_window_seconds)>0;
+  if(!commonWindow && health && !health.has_data)return 0;
+  const fps=Number(commonWindow ? stream.capture_fps : health ? health.hz : stream?.capture_fps);
   return Number.isFinite(fps)&&fps>0?fps:0;
+}
+function cameraMetric(value,digits=1,suffix='') {
+  return value!=null && Number.isFinite(Number(value)) && Number(value)>=0
+    ? `${Number(value).toFixed(digits)}${suffix}` : '--';
 }
 function cameraMonitorSummary(stream,health) {
   if(!stream)return '未启用 / 尚未应用';
   if(stream.error)return `异常：${stream.error}`;
   const inputFps=cameraActualFps(stream,health);
-  const sendFps=Number(stream.webrtc_send_fps);
-  const decodedFps=Number(stream.decoded_fps)||0;
-  const decodeMs=Number(stream.jpeg_decode_ms)||0;
-  const safeSendFps=Number.isFinite(sendFps)&&sendFps>0?sendFps:0;
+  const submitFps=stream.webrtc_submit_fps ?? stream.webrtc_send_fps;
   const codec=stream.webrtc_codec||stream.codec||'未知';
-  const bitrate=Number(stream.webrtc_bitrate_mbps)||0;
-  const target=Number(stream.webrtc_target_bitrate_mbps)||0;
-  const loss=Number(stream.webrtc_fraction_lost_pct)||0;
-  const rtt=stream.webrtc_rtt_ms==null?'--':`${Number(stream.webrtc_rtt_ms).toFixed(1)} ms`;
-  const encodeMs=Number(stream.webrtc_encode_ms)||0;
-  return `${inputFps>0?'正在接收':'等待图像'} · ROS输入 ${inputFps.toFixed(1)} FPS · JPEG解码 ${decodedFps.toFixed(1)} FPS/${decodeMs.toFixed(1)} ms · 头显发送 ${safeSendFps.toFixed(1)} FPS · H264 ${encodeMs.toFixed(1)} ms · ${codec} ${bitrate.toFixed(2)}/${target.toFixed(2)} Mbps · 丢包 ${loss.toFixed(2)}% · RTT ${rtt} · 头显连接 ${stream.peers||0}`;
+  const window=Number(stream.fps_window_seconds)>0
+    ? `同窗 ${cameraMetric(stream.fps_window_seconds)} s` : '独立统计窗口';
+  const loss=stream.webrtc_feedback_received
+    ? cameraMetric(stream.webrtc_fraction_lost_pct,2,'%') : '未收到反馈';
+  return `${inputFps>0?'正在接收':'等待图像'} · ${window} · ROS输入 ${inputFps.toFixed(1)} FPS · 图像解码 ${cameraMetric(stream.decoded_fps)} FPS/${cameraMetric(stream.jpeg_decode_ms)} ms · 编码输入 ${cameraMetric(submitFps)} FPS · RTP输出 ${cameraMetric(stream.webrtc_output_fps)} FPS · ${codec}编码器内 ${cameraMetric(stream.webrtc_encode_ms)} ms · 发送处理 ${cameraMetric(stream.webrtc_submit_to_transport_ms)} ms · 其中传输调用 ${cameraMetric(stream.webrtc_transport_ms)} ms · 本地覆盖 ${cameraMetric(stream.decode_frames_overwritten,0)} 帧/跳帧 ${cameraMetric(stream.webrtc_frames_skipped,0)} 帧 · 网络丢包 ${loss} · 头显显示帧率 未上报 · 码率 ${cameraMetric(stream.webrtc_bitrate_mbps,2)}/${cameraMetric(stream.webrtc_target_bitrate_mbps,2)} Mbps · RTT ${cameraMetric(stream.webrtc_rtt_ms)} ms · 头显连接 ${stream.peers||0}`;
+}
+function cameraMonitorHelp(stream) {
+  const timing=Number(stream?.fps_window_seconds)>0
+    ? `各阶段 FPS 使用同一个最近 ${stream.fps_window_seconds} 秒窗口；跨窗口完成的帧可能造成短时帧数差异。`
+    : '当前服务尚未提供统一统计窗口。';
+  return timing+' 编码器内耗时只覆盖编解码调用。发送处理从提交新帧到最后一个 RTP 包交给本机传输层，包含编码排队、线程唤醒、编码、封包、加密和 UDP 提交；其中传输调用为加密和 UDP 提交部分，不能重复相加。RTP 输出不代表头显接收或显示。覆盖为解码前压缩帧被替换，跳帧为解码后未送入编码器的中间帧，计数按本次连接累计；网络丢包来自头显 RTCP 反馈，与本地跳帧分别统计。头显实际显示帧率尚无回传。';
 }
 function renderCameraStatus(camera,health={}) {
   for(const element of $$('[data-camera-status]')){
     const stream=(camera.streams||[]).find(item=>item.id===element.dataset.cameraStatus);
-    element.textContent=cameraMonitorSummary(stream,health[stream?.topic]);
+    element.textContent=cameraMonitorSummary(stream,health[stream?.custom_topic||stream?.topic]);
+    element.title=cameraMonitorHelp(stream);
     const topic=document.createElement('div');topic.className='camera-active-topic';
-    topic.textContent=stream?`当前生效话题：${stream.topic}`:'保存并应用配置后开始监控';
+    topic.textContent=stream?`当前生效话题：${stream.custom_topic||stream.topic}`:'保存并应用配置后开始监控';
     element.append(topic);
   }
 }

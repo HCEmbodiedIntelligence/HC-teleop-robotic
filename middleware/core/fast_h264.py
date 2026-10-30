@@ -62,7 +62,7 @@ class FastH264Encoder(h264.H264Encoder):
             self.codec.bit_rate = configured_bitrate
             self.codec.pix_fmt = "yuv420p"
             self.codec.framerate = fractions.Fraction(h264.MAX_FRAME_RATE, 1)
-            self.codec.time_base = fractions.Fraction(1, h264.MAX_FRAME_RATE)
+            self.codec.time_base = fractions.Fraction(1, 90000)
             self.codec.options = {
                 "level": "31",
                 "preset": "ultrafast",

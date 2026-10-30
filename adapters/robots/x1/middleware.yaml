@@ -178,7 +178,7 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/left_arm/ee_pose
-    description: 左臂末端反馈位姿，由控制节点本地模型计算
+    description: 左臂末端反馈位姿，实机来自硬件，保留源坐标系
     type: geometry_msgs/msg/PoseStamped
     enabled: true
     outputs:
@@ -186,7 +186,7 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/right_arm/ee_pose
-    description: 右臂末端反馈位姿，由控制节点本地模型计算
+    description: 右臂末端反馈位姿，实机来自硬件，保留源坐标系
     type: geometry_msgs/msg/PoseStamped
     enabled: true
     outputs:
@@ -340,7 +340,7 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/ee_poses
-    description: 本地模型计算的双臂末端反馈位姿，顺序为右臂、左臂
+    description: 双臂末端反馈位姿，实机来自硬件，顺序为右臂、左臂
     type: geometry_msgs/msg/PoseArray
     enabled: true
     outputs:
@@ -373,7 +373,7 @@ ros:
     event_max_hz: 0.0
   command_mux:
     enabled: true
-    source: vr
+    source: motion
     vr_topic: /control/vr/joint_states
     exoskeleton_topic: /control/exoskeleton/joint_states
     output_topic: /action/joint_states
@@ -383,7 +383,11 @@ ros:
     motion_topic: /control/motion/joint_targets
     motion_permit_topic: /control/motion/permit
     hardware_ready_timeout_sec: 2.0
+  intervention:
+    legacy_topics: true
+    automatic_recording: false
+    max_arm_velocity_rad_s: 0.25
+    max_target_error_rad: 0.3
 vr:
   pose_timeout_ms: 600
-  # 网页姿态预览频率；不影响 /vrdata、100 Hz 控制或原始录制。
-  web_pose_hz: 10
+  web_pose_hz: 10.0

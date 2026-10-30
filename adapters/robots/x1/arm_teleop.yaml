@@ -35,6 +35,7 @@ robot:
     Joint7_L: 0.0
 camera_metadata:
   enabled: true
+  hardware_publishes: true  # HC_RUNTIME_MODE=teleop: consume native observation metadata.
   camera: eye  # Preserve the historical hc_camera_calibration/v1 camera ID.
   common_frame: zhi_Link
   camera_frame: camera_head
@@ -153,9 +154,9 @@ body:
 
   # 头部转动驱动脖子转动 (Pan-Tilt Neck Control)
   neck_tracking_enabled: false  # 暂停头显驱动脖子转动；底盘和腰部跟随保持启用。
-  neck_joint_names: [head_1, head_2]
-  neck_yaw_joint: head_1
-  neck_pitch_joint: head_2
+  neck_joint_names: []
+  neck_yaw_joint: 
+  neck_pitch_joint: 
   neck_yaw_scale: 1.0
   neck_pitch_scale: 1.0
   neck_max_yaw: 1.57    # rad (±90°)
@@ -299,6 +300,7 @@ grippers:
 control:
   # 默认使用 ControllerV23；Motion 可通过 HC_CONTROL_BACKEND 显式启用。
   backend: v23
+  legacy_intervention: true
   enabled_on_start: true
   home_on_start: true
   rate_hz: 100.0
@@ -313,6 +315,7 @@ control:
   target_pose_topic: /action/ee_poses
   controller_target_pose_topic: /control/solver/ee_targets
   actual_pose_topic: /observation/ee_poses
+  actual_pose_from_hardware: true  # Simulation still publishes model FK locally.
   status_topic: /status/teleop
   safety_stop_topic: /control/emergency_stop
   enable_topic: /control/teleop/enabled

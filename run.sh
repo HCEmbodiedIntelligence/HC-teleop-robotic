@@ -17,7 +17,7 @@ usage() {
   cat <<EOF
 Usage: $0 [middleware|sim|teleop] [options]
 
-  middleware Dashboard + VR gateway; launch PyBullet from System Configuration
+  middleware Dashboard + VR transport; launch PyBullet from System Configuration
   sim       VR discovery + Dashboard + IK/control + PyBullet
   teleop    VR discovery + Dashboard + IK/control for an external real driver
 
@@ -165,6 +165,15 @@ if [[ "${HC_RUNTIME_MODE}" == simulation ]]; then
   export HC_SIMULATION_DOMAIN_ID="${ROS_DOMAIN_ID}" ROS_LOCALHOST_ONLY=1
 else
   unset HC_SIMULATION_DOMAIN_ID
+  # HC_X1 and the middleware must use the same Fast DDS transports. Without
+  # this profile Fast DDS may select wlan0, while HC_X1 is restricted to the
+  # robot-internal and inference Ethernet interfaces, splitting the local graph.
+  export ROS_LOCALHOST_ONLY=0
+  export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-${HOME}/shm_profile.xml}"
+  [[ -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]] || {
+    echo "Fast DDS profile not found: ${FASTRTPS_DEFAULT_PROFILES_FILE}" >&2
+    exit 2
+  }
 fi
 
 PROFILE_DIR="$(/usr/bin/python3 -m middleware.profile_cli profile-dir --config "${MIDDLEWARE_CONFIG}")"
@@ -219,7 +228,6 @@ if [[ "${MODE}" == sim ]]; then
     -r /io_teleop/target_finger_joints:=/action/hands/joint_targets
     -r /io_teleop/target_ee_poses:=/action/ee_poses
     -r /io_teleop/target_gripper_status:=/action/hands/gripper_status
-    -r /io_teleop/target_base_move:=/action/base/command
     -r /io_teleop/hardware_ready:=/status/hardware/ready
   )
 fi

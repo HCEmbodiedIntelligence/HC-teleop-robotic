@@ -15,6 +15,7 @@ from middleware.core.dataset_topics import DatasetTopics
 
 
 def test_camera_metadata_dds_round_trip_and_stale_feedback(monkeypatch):
+    monkeypatch.setenv('HC_RUNTIME_MODE', 'simulation')
     monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
     monkeypatch.setenv('HC_CONTROL_BACKEND', 'motion')
     monkeypatch.delenv('HC_ROBOT_NAME', raising=False)

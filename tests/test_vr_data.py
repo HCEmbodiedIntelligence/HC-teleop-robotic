@@ -1,6 +1,8 @@
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -15,6 +17,23 @@ from middleware.core.protocol import ControllerInput, Pose, PosePacket
 
 @unittest.skipIf(aiohttp is None, "aiohttp is installed by install.sh")
 class VrDataTests(unittest.TestCase):
+    def test_dagger_a_is_not_dispatched_twice_and_receive_stamp_is_preserved(self):
+        from middleware.core.app import MiddlewareRuntime
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = MiddlewareRuntime(validate_config({}), Path(directory))
+            runtime.ros = SimpleNamespace(ownership=SimpleNamespace(active=True), publish=Mock())
+            runtime._on_safety_resume = Mock()
+            pose = Pose((0., 0., 0.), (0., 0., 0., 1.))
+            packet = PosePacket(protocol_version=2, sequence=1, vr_timestamp=1., flags=7,
+                                head=pose, left=pose, right=pose,
+                                right_input=ControllerInput(held_mask=1, pressed_mask=1))
+            frame = dict(packet.as_dict(), hc_received_ns=123_000_000)
+            runtime._on_pose(packet, frame)
+            runtime._on_safety_resume.assert_not_called()
+            fields = runtime.ros.publish.call_args.args[2]
+            self.assertEqual(json.loads(fields['data'])['hc_received_ns'], 123_000_000)
+
     def test_runtime_publishes_one_complete_vrdata_message(self):
         from middleware.core.app import MiddlewareRuntime
 

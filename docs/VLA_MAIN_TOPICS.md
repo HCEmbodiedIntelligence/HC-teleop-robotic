@@ -27,7 +27,7 @@
 | 话题 | 类型与语义 |
 | --- | --- |
 | `/{observation,action}/{left_arm,right_arm,waist}/joint_states` | `JointState`；从整机消息按配置抽取，腰部只在机型支持时发布 |
-| `/{observation,action}/{left_arm,right_arm}/ee_pose` | `PoseStamped`；反馈是本地模型计算，目标来自 VR 位姿链路，不能当作所有控制源的统一末端动作 |
+| `/{observation,action}/{left_arm,right_arm}/ee_pose` | `PoseStamped`；实机反馈来自硬件，仿真反馈由本地模型计算；目标来自 VR 位姿链路，不能当作所有控制源的统一末端动作 |
 | `/action/base/velocity` | `TwistStamped`；上述底盘命令的派生表示，`linear.x/y` 为前向/横向速度，`angular.z` 为偏航速度 |
 
 分组动作、末端位姿和 `/action/base/velocity` 用于观测/录制，不是第二套驱动输入。X1 双臂末端使用 `zhi_Link`；其他机型按实际 `header.frame_id` 解释。
@@ -74,7 +74,7 @@ export ROS_LOCALHOST_ONLY=0    # 跨机器；同机隔离仿真设为 1
 
 用 `ros2 topic list -t` 确认现场名称与类型。脚本复用项目 `.deps` 中的 `mcap` 和消息定义解析器；默认只读显示无需 mcap。文件不覆盖已有录制；Ctrl+C 正常封存。状态、动作或所选相机整段无消息时，录制退出码为 2，并列出缺失源，已收到的数据仍保留。消息数量大于零也不代表时序完整或已通过训练数据质检。
 
-需要相机内外参时，另加 `--topic /observation/cameras/head/calibration std_msgs/msg/String` 和 `--topic /observation/cameras/head/extrinsics std_msgs/msg/String`。X1 在启用 `ros.dataset_topics.enabled` 后自动生成；数据来源、坐标方向与断流行为见[相机内外参接口](dataset_topics.md)。
+需要相机内外参时，另加 `--topic /observation/cameras/head/calibration std_msgs/msg/String` 和 `--topic /observation/cameras/head/extrinsics std_msgs/msg/String`。X1 实机直接使用硬件发布的元数据，仿真在启用 `ros.dataset_topics.enabled` 后生成；数据来源、坐标方向与断流行为见[相机内外参接口](dataset_topics.md)。
 
 ## 转为训练数据
 

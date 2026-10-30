@@ -247,6 +247,9 @@ class VrGateway:
                             last_vr_timestamp = pose.vr_timestamp
                             last_sample_progress_time = now
                         pose_dict = pose.as_dict()
+                        # Keep reception time across the processing queue;
+                        # queued button/Grip samples must not become fresh again.
+                        pose_dict['hc_received_ns'] = time.time_ns()
                         tracking = pose_dict["tracking"]
                         inputs = pose_dict["inputs"]
                         with self._lock:

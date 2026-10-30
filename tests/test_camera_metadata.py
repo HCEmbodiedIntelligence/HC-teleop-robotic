@@ -52,10 +52,22 @@ class Node:
 
 @pytest.fixture
 def metadata(monkeypatch):
+    monkeypatch.setenv('HC_RUNTIME_MODE', 'simulation')
     monkeypatch.setenv('HC_CONTROL_BACKEND', 'v23')
     monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
     monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
     return CameraMetadata(Node(), load_camera_metadata(PROFILE_CONFIG, ROOT / 'middleware'))
+
+
+def test_real_x1_uses_hardware_metadata_without_any_relay(monkeypatch):
+    monkeypatch.setenv('HC_RUNTIME_MODE', 'teleop')
+    monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
+    monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
+    config = load_camera_metadata(PROFILE_CONFIG, ROOT / 'middleware')
+    component = CameraMetadata(Node(), config)
+    assert config == {'source': 'hardware'}
+    assert component.publishers == {}
+    assert component.subscriptions == []
 
 
 def info(frame='color_optical', fx=400., stamp=100):

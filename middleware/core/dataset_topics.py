@@ -43,14 +43,6 @@ class DatasetTopics:
         self.camera_metadata = CameraMetadata(node, config.get('camera_metadata', {}))
         self.publishers.update(self.camera_metadata.publishers)
         self.subscriptions.extend(self.camera_metadata.subscriptions)
-        for source, target in (
-            ('/io_teleop/state_ee_wrenches', '/observation/ee_wrenches'),
-            ('/io_teleop/vibration_feedback_exo',
-             '/observation/hands/vibration_feedback'),
-        ):
-            self.publisher(target, Float64MultiArray)
-            subscribe(Float64MultiArray, source,
-                      lambda msg, t=target: self.relay(t, msg))
 
     def publisher(self, topic, cls):
         self.publishers[topic] = self.node.create_publisher(cls, topic, 10)

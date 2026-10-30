@@ -13,8 +13,7 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self.camera._set_status(state='running')
 
     async def asyncTearDown(self):
-        for peer in list(self.camera._pcs):
-            await peer.close()
+        await self.camera.stop()
 
     async def test_missing_candidates_is_explicit_and_does_not_create_peer(self):
         with self.assertRaisesRegex(ValueError, 'no ICE candidates'):
@@ -62,6 +61,10 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status['webrtc_state'], 'connected')
             self.assertEqual(status['webrtc_codec'], 'H264')
             self.assertGreater(status['webrtc_packets_sent'], 0)
+            self.assertGreater(status['webrtc_frames_output'], 0)
+            self.assertGreater(status['webrtc_output_fps'], 0)
+            self.assertGreaterEqual(status['webrtc_submit_to_transport_ms'], status['webrtc_transport_ms'])
+            self.assertEqual(status['fps_window_seconds'], 2.0)
             self.assertGreater(status['webrtc_target_bitrate_mbps'], 0)
             self.assertGreater(status['remote_ice_candidates'], 0)
             self.assertGreater(status['local_ice_candidates'], 0)

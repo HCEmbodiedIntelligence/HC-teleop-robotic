@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from pathlib import Path
 from xml.etree import ElementTree
@@ -21,6 +22,8 @@ def load_camera_metadata(config, config_dir):
     directory = selected_profile(config, config_dir)
     teleop = yaml.safe_load((directory / 'arm_teleop.yaml').read_text())
     settings = dict(teleop.get('camera_metadata', {}))
+    if settings.get('hardware_publishes', False) and os.environ.get('HC_RUNTIME_MODE') == 'teleop':
+        return {'source': 'hardware'}
     if not settings.get('enabled', False):
         return {}
     settings['urdf_path'] = str((directory / teleop['robot']['urdf_path']).resolve())
@@ -103,6 +106,10 @@ class CameraMetadata:
 
         self.node, self.config = node, config
         self.subscriptions = []
+        self.publishers = {}
+        # The hardware owns both standard metadata topics in real-robot mode.
+        if config.get('source') == 'hardware':
+            return
         self.infos = {}
         self.joints = None
         self.legacy_received = {}

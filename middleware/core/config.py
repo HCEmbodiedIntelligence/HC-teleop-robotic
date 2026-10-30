@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -17,6 +18,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "domain_id": 14,
         "node_name": "hc_teleop_middleware",
+        "intervention": {
+            "legacy_topics": False,
+            "automatic_recording": True,
+            "max_arm_velocity_rad_s": 0.25,
+            "max_target_error_rad": 0.30,
+        },
         "command_mux": {
             "enabled": True,
             "source": "vr",
@@ -81,6 +88,7 @@ ROBOT_MIDDLEWARE_DEFAULTS: dict[str, Any] = {
             for topic in ("/observation/joint_states", "/action/joint_states")
         ],
         "command_mux": copy.deepcopy(DEFAULT_CONFIG["ros"]["command_mux"]),
+        "intervention": copy.deepcopy(DEFAULT_CONFIG["ros"]["intervention"]),
     },
     "vr": {"pose_timeout_ms": 600, "web_pose_hz": 10.0},
 }
@@ -440,6 +448,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                          ("upload_job_state_dir", "../runtime/recording_uploads")):
         if not isinstance(recording.setdefault(key, default), str) or not recording[key].strip():
             raise ConfigError("ros.recording." + key + " must be a non-empty path")
+    intervention = value["ros"]["intervention"]
+    if not isinstance(intervention, dict):
+        raise ConfigError("ros.intervention must be an object")
+    for key in ("legacy_topics", "automatic_recording"):
+        if type(intervention[key]) is not bool:
+            raise ConfigError("ros.intervention." + key + " must be boolean")
+    for key in ("max_arm_velocity_rad_s", "max_target_error_rad"):
+        item = intervention[key]
+        if type(item) not in (int, float) or not math.isfinite(item) or item <= 0:
+            raise ConfigError("ros.intervention." + key + " must be finite and positive")
     value["camera"] = cam_config
     return value
 

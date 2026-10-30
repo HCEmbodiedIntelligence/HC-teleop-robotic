@@ -14,10 +14,9 @@ groups:
   waist:
     model_joints_from: body.waist_joint_names
     public_name_prefix: waist_joint_
-  head:
-    model_joints_from: body.neck_joint_names
-    public_name_prefix: head_joint_
 auxiliary_joints:
+  head_1: head_joint_1
+  head_2: head_joint_2
   L_ban: left_gripper_joint_1
   R_ban: right_gripper_joint_1
   left_wheel_1: left_wheel_joint_1
@@ -38,7 +37,6 @@ driver:
   - left_arm
   - right_arm
   - waist
-  - head
   parameters:
     plugin_class: humanoid_driver_runtime/RosTopicRobotDriver
     plugin_parameters:

@@ -16,7 +16,7 @@ from typing import Any
 from aiohttp import WSMsgType, web
 import yaml
 
-from .camera import CameraService
+from .camera_process import CameraProcessService as CameraService
 from .simulation import SimulationService, register_simulation_routes
 from .config import ConfigError, ConfigStore, validate_config
 from .profile_api import register_profile_routes
@@ -161,9 +161,12 @@ class MiddlewareRuntime:
         profile_dir = (selected_profile(self.config, self.config_dir)
                        if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
         self.config["ros"].pop("robot_api_profile", None)
+        self.config["ros"].pop("legacy_control_profile", None)
         if profile_dir is not None and unified_profile(profile_dir):
             RobotApiProfile(profile_dir)
             self.config["ros"]["robot_api_profile"] = str(profile_dir)
+        elif profile_dir is not None and self.config["ros"].get("intervention", {}).get("legacy_topics", False):
+            self.config["ros"]["legacy_control_profile"] = str(profile_dir)
         recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
         self.recorder = recorder
         try:
@@ -386,6 +389,9 @@ class MiddlewareRuntime:
             self._broadcast_pending.clear()
             for event in pending:
                 await self._broadcast(event)
+                # send_str can complete synchronously. Give RTP/timers a turn
+                # even when telemetry keeps refilling the pending dictionary.
+                await asyncio.sleep(0)
 
     async def _broadcast(self, event: dict[str, Any]) -> None:
         if not self.websockets:
@@ -433,7 +439,11 @@ class MiddlewareRuntime:
         a_held = bool(right_held & 1)
         a_down = bool(right_pressed & 1) or (a_held and not self._last_a_held)
         self._last_a_held = a_held
-        if a_down:
+        # During DAgger, A/B and Grip are processed in one validated semantic
+        # sample by the ownership receiver, so a pause cannot race a resume.
+        intervention_active = bool(self.ros is not None and
+            getattr(self.ros, 'ownership', None) and self.ros.ownership.active)
+        if a_down and not intervention_active:
             self._on_safety_resume("VR controller A button pressed")
 
         # Pressing both thumbsticks marks the active recording, or the most
@@ -495,7 +505,7 @@ class MiddlewareRuntime:
                 "std_msgs/msg/String",
                 {
                     "data": json.dumps(
-                        {**frame, 'hc_received_ns': time.time_ns()},
+                        {**frame, 'hc_received_ns': frame.get('hc_received_ns', time.time_ns())},
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
@@ -704,7 +714,9 @@ class MiddlewareRuntime:
 
     def _on_vr_timeout(self, reason: str) -> None:
         if self.ros and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
-            self.ros.ownership.fault(reason)
+            # Headset availability gates manual takeover, not model inference
+            # or already-authorized program output. Manual loss still faults.
+            self.ros.ownership.input_lost(reason)
             return
         source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
         if source is None:
@@ -932,10 +944,11 @@ def create_app(store: ConfigStore) -> web.Application:
 
     async def teleop_home(request: web.Request) -> web.Response:
         if runtime.ros and runtime.ros.ownership.active:
-            raise web.HTTPConflict(text='请退出人工干预会话后再回零')
-        source = store.value.get("ros", {}).get("command_mux", {}).get(
-            "source", "vr"
-        )
+            if not runtime.ros.request_manual_home():
+                raise web.HTTPConflict(text='请先握住右 Grip 完成人工接管，确认硬件就绪后再回零')
+            return web.json_response({"accepted": True}, status=202)
+        source = (runtime.ros.status().get("command_mux", {}).get("source", "vr")
+                  if runtime.ros else store.value.get("ros", {}).get("command_mux", {}).get("source", "vr"))
         if source != "vr":
             raise web.HTTPConflict(text="回零仅在 VR/IK 控制源下可用")
         if runtime.ros is not None:
@@ -977,7 +990,8 @@ def create_app(store: ConfigStore) -> web.Application:
         )
 
     async def websocket(request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
+        # Telemetry shares the event loop with RTP; synchronous deflate stalls video.
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024, compress=False)
         await ws.prepare(request)
         runtime.websockets.add(ws)
         await ws.send_json(envelope("connected", "middleware", runtime.status()))
@@ -1059,7 +1073,7 @@ def create_app(store: ConfigStore) -> web.Application:
         _camera_id, camera = camera_for_request(request)
         if camera is None:
             raise web.HTTPServiceUnavailable(text="camera service is unavailable")
-        frame = camera.latest()
+        frame = await asyncio.to_thread(camera.latest)
         if frame is None:
             raise web.HTTPNotFound(text="no frame available")
         try:
@@ -1084,7 +1098,7 @@ def create_app(store: ConfigStore) -> web.Application:
         try:
             import cv2
             while True:
-                frame = camera.latest()
+                frame = await asyncio.to_thread(camera.latest)
                 if frame is not None:
                     success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if success:

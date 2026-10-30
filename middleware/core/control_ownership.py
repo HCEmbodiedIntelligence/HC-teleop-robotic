@@ -39,8 +39,11 @@ class ControlOwnership:
     def __init__(self, *, lock=None, clock=time.monotonic_ns, ros_clock=time.time_ns,
                  revoke=lambda: None, permit=lambda *args: None,
                  open_segment=lambda *args: None, close_segment=lambda *args: None,
-                 emit=lambda event: None, transition_timeout_sec=2., input_timeout_sec=.3):
+                 emit=lambda event: None, transition_timeout_sec=2., input_timeout_sec=.3,
+                 required_peers=('motion', 'teleop'), recording_enabled=True):
         self.lock = lock or threading.RLock()
+        self.required_peers = frozenset(required_peers)
+        self.recording_enabled = bool(recording_enabled)
         self.clock, self.ros_clock = clock, ros_clock
         self.revoke, self.permit = revoke, permit
         self.open_segment, self.close_segment, self.emit = open_segment, close_segment, emit
@@ -70,6 +73,8 @@ class ControlOwnership:
         self.input_sequence = -1
         self.preparing_capture = False
         self.input_ready_stamp_ns = 0
+        self.input_diagnostics = dict(received=0, accepted=0, rejected=0,
+                                      last_rejection='', last_loss_reason='')
         self.capture_ready = lambda: False
         self.recording_error = ''
         self.release_ns = None
@@ -121,7 +126,7 @@ class ControlOwnership:
             self.input_armed = self.input_valid = self.gripped = self.resume_auto = False
             self.input_sequence = -1
             self.preparing_capture = preparing_capture
-            self.input_ready_stamp_ns = 0
+            self.input_ready_stamp_ns = self.ros_clock()
             self.recording_error = ''
             self._invalidate('HOLD', reason='session enabled; explicit start required')
             return self.snapshot()
@@ -135,7 +140,7 @@ class ControlOwnership:
             # Samples observed while writers/subscriptions were starting must
             # not arm a later held Grip. Require a fresh release after readiness.
             self.input_armed = self.input_valid = self.gripped = False
-            self.reason = 'capture prepared; observe release before starting'
+            self.reason = 'capture prepared; explicit program start required'
             self._event('capture_ready')
 
     def disable(self):
@@ -145,17 +150,21 @@ class ControlOwnership:
             self._invalidate('OFF', reason='session disabled; output remains closed')
 
     def start_auto(self, *, recording_ready, control_ready):
+        """Explicitly authorize program actions; headset presence is optional."""
         with self.lock:
-            if self.preparing_capture or self.state != 'HOLD' or self.gripped or not self.input_armed or not self.input_valid:
-                raise OwnershipConflict('start requires HOLD and a fresh observed release')
-            if not recording_ready or not control_ready or not {'motion', 'teleop'} <= self.peers.keys():
+            if self.preparing_capture or self.state != 'HOLD':
+                raise OwnershipConflict('start requires HOLD and completed preparation')
+            if self._input_fresh() and self.gripped:
+                raise OwnershipConflict('release the active manual Grip before starting')
+            if (self.recording_enabled and not recording_ready) or not control_ready or not self.required_peers <= self.peers.keys():
                 raise OwnershipConflict('capture, feedback or control participants are not ready')
             self.resume_auto = True
             self._invalidate('RETURNING', 'motion', 'explicit start')
 
     def takeover(self):
         with self.lock:
-            if self.preparing_capture or self.state not in {'AUTO', 'HOLD', 'RETURNING'}:
+            if (self.preparing_capture or self.state not in {'AUTO', 'HOLD', 'RETURNING'}
+                    or not self._input_fresh() or not self.input_armed or not self.gripped):
                 return False
             self.resume_auto = self.state == 'AUTO' or (self.state == 'RETURNING' and self.resume_auto)
             self.release_ns = None
@@ -180,6 +189,12 @@ class ControlOwnership:
             # Neither pause nor an ordinary resume clears a fault/estop latch.
             if self.state in {'FAULT', 'ESTOP'}:
                 return
+            # A Grip sample queued before this pause cannot immediately take
+            # over again. Observe a fresh release before accepting another edge.
+            self.input_armed = False
+            self.input_ready_stamp_ns = self.ros_clock()
+            if self.state == 'HOLD' and not self.resume_auto:
+                return
             self.resume_auto = False
             self._invalidate('HOLD', reason=reason)
 
@@ -198,45 +213,95 @@ class ControlOwnership:
             if not control_ready:
                 raise OwnershipConflict('fault conditions have not cleared')
             self.input_armed = self.resume_auto = False
-            self._invalidate('HOLD', reason='explicit recovery; observe release before starting')
+            self.input_ready_stamp_ns = self.ros_clock()
+            self._invalidate('HOLD', reason='explicit recovery; explicit program start required')
 
-    def input(self, *, device_instance, sequence, valid, gripped, stamp_ns):
-        """Semantic device sample. Invalid/default input never means release."""
+    def _input_fresh(self):
+        return self.input_valid and self.clock()-self.input_time_ns <= self.input_timeout_ns
+
+    def input_lost(self, reason):
+        """Disarm manual input; only an active manual handover/output must stop."""
+        with self.lock:
+            self.input_valid = self.input_armed = self.gripped = False
+            self.input_ready_stamp_ns = self.ros_clock()
+            self.input_diagnostics.update(last_loss_reason=reason,
+                                          last_loss_stamp_ns=self.input_ready_stamp_ns)
+            if self.state in {'TAKEOVER', 'MANUAL'}:
+                self.fault(reason)
+
+    def _reject_input(self, reason):
+        """Keep bounded diagnostic facts without changing the input gate."""
+        self.input_diagnostics['rejected'] += 1
+        self.input_diagnostics.update(
+            last_rejection=reason,
+            last_rejected_source_ns=self.input_diagnostics['last_source_ns'],
+            last_rejected_age_ms=self.input_diagnostics['last_age_ms'],
+            last_rejected_callback_ns=self.input_diagnostics['last_callback_ns'])
+        return False
+
+    def input(self, *, device_instance, sequence, valid, gripped, stamp_ns,
+              pause_requested=False, resume_requested=False):
+        """Accept a semantic sample, with pause taking priority over Grip.
+
+        Return True only for a fresh valid sample. The caller may dispatch an
+        explicit resume after this method, under the same control lock. Resume
+        suppresses Grip handling in its frame; it never clears a fault here.
+        """
         with self.lock:
             now = self.clock()
+            # A new packet must not reuse an armed release from before a gap,
+            # even when it arrives before the periodic watchdog runs.
+            if self.input_valid and not self._input_fresh():
+                self.input_lost('teleop input timeout')
             age = self.ros_clock() - stamp_ns
+            self.input_diagnostics['received'] += 1
+            self.input_diagnostics.update(last_source_ns=stamp_ns,
+                last_callback_ns=stamp_ns+age, last_age_ms=age/1e6,
+                last_sequence=sequence)
             if sequence <= self.input_sequence and device_instance == self.input_device:
-                return
+                return self._reject_input('out_of_order_sequence')
             if not -50_000_000 <= age <= self.input_timeout_ns:
-                return
+                return self._reject_input('sample_age_out_of_range')
             if self.active and stamp_ns < self.input_ready_stamp_ns:
-                return
+                return self._reject_input('sample_before_rearm_cutoff')
+            device_changed = bool(self.input_device and device_instance != self.input_device and self.active)
             if device_instance != self.input_device:
                 if self.input_device and self.active:
-                    self.fault('teleop input instance changed')
+                    self.input_lost('teleop input instance changed')
                 self.input_device, self.input_sequence, self.input_armed = device_instance, -1, False
             self.input_sequence, self.input_time_ns = sequence, now
             self.input_valid = bool(valid)
             if not valid:
-                self.input_armed = False
-                if self.active:
-                    self.fault('teleop input invalid/tracking lost')
-                return
+                self.input_lost('teleop input invalid/tracking lost')
+                return self._reject_input('invalid_semantic_input')
             if self.preparing_capture:
                 self.input_valid = self.input_armed = self.gripped = False
-                return
+                return self._reject_input('capture_preparing')
+            if device_changed:
+                self.gripped = bool(gripped)
+                self.input_armed = False
+                return self._reject_input('device_changed_release_required')
             previous = self.gripped
             self.gripped = bool(gripped)
+            if pause_requested:
+                self.hold('VR controller B button pressed')
+                self.input_diagnostics['accepted'] += 1
+                self.input_diagnostics['last_accepted_source_ns'] = stamp_ns
+                return True
+            resume_requested = resume_requested and self.state in {'HOLD', 'FAULT', 'ESTOP'}
             if not gripped:
                 self.input_armed = True
-                if previous and self.active:
+                if previous and self.active and not resume_requested:
                     self.release()
-            elif not previous and self.input_armed and self.active:
+            elif not previous and self.input_armed and self.active and not resume_requested:
                 self.takeover()
+            self.input_diagnostics['accepted'] += 1
+            self.input_diagnostics['last_accepted_source_ns'] = stamp_ns
+            return True
 
     def peer(self, participant, instance):
         with self.lock:
-            if participant not in {'motion', 'teleop'} or not instance:
+            if participant not in self.required_peers or not instance:
                 return
             previous = self.peers.get(participant)
             self.peers[participant] = instance
@@ -266,12 +331,15 @@ class ControlOwnership:
             if self.clock() >= self.deadline_ns:
                 self.fault('handover timeout: ' + self.phase + '; ack=' + ','.join(sorted(self.acks)))
                 return
-            if not control_ready or not {'motion', 'teleop'} <= self.acks:
+            if self.state == 'TAKEOVER' and not self._input_fresh():
+                self.input_lost('teleop input timeout during handover')
+                return
+            if not control_ready or not self.required_peers <= self.acks:
                 return
             if self.phase == 'revoke':
-                if self.state == 'TAKEOVER' and (not self.gripped or not manual_ready):
+                if self.state == 'TAKEOVER' and (not self._input_fresh() or not self.gripped or not manual_ready):
                     return
-                if self.state == 'TAKEOVER':
+                if self.state == 'TAKEOVER' and self.recording_enabled:
                     # The capture range is established before either receiver
                     # may accept the first manual command. Failure is visible
                     # and never prevents a human stopping the program.
@@ -301,18 +369,20 @@ class ControlOwnership:
             if self.preparing_capture and self.state == 'HOLD' and self.capture_ready():
                 self.finish_capture_preparation(self.session)
             if not self.preparing_capture and self.active and self.input_valid and self.clock()-self.input_time_ns > self.input_timeout_ns:
-                self.input_valid = self.input_armed = False
-                self.fault('teleop input timeout')
+                self.input_lost('teleop input timeout')
             if self.state in {'AUTO', 'MANUAL'}:
-                for peer in ('motion', 'teleop'):
+                for peer in self.required_peers:
                     if self.clock()-self.peer_times.get(peer, 0) > self.input_timeout_ns:
+                        self._event('heartbeat_timeout', participant=peer,
+                                    gap_ms=(self.clock()-self.peer_times.get(peer, 0))/1e6,
+                                    limit_ms=self.input_timeout_ns/1e6)
                         self.fault(peer+' acknowledgement heartbeat lost')
                         break
 
     def allows(self, token):
         return (token == self.token and self.phase == 'grant' and
                 ((self.state == 'AUTO' and token.source == 'motion') or
-                 (self.state == 'MANUAL' and token.source == 'vr' and self.gripped and self.input_valid)))
+                 (self.state == 'MANUAL' and token.source == 'vr' and self.gripped and self._input_fresh())))
 
     def sent(self, token, target, stamp_ns):
         """Invoked only after hardware publication, under the final gate lock."""
@@ -349,8 +419,12 @@ class ControlOwnership:
             return dict(state=self.state, phase=self.phase, reason=self.reason,
                         **asdict(self.token), input_valid=self.input_valid,
                         input_armed=self.input_armed, gripped=self.gripped,
+                        input_diagnostics=dict(self.input_diagnostics),
+                        input_rearm_cutoff_ns=self.input_ready_stamp_ns,
                         preparing_capture=self.preparing_capture,
+                        required_peers=sorted(self.required_peers), recording_enabled=self.recording_enabled,
                         acknowledgements=sorted(self.acks), peers=dict(self.peers),
                         recording_error=self.recording_error, command_seq=self.command_seq,
                         cutoff_ns=self.cutoff_ns, sequence=self.event_seq,
+                        published_stamp_ns=self.ros_clock(),
                         metrics=list(self.metrics)[-64:], metric_count=len(self.metrics))

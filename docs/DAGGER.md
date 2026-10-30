@@ -1,5 +1,27 @@
 # DAgger 人工接管与纠正采集
 
+## X1 HoloBrain HTTP 网关随实机入口启动
+
+X1 配置启用 `ros.intervention.legacy_topics` 时，`./run.sh teleop` 自动启动
+HoloBrain DAgger v2 网关、middleware 和求解器。HC_X1 仍在另一个终端单独启动，
+不再额外运行 `holobrain_http_gateway/start_robot.sh` 或手动启动第二个网关。
+不带参数的 `./run.sh` 仍是 Dashboard 入口；`./run.sh sim` 不启动此网关。
+
+网关代码默认位于 `~/holobrain_http_gateway`，其他位置通过
+`HC_TJ_GATEWAY_ROOT` 指定。网关继承 HC 的 ROS 域，默认 HTTP 端口为 8765，
+可用 `HC_TJ_GATEWAY_PORT` 修改。启动文件缺失或端口已占用时，HC 在启动子进程前
+报错，已有网关需要人工停止，不会被接管或强制关闭。
+
+日志位于本次会话的 `middleware/holobrain_gateway.log`。退出实机入口时一起停止
+网关；任一必需进程退出会结束本次 HC 进程组，外部 HC_X1 不受进程清理影响。
+网关只向 `/hc_teleop` 程序输入发布动作，由 HC 仲裁后输出到 `/action`。
+网关直接订阅 `/observation/joint_states`、手部反馈、头部 RGB-D 及内外参；
+HC 不再生成 `/hc_teleop/joint_states` 和相机别名。网关与 HC 必须同步更新。
+自动启动服务不会自动开启 DAgger 会话、恢复 FAULT 或授予 AUTO。
+模型仍可独立推理；动作必须在 Dashboard 开启会话并点击“开始程序”后才允许下发。
+
+以下统一 Robot API / Motion 说明对应其他部署路径。
+
 2026-10-22：从本地未上传的 humanoid 工作恢复到 main。父仓库来源为
 `32e0350797c9ee73289aa0e96ffbdad29a01e51e` stash，Motion 子模块来源为
 `92c5de19b29999dc9735802ad78336364b49b07c` stash。两个原 stash 均保留。
@@ -21,6 +43,27 @@
 DAgger 会话只开放双臂和支持的夹爪，腰部、头部、底盘保持。普通遥操作的腰部安全规则仍有效：恢复后需新的左 Grip 按下沿。
 
 ## 数据
+
+控制调度：普通命令和遥测使用单线程 ROS executor；手柄控制事件、参与者确认、
+控制权定时检查、hardware-ready 及 X1 实测关节反馈使用独立的 control node/executor。
+相机继续使用已有的独立 executor。这样动作准备不会占住控制事件和反馈的接收队列。
+控制锁、最终发送前的授权复核、300 ms 输入/心跳限制和 250 ms 必要关节反馈限制不变；
+不通过缩短输入历史队列丢弃按钮边沿，也不通过扩大超时掩盖迟到。
+
+接管诊断：`/api/control/ownership` 的 `input_diagnostics` 记录 HC 收到、
+接受和拒绝的输入数量、最后一次拒绝原因及输入年龄；它不改变输入有效性条件。
+`/api/status` 的 `ros.last_input_callback_error` 保留输入回调异常，
+`ros.last_feedback_failure` 保留故障瞬间各必要关节的接收年龄和源时间年龄。
+`legacy_control.feedback_timing_ms` 是当前反馈年龄；`heartbeat_timeout`
+事件记录实际丢失的参与者、间隔及原有超时上限。诊断字段不会恢复或授予控制权。
+`input_diagnostics.callback_entry_age_ms` 是进入语义输入回调时的消息年龄，
+`callback_lock_wait_ms` 是随后等待控制锁的时间，`callback_input_work_ms`
+是取得锁后处理该输入的时间。`ros.callback_timings` 记录各回调的最近和最大耗时；
+`ros.slow_callbacks` 有界保留最近 32 次超过 20 ms 的回调名称和耗时。
+这些计时不会修改回调分组、执行线程、QoS、控制阈值或恢复条件。
+当最近输入已迟到超过 100 ms 时，独立的只读诊断线程在
+`ros.control_contention_samples` 中有界保存控制锁持有线程及其调用位置，
+并记录当时执行的接管回调。采样不获取或替换控制锁，不读取局部变量值。
 
 沿用 main 的 `ros.recording.format`：`mcap`、`lerobot`、`both`、`mcap_mp4`。
 `mcap_mp4` 使用 main 的 RGB MP4＋无损深度包；深度原始消息保留在 `raw.mcap` 中。
