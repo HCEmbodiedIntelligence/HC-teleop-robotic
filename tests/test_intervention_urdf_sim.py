@@ -43,7 +43,6 @@ def run_simulator(profile, report):
     api = RobotApiProfile(profile)
     report.mkdir(parents=True, exist_ok=True)
     rclpy.init(args=['--ros-args', '-r', '/io_teleop/hardware_ready:=/status/hardware/ready',
-        '-r', '/io_teleop/target_base_move:=/action/base/command',
         '-r', '/io_teleop/target_ee_poses:=/action/ee_poses'])
     simulator = SimRobotController(str(profile/'arm_teleop.yaml'), init_debug=False, headless=True)
     camera = simulator.create_publisher(Image, CAMERA, 1)

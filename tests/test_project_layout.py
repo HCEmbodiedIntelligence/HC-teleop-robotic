@@ -54,7 +54,6 @@ class ProjectLayoutTests(unittest.TestCase):
             "target_finger_joints",
             "target_ee_poses",
             "target_gripper_status",
-            "target_base_move",
         ):
             self.assertIn(
                 "/io_teleop/" + topic + ":=" + {'joint_states': '/observation/joint_states', 'joint_cmd': '/action/joint_states', 'target_ee_poses': '/action/ee_poses', 'target_base_move': '/action/base/command', 'hardware_ready': '/status/hardware/ready', 'target_finger_joints': '/action/hands/joint_targets', 'target_gripper_status': '/action/hands/gripper_status', 'target_joint_from_vr': '/control/solver/target_joint_from_vr'}[topic], launcher

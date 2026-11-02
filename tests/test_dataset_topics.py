@@ -114,16 +114,14 @@ def test_camera_metadata_is_relayed_unchanged_to_standard_topics():
     assert b.publishers['/observation/cameras/head/extrinsics'].messages == [extrinsics]
 
 
-def test_native_force_is_not_republished_but_vibration_still_has_a_source():
+def test_native_force_and_retired_vibration_topics_are_not_relayed():
     b = bridge()
     sources = dict(b.subscriptions)
-    vibration = Float64MultiArray(data=list(range(10)))
-
-    sources['/io_teleop/vibration_feedback_exo'](vibration)
 
     assert '/io_teleop/state_ee_wrenches' not in sources
     assert '/observation/ee_wrenches' not in b.publishers
-    assert b.publishers['/observation/hands/vibration_feedback'].messages == [vibration]
+    assert '/io_teleop/vibration_feedback_exo' not in sources
+    assert '/observation/hands/vibration_feedback' not in b.publishers
 
 
 def test_config_records_all_projected_topics_and_raw_vr():
