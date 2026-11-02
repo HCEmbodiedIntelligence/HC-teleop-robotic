@@ -81,9 +81,27 @@ class InterventionTeleop:
         node.create_subscription(Header, '/internal/vr/home_request', self.home_request, 1)
         node.create_timer(.1, self.heartbeat)
         self.hand_feedback = {}
+        self.hand_commands = {}
+        self.last_hand_step = 0.0
         if node.backend == 'v23':
             from rclpy.qos import qos_profile_sensor_data
             node.create_subscription(JointState, '/observation/hands/joint_states', self.hands, qos_profile_sensor_data)
+            for side in ('right', 'left'):
+                topic = node.config['grippers'][side]['finger_topic']
+                node.create_subscription(JointState, topic,
+                    lambda msg, side=side: self.hand_command(msg, side), qos_profile_sensor_data)
+
+    def hand_command(self, message, side):
+        """Remember the last final setpoint for a bounded X1 hand handover."""
+        stamp = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
+        if (len(message.name) != len(message.position) or len(set(message.name)) != len(message.name)
+                or not all(math.isfinite(v) for v in message.position)
+                or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= .25):
+            return
+        for name, value in zip(message.name, message.position):
+            if (name in self.node.config['grippers'][side]['finger_joint_names'] and
+                    stamp > self.hand_commands.get(name, (0, 0))[1]):
+                self.hand_commands[name] = (value, stamp)
 
     def hands(self, message):
         stamp = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
@@ -197,6 +215,7 @@ class InterventionTeleop:
 
     def anchor(self):
         node, now = self.node, time.monotonic()
+        self.last_hand_step = now
         if (not self.valid or not self.input.pressed or now-self.last_input > .3 or
                 now-node.joint_state_stamp > min(.2, node.control['joint_state_timeout'])):
             raise ValueError('fresh tracked controllers and measured feedback required')
@@ -218,10 +237,26 @@ class InterventionTeleop:
                 if side not in ('left', 'right'):
                     continue
                 for index, name in enumerate(cfg['finger_joint_names']):
-                    if name in node.joint_state and side in self.triggers:
-                        q = node.joint_state[name]
-                        self.grippers[name] = [side, self.triggers[side], q, q,
-                            cfg['finger_open'][index], cfg['finger_closed'][index]]
+                    if name not in node.joint_state or side not in self.triggers:
+                        continue
+                    q = node.joint_state[name]
+                    opened, closed = cfg['finger_open'][index], cfg['finger_closed'][index]
+                    previous = q
+                    if node.backend == 'v23':
+                        measured = self.hand_feedback.get(name)
+                        if not measured or now-measured[1] > .25:
+                            continue
+                        q = previous = measured[0]
+                        # A measured finger can lie outside the calibrated command
+                        # interval. Prefer a fresh, legal final command as slew seed
+                        # in that case. All generated commands still pass HC checks.
+                        lo, hi = sorted((opened, closed))
+                        sent = self.hand_commands.get(name)
+                        if not lo <= q <= hi and sent and lo <= sent[0] <= hi:
+                            age = (node.get_clock().now().nanoseconds-sent[1])*1e-9
+                            if -.05 <= age <= .25:
+                                previous = sent[0]
+                    self.grippers[name] = [side, self.triggers[side], q, previous, opened, closed]
 
     def can_home(self):
         now = time.monotonic()
@@ -274,13 +309,25 @@ class InterventionTeleop:
             node._update_arm_target(arm)
         node._publish_target_poses()
         values = {}
+        if node.backend == 'v23':
+            # Use elapsed time: dropped control ticks must not slow a fresh
+            # trigger indefinitely or allow a large step after a stall.
+            dt = max(0., min(.05, now-self.last_hand_step))
+            self.last_hand_step = now
+        else:
+            dt = 1./float(node.control['rate_hz'])
+        step = float(node.config['grippers']['max_velocity'])*dt
         for name, reference in self.grippers.items():
             side, trigger, initial, previous, opened, closed = reference
             if side not in self.triggers:
                 continue
-            desired = initial+(self.triggers[side]-trigger)*(closed-opened)
+            # X1 uses the same absolute trigger mapping as ordinary VR teleop.
+            # Preserve the relative mapping on other backends.
+            if node.backend == 'v23':
+                desired = opened+self.triggers[side]*(closed-opened)
+            else:
+                desired = initial+(self.triggers[side]-trigger)*(closed-opened)
             desired = max(min(opened, closed), min(max(opened, closed), desired))
-            step = float(node.config['grippers']['max_velocity'])/float(node.control['rate_hz'])
             reference[3] = max(previous-step, min(previous+step, desired))
             values[name] = reference[3]
         if values:

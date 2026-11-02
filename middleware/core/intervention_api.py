@@ -32,16 +32,20 @@ def register_intervention_routes(app, runtime):
             raise web.HTTPBadRequest(text='request must be an object')
         name = request.match_info['action']
         capture_mode = data.get('capture_mode', 'corrections_only')
-        if name == 'enable' and capture_mode not in ('corrections_only', 'full_session'):
+        if name in {'enable', 'enable_dagger'} and capture_mode not in ('corrections_only', 'full_session'):
             raise web.HTTPBadRequest(text='capture_mode must be corrections_only or full_session')
         async with lock:
             control = runtime.ros.ownership
             capture = runtime.recorder.corrections if runtime.recorder else None
             recording = control.recording_enabled
-            if recording and runtime.recorder is None:
+            if recording and name in {'enable', 'enable_dagger'} and runtime.recorder is None:
                 raise web.HTTPServiceUnavailable(text='recording service is required when automatic recording is enabled')
             operations = {
                 'enable': lambda: control.enable(preparing_capture=recording),
+                'start_model': lambda: control.start_model(control_ready=runtime.ros.control_ready(),
+                    recording_ready=bool(capture and capture.status()['ready'])),
+                'enable_dagger': lambda: control.set_dagger(True, preparing_capture=recording),
+                'disable_dagger': lambda: control.set_dagger(False),
                 'takeover': control.takeover, 'hold': control.hold,
                 'disable': control.disable, 'recover': runtime.ros.recover_intervention,
                 'return': lambda: control.start_auto(recording_ready=bool(capture and capture.status()['ready']),
@@ -50,7 +54,9 @@ def register_intervention_routes(app, runtime):
             if name not in operations:
                 raise web.HTTPNotFound(text='unknown intervention operation')
             try:
-                if name == 'enable':
+                if name == 'start_model' and runtime.player and runtime.player.status().get('is_active'):
+                    raise ValueError('stop replay before starting model control')
+                if name in {'enable', 'enable_dagger'}:
                     if capture is not None and capture.capture_mode != capture_mode:
                         raise ValueError('exit the intervention session before changing capture mode')
                     if runtime.player and runtime.player.status().get('is_active'):
@@ -70,14 +76,14 @@ def register_intervention_routes(app, runtime):
                 # never stop a newer capture. A failed disk operation may only
                 # retry while its original authority generation is current.
                 pending = pending_capture == (name, data.get('request_id'), control.session, control.epoch, capture_mode)
-                if pending and recording and name == 'enable' and runtime.recorder.corrections is None:
+                if pending and recording and name in {'enable', 'enable_dagger'} and runtime.recorder.corrections is None:
                     metadata = {**runtime.session_profile_metadata,
                                 'controller_instance_id': control.instance, 'session_id': control.session}
                     await asyncio.to_thread(runtime.recorder.prepare_corrections, metadata, capture_mode=capture_mode)
                     capture = runtime.recorder.corrections
                     if capture and capture.status()['ready']:
                         control.finish_capture_preparation(metadata['session_id'])
-                elif pending and recording and name == 'disable':
+                elif pending and recording and name in {'disable', 'disable_dagger'} and runtime.recorder is not None:
                     await asyncio.to_thread(runtime.recorder.stop_corrections)
                 if pending:
                     pending_capture = None

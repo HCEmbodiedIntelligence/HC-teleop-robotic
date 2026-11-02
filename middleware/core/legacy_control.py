@@ -5,6 +5,7 @@ Selected targets use the existing /action hardware adapter; no Motion API is
 called here. Feedback and safety checks also apply when recording is disabled.
 """
 import math
+from collections import Counter
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -40,6 +41,12 @@ class LegacyTopicControl:
         self.last_command_stamp, self.last_command, self.command_time = {}, {}, {}
         self.generation = None
         self.last_rejection = ''
+        self.recent_rejection = ''
+        self.diagnostics = Counter()
+        self.last_rejection_ns = 0
+        self.last_clip = {}
+        self.last_arm_publish_time = None
+        self.arm_publish_gap_max_ms = 0.0
         urdf = (profile/self.teleop['robot']['urdf_path']).resolve()
         self.limits = {}
         for joint in ElementTree.parse(urdf).getroot().findall('joint'):
@@ -53,6 +60,11 @@ class LegacyTopicControl:
             for name, opened, closed in zip(names, cfg['finger_open'], cfg['finger_closed']):
                 self.limits[name] = (min(opened, closed), max(opened, closed))
         self.collision = None
+        node.get_logger().info('[control-limits] '+str(dict(
+            arm_velocity_rad_s=self.arm_velocity, target_error_rad=self.max_error,
+            feedback_command_max_age_s=self.max_age,
+            arm_position_limits={n:self.limits[n] for n in self.arms},
+            hand_velocity_rad_s=self.teleop['grippers']['max_velocity'])))
         if self.teleop['control'].get('collision_avoidance_enabled', True):
             self.collision = ModelCollisionGuard(SimpleNamespace(urdf_path=urdf, teleop=self.teleop,
                 groups={'arms': self.arms, 'waist': self.waist}))
@@ -168,12 +180,22 @@ class LegacyTopicControl:
                 raise ValueError('unsupported own command joints')
             selected = self.select(message, self.arms if channel == 'arms' else self.hands[channel])
             with self.bridge._lock:
+                self.diagnostics['program_received_'+channel] += 1
                 token = self.bridge.ownership.token if self.bridge.ownership.active else None
-                if self.bridge.ownership.active and self.bridge.ownership.state != 'AUTO':
+                if not self.bridge.ownership.active or self.bridge.ownership.state != 'AUTO':
+                    self.diagnostics['program_blocked_authority_'+channel] += 1
                     return
             self.bridge.forward_live_command('motion', selected, self.publish_selected, token)
         except (ValueError, TypeError) as exc:
-            self.last_rejection = str(exc)
+            self.reject(str(exc))
+
+    def reject(self, reason):
+        """Retain the latest rejection even if the next target succeeds."""
+        with self.bridge._lock:
+            self.last_rejection = reason
+            self.recent_rejection = reason
+            self.last_rejection_ns = self.node.get_clock().now().nanoseconds
+            self.diagnostics['rejected:'+reason.split(':', 1)[0]] += 1
 
     def receive_owned(self, message, token, *, frame_id=None):
         try:
@@ -215,7 +237,7 @@ class LegacyTopicControl:
                 for name, value in values.items():
                     lo, hi = self.limits[name]
                     if not lo-1e-6 <= value <= hi+1e-6:
-                        raise ValueError('joint limit: '+name)
+                        raise ValueError(f'joint limit: {name} target={value:.6f} range=[{lo:.6f},{hi:.6f}]')
                 generation = self.bridge.ownership.token
                 active = self.bridge.ownership.active
                 if active:
@@ -230,12 +252,17 @@ class LegacyTopicControl:
                 if active and generation.source == 'motion':
                     for name, value in values.items():
                         if name in self.arms and abs(value-self.positions[name]) > self.max_error:
-                            raise ValueError('target too far from measured position: '+name)
+                            raise ValueError(f'target too far from measured position: {name} target={value:.6f} measured={self.positions[name]:.6f} error={abs(value-self.positions[name]):.6f} limit={self.max_error:.6f}')
                         reference = self.positions[name] if name in self.arms else value
                         previous = self.last_command.get(name, reference) if generation == self.generation else reference
                         dt = min(.05, max(.001, now-self.command_time.get(name, now-.01))) if generation == self.generation else .01
                         speed = self.arm_velocity if name in self.arms else float(self.teleop['grippers']['max_velocity'])
                         values[name] = min(previous+speed*dt, max(previous-speed*dt, value))
+                        if abs(values[name]-value) > 1e-9:
+                            self.diagnostics['arm_velocity_clipped' if name in self.arms else 'hand_velocity_clipped'] += 1
+                            self.last_clip = dict(joint=name, requested=value, sent=values[name],
+                                delta_rad=value-values[name], limit_rad_s=speed, dt_s=dt,
+                                stamp_ns=self.node.get_clock().now().nanoseconds)
                 measured = dict(self.positions)
             if self.collision and set(values) & set(self.arms):
                 if not self.feedback_fresh():
@@ -248,7 +275,7 @@ class LegacyTopicControl:
             target.velocity, target.effort = [], []
             return target, stamp, generation
         except (ValueError, TypeError) as exc:
-            self.last_rejection = str(exc)
+            self.reject(str(exc))
             return None
 
     def commit(self, prepared, *, intervention=False):
@@ -256,6 +283,7 @@ class LegacyTopicControl:
         if (not self.fresh(set(target.name)-self.hand_names) or generation != self.bridge.ownership.token
                 or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age
                 or any(stamp <= self.last_command_stamp.get(n, 0) for n in target.name)):
+            self.reject('commit freshness or authority changed')
             return False
         if generation != self.generation:
             self.last_command.clear()
@@ -264,7 +292,9 @@ class LegacyTopicControl:
         self.last_command_stamp.update(dict.fromkeys(target.name, stamp))
         self.last_command.update(zip(target.name, target.position))
         self.command_time.update(dict.fromkeys(target.name, time.monotonic()))
+        channel = 'arms' if set(target.name) & set(self.arms) else 'hands'
         self.last_rejection = ''
+        self.diagnostics['accepted_'+channel] += 1
         return True
 
     def publish_selected(self, message):
@@ -274,6 +304,12 @@ class LegacyTopicControl:
                 self.hand_pubs[side].publish(message)
                 return
         self.output.publish(message)
+        now = time.monotonic()
+        if self.last_arm_publish_time is not None:
+            self.arm_publish_gap_max_ms = max(self.arm_publish_gap_max_ms,
+                (now-self.last_arm_publish_time)*1000)
+        self.last_arm_publish_time = now
+        self.diagnostics['published_arms'] += 1
 
     def status(self):
         now, wall = time.monotonic(), self.node.get_clock().now().nanoseconds
@@ -285,6 +321,11 @@ class LegacyTopicControl:
             timing[name] = dict(receive_age_ms=(now-self.received[name])*1000,
                                 source_age_ms=(wall-self.sample_ns[name])/1e6)
         return dict(mode='legacy_topics', last_rejection=self.last_rejection,
+                    recent_rejection=self.recent_rejection,
+                    last_rejection_ns=self.last_rejection_ns,
+                    diagnostics=dict(self.diagnostics), last_clip=dict(self.last_clip),
+                    limits=dict(arm_velocity_rad_s=self.arm_velocity, target_error_rad=self.max_error,
+                        feedback_command_max_age_s=self.max_age, hand_velocity_rad_s=self.teleop['grippers']['max_velocity']),
                     feedback_ready=self.feedback_fresh(),
                     feedback_timing_ms=timing,
                     hands_ready={side:self.fresh(names) for side,names in self.hands.items()})

@@ -167,57 +167,53 @@ function renderIntervention(status,capture) {
   interventionStatus=status;
   interventionCapture=capture;
   const state=status?.state||'OFF';
-  const supported=(status?.required_peers||['motion','teleop']).every(peer=>Boolean(status?.peers?.[peer]));
+  const needsRestart=Boolean(status?.state)&&typeof status.dagger_enabled!=='boolean';
+  const dagger=needsRestart?state!=='OFF':Boolean(status?.dagger_enabled);
+  const supported=!needsRestart&&(status?.required_peers||['motion','teleop']).every(peer=>Boolean(status?.peers?.[peer]));
   const recording=status?.recording_enabled!==false;
-  const captureReady=!recording||Boolean(capture?.ready);
+  const captureReady=!dagger||!recording||Boolean(capture?.ready);
   for(const button of $$('.source-switch button'))button.disabled=interventionPending||state!=='OFF';
-  setText('#controlSourceHint',state!=='OFF'?
-    'DAgger 接管正在管理控制源：右 Grip 接管，正常松手交还；退出 DAgger 后自动切回 VR。':
-    '用于普通控制时选择 VR、程序或外骨骼；DAgger 接管内由 Grip 自动接管和交还，无需手动切源。');
+  setText('#controlSourceHint',state==='OFF'?'选择普通控制源，或点击“开始模型控制”允许推理端下发动作。':
+    dagger?'DAgger 已开启：右 Grip 接管，松开交还模型。':'模型控制已开启，DAgger 关闭：手柄不会抢占模型。');
   const homeButton=$('#interventionHome');
-  if(homeButton)homeButton.disabled=interventionPending||state!=='MANUAL'||!status?.gripped;
+  if(homeButton)homeButton.disabled=interventionPending||!dagger||state!=='MANUAL'||!status?.gripped;
   const captureMode=$('#interventionCaptureMode');
   if(captureMode) {
     if(capture?.capture_mode)captureMode.value=capture.capture_mode;
-    captureMode.disabled=!recording||interventionPending||state!=='OFF';
+    captureMode.disabled=!recording||interventionPending||dagger;
     renderInterventionCaptureHint();
   }
-  const labels={OFF:'关闭',HOLD:'保持',AUTO:'模型/程序控制',TAKEOVER:'正在接管',MANUAL:'人工控制',RETURNING:'正在交还',FAULT:'故障保持',ESTOP:'急停保持'};
+  const labels={OFF:'模型控制未开启',HOLD:'机器人已暂停',AUTO:'模型控制中',TAKEOVER:'正在接管',MANUAL:'手柄控制中',RETURNING:'等待模型控制授权',FAULT:'故障暂停',ESTOP:'急停暂停'};
   setText('#interventionState',labels[state]||state);
-  if(state==='OFF') {
-    setText('#interventionReadiness',interventionPending?'正在处理会话请求…':
-      supported?(recording?'模型独立推理；先启用 DAgger，等待观测和录制资源就绪。':'模型独立推理；启用 DAgger后点击“开始模型控制”授权动作下发。'):'等待控制后端及接管接收进程就绪（不要求头显在线）。');
-  } else {
-    const details=[state==='HOLD'?'DAgger 已启用，机器人暂停':labels[state]||state,
-      !recording?'自动录制已关闭':capture?.capture_mode==='full_session'?'正在连续录制整个会话':`仅人工接管片段 · 可用片段 ${capture?.prepared_slots||0}`,
-      !recording?'仅控制权切换':capture?.ready?'采集就绪':'等待采集输入就绪'];
-    if(capture?.sources?.issues?.length) {
-      const names={'/observation/hands/joint_states':'手部关节反馈','/observation/hands/triggers':'手部输入反馈'};
-      const topics=capture.sources.issues.map(topic=>config?.ros?.subscriptions?.find(item=>item.topic===topic)?.description||names[topic]||DEFAULT_TOPIC_DESCRIPTIONS[topic]||topic);
-      details.push('等待观测：'+topics.join('、')+'。可退出 DAgger后，在“话题录制”中调整不需要的观测项。');
-    }
-    if(!status?.input_valid)details.push('VR 未就绪，仅人工接管不可用；不阻止模型/程序控制');
-    else if(!status.input_armed)details.push('人工接管前请先松开右 Grip');
-    if(status?.input_valid&&status.gripped)details.push('右 Grip 正握持，松开后可开始模型控制');
-    else if(state==='HOLD'&&captureReady&&supported)details.push('可点击“开始模型控制”授权动作下发；模型推理独立运行');
-    if(state==='FAULT'||state==='ESTOP') {
-      if(status?.reason)details.push(status.reason);
-      details.push('排除故障后点击“故障复位（保持暂停）”，再手动点击“开始模型控制”');
-    }
-    if(capture?.error)details.push(capture.error);
-    if(status?.recording_error)details.push(status.recording_error);
-    if(status?.legacy_control?.last_rejection)details.push('目标被保持：'+status.legacy_control.last_rejection);
-    for(const [side,ready] of Object.entries(status?.legacy_control?.hands_ready||{})) {
-      if(!ready)details.push((side==='left'?'左手':'右手')+'反馈未就绪，手部保持');
-    }
-    setText('#interventionReadiness',details.join(' · '));
+  const details=[dagger?'DAgger 已开启':'DAgger 已关闭'];
+  if(state==='OFF')details.push(supported?'点击“开始模型控制”，推理端即可下发动作；需要人工接管时再开启 DAgger。':'等待控制后端就绪（不要求头显在线）。');
+  else if(state==='AUTO')details.push('推理端可下发动作');
+  else if(state==='HOLD')details.push('点击“继续模型控制”恢复动作');
+  if(dagger) {
+    details.push(!recording?'自动录制已关闭；左 X 开始录制，左 Y 停止录制':capture?.capture_mode==='full_session'?'正在连续录制整个会话':`仅人工接管片段 · 可用片段 ${capture?.prepared_slots||0}`);
+    if(status?.preparing_capture)details.push('等待采集准备，暂不可接管');
+    if(!status?.input_valid)details.push('VR 未就绪，暂不可接管；模型控制不受影响');
+    else if(!status.input_armed)details.push('先松开右 Grip，再握持接管');
+    if(state==='MANUAL')details.push('保持右 Grip 时可回零；松开会取消回零并交还模型');
+    if(capture?.sources?.issues?.length)details.push('等待采集：'+capture.sources.issues.join('、'));
   }
+  if(state==='FAULT'||state==='ESTOP')details.push(status?.reason||'', '排除故障后复位，再点击“继续模型控制”；复位本身不恢复动作');
+  if(capture?.error)details.push(capture.error);
+  if(status?.recording_error)details.push(status.recording_error);
+  if(status?.legacy_control?.recent_rejection)details.push('最近目标拒绝：'+status.legacy_control.recent_rejection);
+  setText('#interventionReadiness',needsRestart?'请在空闲时重启 HC 遥操作会话，以启用独立的模型控制和 DAgger 按钮。':interventionPending?'正在处理请求…':details.filter(Boolean).join(' · '));
   for(const button of $$('[data-intervention]')) {
     const action=button.dataset.intervention;
-    button.disabled=interventionPending||(action==='enable'?state!=='OFF'||!supported:action==='return'?
-      !(state==='HOLD'&&captureReady&&supported&&!(status?.input_valid&&status?.gripped)):
-      action==='recover'?!(state==='FAULT'||state==='ESTOP')||Boolean(status?.input_valid&&status?.gripped):
-      action==='hold'?state==='OFF'||state==='HOLD':state==='OFF');
+    if(action==='start_model')button.textContent=state==='OFF'?'开始模型控制':'继续模型控制';
+    const allowed={
+      start_model:(state==='OFF'||state==='HOLD')&&supported&&captureReady&&!(dagger&&status?.input_valid&&status?.gripped),
+      enable_dagger:!dagger&&(state==='AUTO'||state==='HOLD')&&supported,
+      disable_dagger:!needsRestart&&dagger,
+      hold:!['OFF','HOLD','FAULT','ESTOP'].includes(state),
+      recover:['FAULT','ESTOP'].includes(state)&&!(dagger&&status?.input_valid&&status?.gripped),
+      disable:state!=='OFF',
+    };
+    button.disabled=interventionPending||!allowed[action];
   }
 }
 
@@ -250,7 +246,7 @@ function bindInterventionControls() {
       const requestId=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
       const result=await api('/api/control/intervention/'+button.dataset.intervention, {
         method:'POST', body:JSON.stringify({request_id:requestId, session_id:status.session_id,
-                                          ...(button.dataset.intervention==='enable'?{capture_mode:captureMode?.value||'corrections_only'}:{}),
+                                          ...(button.dataset.intervention==='enable_dagger'?{capture_mode:captureMode?.value||'corrections_only'}:{}),
                                           expected_epoch:status.epoch})});
       renderIntervention(result.ownership,result.capture);
     } catch(error) {

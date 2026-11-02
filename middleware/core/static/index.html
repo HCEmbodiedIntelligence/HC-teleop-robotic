@@ -49,20 +49,21 @@
       </article>
       <div class="grid two">
         <article class="panel intervention-panel">
-          <div class="panel-title"><div><h2>DAgger 模型控制与人工接管</h2><p>模型独立推理；“开始模型控制”授权动作下发。VR 仅用于人工接管：跟踪有效时松开再握住右 Grip，正常松手自动交还。</p></div><span id="interventionState" class="tag">关闭</span></div>
+          <div class="panel-title"><div><h2>模型控制与 DAgger</h2><p>先开始模型控制，允许推理端下发动作。需要手柄接管时再开启 DAgger；关闭 DAgger 后模型继续控制。</p></div><span id="interventionState" class="tag">模型控制未开启</span></div>
           <label>录制范围<select id="interventionCaptureMode" aria-describedby="interventionCaptureHint">
             <option value="corrections_only">仅人工接管片段（默认）</option>
             <option value="full_session">整个会话（模型动作执行 + 人工接管）</option>
           </select></label>
           <p id="interventionCaptureHint" class="form-help">自动录制开启时，每次人工接管（含接管回零）单独保存；使用“话题录制”中勾选的数据项。</p>
-          <p id="interventionReadiness" role="status">先启用 DAgger，等待观测和录制资源就绪。</p>
+          <p id="interventionReadiness" role="status">开始模型控制后，可按需开启 DAgger。</p>
           <p id="interventionError" class="error" role="alert"></p>
-          <button data-intervention="enable">启用 DAgger</button>
-          <button data-intervention="return" disabled>开始模型控制</button>
+          <button data-intervention="start_model" disabled>开始模型控制</button>
+          <button data-intervention="enable_dagger" disabled>开启 DAgger</button>
+          <button data-intervention="disable_dagger" disabled>关闭 DAgger</button>
           <button data-intervention="hold" disabled>暂停机器人</button>
-          <button id="interventionHome" disabled>回零（保持右 Grip）</button>
-          <button data-intervention="recover" disabled>故障复位（保持暂停）</button>
-          <button data-intervention="disable" disabled>退出 DAgger，切回 VR</button>
+          <button id="interventionHome" disabled>回零</button>
+          <button data-intervention="recover" disabled>故障复位</button>
+          <button data-intervention="disable" disabled>结束模型控制，切回 VR</button>
         </article>
         <article class="panel source-panel">
           <div class="panel-title"><div><h2>控制源切换</h2><p id="controlSourceHint">用于普通控制时选择 VR、程序或外骨骼；DAgger 接管内由 Grip 自动接管和交还，无需手动切源。</p></div><span id="muxSafetyBadge" class="tag">等待状态</span></div>
@@ -456,6 +457,6 @@
     </form>
   </dialog>
   <script src="/static/platform_panel.js?v=15-master-toggle"></script>
-  <script src="/static/app.js?v=20261030-dagger-home"></script>
+  <script src="/static/app.js?v=070b60f9aa84"></script>
 </body>
 </html>

@@ -88,6 +88,25 @@ class Rig:
             self.bridge._command_output_enabled = True
 
 
+def test_boundary_logs_clips_rejections_and_never_admits_off_model_targets():
+    r=Rig(); b=r.boundary
+    b.program(message({n:b.positions[n]+.1 for n in b.arms}), 'arms')
+    assert b.diagnostics['arm_velocity_clipped'] > 0
+    assert b.last_clip['limit_rad_s'] == .25
+    b.program(message({n:b.positions[n]+.4 for n in b.arms}), 'arms')
+    assert 'target too far' in b.last_rejection
+    assert 'measured=' in b.last_rejection and b.last_rejection_ns > 0
+    side='right'
+    b.program(message(dict(zip(b.hands[side],b.teleop['grippers'][side]['finger_open']))),side)
+    assert b.last_rejection == ''
+    assert 'target too far' in b.recent_rejection
+    r.control.disable()
+    count=len(r.wire)
+    b.program(message({n:b.positions[n] for n in b.arms}), 'arms')
+    assert len(r.wire)==count
+    assert b.diagnostics['program_blocked_authority_arms']==1
+
+
 def test_own_arms_and_hands_share_stamp_and_are_all_revoked_without_recording():
     r=Rig(); b=r.boundary
     ns=time.time_ns()

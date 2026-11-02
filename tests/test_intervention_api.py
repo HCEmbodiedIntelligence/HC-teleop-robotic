@@ -11,6 +11,27 @@ from middleware.core.intervention_api import register_intervention_routes
 
 
 class InterventionApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_start_does_not_prepare_capture_until_dagger_enabled(self):
+        self.recording_lifecycle()
+        self.assertEqual((await self.command('enable_dagger')).status, 409)
+        self.assertEqual((await self.command('start_model')).status, 202)
+        self.assertFalse(self.control.dagger_enabled)
+        self.recorder.prepare_corrections.assert_not_called()
+        for _ in range(2):
+            for peer in ('motion','teleop'):
+                self.control.acknowledge(self.control.token,self.control.phase,peer,peer)
+            self.control.advance(control_ready=True,manual_ready=True)
+        token=self.control.token
+        self.assertEqual((await self.command('enable_dagger',request_id='open')).status,202)
+        self.assertTrue(self.control.dagger_enabled)
+        self.recorder.prepare_corrections.assert_called_once()
+        self.assertEqual(self.control.token,token)
+        self.assertEqual((await self.command('disable_dagger')).status,202)
+        self.assertEqual(self.control.token,token)
+        self.assertEqual(self.control.state,'AUTO')
+        self.assertFalse(self.control.dagger_enabled)
+        self.recorder.stop_corrections.assert_called_once()
+
     def recording_lifecycle(self):
         self.control.peer('motion', 'motion')
         self.control.peer('teleop', 'teleop')

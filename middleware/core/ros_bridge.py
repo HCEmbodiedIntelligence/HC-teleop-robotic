@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 import traceback
-from collections import deque
+from collections import Counter, deque
 from typing import Any, Callable
 
 from .protocol import envelope
@@ -205,6 +205,7 @@ class RosBridge:
         self._mux_forwarded_times: deque[float] = deque(maxlen=300)
         self._mux_forwarded = 0
         self._mux_rejected = 0
+        self._mux_rejection_reasons = Counter()
         domain_id = int(config.get("domain_id", 0))
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.get("enabled", True) else "starting",
@@ -285,6 +286,7 @@ class RosBridge:
                 "forwarded": self._mux_forwarded,
                 "forwarded_hz": recent_rate(self._mux_forwarded_times),
                 "rejected": self._mux_rejected,
+                "rejection_reasons": dict(self._mux_rejection_reasons),
             }
             return result
 
@@ -556,6 +558,11 @@ class RosBridge:
                     or self._replay_active or self._command_source != source
                     or (self.ownership.active and not self.ownership.allows(token))):
                 self._mux_rejected += 1
+                reason = ('invalid_target' if not valid else
+                    'stale_or_reordered' if stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0)) else
+                    'hardware_not_ready' if not ready else 'output_closed' if not self._command_output_enabled else
+                    'replay_active' if self._replay_active else 'source_mismatch' if self._command_source != source else 'ownership_denied')
+                self._mux_rejection_reasons[source+':'+reason] += 1
                 return False
             epoch = self._output_epoch
         prepared = self._boundary.prepare(message) if self._boundary else message
@@ -565,10 +572,12 @@ class RosBridge:
                     or self._replay_active or stamp <= self._source_stamps.get(stream, 0)
                     or (self.ownership.active and not self.ownership.allows(token))):
                 self._mux_rejected += 1
+                self._mux_rejection_reasons[source+(':boundary_rejected' if prepared is None else ':authority_changed_during_prepare')] += 1
                 return False
             if self._boundary and not (self._boundary.commit(prepared, intervention=True)
                     if self.ownership.active else self._boundary.commit(prepared)):
                 self._mux_rejected += 1
+                self._mux_rejection_reasons[source+':commit_rejected'] += 1
                 return False
             self._source_stamps[stream] = stamp
             if self._legacy_enabled and self._boundary:
@@ -1151,6 +1160,21 @@ class RosBridge:
         event_cursor = 0
         state_last = 0.
         state_sequence = -1
+        diagnostic_last = time.monotonic()
+
+        def rejection_counts():
+            # Source switches and closed authority routinely reject commands.
+            # Report invalid commands and boundary failures separately.
+            counts = Counter({reason: count for reason, count in self._mux_rejection_reasons.items()
+                              if reason.partition(':')[2] in {
+                                  'invalid_target', 'stale_or_reordered', 'boundary_rejected', 'commit_rejected'}})
+            if self._legacy_enabled and self._boundary:
+                counts.update({reason: count for reason, count in self._boundary.diagnostics.items()
+                               if reason.startswith('rejected:')})
+            return counts
+
+        with self._lock:
+            diagnostic_previous = rejection_counts()
         def publish_status():
             """Snapshot authority briefly; DDS/JSON work never holds its lock.
 
@@ -1158,7 +1182,7 @@ class RosBridge:
             order; current state is coalesced at the existing 10 Hz cadence.
             This observer never advances, grants or revokes robot authority.
             """
-            nonlocal event_cursor, state_last, state_sequence
+            nonlocal event_cursor, state_last, state_sequence, diagnostic_last, diagnostic_previous
             with self._lock:
                 ownership = self.ownership
                 events = [event for event in ownership.events
@@ -1168,9 +1192,29 @@ class RosBridge:
                          if now-state_last >= .1 or state_sequence != ownership.event_seq
                          else None)
                 sequence = ownership.event_seq
+                diagnostic = None
+                if now-diagnostic_last >= 1.0:
+                    counts = rejection_counts()
+                    delta = counts-diagnostic_previous
+                    if delta:
+                        diagnostic = dict(state=ownership.state, epoch=ownership.epoch, counts=dict(delta))
+                        if any(key.startswith('rejected:') for key in delta):
+                            diagnostic.update(recent_rejection=self._boundary.recent_rejection,
+                                              rejection_stamp_ns=self._boundary.last_rejection_ns)
+                    diagnostic_previous, diagnostic_last = counts, now
+                    if self._legacy_enabled and self._boundary:
+                        self._boundary.arm_publish_gap_max_ms = 0.0
+            errors = []
             for event in events:
                 events_pub.publish(String(data=json.dumps(event, allow_nan=False)))
+                if (event['kind'] in {'recording_failed', 'heartbeat_timeout', 'manual_input_timeout'} or
+                        (event['kind'] == 'revoked' and event['state'] in {'FAULT', 'ESTOP'})):
+                    errors.append(event)
                 event_cursor = event['sequence']
+            if errors:
+                node.get_logger().error('[control-event] '+json.dumps(errors, allow_nan=False))
+            if diagnostic is not None:
+                node.get_logger().error('[control-diag] '+json.dumps(diagnostic, allow_nan=False))
             if state is not None:
                 state_pub.publish(String(data=json.dumps(state, allow_nan=False)))
                 state_last = now

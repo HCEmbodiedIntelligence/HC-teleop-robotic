@@ -45,6 +45,62 @@ class Rig:
         assert self.control.state == 'AUTO'
 
 
+def test_model_only_then_dagger_toggle_preserves_auto_and_fences_manual():
+    rig = Rig()
+    c = rig.control
+    c.disable()
+    c.start_model(control_ready=True)
+    rig.ack(); rig.ack()
+    assert c.state == 'AUTO' and not c.dagger_enabled
+    token = c.token
+    rig.input(False); rig.input(True)
+    assert c.token == token and not c.takeover()
+    c.set_dagger(True)
+    assert c.token == token and c.allows(token)
+    rig.input(True)
+    assert c.state == 'AUTO'  # held before enabling cannot seize control
+    rig.input(False); rig.input(True)
+    rig.ack(); rig.ack()
+    assert c.state == 'MANUAL'
+    manual = c.token
+    c.set_dagger(False)
+    assert c.state == 'RETURNING' and not c.allows(manual)
+    rig.ack(); rig.ack()
+    assert c.state == 'AUTO' and not c.dagger_enabled
+    token = c.token
+    c.set_dagger(True); c.set_dagger(False)
+    assert c.token == token and c.allows(token)
+
+
+def test_dagger_disable_preserves_fault_and_model_ignores_controller_buttons():
+    rig = Rig(); c = rig.control
+    c.disable(); c.start_model(control_ready=True)
+    rig.ack(); rig.ack()
+    rig.ns += 1
+    c.input(device_instance='vr-test', sequence=100, valid=True, gripped=True,
+            pause_requested=True, resume_requested=True, stamp_ns=rig.ns)
+    assert c.state == 'AUTO'
+    c.set_dagger(True)
+    c.fault('physical stop', estop=True)
+    c.set_dagger(False)
+    assert c.state == 'ESTOP'
+    with pytest.raises(OwnershipConflict):
+        c.start_model(control_ready=True)
+
+
+def test_manual_input_gap_revokes_and_reports_elapsed_time():
+    rig=Rig();rig.auto();rig.input(True);rig.ack();rig.ack()
+    control=rig.control;token=control.token
+    assert control.state=='MANUAL'
+    rig.ns+=325_000_000
+    control.watchdog()
+    assert control.state=='FAULT' and not control.allows(token)
+    events=[e for e in control.events if e['kind']=='manual_input_timeout']
+    assert len(events)==1 and events[0]['input_gap_ms']==325
+    assert events[0]['limit_ms']==300
+    assert events[0]['last_accepted_stamp_ns']==rig.ns-325_000_000
+
+
 def test_short_repeated_interventions_and_ordered_capture_boundaries():
     rig = Rig()
     rig.auto()

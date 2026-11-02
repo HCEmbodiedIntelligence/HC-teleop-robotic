@@ -13,10 +13,10 @@ function page() {
     if (!elements.has(selector)) elements.set(selector, {textContent:'', disabled:false});
     return elements.get(selector);
   };
-  const buttons = Object.fromEntries(['enable','return','hold','recover','disable'].map(action =>
+  const buttons = Object.fromEntries(['start_model','enable_dagger','disable_dagger','hold','recover','disable'].map(action =>
     [action, {dataset:{intervention:action}, disabled:false}]));
   const sources = ['vr','motion','exoskeleton'].map(source=>({dataset:{source},disabled:false}));
-  const state = {state:'OFF', session_id:'', epoch:0, peers:{motion:'motion-1',teleop:'teleop-1'}, capture:null};
+  const state = {state:'OFF', session_id:'', epoch:0, peers:{motion:'motion-1',teleop:'teleop-1'}, capture:null, dagger_enabled:false, recording_enabled:false};
   const posts = [];
   const errors = [];
   let handlePost;
@@ -35,12 +35,16 @@ function page() {
       assert.equal(body.session_id,state.session_id);
       assert.equal(body.expected_epoch,state.epoch);
       state.epoch++;
-      if (posts.at(-1).action==='enable') {
-        state.state='HOLD';state.session_id='session-1';
-        state.capture={ready:false,capture_mode:body.capture_mode,prepared_slots:4,sources:{issues:[]}};
+      if (posts.at(-1).action==='start_model') {
+        state.state='AUTO';state.session_id='session-1';
+      } else if (posts.at(-1).action==='enable_dagger') {
+        state.dagger_enabled=true;
+        if(state.recording_enabled)state.capture={ready:true,capture_mode:body.capture_mode,prepared_slots:4,sources:{issues:[]}};
+      } else if (posts.at(-1).action==='disable_dagger') {
+        state.dagger_enabled=false;state.capture=null;
       } else if (posts.at(-1).action==='disable') {
-        state.state='OFF';state.capture=null;
-      } else if (posts.at(-1).action==='recover') {
+        state.state='OFF';state.capture=null;state.dagger_enabled=false;
+      } else if (posts.at(-1).action==='recover'||posts.at(-1).action==='hold') {
         state.state='HOLD';
       }
       return {ok:true,json:async()=>({ownership:structuredClone(state),capture:structuredClone(state.capture)})};
@@ -57,141 +61,89 @@ function page() {
   return {context,get,buttons,sources,state,posts,errors,render,setPost:handler=>{handlePost=handler;}};
 }
 
-test('LAN HTTP buttons enable and exit a session without crypto.randomUUID',async()=>{
+test('start model, enable and disable DAgger, then end model are distinct actions on LAN HTTP',async()=>{
   const p=page();
   assert.equal(vm.runInContext('typeof crypto.randomUUID',p.context),'undefined');
-  await p.buttons.enable.onclick();
-  assert.equal(p.state.state,'HOLD');
-  assert.equal(p.posts[0].body.capture_mode,'corrections_only');
-  assert.match(p.posts[0].body.request_id,/^[0-9a-f]{32}$/);
-  assert.equal(p.get('#interventionState').textContent,'保持');
-  assert.match(p.get('#interventionReadiness').textContent,/DAgger 已启用/);
-  assert.equal(p.buttons.disable.disabled,false);
+  assert.equal(p.buttons.start_model.disabled,false);
+  assert.equal(p.buttons.enable_dagger.disabled,true);
+  await p.buttons.start_model.onclick();
+  assert.equal(p.state.state,'AUTO');
+  assert.equal(p.state.dagger_enabled,false);
+  assert.match(p.get('#controlSourceHint').textContent,/手柄不会抢占/);
+  await p.buttons.enable_dagger.onclick();
+  assert.equal(p.state.dagger_enabled,true);
+  assert.equal(p.buttons.disable_dagger.disabled,false);
+  await p.buttons.disable_dagger.onclick();
+  assert.equal(p.state.state,'AUTO');
+  assert.equal(p.state.dagger_enabled,false);
   await p.buttons.disable.onclick();
   assert.equal(p.state.state,'OFF');
-  assert.equal(p.buttons.enable.disabled,false);
-  assert.notEqual(p.posts[0].body.request_id,p.posts[1].body.request_id);
-  assert.deepEqual(p.errors,[]);
+  assert.equal(new Set(p.posts.map(p=>p.body.request_id)).size,4);
 });
 
-test('whole session selection reaches the API, locks during capture and restores from server status',async()=>{
-  const p=page();
+test('new controls wait for matching HC backend during rollout',()=>{
+  const p=page();delete p.state.dagger_enabled;p.render();
+  assert.equal(p.buttons.start_model.disabled,true);
+  assert.match(p.get('#interventionReadiness').textContent,/重启/);
+  p.state.state='AUTO';p.render();
+  assert.equal(p.buttons.enable_dagger.disabled,true);
+  assert.equal(p.buttons.disable_dagger.disabled,true);
+  assert.equal(p.buttons.hold.disabled,false);
+});
+
+test('capture selection belongs to DAgger and cannot block model start',async()=>{
+  const p=page();p.state.recording_enabled=true;p.render();
   p.get('#interventionCaptureMode').value='full_session';
-  p.get('#interventionCaptureMode').onchange();
-  assert.match(p.get('#interventionCaptureHint').textContent,/连续录制/);
-  await p.buttons.enable.onclick();
-  assert.equal(p.posts[0].body.capture_mode,'full_session');
+  await p.buttons.start_model.onclick();
+  assert.equal(p.posts[0].body.capture_mode,undefined);
+  await p.buttons.enable_dagger.onclick();
+  assert.equal(p.posts[1].body.capture_mode,'full_session');
   assert.equal(p.get('#interventionCaptureMode').disabled,true);
-  assert.ok(p.sources.every(button=>button.disabled));
-  assert.match(p.get('#interventionReadiness').textContent,/正在连续录制整个会话/);
-  p.get('#interventionCaptureMode').value='corrections_only';
-  p.render();
-  assert.equal(p.get('#interventionCaptureMode').value,'full_session');
-  await p.buttons.disable.onclick();
-  assert.equal(p.get('#interventionCaptureMode').disabled,false);
-  assert.ok(p.sources.every(button=>!button.disabled));
+  assert.match(p.get('#interventionReadiness').textContent,/连续录制/);
 });
 
-test('polling cannot unlock the buttons or submit a second request while enabling',async()=>{
+test('fault reset remains paused and no held Grip blocks model-only start',async()=>{
   const p=page();
-  let complete, entered;
-  const submitted=new Promise(resolve=>{entered=resolve;});
-  p.setPost(()=>new Promise(resolve=>{complete=resolve;entered();}));
-  const pending=p.buttons.enable.onclick();
-  await submitted;
-  p.render();
-  assert.ok(Object.values(p.buttons).every(button=>button.disabled));
-  assert.ok(p.sources.every(button=>button.disabled));
-  await p.buttons.enable.onclick();
-  assert.equal(p.posts.length,1);
-  Object.assign(p.state,{state:'HOLD',session_id:'session-1',epoch:1,capture:{ready:false,prepared_slots:4}});
-  complete({ok:true,json:async()=>({ownership:p.state,capture:p.state.capture})});
-  await pending;
-  assert.equal(p.buttons.disable.disabled,false);
-});
-
-test('capture preparation failure stays visible and refreshes authority so the session can be exited',async()=>{
-  const p=page();
-  p.setPost(async()=>{
-    Object.assign(p.state,{state:'HOLD',session_id:'session-1',epoch:1});
-    return {ok:false,status:409,text:async()=> '录制目录不可写'};
-  });
-  await p.buttons.enable.onclick();
-  p.render();
-  assert.match(p.get('#interventionError').textContent,/录制目录不可写/);
-  assert.equal(p.get('#interventionState').textContent,'保持');
-  assert.equal(p.buttons.enable.disabled,true);
-  assert.equal(p.buttons.disable.disabled,false);
-  p.setPost(null);
-  await p.buttons.disable.onclick();
-  assert.equal(p.state.state,'OFF');
-  assert.equal(p.get('#interventionError').textContent,'');
-});
-
-test('program start requires observations but no headset; active Grip still blocks start',()=>{
-  const p=page();
-  Object.assign(p.state,{state:'HOLD',input_valid:false,input_armed:false,gripped:false,
-    capture:{ready:false,prepared_slots:4,sources:{issues:['/observation/cameras/head/color/compressed']}}});
-  p.render();
-  assert.match(p.get('#interventionReadiness').textContent,/等待观测：头部相机/);
-  assert.match(p.get('#interventionReadiness').textContent,/VR 未就绪，仅人工接管不可用/);
-  assert.equal(p.buttons.return.disabled,true);
-  p.state.capture.ready=true;
-  p.state.capture.sources.issues=[];
-  p.render();
-  assert.equal(p.buttons.return.disabled,false);
-  p.state.input_valid=true;
-  p.state.input_armed=true;
-  p.state.gripped=true;
-  p.render();
-  assert.equal(p.buttons.return.disabled,true);
-  assert.match(p.get('#interventionReadiness').textContent,/右 Grip 正握持/);
-  p.state.gripped=false;
-  p.render();
-  assert.equal(p.buttons.return.disabled,false);
-});
-
-test('fault recovery is explicit and only returns to HOLD before another start',async()=>{
-  const p=page();
-  Object.assign(p.state,{state:'ESTOP',session_id:'session-1',epoch:3,
-    recording_enabled:false,input_valid:false,input_armed:false,gripped:false});
-  p.render();
-  assert.equal(p.posts.length,0);
-  assert.equal(p.buttons.return.disabled,true);
+  Object.assign(p.state,{state:'ESTOP',gripped:true,input_valid:true});p.render();
+  assert.equal(p.buttons.start_model.disabled,true);
   assert.equal(p.buttons.recover.disabled,false);
-  assert.match(p.get('#interventionReadiness').textContent,/故障复位（保持暂停）/);
   await p.buttons.recover.onclick();
-  assert.equal(p.posts.length,1);
-  assert.equal(p.posts[0].action,'recover');
   assert.equal(p.state.state,'HOLD');
-  assert.equal(p.buttons.recover.disabled,true);
-  assert.equal(p.buttons.return.disabled,false);
+  assert.equal(p.buttons.start_model.disabled,false);
+  p.state.dagger_enabled=true;p.render();
+  assert.equal(p.buttons.start_model.disabled,true);
 });
 
-
-test('v23 control can start without capture and explains disabled automatic recording',()=>{
-  const p=page();
-  Object.assign(p.state,{state:'HOLD',required_peers:['solver','teleop'],peers:{solver:'v23',teleop:'vr'},recording_enabled:false,input_valid:false,input_armed:false,gripped:false,capture:null});
-  p.render();
-  assert.equal(p.buttons.return.disabled,false);
-  assert.equal(p.get('#interventionCaptureMode').disabled,true);
-  assert.match(p.get('#interventionReadiness').textContent,/自动录制已关闭/);
-  assert.match(p.get('#interventionCaptureHint').textContent,/自动录制已关闭/);
-  p.state.legacy_control={hands_ready:{left:false,right:true},last_rejection:'target too far'};
-  p.render();
-  assert.match(p.get('#interventionReadiness').textContent,/左手反馈未就绪/);
-  assert.match(p.get('#interventionReadiness').textContent,/target too far/);
-});
-
-test('home is available only during manual takeover and sends the home request',async()=>{
+test('home requires DAgger manual authority and displays Grip guidance outside the button',async()=>{
   const p=page();
   for(const state of ['OFF','HOLD','AUTO','FAULT']) {
-    Object.assign(p.state,{state,gripped:true});p.render();
+    Object.assign(p.state,{state,dagger_enabled:true,gripped:true});p.render();
     assert.equal(p.get('#interventionHome').disabled,true);
   }
-  Object.assign(p.state,{state:'MANUAL',gripped:true,recording_enabled:false});p.render();
+  p.state.state='MANUAL';p.render();
   assert.equal(p.get('#interventionHome').disabled,false);
+  assert.match(p.get('#interventionReadiness').textContent,/保持右 Grip/);
   await p.get('#interventionHome').onclick();
   assert.equal(p.posts.at(-1).action,'home');
-  assert.match(p.get('#interventionCaptureHint').textContent,/左 X 开始录制，左 Y 停止录制/);
+});
+
+test('pending request cannot be duplicated or enabled by polling',async()=>{
+  const p=page();let resolve,entered;
+  const submitted=new Promise(r=>entered=r);
+  p.setPost(()=>new Promise(r=>{resolve=r;entered();}));
+  const pending=p.buttons.start_model.onclick();await submitted;p.render();
+  assert.ok(Object.values(p.buttons).every(b=>b.disabled));
+  await p.buttons.start_model.onclick();assert.equal(p.posts.length,1);
+  Object.assign(p.state,{state:'AUTO',session_id:'s',epoch:1});
+  resolve({ok:true,json:async()=>({ownership:p.state,capture:null})});await pending;
+  assert.equal(p.buttons.enable_dagger.disabled,false);
+});
+
+test('API failure remains visible and refreshes authority',async()=>{
+  const p=page();
+  p.setPost(async()=>({ok:false,status:409,text:async()=> 'feedback not ready'}));
+  await p.buttons.start_model.onclick();
+  assert.match(p.get('#interventionError').textContent,/feedback not ready/);
+  assert.equal(p.state.state,'OFF');
+  assert.equal(p.buttons.start_model.disabled,false);
 });

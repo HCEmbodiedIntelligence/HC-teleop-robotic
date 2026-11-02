@@ -236,6 +236,15 @@ class VrGateway:
                             self._increment("old")
                             continue
                         lost = packet_loss_count(pose.sequence, last_sequence)
+                        gap_ms = (now-last_packet_time)*1000
+                        if last_sequence is not None and gap_ms >= 300:
+                            # Keep one fact for diagnosis, without logging each
+                            # packet or changing the manual input lease.
+                            self._set_status(last_pose_gap={
+                                'received_at': time.time(), 'receive_gap_ms': round(gap_ms, 1),
+                                'missing_packets': lost, 'previous_sequence': last_sequence,
+                                'sequence': pose.sequence, 'previous_vr_timestamp': last_vr_timestamp,
+                                'vr_timestamp': pose.vr_timestamp})
                         last_sequence = pose.sequence
                         last_packet_time = now
                         ever_received = True

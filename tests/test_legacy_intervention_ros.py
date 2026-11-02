@@ -49,10 +49,10 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
             'head':dict(position=[0.,1.5,0.],quaternion=[0.,0.,0.,1.]),
             'left':dict(position=[-.2,1.3,-.4],quaternion=[0.,0.,0.,1.]),
             'right':dict(position=[.2,1.3,-.4],quaternion=[0.,0.,0.,1.])},
-        inputs=dict(left=dict(grip=0.,trigger=.5),right=dict(grip=0.,trigger=.5)))
+        inputs=dict(left=dict(grip=0.,trigger=0.),right=dict(grip=0.,trigger=0.)))
     values={n:float(q) for n,q in cfg['robot']['initial_joints'].items()}
     hand_values={n:float(q) for side in ('right','left') for n,q in zip(
-        cfg['grippers'][side]['finger_joint_names'],cfg['grippers'][side]['finger_open'])}
+        cfg['grippers'][side]['finger_joint_names'],cfg['grippers'][side]['finger_closed'])}
     arm_names=[n for side in ('right','left') for n in cfg['arms'][side]['joint_names']]
     outputs=[];states=[];images=[]
     program_active=True
@@ -78,7 +78,10 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
     def feed():
         stamp=probe.get_clock().now().to_msg()
         state=msg(values,stamp);state.velocity=[0.]*len(state.name)
-        state_pub.publish(state);hands_pub.publish(msg(hand_values,stamp))
+        state_pub.publish(state)
+        # Real X1 feedback can be outside the calibrated command interval.
+        # The recent final command still provides a legal continuity reference.
+        hands_pub.publish(msg({**hand_values, 'L_thumb_roll_joint':.0252},stamp))
         ready_pub.publish(Bool(data=True))
         frame.update(sequence=frame['sequence']+1,vr_timestamp=time.monotonic(),hc_received_ns=time.time_ns())
         vr_pub.publish(String(data=json.dumps(frame)))
@@ -126,6 +129,21 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
             until(lambda:control.state=='MANUAL')
             token=control.token
             count=len(outputs)
+            if cycle == 0:
+                def at_pose(side, pose):
+                    grip = cfg['grippers'][side]
+                    return all(abs(hand_values[name]-q)<1e-5 for name,q in
+                               zip(grip['finger_joint_names'],grip[pose]))
+                # Closed model pose at takeover. With no trigger edge at all,
+                # both hands must slew to open on their final hardware topics.
+                until(lambda:at_pose('left','finger_open') and at_pose('right','finger_open'))
+                frame['inputs']['right']['trigger']=1.
+                until(lambda:at_pose('right','finger_closed'))
+                assert at_pose('left','finger_open') and control.state=='MANUAL'
+                frame['inputs']['right']['trigger']=0.
+                until(lambda:at_pose('right','finger_open'))
+                assert control.token==token
+                assert not bridge._boundary.diagnostics['rejected:joint limit']
             frame['poses']['right']['position'][2]-=.001
             frame['inputs']['right']['trigger']+=.01
             pump(.3)

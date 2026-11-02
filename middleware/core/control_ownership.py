@@ -72,6 +72,7 @@ class ControlOwnership:
         self.input_device = ''
         self.input_sequence = -1
         self.preparing_capture = False
+        self.dagger_enabled = False
         self.input_ready_stamp_ns = 0
         self.input_diagnostics = dict(received=0, accepted=0, rejected=0,
                                       last_rejection='', last_loss_reason='')
@@ -118,11 +119,12 @@ class ControlOwnership:
         self._event('revoked')
         self.permit(self.token, 'revoke', self.cutoff_ns, self.active)
 
-    def enable(self, *, preparing_capture=False):
+    def enable(self, *, preparing_capture=False, dagger_enabled=True):
         with self.lock:
             if self.active:
                 raise OwnershipConflict('intervention session already active')
             self.session = uuid.uuid4().hex
+            self.dagger_enabled = bool(dagger_enabled)
             self.input_armed = self.input_valid = self.gripped = self.resume_auto = False
             self.input_sequence = -1
             self.preparing_capture = preparing_capture
@@ -133,37 +135,64 @@ class ControlOwnership:
 
     def finish_capture_preparation(self, session_id):
         with self.lock:
-            if not self.preparing_capture or self.session != session_id or self.state != 'HOLD':
+            if not self.preparing_capture or self.session != session_id or self.state not in {'HOLD', 'AUTO', 'RETURNING'}:
                 return
             self.preparing_capture = False
             self.input_ready_stamp_ns = self.ros_clock()
             # Samples observed while writers/subscriptions were starting must
             # not arm a later held Grip. Require a fresh release after readiness.
             self.input_armed = self.input_valid = self.gripped = False
-            self.reason = 'capture prepared; explicit program start required'
+            self.reason = 'DAgger capture prepared; fresh Grip release required'
             self._event('capture_ready')
 
     def disable(self):
         with self.lock:
+            self.dagger_enabled = False
             self.preparing_capture = False
             self.resume_auto = False
             self._invalidate('OFF', reason='session disabled; output remains closed')
+
+    def start_model(self, *, control_ready, recording_ready=False):
+        """Start/resume model authority; a new session never enables takeover."""
+        with self.lock:
+            if not control_ready or not self.required_peers <= self.peers.keys():
+                raise OwnershipConflict('feedback or control participants are not ready')
+            if not self.active:
+                self.enable(dagger_enabled=False)
+            self.start_auto(control_ready=control_ready, recording_ready=recording_ready)
+
+    def set_dagger(self, enabled, *, preparing_capture=False):
+        """Toggle manual takeover within a model session, preserving pause/fault."""
+        with self.lock:
+            if not self.active:
+                raise OwnershipConflict('start model control before enabling DAgger')
+            if enabled and self.state not in {'AUTO', 'HOLD'}:
+                raise OwnershipConflict('DAgger enable requires stable model control or pause')
+            if self.dagger_enabled == enabled:
+                return
+            self.dagger_enabled = bool(enabled)
+            self.preparing_capture = bool(enabled and preparing_capture)
+            self.input_ready_stamp_ns = self.ros_clock()
+            self.input_armed = self.input_valid = self.gripped = False
+            if not enabled and self.state in {'TAKEOVER', 'MANUAL'}:
+                self.release()
+            self._event('dagger_enabled' if enabled else 'dagger_disabled')
 
     def start_auto(self, *, recording_ready, control_ready):
         """Explicitly authorize program actions; headset presence is optional."""
         with self.lock:
             if self.preparing_capture or self.state != 'HOLD':
                 raise OwnershipConflict('start requires HOLD and completed preparation')
-            if self._input_fresh() and self.gripped:
+            if self.dagger_enabled and self._input_fresh() and self.gripped:
                 raise OwnershipConflict('release the active manual Grip before starting')
-            if (self.recording_enabled and not recording_ready) or not control_ready or not self.required_peers <= self.peers.keys():
+            if (self.dagger_enabled and self.recording_enabled and not recording_ready) or not control_ready or not self.required_peers <= self.peers.keys():
                 raise OwnershipConflict('capture, feedback or control participants are not ready')
             self.resume_auto = True
             self._invalidate('RETURNING', 'motion', 'explicit start')
 
     def takeover(self):
         with self.lock:
-            if (self.preparing_capture or self.state not in {'AUTO', 'HOLD', 'RETURNING'}
+            if (not self.dagger_enabled or self.preparing_capture or self.state not in {'AUTO', 'HOLD', 'RETURNING'}
                     or not self._input_fresh() or not self.input_armed or not self.gripped):
                 return False
             self.resume_auto = self.state == 'AUTO' or (self.state == 'RETURNING' and self.resume_auto)
@@ -228,6 +257,12 @@ class ControlOwnership:
                                           last_loss_stamp_ns=self.input_ready_stamp_ns)
             if self.state in {'TAKEOVER', 'MANUAL'}:
                 self.fault(reason)
+                if reason == 'teleop input timeout':
+                    self._event('manual_input_timeout',
+                        input_gap_ms=(self.clock()-self.input_time_ns)/1e6,
+                        limit_ms=self.input_timeout_ns/1e6,
+                        last_accepted_stamp_ns=self.input_diagnostics.get('last_accepted_source_ns'),
+                        last_sequence=self.input_sequence)
 
     def _reject_input(self, reason):
         """Keep bounded diagnostic facts without changing the input gate."""
@@ -281,6 +316,11 @@ class ControlOwnership:
                 self.gripped = bool(gripped)
                 self.input_armed = False
                 return self._reject_input('device_changed_release_required')
+            if self.active and not self.dagger_enabled:
+                # Model-only mode ignores controller takeover/pause/resume.
+                # Physical emergency stop remains on its independent route.
+                self.input_armed = self.gripped = False
+                return self._reject_input('dagger_disabled')
             previous = self.gripped
             self.gripped = bool(gripped)
             if pause_requested:
@@ -366,7 +406,7 @@ class ControlOwnership:
 
     def watchdog(self):
         with self.lock:
-            if self.preparing_capture and self.state == 'HOLD' and self.capture_ready():
+            if self.preparing_capture and self.state in {'HOLD', 'AUTO', 'RETURNING'} and self.capture_ready():
                 self.finish_capture_preparation(self.session)
             if not self.preparing_capture and self.active and self.input_valid and self.clock()-self.input_time_ns > self.input_timeout_ns:
                 self.input_lost('teleop input timeout')
@@ -382,7 +422,7 @@ class ControlOwnership:
     def allows(self, token):
         return (token == self.token and self.phase == 'grant' and
                 ((self.state == 'AUTO' and token.source == 'motion') or
-                 (self.state == 'MANUAL' and token.source == 'vr' and self.gripped and self._input_fresh())))
+                 (self.dagger_enabled and self.state == 'MANUAL' and token.source == 'vr' and self.gripped and self._input_fresh())))
 
     def sent(self, token, target, stamp_ns):
         """Invoked only after hardware publication, under the final gate lock."""
@@ -417,6 +457,8 @@ class ControlOwnership:
     def snapshot(self):
         with self.lock:
             return dict(state=self.state, phase=self.phase, reason=self.reason,
+                        dagger_enabled=self.dagger_enabled,
+                        recent_events=list(self.events)[-16:],
                         **asdict(self.token), input_valid=self.input_valid,
                         input_armed=self.input_armed, gripped=self.gripped,
                         input_diagnostics=dict(self.input_diagnostics),
