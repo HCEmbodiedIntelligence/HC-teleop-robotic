@@ -98,15 +98,15 @@ class HcRealmanProfileTest(unittest.TestCase):
             l_rot = np.array(p.getMatrixFromQuaternion(l_state[5])).reshape(3, 3)
             l_z_axis = l_rot[:, 2]
 
-            # 1. Z-axis must point forward (+X)
-            self.assertGreater(r_z_axis[0], 0.99, f"Right TCP Z-axis does not point forward: {r_z_axis}")
-            self.assertGreater(l_z_axis[0], 0.99, f"Left TCP Z-axis does not point forward: {l_z_axis}")
+            # 1. Z-axis must point forward (-X, front of robot)
+            self.assertLess(r_z_axis[0], -0.99, f"Right TCP Z-axis does not point forward (-X): {r_z_axis}")
+            self.assertLess(l_z_axis[0], -0.99, f"Left TCP Z-axis does not point forward (-X): {l_z_axis}")
 
-            # 2. Forward reach X in natural human range [0.40m, 0.55m]
-            self.assertGreaterEqual(r_pos[0], 0.40)
-            self.assertLessEqual(r_pos[0], 0.55)
-            self.assertGreaterEqual(l_pos[0], 0.40)
-            self.assertLessEqual(l_pos[0], 0.55)
+            # 2. Forward reach X in natural human range [-0.55m, -0.40m]
+            self.assertGreaterEqual(r_pos[0], -0.55)
+            self.assertLessEqual(r_pos[0], -0.40)
+            self.assertGreaterEqual(l_pos[0], -0.55)
+            self.assertLessEqual(l_pos[0], -0.40)
 
             # 3. Comfortable working height Z in [0.80m, 1.05m]
             self.assertGreaterEqual(r_pos[2], 0.80)
