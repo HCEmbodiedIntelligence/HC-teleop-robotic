@@ -162,6 +162,59 @@ class HcRealmanProfileTest(unittest.TestCase):
         finally:
             p.disconnect(cid)
 
+    def test_axis_mapping_directions_and_rotations(self):
+        """Verify axis_mapping ensures correct human-to-robot lateral translation and wrist rotations."""
+        with open(self.profile_dir / "arm_teleop.yaml") as f:
+            cfg = yaml.safe_load(f)
+        mapping = np.asarray(cfg["control"]["axis_mapping"], dtype=float)
+
+        self.assertEqual(mapping.shape, (3, 3))
+
+        # 1. Translation mappings
+        # VR forward (+Z) -> Robot front (-X)
+        d_fwd = mapping @ np.array([0.0, 0.0, 1.0])
+        np.testing.assert_allclose(d_fwd, [-1.0, 0.0, 0.0], atol=1e-6)
+
+        # VR right (+X) -> Robot right (+Y in HC_REALMAN ZZJ_Link frame)
+        d_right = mapping @ np.array([1.0, 0.0, 0.0])
+        np.testing.assert_allclose(d_right, [0.0, 1.0, 0.0], atol=1e-6)
+
+        # VR up (+Y) -> Robot up (+Z)
+        d_up = mapping @ np.array([0.0, 1.0, 0.0])
+        np.testing.assert_allclose(d_up, [0.0, 0.0, 1.0], atol=1e-6)
+
+        # 2. Rotation mappings: mapped_R = M @ R_vr @ M.T
+        def get_rot_matrix(axis, angle_rad):
+            axis = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+            K = np.array([
+                [0, -axis[2], axis[1]],
+                [axis[2], 0, -axis[0]],
+                [-axis[1], axis[0], 0]
+            ])
+            return np.eye(3) + np.sin(angle_rad) * K + (1 - np.cos(angle_rad)) * (K @ K)
+
+        def extract_rot_axis(R):
+            tr = np.trace(R)
+            angle = np.arccos(np.clip((tr - 1.0) / 2.0, -1.0, 1.0))
+            if np.abs(angle) < 1e-6:
+                return np.zeros(3)
+            return np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / (2.0 * np.sin(angle))
+
+        # Pitch around VR X (+X_vr) preserves downward pitch direction (-Y_rob)
+        R_pitch_vr = get_rot_matrix([1.0, 0.0, 0.0], np.radians(10.0))
+        R_pitch_rob = mapping @ R_pitch_vr @ mapping.T
+        np.testing.assert_allclose(extract_rot_axis(R_pitch_rob), [0.0, -1.0, 0.0], atol=1e-6)
+
+        # Yaw around VR Y (+Y_vr) rotates around -Z_rob (correct inverted yaw)
+        R_yaw_vr = get_rot_matrix([0.0, 1.0, 0.0], np.radians(10.0))
+        R_yaw_rob = mapping @ R_yaw_vr @ mapping.T
+        np.testing.assert_allclose(extract_rot_axis(R_yaw_rob), [0.0, 0.0, -1.0], atol=1e-6)
+
+        # Roll around VR Z (+Z_vr) rotates around +X_rob (correct inverted roll)
+        R_roll_vr = get_rot_matrix([0.0, 0.0, 1.0], np.radians(10.0))
+        R_roll_rob = mapping @ R_roll_vr @ mapping.T
+        np.testing.assert_allclose(extract_rot_axis(R_roll_rob), [1.0, 0.0, 0.0], atol=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()
