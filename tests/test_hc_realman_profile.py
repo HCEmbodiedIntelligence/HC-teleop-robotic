@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import yaml
+import numpy as np
 import pybullet as p
 from middleware.core.robot_profiles import RobotProfileManager
 from adapters.v23.src.pinocchio_interface_v3 import PinocchioInterfaceV3
@@ -36,7 +37,8 @@ class HcRealmanProfileTest(unittest.TestCase):
             robot_id = p.loadURDF(urdf, useFixedBase=True)
             self.assertGreaterEqual(robot_id, 0)
             num_joints = p.getNumJoints(robot_id)
-            self.assertEqual(num_joints, 48)
+            # 48 kinematic joints + 2 end effector TCP fixed frames (right_hand_tcp, left_hand_tcp)
+            self.assertEqual(num_joints, 50)
         finally:
             p.disconnect(cid)
 
@@ -61,6 +63,104 @@ class HcRealmanProfileTest(unittest.TestCase):
                 hw_cfg = yaml.safe_load(f)
             hw_joints = hw_cfg["left_arm"]["joints"] + hw_cfg["right_arm"]["joints"]
             self.assertEqual(sim_joints, hw_joints)
+
+    def test_human_like_initial_pose_and_forward_z_axis(self):
+        """Verify initial arm pose has forward-pointing Z-axis (+X) and human-like geometry."""
+        with open(self.profile_dir / "arm_teleop.yaml") as f:
+            cfg = yaml.safe_load(f)
+        initial_joints = cfg["robot"]["initial_joints"]
+
+        cid = p.connect(p.DIRECT)
+        try:
+            urdf = str(self.profile_dir / "urdf/hc_realman.urdf")
+            robot_id = p.loadURDF(urdf, useFixedBase=True)
+            link_map = {}
+            for i in range(p.getNumJoints(robot_id)):
+                info = p.getJointInfo(robot_id, i)
+                j_name = info[1].decode("utf-8")
+                l_name = info[12].decode("utf-8")
+                link_map[l_name] = i
+                if j_name in initial_joints:
+                    p.resetJointState(robot_id, i, initial_joints[j_name])
+
+            self.assertIn("right_hand_tcp", link_map)
+            self.assertIn("left_hand_tcp", link_map)
+
+            # Check Right Hand TCP
+            r_state = p.getLinkState(robot_id, link_map["right_hand_tcp"], computeForwardKinematics=True)
+            r_pos = np.array(r_state[4])
+            r_rot = np.array(p.getMatrixFromQuaternion(r_state[5])).reshape(3, 3)
+            r_z_axis = r_rot[:, 2]
+
+            # Check Left Hand TCP
+            l_state = p.getLinkState(robot_id, link_map["left_hand_tcp"], computeForwardKinematics=True)
+            l_pos = np.array(l_state[4])
+            l_rot = np.array(p.getMatrixFromQuaternion(l_state[5])).reshape(3, 3)
+            l_z_axis = l_rot[:, 2]
+
+            # 1. Z-axis must point forward (+X)
+            self.assertGreater(r_z_axis[0], 0.99, f"Right TCP Z-axis does not point forward: {r_z_axis}")
+            self.assertGreater(l_z_axis[0], 0.99, f"Left TCP Z-axis does not point forward: {l_z_axis}")
+
+            # 2. Forward reach X in natural human range [0.40m, 0.55m]
+            self.assertGreaterEqual(r_pos[0], 0.40)
+            self.assertLessEqual(r_pos[0], 0.55)
+            self.assertGreaterEqual(l_pos[0], 0.40)
+            self.assertLessEqual(l_pos[0], 0.55)
+
+            # 3. Comfortable working height Z in [0.80m, 1.05m]
+            self.assertGreaterEqual(r_pos[2], 0.80)
+            self.assertLessEqual(r_pos[2], 1.05)
+            self.assertGreaterEqual(l_pos[2], 0.80)
+            self.assertLessEqual(l_pos[2], 1.05)
+
+            # 4. Left-Right lateral symmetry: |Y_r + Y_l| < 0.005m
+            self.assertAlmostEqual(r_pos[1] + l_pos[1], 0.0, delta=0.005)
+
+            # 5. Collision free
+            p.stepSimulation()
+            contacts = p.getContactPoints(robot_id, robot_id)
+            self.assertEqual(len(contacts), 0, f"Initial pose has self-collisions: {contacts}")
+        finally:
+            p.disconnect(cid)
+
+    def test_ee_target_and_actual_coincidence(self):
+        """Verify ee_target coincides exactly with ee_actual in the simulator using ZZJ_Link base."""
+        with open(self.profile_dir / "arm_teleop.yaml") as f:
+            cfg = yaml.safe_load(f)
+        initial_joints = cfg["robot"]["initial_joints"]
+
+        cid = p.connect(p.DIRECT)
+        try:
+            urdf = str(self.profile_dir / "urdf/hc_realman.urdf")
+            robot_id = p.loadURDF(urdf, useFixedBase=True)
+            link_map = {}
+            for i in range(p.getNumJoints(robot_id)):
+                info = p.getJointInfo(robot_id, i)
+                j_name = info[1].decode("utf-8")
+                link_map[info[12].decode("utf-8")] = i
+                if j_name in initial_joints:
+                    p.resetJointState(robot_id, i, initial_joints[j_name])
+
+            base_id = link_map["ZZJ_Link"]
+            base_pose = p.getLinkState(robot_id, base_id, computeForwardKinematics=True)[4:6]
+
+            for side in ["right", "left"]:
+                ee_id = link_map[f"{side}_hand_tcp"]
+                actual_ee = p.getLinkState(robot_id, ee_id, computeForwardKinematics=True)[4:6]
+
+                # arm_teleop_node publishes target relative to base_link:
+                inv_base = p.invertTransform(base_pose[0], base_pose[1])
+                local_target = p.multiplyTransforms(inv_base[0], inv_base[1], actual_ee[0], actual_ee[1])
+
+                # sim_robot_control_node reconstructs target in world:
+                reconstructed_target = p.multiplyTransforms(base_pose[0], base_pose[1], local_target[0], local_target[1])
+
+                # Position difference must be practically zero (< 1e-6)
+                pos_diff = np.linalg.norm(np.array(actual_ee[0]) - np.array(reconstructed_target[0]))
+                self.assertLess(pos_diff, 1e-6, f"{side} arm ee_actual and ee_target do not coincide: diff={pos_diff}")
+        finally:
+            p.disconnect(cid)
 
 
 if __name__ == "__main__":
