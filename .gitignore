@@ -35,6 +35,7 @@ tools/diagnostics/waist_monitor.py
 adapters/robots/*
 !adapters/robots/openarmx/
 !adapters/robots/x1/
+!adapters/robots/HC_REALMAN/
 !adapters/robots/.gitkeep
 !adapters/robots/*.md
 

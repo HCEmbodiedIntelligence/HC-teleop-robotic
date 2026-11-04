@@ -1,0 +1,71 @@
+ros_interface:
+  node_name: controller_v2_3_HC_REALMAN
+  rate: 100
+  sub_topic:
+    joint_state: /observation/joint_states
+    ee_target: /control/solver/ee_targets
+    reset: /control/solver/reset
+  pub_topic:
+    joint_target: /control/solver/joint_targets
+    solver_state: /status/solver/joint_states
+    reset_ack: /status/solver/reset_ack
+control:
+  method: retarget
+  dt: 0.01
+  damping: 5.0e-03
+  joints_init:
+    right_joint1: -2.8798
+    right_joint2: 0.6109
+    right_joint3: 1.3090
+    right_joint4: 1.2217
+    right_joint5: 1.8326
+    right_joint6: 0.0
+    left_joint1: -3.0019
+    left_joint2: 0.6109
+    left_joint3: 1.3090
+    left_joint4: 1.2217
+    left_joint5: 1.7104
+    left_joint6: 0.0
+model:
+  urdf: urdf/hc_realman.urdf
+  free_joints:
+  - right_joint1
+  - right_joint2
+  - right_joint3
+  - right_joint4
+  - right_joint5
+  - right_joint6
+  - left_joint1
+  - left_joint2
+  - left_joint3
+  - left_joint4
+  - left_joint5
+  - left_joint6
+task:
+  pose:
+  - - - base_arm_link
+      - right_hand_tcp
+    - 5.0
+    - 1.0
+    - 3.0
+  - - - Z_base_arm_link
+      - left_hand_tcp
+    - 5.0
+    - 1.0
+    - 3.0
+  axis: []
+  joint: []
+limit:
+  velocity:
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
+  - 179.91
