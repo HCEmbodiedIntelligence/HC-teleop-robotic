@@ -84,14 +84,6 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
-  - topic: /observation/hands/triggers
-    description: ''
-    type: geometry_msgs/msg/PoseArray
-    enabled: true
-    outputs:
-    - record
-    max_hz: 0.0
-    event_max_hz: 0.0
   - topic: /observation/hands/vibration_feedback
     description: 外骨骼手部振动反馈数据
     type: std_msgs/msg/Float64MultiArray
@@ -233,14 +225,6 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
-  - topic: /observation/base/pose
-    description: 底盘实际位置与朝向，用于轨迹和移动距离分析
-    type: geometry_msgs/msg/PoseStamped
-    enabled: true
-    outputs:
-    - record
-    max_hz: 0.0
-    event_max_hz: 0.0
   - topic: /action/base/velocity
     description: 底盘命令的结构化速度：前向、横向及偏航角速度
     type: geometry_msgs/msg/TwistStamped
@@ -276,14 +260,6 @@ ros:
   - topic: /vrdata
     description: 原始头显和双手位姿、按键、跟踪状态及 VR 时间戳
     type: std_msgs/msg/String
-    enabled: true
-    outputs:
-    - record
-    max_hz: 0.0
-    event_max_hz: 0.0
-  - topic: /clock
-    description: 仿真时钟，用于区分仿真时间与实际录制时间
-    type: rosgraph_msgs/msg/Clock
     enabled: true
     outputs:
     - record

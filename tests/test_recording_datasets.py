@@ -97,6 +97,18 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.directory.cleanup()
 
+    async def test_tagged_mcap_download_includes_companion_without_changing_raw_api(self):
+        source = self.root / 'recordings/capture.mcap'
+        source.write_bytes(b'raw mcap')
+        url = '/api/recordings/capture.mcap/download'
+        self.assertEqual(await (await self.client.get(url + '?with_tags=1')).read(), b'raw mcap')
+        source.with_suffix('.takeovers.json').write_text('{"tag":"dagger","intervals":[]}')
+        self.assertEqual(await (await self.client.get(url)).read(), b'raw mcap')
+        data = await (await self.client.get(url + '?with_tags=1')).read()
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual(archive.read('mcap/capture.mcap'), b'raw mcap')
+            self.assertEqual(json.loads(archive.read('mcap/capture.takeovers.json'))['intervals'], [])
+
     async def test_format_selection_saves_through_page_api_and_survives_reload(self):
         for mode in ('mcap', 'mcap_mp4', 'lerobot', 'both'):
             response = await self.client.get('/api/config')

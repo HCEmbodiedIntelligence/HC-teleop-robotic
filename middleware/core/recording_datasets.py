@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from .takeover_log import takeover_file
+
 
 def resolve_dataset(directory: Path, identifier: str) -> Path:
     """Keep file IDs distinct from dataset IDs, rejecting traversal and symlinks."""
@@ -116,6 +118,9 @@ def archive_datasets(directory: Path, identifiers: list[str]) -> Path:
                     prefix = Path('mcap')
                 if target.is_file():
                     output.write(target, prefix / target.name)
+                    takeovers = takeover_file(target)
+                    if takeovers:
+                        output.write(takeovers, prefix / takeovers.name)
                 else:
                     for path in dataset_files(target):
                         output.write(path, prefix / path.relative_to(target))

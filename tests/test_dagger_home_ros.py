@@ -4,6 +4,7 @@ Opt in with HC_RUN_LEGACY_ROS_TESTS=1 on a localhost-only ROS domain >= 200.
 No Motion node, action server, recorder or real hardware is used.
 """
 import copy
+import math
 import importlib.util
 import json
 import os
@@ -58,7 +59,8 @@ def test_dagger_home_keeps_authority_and_exit_returns_vr(monkeypatch):
     program_active=True
     def command(msg,channel):
         outputs.append((time.monotonic(),channel,copy.deepcopy(msg),bridge.ownership.state if bridge else 'OFF'))
-        (values if channel=='arms' else hand_values).update(zip(msg.name,msg.position))
+        (values if channel=='arms' else hand_values).update(
+            (n,q) for n,q in zip(msg.name,msg.position) if math.isfinite(q))
     probe.create_subscription(JointState,'/action/joint_states',lambda m:command(m,'arms'),10)
     for side in ('right','left'):
         probe.create_subscription(JointState,f'/action/{side}_hand/joint_states',lambda m,s=side:command(m,s),10)
@@ -136,7 +138,9 @@ def test_dagger_home_keeps_authority_and_exit_returns_vr(monkeypatch):
             assert bridge.request_manual_home()
             until(lambda:any(m.header.frame_id=='home' for _,_,m,_ in outputs[before_home:]))
             home_messages=[m for _,_,m,_ in outputs[before_home:] if m.header.frame_id=='home']
-            assert set(arm_names+['leg_1','leg_2','zhi'])==set(home_messages[0].name)
+            assert set(bridge._boundary.arm_fields)==set(home_messages[0].name)
+            assert {n for n,q in zip(home_messages[0].name,home_messages[0].position)
+                    if math.isfinite(q)} == set(arm_names+['leg_1','leg_2','zhi'])
             assert control.token==token and control.state=='MANUAL'
             if cycle != 1:
                 until(lambda:not teleop.homing and not solver.intervention.homing)

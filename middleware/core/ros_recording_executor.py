@@ -9,6 +9,7 @@ from collections import deque
 from typing import Any
 
 from .topic_recorder import TopicRecorder, _counter_add, _lower_recording_priority
+from .x1_recording import is_x1
 
 
 def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -18,6 +19,20 @@ def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
         for item in config.get("subscriptions", [])
         if item.get("enabled", True) and "record" in item.get("outputs", [])
     ]
+
+
+def recording_inputs(topic: str, config: dict[str, Any]) -> tuple[str, ...]:
+    if is_x1(config) and topic in (
+        '/observation/ee_poses', '/observation/left_arm/ee_pose', '/observation/right_arm/ee_pose'
+    ):
+        return ('/internal/recording' + topic,)
+    # Public messages still arrive during ordinary teleoperation. The X1 v23
+    # ownership path produces separate recording copies during interventions.
+    if config.get("legacy_control_profile") and topic in (
+        "/action/ee_poses", "/control/solver/ee_targets", "/control/solver/joint_targets"
+    ):
+        return topic, "/internal/recording" + topic
+    return (topic,)
 
 
 _IDLE_MONITOR_TOPICS = {
@@ -227,7 +242,7 @@ def _raw_recording_process(
                     timestamps,
                     message_counts,
                     now,
-                    set(ros_subscriptions),
+                    {source.removeprefix('/internal/recording') for source in ros_subscriptions},
                 ),
                 "pid": __import__("os").getpid(),
                 "priority": "low",
@@ -252,9 +267,9 @@ def _raw_recording_process(
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
 
-        def create_subscription(item: dict[str, Any], *, recording: bool) -> None:
+        def create_subscription(item: dict[str, Any], source: str, *, recording: bool) -> None:
             topic = str(item["topic"])
-            if topic in ros_subscriptions:
+            if source in ros_subscriptions:
                 return
             msg_type = str(item["type"])
             max_hz = float(item.get("max_hz", 0.0))
@@ -286,6 +301,7 @@ def _raw_recording_process(
                             "topic": topic,
                             "msg_type": msg_type,
                             "_raw": raw_data,
+                            "record_only": source != topic,
                             "stamp_ns": time.time_ns(),
                         }
                     ):
@@ -295,9 +311,9 @@ def _raw_recording_process(
                     counters["rejected"] += 1
                     _counter_add(dropped_counter)
 
-            ros_subscriptions[topic] = node.create_subscription(
+            ros_subscriptions[source] = node.create_subscription(
                 message_type,
-                topic,
+                source,
                 callback,
                 recording_subscription_qos(item)
                 if recording
@@ -326,7 +342,8 @@ def _raw_recording_process(
             # ready, preserving capture completeness.
             destroy_subscriptions()
             for item in subscriptions:
-                create_subscription(item, recording=True)
+                for source in recording_inputs(str(item["topic"]), config):
+                    create_subscription(item, source, recording=True)
             subscriptions_ready_event.set()
             publish_status("ready")
 
@@ -334,13 +351,13 @@ def _raw_recording_process(
             nonlocal capture_seen
             destroy_subscriptions()
             for item in idle_subscriptions:
-                create_subscription(item, recording=False)
+                create_subscription(item, str(item["topic"]), recording=False)
             capture_seen = False
             subscriptions_ready_event.clear()
             publish_status("monitoring")
 
         for item in idle_subscriptions:
-            create_subscription(item, recording=False)
+            create_subscription(item, str(item["topic"]), recording=False)
         publish_status("monitoring" if ros_subscriptions else "standby")
         last_status = time.monotonic()
         while not stop_event.is_set():

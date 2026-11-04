@@ -66,6 +66,21 @@ class RosRecordingExecutorTests(unittest.TestCase):
             ["/control/solver/joint_targets"],
         )
 
+    def test_all_profiles_use_page_selection_without_historical_topic_filter(self):
+        subscriptions = [
+            dict(topic='/action/base/command', type='std_msgs/msg/Float64MultiArray', outputs=['record']),
+            dict(topic='/observation/hands/triggers', type='geometry_msgs/msg/PoseArray', outputs=['record']),
+            dict(topic='/action/joint_states', type='std_msgs/msg/String', outputs=['record']),
+            dict(topic='/events/control/intervention', type='std_msgs/msg/String', outputs=['record']),
+            dict(topic='/custom/sensor', type='std_msgs/msg/String', outputs=['record']),
+            dict(topic='/disabled', type='std_msgs/msg/String', outputs=['record'], enabled=False),
+            dict(topic='/unselected', type='std_msgs/msg/String', outputs=['websocket']),
+        ]
+        for profile in ('/robots/x1', '/robots/other', ''):
+            with self.subTest(profile=profile):
+                self.assertEqual(recording_subscriptions(dict(legacy_control_profile=profile,
+                                                              subscriptions=subscriptions)), subscriptions[:5])
+
     def test_rate_gate_does_not_halve_jittery_30_hz_input(self):
         gate = RateGate()
         timestamps = [0.0, 0.0325, 0.0650, 0.0975, 0.1300]

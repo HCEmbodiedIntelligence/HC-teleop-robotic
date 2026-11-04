@@ -347,8 +347,8 @@ function updateJointMonitor(event,kind) {
   const target=kind==='command'?jointMonitor.command:jointMonitor.feedback;
   target.clear();
   names.forEach((name,index)=>{
-    const value=Number(positions[index]);
-    if(Number.isFinite(value))target.set(String(name),value);
+    const value=positions[index];
+    if(typeof value==='number'&&Number.isFinite(value))target.set(String(name),value);
   });
   scheduleJointMonitorRender();
 }
@@ -1478,8 +1478,8 @@ async function loadDatasets() {
         downloadLink.disabled = true;
         downloadLink.title = '数据集生成完成后可下载';
       } else {
-        downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download`;
-        downloadLink.setAttribute('download', (isLeRobotDataset(file) || file.format === 'CAPTURE_BUNDLE') ? `${file.filename}.zip` : file.filename);
+        downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download?with_tags=1`;
+        downloadLink.setAttribute('download', '');
       }
       downloadLink.textContent = '下载';
 

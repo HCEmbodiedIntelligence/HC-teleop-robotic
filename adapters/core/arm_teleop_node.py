@@ -119,6 +119,7 @@ class RobotArmTeleopNode(Node):
         self.source_cutoff_ns = 0
         self.joint_state: dict[str, float] = {}
         self.joint_state_stamp = 0.0
+        self.joint_state_source_ns = 0
         self.last_command: dict[str, float] = {}
         self.last_status_publish = 0.0
         self.base_zero_pending = False
@@ -342,6 +343,10 @@ class RobotArmTeleopNode(Node):
             latest_reliable_qos,
         )
         self.actual_pub = None
+        self.record_actual_pub = None
+        if self.config_path.parent.name == 'x1' and self.control.get('legacy_intervention'):
+            self.record_actual_pub = self.create_publisher(
+                PoseArray, '/internal/recording/observation/ee_poses', latest_reliable_qos)
         if not (self.control.get("actual_pose_from_hardware", False)
                 and os.environ.get("HC_RUNTIME_MODE") == "teleop"):
             self.actual_pub = self.create_publisher(
@@ -834,6 +839,13 @@ class RobotArmTeleopNode(Node):
             self._resume_teleop("VR controller A button pressed")
 
     def _resume_teleop(self, reason: str = "VR controller A button pressed") -> None:
+        if self.control_source == "vr" and (not self.enabled or not self.homing):
+            # Replay can move the robot without changing the selected VR source.
+            # Resume at the next measured pose, even if both A and Grip are down.
+            self._reset_control_references()
+            if not self.enabled:
+                self.initial_homing_done = True
+            self.home_gesture_latched = True  # Observe centered sticks before a new home gesture.
         self.enabled = True
         self.stop_reason = ""
         self.waist_output_enabled = False
@@ -865,7 +877,13 @@ class RobotArmTeleopNode(Node):
         self.control_source = source
         if getattr(self, "intervention", None) and self.intervention.active:
             return  # The ownership permit handles DAgger resets and references.
+        self._reset_control_references()
+        self.get_logger().info(f"control source changed to {source}; old VR state discarded")
+
+    def _reset_control_references(self) -> None:
         self._release_all(send_base_zero=True)
+        self.arms["right"].joy = None  # A cached release cannot rearm the solver.
+        self.body.smoothed_head_pose = None
         self.homing = False
         self.generic_aux_command.clear()
         self.body.target_base = None
@@ -875,24 +893,27 @@ class RobotArmTeleopNode(Node):
         self.source_cutoff_ns = int(self.get_clock().now().nanoseconds)
         if self.external_ik:
             self.solver_rearm.start_homing()
-            if source == "vr":
+            if self.control_source == "vr":
                 self.solver_rearm.homing_complete()
-        self.get_logger().info(f"control source changed to {source}; old VR state discarded")
 
     def _joint_state_callback(self, message: JointState) -> None:
-        if len(message.name) != len(message.position):
+        if len(message.name) != len(message.position) or len(set(message.name)) != len(message.name):
             return
+        stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+        if self.backend in {"v23", "generic"}:
+            now_ns = self.get_clock().now().nanoseconds
+            if (not -50_000_000 <= now_ns - stamp_ns <= 250_000_000
+                    or stamp_ns <= self.joint_state_source_ns <= now_ns + 50_000_000):
+                return
         values = dict(zip(message.name, message.position))
         if not all(math.isfinite(float(value)) for value in values.values()):
             return
         self.joint_state = {name: float(value) for name, value in values.items()}
         self.joint_state_stamp = self._monotonic()
+        self.joint_state_source_ns = stamp_ns
         if self.source_feedback_pending:
-            stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
-            now_ns = int(self.get_clock().now().nanoseconds)
-            if (stamp_ns <= self.source_cutoff_ns or not -50_000_000 <= now_ns-stamp_ns <= 250_000_000
-                    or len(set(message.name)) != len(message.name)
-                    or any(name not in self.joint_state for name in self._homing_joint_names())):
+            if (not self.hardware_ready or self.joint_state_source_ns <= self.source_cutoff_ns
+                    or not self._complete_feedback_fresh()):
                 return
             self.last_command = dict(self.joint_state)
             self.generic_aux_command.clear()
@@ -902,6 +923,13 @@ class RobotArmTeleopNode(Node):
             self._sync_model()
             self._ensure_generic_targets()
             self.source_feedback_pending = False
+            if (self.enabled and self.control_source == "vr" and self.backend in {"v23", "generic"}
+                    and not (self.intervention and self.intervention.active)):
+                # Hold the arms at measured positions while waiting for the IK reset/Grip.
+                names = self.arms["right"].joint_names + self.arms["left"].joint_names
+                hold = JointState(name=list(names), position=[self.joint_state[name] for name in names])
+                hold.header.stamp = self.get_clock().now().to_msg()
+                self.command_pub.publish(hold)
         if not self.last_command:
             self.last_command = dict(self.joint_state)
         if not self.initial_homing_done and self.hardware_ready and self.control_source == "vr":
@@ -913,6 +941,18 @@ class RobotArmTeleopNode(Node):
             self.get_logger().info(
                 "post-home joint feedback received; solver reset requested"
             )
+
+    def _complete_feedback_fresh(self) -> bool:
+        age_ns = self.get_clock().now().nanoseconds - self.joint_state_source_ns
+        return (-50_000_000 <= age_ns <= 250_000_000
+                and self._monotonic() - self.joint_state_stamp <= float(self.control["joint_state_timeout"])
+                and all(name in self.joint_state for name in self._homing_joint_names()))
+
+    def _ensure_vr_feedback(self) -> bool:
+        if self._complete_feedback_fresh():
+            return True
+        self._reset_control_references()
+        return False
 
     def _solver_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position):
@@ -947,6 +987,10 @@ class RobotArmTeleopNode(Node):
             return
 
         if ready and not was_ready:
+            if self.source_feedback_pending:
+                if self.external_ik and self.control_source == "vr":
+                    self.solver_rearm.homing_complete()
+                return  # The next complete feedback frame anchors the pose and starts the reset.
             self.get_logger().info(
                 "hardware ready confirmed: resetting IK, recapturing pose, and enabling joint output"
             )
@@ -997,6 +1041,8 @@ class RobotArmTeleopNode(Node):
         if not self.enabled:
             return
         if not self.hardware_ready or self.homing:
+            return
+        if not self._ensure_vr_feedback():
             return
         if self.solver_rearm.blocked:
             stamp_ns = (
@@ -3017,20 +3063,18 @@ class RobotArmTeleopNode(Node):
             return 1.0
         return (val - 0.04) / (0.96 - 0.04)
 
+    def _gripper_position(self, side: str, trigger: float) -> float:
+        cfg = self.config['grippers'][side]
+        previous = self.last_command.get(cfg['sim_joint'], self.joint_state.get(cfg['sim_joint'], 0.0))
+        step = float(self.config['grippers']['max_velocity']) / float(self.control['rate_hz'])
+        return float(np.clip(trigger * float(cfg['sim_closed_position']), previous-step, previous+step))
+
     def _update_grippers(self, command: dict[str, float], now: float) -> None:
         for side in ("right", "left"):
             cfg = self.config["grippers"][side]
             trigger = self._trigger(side) if self._input_fresh(self.arms[side], now) else 0.0
             if self.config["grippers"].get("include_sim_joints", True):
-                name = cfg["sim_joint"]
-                target = trigger * float(cfg["sim_closed_position"])
-                previous = self.last_command.get(name, self.joint_state.get(name, 0.0))
-                max_step = float(self.config["grippers"]["max_velocity"]) / float(
-                    self.control["rate_hz"]
-                )
-                command[name] = float(
-                    np.clip(target, previous - max_step, previous + max_step)
-                )
+                command[cfg['sim_joint']] = self._gripper_position(side, trigger)
             finger = JointState()
             finger.header.stamp = self.get_clock().now().to_msg()
             finger.name = list(cfg["finger_joint_names"])
@@ -3379,6 +3423,8 @@ class RobotArmTeleopNode(Node):
             self._publish_status(now, feedback_fresh)
             return
         if self.external_ik:
+            if self.backend != "motion" and self.enabled and not self.homing and not self._ensure_vr_feedback():
+                return
             self._generic_control_tick(now, feedback_fresh, command)
             return
         if not self.enabled or command is None:
@@ -3590,13 +3636,16 @@ class RobotArmTeleopNode(Node):
             ) = torso[1]
             controller_message.poses.append(pose)
         if getattr(self, 'intervention', None) and self.intervention.active:
-            self.intervention.poses(controller_message if self.backend == "v23" else message)
+            if self.backend == "v23":
+                self.intervention.poses(controller_message, action_pose=message)
+            else:
+                self.intervention.poses(message)
             return
         self.target_pub.publish(message)
         self.controller_target_pub.publish(controller_message)
 
     def _publish_actual_poses(self) -> None:
-        if self.actual_pub is None:
+        if self.actual_pub is None and self.record_actual_pub is None:
             self._publish_head_tracking_poses()
             return
         message = PoseArray()
@@ -3619,7 +3668,10 @@ class RobotArmTeleopNode(Node):
                 pose.orientation.w,
             ) = local[1]
             message.poses.append(pose)
-        self.actual_pub.publish(message)
+        if self.actual_pub:
+            self.actual_pub.publish(message)
+        if self.record_actual_pub:
+            self.record_actual_pub.publish(message)
         self._publish_head_tracking_poses()
 
     def _publish_head_tracking_poses(self) -> None:

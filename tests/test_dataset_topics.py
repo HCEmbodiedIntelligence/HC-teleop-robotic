@@ -124,17 +124,17 @@ def test_native_force_and_retired_vibration_topics_are_not_relayed():
     assert '/observation/hands/vibration_feedback' not in b.publishers
 
 
-def test_config_records_all_projected_topics_and_raw_vr():
+def test_config_offers_projected_topics_and_raw_vr_for_page_selection():
     from pathlib import Path
-    import yaml
     from middleware.core.config import ConfigStore
     config = ConfigStore(Path(__file__).parents[1] / 'middleware/config.yaml').load()
     from middleware.core.dataset_topics import load_joint_groups
     config['ros']['dataset_topics']['joint_groups'] = load_joint_groups(config, Path(__file__).parents[1] / 'middleware')
     b = DatasetTopics(Node(), config['ros']['dataset_topics'])
-    recorded = {i['topic'] for i in config['ros']['subscriptions'] if i['enabled'] and 'record' in i['outputs']}
-    assert set(b.publishers) <= recorded
-    assert {'/vrdata', '/clock'} <= recorded
+    # Presence in the topic catalogue does not force the page to record it.
+    available = {i['topic'] for i in config['ros']['subscriptions']}
+    assert set(b.publishers) <= available
+    assert '/vrdata' in available
 
 
 def test_no_projection_subscribes_to_its_own_output():

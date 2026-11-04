@@ -37,6 +37,12 @@ class LegacyTopicControl:
         self.hand_names = set().union(*map(set, self.hands.values()))
         self.sim_joints = {self.teleop['grippers'][side]['sim_joint'] for side in self.hands
                            if self.teleop['grippers'][side].get('sim_joint')}
+        # The dataset layout includes configured model joints even when their
+        # controller is disabled. Missing commands are NaN, never feedback.
+        self.arm_fields = (self.arms + tuple(n for n in self.teleop['robot']['initial_joints']
+                                            if n not in self.arms)
+                           + tuple(self.teleop['grippers'][s]['sim_joint'] for s in ('right', 'left')))
+        self.model_only_joints = set(self.arm_fields) - set(self.home_joints) - self.sim_joints
         self.positions, self.sample_ns, self.received, self.speeds = {}, {}, {}, {}
         self.last_command_stamp, self.last_command, self.command_time = {}, {}, {}
         self.generation = None
@@ -90,18 +96,22 @@ class LegacyTopicControl:
                       lambda msg, side=side: self.program(msg, side))
             subscribe(JointState, f'/control/vr/{side}_hand/joint_states',
                       lambda msg, side=side: self.bridge.forward_live_command(
-                          'vr', self.select(msg, self.hands[side]), self.publish_selected))
+                          'vr', self.select(msg, self.hand_fields(side)), self.publish_selected))
+
+    def hand_fields(self, side):
+        marker = self.teleop['grippers'][side].get('binary_state_joint')
+        return self.hands[side] + ((marker,) if marker else ())
 
     @staticmethod
     def stamp(message):
         return message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
 
     @staticmethod
-    def values(message):
+    def values(message, *, allow_missing=False):
         if (not message.name or len(message.name) != len(message.position)
                 or len(set(message.name)) != len(message.name)
                 or not all(isinstance(n, str) and n for n in message.name)
-                or not all(math.isfinite(v) for v in message.position)):
+                or not all(math.isfinite(v) or (allow_missing and math.isnan(v)) for v in message.position)):
             raise ValueError('invalid joint names or positions')
         return dict(zip(message.name, message.position))
 
@@ -174,11 +184,13 @@ class LegacyTopicControl:
 
     def program(self, message, channel):
         try:
-            names = set(self.values(message))
-            allowed = set(self.feedback_order) if channel == 'arms' else set(self.hands[channel])
+            values = self.values(message, allow_missing=set(message.name) == set(self.arm_fields))
+            names = set(values)
+            fields = self.arm_fields if channel == 'arms' else self.hand_fields(channel)
+            allowed = set(fields)
             if not names <= allowed:
                 raise ValueError('unsupported own command joints')
-            selected = self.select(message, self.arms if channel == 'arms' else self.hands[channel])
+            selected = self.select(message, [n for n in fields if n in values and not math.isnan(values[n])])
             with self.bridge._lock:
                 self.diagnostics['program_received_'+channel] += 1
                 token = self.bridge.ownership.token if self.bridge.ownership.active else None
@@ -199,16 +211,21 @@ class LegacyTopicControl:
 
     def receive_owned(self, message, token, *, frame_id=None):
         try:
-            names = set(self.values(message))
+            values = self.values(message, allow_missing=set(message.name) == set(self.arm_fields))
+            names = set(values)
             home = frame_id == 'home'
-            allowed = set(self.home_joints) if home else set(self.feedback_order) | self.hand_names
+            allowed = set(self.arm_fields) if home else set(self.arm_fields) | self.hand_names
             if token.source != 'vr' or not names <= allowed:
                 return
-            groups = (self.home_joints,) if home else (self.arms, *self.hands.values())
+            groups = (self.arm_fields,) if home else (self.arm_fields, *self.hands.values())
             for group in groups:
                 if not names.intersection(group):
                     continue
-                target = self.select(message, group)
+                markers = (set() if home else self.sim_joints if group == self.arm_fields else
+                           {self.teleop['grippers'][side]['binary_state_joint']
+                            for side in self.hands if group == self.hands[side]})
+                target = self.select(message, [n for n in message.name
+                    if n in set(group) | markers and not math.isnan(values[n])])
                 if frame_id is not None:
                     target.header.frame_id = frame_id
                 self.bridge.forward_live_command('vr', target, self.publish_selected, token)
@@ -217,12 +234,26 @@ class LegacyTopicControl:
 
     def prepare(self, message):
         try:
-            values = self.values(message)
-            # VR also carries simulation-only gripper coordinates. Real hands
-            # already use their dedicated, gated finger command topics.
-            if set(values) & self.sim_joints:
-                message = self.select(message, [n for n in message.name if n not in self.sim_joints])
-                values = self.values(message)
+            original = self.values(message, allow_missing=set(message.name) == set(self.arm_fields))
+            if not set(original) <= self.limits.keys() | self.sim_joints | self.model_only_joints:
+                raise ValueError('unknown command joints')
+            values = {n:v for n,v in original.items() if not math.isnan(v)}
+            model = {n:values.pop(n) for n in list(values) if n in self.model_only_joints}
+            # Standard JointState includes virtual/binary gripper fields. Keep
+            # them on the action topic; only physical joints enter control checks.
+            labels = {n: values.pop(n) for n in list(values) if n in self.sim_joints}
+            if not values:
+                raise ValueError('command has no physical joints')
+            hand = next((s for s in self.hands if set(values) <= set(self.hands[s])), None)
+            for side, cfg in ((s, self.teleop['grippers'][s]) for s in self.hands):
+                marker = cfg['sim_joint']
+                if marker not in labels:
+                    continue
+                if hand:
+                    if side != hand or labels[marker] not in (0., 1.):
+                        raise ValueError('invalid binary gripper field')
+                elif not set(values).intersection(self.arms) or not 0 <= labels[marker] <= float(cfg['sim_closed_position']):
+                    raise ValueError('invalid virtual gripper field')
             stamp = self.stamp(message)
             now = time.monotonic()
             with self.bridge._lock:
@@ -241,8 +272,7 @@ class LegacyTopicControl:
                 generation = self.bridge.ownership.token
                 active = self.bridge.ownership.active
                 if active:
-                    home = generation.source == 'vr' and message.header.frame_id == 'home'
-                    allowed = set(self.home_joints) if home else set(self.arms) | self.hand_names
+                    allowed = set(self.home_joints) | self.hand_names
                     if not set(values) <= allowed:
                         raise ValueError('body joints held during intervention')
                 # Program targets have an extra measured-error/slew envelope.
@@ -251,6 +281,8 @@ class LegacyTopicControl:
                 # limiter after the normal teleoperation controller.
                 if active and generation.source == 'motion':
                     for name, value in values.items():
+                        if name in self.waist:
+                            continue  # Preserve supplied waist commands; do not apply hand slew.
                         if name in self.arms and abs(value-self.positions[name]) > self.max_error:
                             raise ValueError(f'target too far from measured position: {name} target={value:.6f} measured={self.positions[name]:.6f} error={abs(value-self.positions[name]):.6f} limit={self.max_error:.6f}')
                         reference = self.positions[name] if name in self.arms else value
@@ -270,7 +302,10 @@ class LegacyTopicControl:
                 allowed, collision, _ = self.collision.check(measured, values)
                 if not allowed:
                     raise ValueError('collision check refused: '+str(collision))
-            target = self.target_message(message, message.name, [values[n] for n in message.name])
+            values.update(labels)
+            values.update(model)
+            names = self.arm_fields if active and set(values).intersection(self.arms) else message.name
+            target = self.target_message(message, names, [values.get(n, math.nan) for n in names])
             # A rate-limited position target must not carry the original speed.
             target.velocity, target.effort = [], []
             return target, stamp, generation
@@ -280,25 +315,26 @@ class LegacyTopicControl:
 
     def commit(self, prepared, *, intervention=False):
         target, stamp, generation = prepared
-        if (not self.fresh(set(target.name)-self.hand_names) or generation != self.bridge.ownership.token
+        physical = {n for n,v in zip(target.name, target.position) if math.isfinite(v)} - self.sim_joints - self.model_only_joints
+        if (not self.fresh(physical-self.hand_names) or generation != self.bridge.ownership.token
                 or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age
-                or any(stamp <= self.last_command_stamp.get(n, 0) for n in target.name)):
+                or any(stamp <= self.last_command_stamp.get(n, 0) for n in physical)):
             self.reject('commit freshness or authority changed')
             return False
         if generation != self.generation:
             self.last_command.clear()
             self.command_time.clear()
         self.generation = generation
-        self.last_command_stamp.update(dict.fromkeys(target.name, stamp))
-        self.last_command.update(zip(target.name, target.position))
-        self.command_time.update(dict.fromkeys(target.name, time.monotonic()))
+        self.last_command_stamp.update(dict.fromkeys(physical, stamp))
+        self.last_command.update((n, v) for n, v in zip(target.name, target.position) if n in physical)
+        self.command_time.update(dict.fromkeys(physical, time.monotonic()))
         channel = 'arms' if set(target.name) & set(self.arms) else 'hands'
         self.last_rejection = ''
         self.diagnostics['accepted_'+channel] += 1
         return True
 
     def publish_selected(self, message):
-        names = set(message.name)
+        names = {n for n,v in zip(message.name, message.position) if math.isfinite(v)} - self.sim_joints - self.model_only_joints
         for side, group in self.hands.items():
             if names <= set(group):
                 self.hand_pubs[side].publish(message)

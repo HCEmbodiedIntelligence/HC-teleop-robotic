@@ -1,5 +1,6 @@
 """Control facts, transaction races and final-boundary isolation without ROS."""
 import threading
+import json
 from pathlib import Path
 from types import SimpleNamespace as Obj
 from unittest.mock import Mock
@@ -57,6 +58,7 @@ def test_model_only_then_dagger_toggle_preserves_auto_and_fences_manual():
     assert c.token == token and not c.takeover()
     c.set_dagger(True)
     assert c.token == token and c.allows(token)
+
     rig.input(True)
     assert c.state == 'AUTO'  # held before enabling cannot seize control
     rig.input(False); rig.input(True)
@@ -554,3 +556,73 @@ def test_heartbeat_diagnostic_keeps_real_timeout_fault():
     assert len(events)==1
     assert events[0]['participant'] in ('teleop','motion')
     assert events[0]['gap_ms']>events[0]['limit_ms']==300.
+
+
+def test_recordings_tag_confirmed_control_across_mode_changes(tmp_path):
+    from middleware.core.takeover_log import TakeoverLog, takeover_path
+    from middleware.core.topic_recorder import TopicRecorder
+
+    rig = Rig()
+    control = rig.control
+    control.disable()
+    control.recording_enabled = False  # X1 uses ordinary X/Y and web recordings.
+    recorder = TopicRecorder({'directory': str(tmp_path)}, tmp_path)
+    log = recorder.takeovers = TakeoverLog(control.ros_clock)
+    control.dagger_changed = log.dagger_changed
+    control.manual_changed = log.manual_changed
+    try:
+        plain = Path(recorder.start('plain'))
+        recorder.stop()
+        assert not takeover_path(plain).exists()
+
+        mixed = Path(recorder.start('mixed'))
+        control.enable()
+        rig.input(False)
+        rig.auto()
+        # A Grip request that is released before grant ACKs has no tag interval.
+        rig.input(True)
+        rig.ack()
+        rig.input(False)
+        rig.ack()
+        rig.ack()
+        control.set_dagger(False)
+        recorder.stop()
+        data = json.loads(takeover_path(mixed).read_text())
+        assert data['tag'] == 'dagger' and data['complete'] and data['intervals'] == []
+
+        control.set_dagger(True)
+        rig.input(False)
+        first = Path(recorder.start('first'))
+        for _ in range(2):
+            rig.input(True)
+            rig.ack()
+            rig.ack()
+            assert control.state == 'MANUAL'
+            rig.ns += 20_000_000
+            rig.input(False)
+            rig.ack()
+            rig.ack()
+        rig.input(True)
+        rig.ack()
+        rig.ack()
+        rig.ns += 5_000_000
+        recorder.stop()
+        first_data = json.loads(takeover_path(first).read_text())
+        intervals = first_data['intervals']
+        assert [item['end_reason'] for item in intervals] == ['normal release'] * 2 + ['recording_stopped']
+        assert len({item['intervention_id'] for item in intervals}) == 3
+        assert intervals[0]['end_ns'] - intervals[0]['start_ns'] == 21_000_000
+        assert intervals[-1]['end_ns'] == rig.ns
+        second = Path(recorder.start('second'))
+        rig.ns += 30_000_000
+        control.fault('feedback lost')
+        recorder.stop()
+        second_data = json.loads(takeover_path(second).read_text())
+        interval, = second_data['intervals']
+        assert interval['intervention_id'] == intervals[-1]['intervention_id']
+        assert interval['start_offset_s'] == 0 and interval['end_offset_s'] == .03
+        assert interval['end_reason'] == 'feedback lost'
+        recorder.delete_recording(first.name)
+        assert not takeover_path(first).exists()
+    finally:
+        recorder.shutdown()

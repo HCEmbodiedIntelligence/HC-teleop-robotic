@@ -10,6 +10,7 @@ import uuid
 
 from middleware.core.control_ownership import ControlToken
 from middleware.core.protocol import is_sequence_newer
+from .arm_teleop_math import binary_trigger_state
 
 
 class ClutchInput:
@@ -73,6 +74,8 @@ class InterventionTeleop:
         self.triggers = {}
         self.ack_pub = node.create_publisher(String, '/status/control/ack', 100)
         self.input_pub = node.create_publisher(String, '/events/teleop/clutch', 100)
+        if node.backend == 'v23':
+            self.record_action_pose = node.create_publisher(PoseArray, '/internal/recording/action/ee_poses', 10)
         self.pose_pub = node.create_publisher(PoseArray, '/internal/vr/owned_poses', 1)
         self.aux_pub = node.create_publisher(JointState, '/internal/vr/aux_joint_targets', 1)
         self.owned_pub = node.create_publisher(JointState, '/internal/control/joint_targets', 10)
@@ -307,7 +310,8 @@ class InterventionTeleop:
             return
         for arm in node.arms.values():
             node._update_arm_target(arm)
-        node._publish_target_poses()
+        if node.backend != 'v23':
+            node._publish_target_poses()
         values = {}
         if node.backend == 'v23':
             # Use elapsed time: dropped control ticks must not slow a fresh
@@ -331,6 +335,24 @@ class InterventionTeleop:
             reference[3] = max(previous-step, min(previous+step, desired))
             values[name] = reference[3]
         if values:
+            if node.backend == 'v23':
+                auxiliary = {}
+                for side in ('right', 'left'):
+                    cfg = node.config['grippers'][side]
+                    if side not in self.triggers or not set(values).intersection(cfg['finger_joint_names']):
+                        continue
+                    trigger = self.triggers[side]
+                    if cfg.get('binary_state_joint'):
+                        values[cfg['binary_state_joint']] = binary_trigger_state(
+                            trigger, node.config['grippers'].get('binary_trigger_threshold', .5))
+                    if node.config['grippers'].get('include_sim_joints', True):
+                        auxiliary[cfg['sim_joint']] = node._gripper_position(side, trigger)
+                if auxiliary:
+                    aux = JointState(name=list(auxiliary), position=list(auxiliary.values()))
+                    aux.header.stamp = node.get_clock().now().to_msg()
+                    aux.header.frame_id = self.token.key()+'#'
+                    self.aux_pub.publish(aux)
+                    node.last_command.update(auxiliary)
             msg = JointState(name=list(values), position=list(values.values()))
             msg.header.stamp = node.get_clock().now().to_msg()
             msg.header.frame_id = self.token.key()+'#'
@@ -338,9 +360,13 @@ class InterventionTeleop:
                 self.owned_pub.publish(msg)
             else:
                 self.aux_pub.publish(msg)
+        if node.backend == 'v23':
+            node._publish_target_poses()
         node._publish_status(now, feedback_fresh)
 
-    def poses(self, message):
+    def poses(self, message, *, action_pose=None):
         if self.granted:
             message.header.frame_id = self.token.key()+'#'+message.header.frame_id
             self.pose_pub.publish(message)
+            if action_pose is not None and self.record_action_pose.get_subscription_count():
+                self.record_action_pose.publish(action_pose)

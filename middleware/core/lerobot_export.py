@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -638,6 +639,10 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
             presence = validate_lerobot_info(snapshot, read_json(staged_dataset / 'meta/info.json'))
             atomic_json(staged_dataset / 'capture-context.json', {'schema_version': 'hc-capture-context/v1',
                 'recording_id': snapshot['recording_id'], 'capture_snapshot': snapshot, 'feature_presence': presence})
+        from middleware.core.takeover_log import takeover_file
+        takeovers = takeover_file(source)
+        if takeovers:
+            shutil.copyfile(takeovers, staged_dataset / 'meta/takeovers.json')
         if destination.exists():
             raise FileExistsError(f'Destination was created during export: {destination}')
         staged_dataset.rename(destination)

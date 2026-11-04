@@ -4,6 +4,7 @@ Opt in with HC_RUN_LEGACY_ROS_TESTS=1 on a localhost-only ROS domain >= 200.
 No Motion node, action server, recorder or real hardware is used.
 """
 import copy
+import math
 import importlib.util
 import json
 import os
@@ -58,7 +59,8 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
     program_active=True
     def command(msg,channel):
         outputs.append((time.monotonic(),channel,copy.deepcopy(msg),bridge.ownership.state if bridge else 'OFF'))
-        (values if channel=='arms' else hand_values).update(zip(msg.name,msg.position))
+        (values if channel=='arms' else hand_values).update(
+            (n,q) for n,q in zip(msg.name,msg.position) if math.isfinite(q))
     probe.create_subscription(JointState,'/action/joint_states',lambda m:command(m,'arms'),10)
     for side in ('right','left'):
         probe.create_subscription(JointState,f'/action/{side}_hand/joint_states',lambda m,s=side:command(m,s),10)

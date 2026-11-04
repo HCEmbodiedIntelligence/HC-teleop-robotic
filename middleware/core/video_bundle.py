@@ -157,6 +157,10 @@ def prepare(source, target, job, *, read_bytes_per_second=16*1024**2):
         session_capture = source.with_suffix('.session.json')
         if session_capture.is_file():
             shutil.copyfile(session_capture, staging / 'intervention-session.json')
+        from .takeover_log import takeover_file
+        takeovers = takeover_file(source)
+        if takeovers:
+            shutil.copyfile(takeovers, staging / 'takeovers.json')
         committed = [{'path': p.relative_to(staging).as_posix(), **file_checksum(p)}
                      for p in sorted(staging.rglob('*')) if p.is_file()]
         atomic_json(staging / 'manifest.json', {'state': 'completed', 'committed': committed,

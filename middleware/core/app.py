@@ -25,9 +25,10 @@ from .robot_profiles import RobotProfileManager
 from .robot_api import RobotApiProfile, selected_profile, selected_profile_root
 from adapters.core.runtime_config import unified_profile
 from .ros_bridge import RosBridge
-from .ros_recording_executor import RosRecordingExecutor
+from .ros_recording_executor import RosRecordingExecutor, recording_subscriptions
 from .topic_player import TopicPlayer
 from .topic_recorder import TopicRecorder
+from .takeover_log import TakeoverLog
 from .vr_gateway import VrGateway
 from .runtime_mode import configure_environment
 
@@ -167,7 +168,8 @@ class MiddlewareRuntime:
             self.config["ros"]["robot_api_profile"] = str(profile_dir)
         elif profile_dir is not None and self.config["ros"].get("intervention", {}).get("legacy_topics", False):
             self.config["ros"]["legacy_control_profile"] = str(profile_dir)
-        recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir)
+        recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir,
+                                 topics=recording_subscriptions(self.config["ros"]))
         self.recorder = recorder
         try:
             from .platform_connection import PlatformConnection
@@ -234,6 +236,8 @@ class MiddlewareRuntime:
         dataset_config = self.config["ros"].get("dataset_topics", {})
         if dataset_config.get("enabled", False):
             from .dataset_topics import load_joint_groups
+            from .x1_recording import is_x1
+            dataset_config["x1_recording_fk"] = is_x1(self.config["ros"])
             from .camera_metadata import load_camera_metadata
             dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
             dataset_config["camera_metadata"] = load_camera_metadata(self.config, self.config_dir)
@@ -244,6 +248,9 @@ class MiddlewareRuntime:
             camera_topics=list(self._cameras_by_topic),
         )
         self.recorder.configure_corrections(self.config['ros'])
+        recorder.takeovers = TakeoverLog(self.ros.ownership.ros_clock)
+        self.ros.ownership.manual_changed = recorder.takeovers.manual_changed
+        self.ros.ownership.dagger_changed = recorder.takeovers.dagger_changed
         self.ros.ownership.open_segment = self.recorder.correction_open
         self.ros.ownership.close_segment = self.recorder.correction_close
         def capture_ready():
@@ -1352,7 +1359,8 @@ def create_app(store: ConfigStore) -> web.Application:
         })
 
     async def download_recording(request: web.Request) -> web.StreamResponse:
-        from .recording_datasets import resolve_dataset, archive_dataset
+        from .recording_datasets import resolve_dataset, archive_dataset, archive_datasets
+        from .takeover_log import takeover_file
         from urllib.parse import quote
         identifier = request.match_info["filename"]
         if runtime.recorder is None:
@@ -1364,12 +1372,16 @@ def create_app(store: ConfigStore) -> web.Application:
         if target.is_file():
             if runtime.recorder.is_recording() and runtime.recorder.path == target:
                 raise web.HTTPConflict(text="recording is still being written")
-            return web.FileResponse(target, headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name)}",
-                "Content-Type": "application/octet-stream",
-            })
+            if request.query.get("with_tags") != "1" or not takeover_file(target):
+                return web.FileResponse(target, headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name)}",
+                    "Content-Type": "application/octet-stream",
+                })
         try:
-            archive = await asyncio.to_thread(archive_dataset, target)
+            if target.is_file():
+                archive = await asyncio.to_thread(archive_datasets, target.parent, [identifier])
+            else:
+                archive = await asyncio.to_thread(archive_dataset, target)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         try:

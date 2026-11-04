@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+import math
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -88,6 +89,48 @@ class Rig:
             self.bridge._command_output_enabled = True
 
 
+@pytest.mark.parametrize('case', ['valid', 'missing_feedback', 'revoked_during_prepare'])
+def test_replay_legacy_arm_command(case):
+    from rclpy.serialization import serialize_message
+    from rclpy.time import Time
+    from rosidl_runtime_py.set_message import set_message_fields
+    from rosidl_runtime_py.utilities import get_message
+
+    rig = Rig()
+    bridge, boundary = rig.bridge, rig.boundary
+    node = boundary.node
+    node.get_clock.return_value.now.side_effect = lambda: Time(nanoseconds=time.time_ns())
+    rig.control.disable()
+    rig.feed()
+    bridge.set_command_output_enabled(True)
+    assert bridge.begin_replay()
+    arm = boundary.arms[0]
+    target = message({arm: boundary.positions[arm]}, stamp=1_000_000_000)
+    target.velocity = [1.0]
+    topic = '/action/joint_states'
+    assert bridge.publish_raw(topic, 'sensor_msgs/msg/JointState', serialize_message(target))
+    if case == 'missing_feedback':
+        boundary.positions.pop(arm)
+    elif case == 'revoked_during_prepare':
+        def stop_replay(*_):
+            bridge.end_replay()
+            return True, None, False
+        boundary.collision.check.side_effect = stop_replay
+    rig.wire.clear()
+    before = time.time_ns()
+    bridge._drain_commands(node, {}, get_message, set_message_fields)
+    published = [msg for name, msg in rig.wire if name == topic]
+    assert not bridge.status()['error']
+    if case == 'valid':
+        sent, = published
+        assert boundary.stamp(sent) >= before
+        assert sent.name == target.name and sent.position == target.position
+        assert not sent.velocity  # The actual prepared target, not the raw MCAP payload.
+    else:
+        assert not published
+        assert arm not in boundary.last_command_stamp
+
+
 def test_boundary_logs_clips_rejections_and_never_admits_off_model_targets():
     r=Rig(); b=r.boundary
     b.program(message({n:b.positions[n]+.1 for n in b.arms}), 'arms')
@@ -117,7 +160,7 @@ def test_own_arms_and_hands_share_stamp_and_are_all_revoked_without_recording():
     assert {t for t,m in r.wire if t.startswith('/action/')} == {
         '/action/joint_states','/action/right_hand/joint_states','/action/left_hand/joint_states'}
     selected=[m for t,m in r.wire if t=='/action/joint_states'][-1]
-    assert max(abs(q-b.positions[n]) for n,q in zip(selected.name,selected.position)) <= .00251
+    assert max(abs(q-b.positions[n]) for n,q in zip(selected.name,selected.position) if n in b.arms) <= .00251
     r.control.input(device_instance='vr', sequence=2, valid=True, gripped=True, stamp_ns=time.time_ns())
     r.advance();r.advance()
     assert r.control.state=='MANUAL'
@@ -128,14 +171,17 @@ def test_own_arms_and_hands_share_stamp_and_are_all_revoked_without_recording():
     assert not r.control.segment_open
 
 
-def test_observation_feedback_is_not_relayed_and_waist_is_filtered_from_commands():
+def test_observation_is_not_relayed_and_supplied_waist_is_preserved():
     r=Rig();b=r.boundary
     assert b.feedback_fresh()
     assert not [topic for topic, _ in r.wire if topic.startswith('/hc_teleop/')]
     assert not hasattr(b, 'camera_pubs')
     b.program(message({n:b.positions[n] for n in reversed(b.feedback_order)}),'arms')
     target=[m for t,m in r.wire if t=='/action/joint_states'][-1]
-    assert tuple(target.name)==b.arms
+    assert tuple(target.name)==b.arm_fields
+    values = dict(zip(target.name, target.position))
+    assert {n:values[n] for n in b.waist} == {n:b.positions[n] for n in b.waist}
+    assert all(math.isnan(values[n]) for n in ('head_1', 'head_2', 'R_ban', 'L_ban'))
 
 
 def test_gate_rechecks_revoke_during_collision_work_and_rejects_old_generation():
@@ -410,7 +456,7 @@ def test_grip_revokes_while_command_preparation_is_blocked():
     assert len(rig.wire) == outputs
 
 
-def test_vr_simulation_grippers_are_removed_at_real_hardware_boundary():
+def test_standard_gripper_fields_survive_action_boundary():
     r = Rig(); b = r.boundary
     r.control.disable()
     r.feed()
@@ -418,8 +464,8 @@ def test_vr_simulation_grippers_are_removed_at_real_hardware_boundary():
     values.update({n: 0.5 for n in b.sim_joints})
     prepared = b.prepare(message(values))
     assert prepared is not None, b.last_rejection
-    assert set(prepared[0].name) == set(b.arms)
-    assert not (set(prepared[0].name) & b.sim_joints)
+    assert prepared[0].name == list(values)
+    assert list(prepared[0].position) == list(values.values())
     assert b.prepare(message({**values, 'unexpected_joint': 0.0})) is None
     assert b.prepare(message({n: 0.5 for n in b.sim_joints})) is None
 
@@ -437,7 +483,7 @@ def test_normal_vr_reaches_action_topic_without_dagger_session():
     assert len(r.wire) == before + 1
     topic, target = r.wire[-1]
     assert topic == '/action/joint_states'
-    assert set(target.name) == set(b.arms)
+    assert set(target.name) == set(b.arms) | b.sim_joints
     r.bridge.set_command_output_enabled(False)
     assert not r.bridge.forward_live_command('vr', message(values), b.output.publish)
     assert len(r.wire) == before + 1

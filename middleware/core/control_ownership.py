@@ -6,6 +6,7 @@ An acknowledgement is an execution fact, never a timer-based assumption.
 """
 from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass
+import math
 import threading
 import time
 import uuid
@@ -47,6 +48,8 @@ class ControlOwnership:
         self.clock, self.ros_clock = clock, ros_clock
         self.revoke, self.permit = revoke, permit
         self.open_segment, self.close_segment, self.emit = open_segment, close_segment, emit
+        self.manual_changed = lambda token, stamp, reason: None
+        self.dagger_changed = lambda enabled: None
         self.instance = uuid.uuid4().hex
         self.session = ''
         self.epoch = 0
@@ -107,6 +110,8 @@ class ControlOwnership:
     def _invalidate(self, state, source='', reason=''):
         # This hook closes the final gate before any capture or peer work.
         self.revoke()
+        if self.state == 'MANUAL':
+            self.manual_changed(None, self.ros_clock(), reason)
         self._close(reason)
         self.epoch += 1
         self.cutoff_ns = self.ros_clock()
@@ -119,12 +124,17 @@ class ControlOwnership:
         self._event('revoked')
         self.permit(self.token, 'revoke', self.cutoff_ns, self.active)
 
+    def _set_dagger_enabled(self, enabled):
+        if self.dagger_enabled != bool(enabled):
+            self.dagger_enabled = bool(enabled)
+            self.dagger_changed(self.dagger_enabled)
+
     def enable(self, *, preparing_capture=False, dagger_enabled=True):
         with self.lock:
             if self.active:
                 raise OwnershipConflict('intervention session already active')
             self.session = uuid.uuid4().hex
-            self.dagger_enabled = bool(dagger_enabled)
+            self._set_dagger_enabled(dagger_enabled)
             self.input_armed = self.input_valid = self.gripped = self.resume_auto = False
             self.input_sequence = -1
             self.preparing_capture = preparing_capture
@@ -147,7 +157,7 @@ class ControlOwnership:
 
     def disable(self):
         with self.lock:
-            self.dagger_enabled = False
+            self._set_dagger_enabled(False)
             self.preparing_capture = False
             self.resume_auto = False
             self._invalidate('OFF', reason='session disabled; output remains closed')
@@ -170,7 +180,7 @@ class ControlOwnership:
                 raise OwnershipConflict('DAgger enable requires stable model control or pause')
             if self.dagger_enabled == enabled:
                 return
-            self.dagger_enabled = bool(enabled)
+            self._set_dagger_enabled(enabled)
             self.preparing_capture = bool(enabled and preparing_capture)
             self.input_ready_stamp_ns = self.ros_clock()
             self.input_armed = self.input_valid = self.gripped = False
@@ -396,6 +406,8 @@ class ControlOwnership:
                 self.permit(self.token, 'grant', self.cutoff_ns, True)
             elif self.phase == 'grant':
                 self.state = 'MANUAL' if self.state == 'TAKEOVER' else 'AUTO'
+                if self.state == 'MANUAL':
+                    self.manual_changed(self.token, self.ros_clock(), '')
                 self._event('permission_open')
                 if self.state == 'AUTO' and self.release_ns is not None:
                     metric = dict(release_to_open_ns=self.clock()-self.release_ns,
@@ -434,9 +446,10 @@ class ControlOwnership:
                 self.pending_auto_metric = None
             return None
         self.command_seq += 1
+        commanded = [(n,v) for n,v in zip(target.name, target.position) if math.isfinite(v)]
         return dict(schema='hc-human-action/v1', **asdict(token), command_seq=self.command_seq,
                     stamp_ns=stamp_ns, action_stage='sent', action_boundary='hc_final',
-                    intervention=True, names=list(target.name), positions=list(target.position))
+                    intervention=True, names=[n for n,_ in commanded], positions=[v for _,v in commanded])
 
     def request(self, request_id, session_id, expected_epoch, action):
         with self.lock:

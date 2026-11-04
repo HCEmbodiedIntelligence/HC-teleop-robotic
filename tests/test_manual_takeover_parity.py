@@ -1,5 +1,6 @@
 """VR takeover preserves ordinary teleoperation targets, with authority fencing."""
 import copy
+import math
 import time
 
 import pytest
@@ -46,8 +47,10 @@ def test_takeover_arm_target_matches_ordinary_teleoperation(delta):
     expected = [msg for topic, msg in ordinary.wire if topic == '/action/joint_states'][-1]
     actual = [msg for topic, msg in manual.wire if topic == '/action/joint_states']
     assert len(actual) == 1
-    assert list(actual[0].name) == list(expected.name)
-    assert list(actual[0].position) == list(expected.position) == list(target.position)
+    actual_values = dict(zip(actual[0].name, actual[0].position))
+    assert [actual_values[n] for n in expected.name] == list(expected.position) == list(target.position)
+    assert tuple(actual[0].name) == manual.boundary.arm_fields
+    assert all(math.isnan(actual_values[n]) for n in set(actual[0].name)-set(target.name))
 
 
 def test_takeover_hand_targets_do_not_receive_a_second_program_slew_limit():
@@ -70,7 +73,7 @@ def test_program_targets_keep_the_existing_slew_and_point_jump_guards():
     b.program(message(arm_values(rig, .02)), 'arms')
     sent = [m for t, m in rig.wire if t == '/action/joint_states']
     assert len(sent) == 1
-    assert max(abs(q-b.positions[n]) for n,q in zip(sent[0].name,sent[0].position)) <= .00251
+    assert max(abs(q-b.positions[n]) for n,q in zip(sent[0].name,sent[0].position) if n in b.arms) <= .00251
     b.program(message(arm_values(rig, .4)), 'arms')
     assert len([m for t,m in rig.wire if t == '/action/joint_states']) == 1
     assert b.last_rejection.startswith('target too far from measured position:')

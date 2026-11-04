@@ -32,6 +32,12 @@ class DatasetTopics:
             for side in ('right', 'left'):
                 self.publisher(f'/{category}/{side}_arm/ee_pose', PoseStamped)
             subscribe(PoseArray, source, lambda msg, c=category: self.poses(c, msg))
+        subscribe(PoseArray, '/internal/recording/action/ee_poses', lambda msg: self.poses('action', msg))
+        if config.get('x1_recording_fk'):
+            category = 'internal/recording/observation'
+            for side in ('right', 'left'):
+                self.publisher(f'/{category}/{side}_arm/ee_pose', PoseStamped)
+            subscribe(PoseArray, f'/{category}/ee_poses', lambda msg: self.poses(category, msg))
         self.publisher('/action/base/velocity', TwistStamped)
         subscribe(Float64MultiArray, '/action/base/command', self.base)
         self.publisher('/observation/headset/pose', PoseStamped)

@@ -65,6 +65,10 @@ def seal_task_artifact(job, fmt, directory, state_dir, cfg):
         if correction.is_file(): files.append(correction)
         session_capture = source.with_suffix('.session.json')
         if session_capture.is_file(): files.append(session_capture)
+        from .takeover_log import takeover_file
+        takeovers = takeover_file(source)
+        if takeovers:
+            files.append(takeovers)
     descriptor_path = state_dir / (identity + '.json')
     if descriptor_path.exists():
         descriptor = read_json(descriptor_path)

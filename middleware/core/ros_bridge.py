@@ -320,16 +320,15 @@ class RosBridge:
             return False
         if self._is_final_joint_command(topic):
             with self._lock:
-                allowed = (
-                    self._replay_active
-                    and self._command_output_enabled
-                    and self._ready_locked(time.monotonic())
-                )
                 epoch = self._output_epoch
-            if not allowed:
-                return False
+                if not self._replay_allowed_locked(epoch):
+                    return False
             return self._enqueue("replay_raw", (topic, msg_type, raw_data, epoch))
         return self._enqueue("publish_raw", (topic, msg_type, raw_data))
+
+    def _replay_allowed_locked(self, epoch: int) -> bool:
+        return (epoch == self._output_epoch and self._replay_active and not self.ownership.active
+                and self._command_output_enabled and self._ready_locked(time.monotonic()))
 
     def begin_replay(self) -> bool:
         """Exclusively arm replay while retaining the normal safety gates."""
@@ -355,6 +354,10 @@ class RosBridge:
 
     def _is_final_joint_command(self, topic: str) -> bool:
         mux_config = self.config.get("command_mux", {})
+        if self._legacy_enabled and self._boundary:
+            hands = self._boundary.teleop['grippers']
+            if str(topic) in {hands[s]['finger_topic'] for s in ('right', 'left')}:
+                return True
         return str(topic) in {
             str(mux_config.get("output_topic", "/action/joint_states")),
             "/io_teleop/joint_cmd",
@@ -894,6 +897,12 @@ class RosBridge:
                     if "CompressedImage" not in msg_type_name and "Image" not in msg_type_name:
                         try:
                             payload = message_to_ordereddict(message)
+                            if msg_type_name == 'sensor_msgs/msg/JointState':
+                                # JSON has no NaN. Keep gaps empty in the UI;
+                                # the independent raw-CDR recorder retains NaN.
+                                for field in ('position', 'velocity', 'effort'):
+                                    payload[field] = [v if math.isfinite(v) else None
+                                                      for v in payload[field]]
                         except Exception:
                             payload = {}
                     else:
@@ -1284,14 +1293,8 @@ class RosBridge:
                         continue
                     if command == "replay_raw":
                         with self._lock:
-                            allowed = (
-                                args[3] == self._output_epoch
-                                and self._replay_active
-                                and self._command_output_enabled
-                                and self._ready_locked(time.monotonic())
-                            )
-                        if not allowed:
-                            continue
+                            if not self._replay_allowed_locked(args[3]):
+                                continue
                     message_type = get_message(msg_type_name)
                     publisher = self._publisher(
                         node, publishers, topic, msg_type_name, message_type
@@ -1302,16 +1305,19 @@ class RosBridge:
                     if command == "replay_raw":
                         if self._public_api is not None:
                             self._public_api.convert_message(message, to_model=True)
-                            # Recording timestamps describe the recording clock;
-                            # an explicitly armed replay is a new command epoch.
-                            message.header.stamp = node.get_clock().now().to_msg()
+                        # This is a new actuator command, even for a legacy MCAP.
+                        message.header.stamp = node.get_clock().now().to_msg()
+                        boundary = self._boundary
+                        prepared = boundary.prepare(message) if boundary else message
                         with self._lock:
-                            if (args[3] == self._output_epoch and self._replay_active
-                                    and self._command_output_enabled and self._ready_locked(time.monotonic())):
-                                if self._boundary:
-                                    if not self._boundary.command(message):
-                                        continue
-                                publisher.publish(message)
+                            if prepared is None or not self._replay_allowed_locked(args[3]):
+                                continue
+                            if boundary:
+                                if not boundary.commit(prepared):
+                                    continue
+                                if self._legacy_enabled:
+                                    message = prepared[0]
+                            publisher.publish(message)
                     else:
                         publisher.publish(message)
                 elif command == "stop":

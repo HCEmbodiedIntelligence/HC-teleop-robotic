@@ -13,6 +13,7 @@ from mcap.reader import make_reader
 from rclpy.serialization import deserialize_message
 
 from middleware.core.control_ownership import ControlToken
+from middleware.core.takeover_log import TakeoverLog
 from tests.correction_recording_support import service as RecordingService
 from tests.correction_recording_support import config as recording_config
 
@@ -32,6 +33,8 @@ def test_raw_short_corrections_preserve_images_actions_and_unbound_download(tmp_
         dict(topic=topic, type='sensor_msgs/msg/'+('JointState' if topic.endswith('state') else 'Image'), outputs=['record'])
         for topic in publishers]))
     current = None
+    log = recorder.recorder.takeovers = TakeoverLog(time.time_ns)
+    log.dagger_changed(True)
     sequence = 0
 
     def feed():
@@ -69,7 +72,9 @@ def test_raw_short_corrections_preserve_images_actions_and_unbound_download(tmp_
             current = ControlToken('controller', 'session', index*2+1, 'vr', 'manual'+str(index))
             sequence = 0
             recorder.correction_open(current, time.time_ns())
+            log.manual_changed(current, time.time_ns(), '')
             pump((.1, .2, .3)[index % 3])
+            log.manual_changed(None, time.time_ns(), 'normal release')
             recorder.correction_close(current, time.time_ns(), sequence, 'normal release')
             current = None
             assert recorder.corrections.process.pid == pid
@@ -84,6 +89,11 @@ def test_raw_short_corrections_preserve_images_actions_and_unbound_download(tmp_
             assert list((bundle/'videos').glob('*.mp4'))
             assert job['quality']['missing_actions'] == 0
             correction = json.loads((bundle/'correction.json').read_text())
+            tags = json.loads((bundle/'takeovers.json').read_text())
+            assert tags == json.loads(source.with_suffix('.takeovers.json').read_text())
+            assert tags['complete'] and len(tags['intervals']) == 1
+            assert tags['intervals'][0]['intervention_id'] == job['metadata']['intervention_id']
+            assert any(item['path'] == 'takeovers.json' for item in manifest['committed'])
             assert correction['intervention'] is True and correction['outcome'] == 'unknown'
             assert any(item['path'] == 'correction.json' for item in manifest['committed'])
             with (bundle/'raw.mcap').open('rb') as stream:

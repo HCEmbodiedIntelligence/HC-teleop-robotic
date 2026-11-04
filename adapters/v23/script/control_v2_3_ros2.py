@@ -112,9 +112,10 @@ class ControllerNode(Node):
         self.intervention = None
         import yaml
         teleop_file = Path(config_path).resolve().parent / 'arm_teleop.yaml'
-        if teleop_file.is_file() and (yaml.safe_load(teleop_file.read_text()) or {}).get('control', {}).get('legacy_intervention', False):
+        teleop_config = (yaml.safe_load(teleop_file.read_text()) or {}) if teleop_file.is_file() else {}
+        if teleop_config.get('control', {}).get('legacy_intervention', False):
             from adapters.core.v23_intervention import V23Intervention
-            self.intervention = V23Intervention(self)
+            self.intervention = V23Intervention(self, teleop_config.get('grippers'))
         self.get_logger().info(
             "reconstructed controller_v2_3 started: "
             f"{len(self.controller.free_joint_names)} free joints, "
@@ -128,6 +129,9 @@ class ControllerNode(Node):
         self.control_source = source
         if self.intervention and self.intervention.active:
             return
+        self._reset_references()
+
+    def _reset_references(self) -> None:
         self.reset_pending = True
         self.reset_cutoff_ns = int(self.get_clock().now().nanoseconds)
         self.source_target_pending = True
@@ -165,8 +169,7 @@ class ControllerNode(Node):
         if self.intervention and self.intervention.active:
             return  # Ownership permits exclusively manage resets during a session.
         if message.data:
-            self.reset_pending = True
-            self.reset_cutoff_ns = int(self.get_clock().now().nanoseconds)
+            self._reset_references()
 
     def _tf_callback(self, message: TFMessage) -> None:
         if self.intervention and self.intervention.active:
@@ -238,7 +241,6 @@ class ControllerNode(Node):
             return
         if not owned and (self.control_source != "vr" or self.source_target_pending):
             return
-        token = owned.token if owned else None
         if self.reset_pending:
             return
         if owned and owned.homing:
@@ -266,8 +268,10 @@ class ControllerNode(Node):
         message.name = list(names)
         message.position = [float(position) for position in positions]
         if owned:
-            message.header.frame_id = token.key()+"#"
-            owned.output.publish(message)
+            owned.publish(message)
+            if owned.record_joint_target.get_subscription_count():
+                owned.record_joint_target.publish(JointState(
+                    header=Header(stamp=message.header.stamp), name=message.name, position=message.position))
         else:
             self.command_pub.publish(message)
         if self.solver_pub is not None:

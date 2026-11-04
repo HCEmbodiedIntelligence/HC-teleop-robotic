@@ -148,6 +148,10 @@ class RecordingArtifacts:
                                     if stream.read(8) != magic:
                                         raise ValueError('MCAP footer is incomplete')
                                 root, paths = source.parent, [source.name]
+                                from .takeover_log import takeover_file
+                                takeovers = takeover_file(source)
+                                if takeovers:
+                                    paths.append(takeovers.name)
                             else:
                                 root = Path(job['destination'])
                                 if read_progress(progress_path(root)).get('state') != 'completed':

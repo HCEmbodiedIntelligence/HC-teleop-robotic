@@ -12,13 +12,14 @@ import json
 import multiprocessing as mp
 from pathlib import Path
 import queue
+from functools import partial
 import shutil
 import threading
 import time
 import uuid
 
 from .topic_recorder import TopicRecorder, enqueue_record
-from .ros_recording_executor import recording_subscriptions, _put_latest
+from .ros_recording_executor import recording_inputs, recording_subscriptions, _put_latest
 
 
 class SessionRouter:
@@ -51,14 +52,14 @@ class SessionRouter:
             interval.update(event)
         self._event('manual_close', event['end_ns'], **event)
 
-    def observe(self, topic, kind, raw, stamp_ns, received_ns, **_kwargs):
+    def observe(self, topic, kind, raw, stamp_ns, received_ns, *, record_only=False, **_kwargs):
         # Match ordinary continuous recording: preserve every received sample,
         # including sources with missing/stale headers. Raw CDR keeps the header.
         stamp_ns = received_ns
         start, end = self.bounds(0)
         if stamp_ns < start or (end and stamp_ns >= end):
             return
-        accepted = self.sink(dict(topic=topic, msg_type=kind, _raw=raw, stamp_ns=stamp_ns))
+        accepted = self.sink(dict(topic=topic, msg_type=kind, _raw=raw, stamp_ns=stamp_ns, record_only=record_only))
         self.counts[topic] = self.counts.get(topic, 0) + int(accepted)
         self.rejected += not accepted
 
@@ -292,15 +293,20 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
 
         for item in subscriptions:
             cls = get_message(item['type'])
-            def receive(raw, item=item, cls=cls):
+            def receive(raw, item=item, cls=cls, *, record_only=False):
                 commands()
                 received = node.get_clock().now().nanoseconds
                 message = deserialize_message(raw, cls)
                 header = getattr(message, 'header', None)
                 stamp = header.stamp.sec*1_000_000_000+header.stamp.nanosec if header else 0
                 seen[item['topic']] = dict(stamp_ns=stamp, received_ns=received)
-                router.observe(item['topic'], item['type'], bytes(raw), stamp, received)
-            handles.append(node.create_subscription(cls, item['topic'], receive, recording_subscription_qos(item), raw=True))
+                if full_session:
+                    router.observe(item['topic'], item['type'], bytes(raw), stamp, received, record_only=record_only)
+                else:
+                    router.observe(item['topic'], item['type'], bytes(raw), stamp, received)
+            for source in recording_inputs(item['topic'], config):
+                callback = partial(receive, record_only=source != item['topic'])
+                handles.append(node.create_subscription(cls, source, callback, recording_subscription_qos(item), raw=True))
 
         def make_action(slot, evidence):
             msg = JointState(name=evidence['names'], position=evidence['positions'])
@@ -389,12 +395,15 @@ class CorrectionSession:
             # TaskRecorder owns preparation, sealing and uploading. Standalone
             # captures remain local too; an unclaimed warm slot is not an artifact.
             recorder.task_managed = True
+            recorder.takeovers = self.service.takeovers
             self.slots.append(dict(recorder=recorder, job=None, state='preparing'))
             self._prepare_slot(index)
         if self.full_session:
             self.prepared.clear()
             stamp = time.time_ns()
             self.bounds[0:2] = [stamp, 0]
+            if self.service.takeovers:
+                self.service.takeovers.begin(self.slots[0]['job']['path'], stamp)
             self.slots[0]['state'] = 'capturing'
             self.slots[0]['job'].update(state='recording', capture_state='capturing',
                 started_at=datetime.fromtimestamp(stamp/1e9, timezone.utc).isoformat())
@@ -468,6 +477,8 @@ class CorrectionSession:
             slot['job']['metadata'].update(asdict(token))
             slot['job'].update(state='recording', capture_state='capturing', started_at=datetime.fromtimestamp(stamp_ns/1e9, timezone.utc).isoformat())
             slot['state'] = 'capturing'
+            if self.service.takeovers:
+                self.service.takeovers.begin(slot['job']['path'], stamp_ns, token.intervention_id)
             self.active = (index, token)
             self.registry_events.append(copy.deepcopy(slot['job']))
             self.state = 'CAPTURING'

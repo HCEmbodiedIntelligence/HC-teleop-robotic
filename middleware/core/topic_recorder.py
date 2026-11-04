@@ -17,6 +17,8 @@ from uuid import uuid4
 from mcap.well_known import MessageEncoding, SchemaEncoding
 from mcap.writer import Writer as McapWriter
 from .background_process import background_environment
+from .takeover_log import takeover_path
+from .x1_recording import ordinary_x1_capture
 
 
 _PRIMITIVE_TYPES = {
@@ -161,6 +163,14 @@ def _get_msg_def(msg_type: str) -> bytes:
         return b""
 
 
+def _matches_recording_topics(event, topics):
+    """Page-configured recordings accept only their selected ROS messages."""
+    return topics is None or (
+        isinstance(event.get('_raw'), bytes)
+        and (event.get('topic'), event.get('msg_type')) in topics
+    )
+
+
 def _mcap_writer_process(
     path: str,
     event_queue: Any,
@@ -172,9 +182,12 @@ def _mcap_writer_process(
     accepted: Any,
     queued_bytes: Any,
     ingress_lock: Any,
+    recording_topics: tuple[tuple[str, str], ...] | None = None,
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
     _lower_recording_priority()
+    record_only_topics = set()
+    x1_capture = ordinary_x1_capture(metadata)
     schemas: dict[str, int] = {}
     channels: dict[tuple[str, str], int] = {}
     try:
@@ -183,6 +196,14 @@ def _mcap_writer_process(
             writer.start(profile="ros2")
             if metadata:
                 writer.add_metadata(RECORDING_METADATA_NAME, metadata)
+            # Declare selected channels even when no publisher sends a sample.
+            # Channel/schema records do not create ROS messages or timestamps.
+            for topic, msg_type in recording_topics or ():
+                if msg_type not in schemas:
+                    schemas[msg_type] = writer.register_schema(
+                        name=msg_type, encoding=SchemaEncoding.ROS2, data=_get_msg_def(msg_type))
+                channels[(topic, msg_type)] = writer.register_channel(
+                    topic=topic, message_encoding=MessageEncoding.CDR, schema_id=schemas[msg_type])
             # Do not report a recording as active until the destination file
             # has actually been opened and the MCAP header has been written.
             ready_event.set()
@@ -200,9 +221,17 @@ def _mcap_writer_process(
                         event.get("msg_type") or "std_msgs/msg/String"
                     )
                     raw_data = event.get("_raw")
+                    if not _matches_recording_topics(event, recording_topics):
+                        with ingress_lock:
+                            _counter_add(messages)
+                            _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
+                        continue
                     stamp_ns = int(event.get("stamp_ns") or time.time_ns())
 
                     if isinstance(raw_data, bytes):
+                        if not x1_capture and event.get('record_only') and topic not in record_only_topics:
+                            writer.add_metadata('hc_teleop.record_only', {'topic': topic})
+                            record_only_topics.add(topic)
                         if msg_type not in schemas:
                             schemas[msg_type] = writer.register_schema(
                                 name=msg_type,
@@ -253,7 +282,7 @@ def _mcap_writer_process(
                             publish_time=stamp_ns,
                         )
                     provenance = event.get('_provenance')
-                    if provenance:
+                    if provenance and not x1_capture and recording_topics is None:
                         key = ('/events/recording/sample_provenance', 'teleop_event')
                         if key not in channels:
                             channels[key] = writer.register_channel(topic=key[0], message_encoding=MessageEncoding.JSON,
@@ -280,9 +309,9 @@ def _reusable_writer_process(control, event_queue, messages, errors, ready, fini
         request = control.get()
         if request is None:
             return
-        path, metadata = request
+        path, metadata, recording_topics = request
         _mcap_writer_process(path, event_queue, messages, errors, ready, metadata,
-                             finish, accepted, queued_bytes, ingress_lock)
+                             finish, accepted, queued_bytes, ingress_lock, recording_topics)
         finished.set()
 
 
@@ -346,10 +375,8 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
             msg_count = s.statistics.message_count
             schemas = {s_id: sch.name for s_id, sch in s.schemas.items()}
             channels = []
-            for chan_id, count in sorted(s.statistics.channel_message_counts.items()):
-                chan = s.channels.get(chan_id)
-                if not chan:
-                    continue
+            for chan_id, chan in sorted(s.channels.items()):
+                count = s.statistics.channel_message_counts.get(chan_id, 0)
                 channels.append({
                     "topic": chan.topic,
                     "type": schemas.get(chan.schema_id, "unknown"),
@@ -419,8 +446,10 @@ from .correction_support import CorrectionSupport
 class TopicRecorder(CorrectionSupport):
     """Process-isolated MCAP recorder for ROS 2 CDR messages and telemetry."""
 
-    def __init__(self, config: dict[str, Any], config_dir: Path):
+    def __init__(self, config: dict[str, Any], config_dir: Path, *, topics=None):
         self.config, self.config_dir = dict(config), config_dir
+        self._recording_topics = (None if topics is None else tuple(dict.fromkeys(
+            (str(item['topic']), str(item['type'])) for item in topics)))
         directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
         if not directory.is_absolute():
             directory = config_dir / directory
@@ -435,6 +464,7 @@ class TopicRecorder(CorrectionSupport):
         self._export_log = None
         self._lerobot_path = ""
         self.path: Path | None = None
+        self.takeovers = None
         self._mp = mp.get_context("spawn")
         self._queue = self._mp.Queue(maxsize=int(config.get('queue_capacity', 8192)))
         self._ingress_lock = self._mp.RLock()
@@ -571,6 +601,8 @@ class TopicRecorder(CorrectionSupport):
         self.path = source_dir / fname
         if self.path.exists():
             raise FileExistsError(f"录制文件已存在: {self.path}")
+        if takeover_path(self.path).exists():
+            raise FileExistsError(f"接管标注文件已存在: {takeover_path(self.path)}")
         # Freeze the platform task at capture start, never at conversion/upload time.
         binding = self.binding_snapshot() if self.binding_snapshot else None
         self._capture_identity = (None if self.task_managed else
@@ -598,7 +630,7 @@ class TopicRecorder(CorrectionSupport):
                               self._ready_event, self._finish_event, self._accepted, self._queued_bytes,
                               self._ingress_lock, self._finished_event), name='correction-writer', daemon=True)
                     self._process.start()
-                self._writer_control.put_nowait((str(self.path), self._active_metadata))
+                self._writer_control.put_nowait((str(self.path), self._active_metadata, self._recording_topics))
             else:
                 self._process = self._mp.Process(
                 target=_mcap_writer_process,
@@ -613,6 +645,7 @@ class TopicRecorder(CorrectionSupport):
                     self._accepted,
                     self._queued_bytes,
                     self._ingress_lock,
+                    self._recording_topics,
                 ),
                 name="mcap-writer",
                 daemon=True,
@@ -631,6 +664,8 @@ class TopicRecorder(CorrectionSupport):
                 self._process = None
                 raise RuntimeError(self._last_error)
             self._artifacts.mark_started(self._capture_identity)
+            if self.takeovers and not self._reusable:
+                self.takeovers.begin(self.path)
             self._accepting_event.set()
         return str(self.path)
 
@@ -646,6 +681,7 @@ class TopicRecorder(CorrectionSupport):
         # for a sentinel, nor can Queue.empty() finish before a feeder flushes.
         with self._ingress_lock:
             self._accepting_event.clear()
+            takeover_write = self.takeovers.finish(self.path) if self.takeovers else None
             self._finish_event.set()
         if self._reusable:
             while not self._finished_event.wait(timeout=.1):
@@ -657,6 +693,11 @@ class TopicRecorder(CorrectionSupport):
         if process.exitcode not in (None, 0):
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self.status()  # Drain writer errors before exporting a closed source.
+        if takeover_write is not None:
+            try:
+                takeover_write.result()
+            except OSError as exc:
+                self._last_error = f"Failed to save takeover times: {exc}"
         if process.exitcode not in (None, 0) and not self._last_error:
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self._artifacts.close(self._capture_identity, self._last_error, capture_ended_at)
@@ -788,6 +829,8 @@ class TopicRecorder(CorrectionSupport):
         )
 
     def record(self, event: dict[str, Any]) -> bool:
+        if not _matches_recording_topics(event, self._recording_topics):
+            return False
         return enqueue_record(self.ipc_resources(), event)
 
     def status(self) -> dict[str, Any]:
@@ -1113,6 +1156,8 @@ class TopicRecorder(CorrectionSupport):
                 self._inspection_process.join(timeout=2)
                 self._inspection_process = None
             self._artifacts.shutdown()
+            if self.takeovers and not self._reusable:
+                self.takeovers.shutdown()
 
     def delete_recording(self, filename: str) -> None:
         from .recording_datasets import resolve_dataset
@@ -1145,6 +1190,8 @@ class TopicRecorder(CorrectionSupport):
         if active_path is not None and target == active_path:
             raise ValueError(f"cannot delete actively recording file: {filename}")
         target.unlink()
+        if target.suffix == '.mcap':
+            takeover_path(target).unlink(missing_ok=True)
         self._inspection_cache.pop("file:" + str(target.resolve()), None)
         try:
             self._inspection_cache_path(target).unlink()

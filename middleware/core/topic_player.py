@@ -323,9 +323,19 @@ class TopicPlayer:
                     duration_sec = (end_ns - start_ns) / 1e9 if end_ns > start_ns else 0.0
 
                     schemas = {s_id: s.name for s_id, s in summary.schemas.items()}
+                    # New bags can contain copies of solver inputs and outputs under
+                    # their historic names. Never send those back into a live solver.
+                    record_only = {m.metadata['topic'] for m in reader.iter_metadata()
+                                   if m.name == 'hc_teleop.record_only' and 'topic' in m.metadata}
+                    if self._recorded_profile_id == 'x1' and any(
+                            c.topic == '/action/joint_states' for c in summary.channels.values()):
+                        # X1 captures store the final joint command. Solver labels are
+                        # never an additional command stream, even without a sidecar.
+                        record_only.update(('/action/ee_poses', '/control/solver/ee_targets',
+                                            '/control/solver/joint_targets', '/observation/ee_poses'))
                     channels = {
                         c_id: (c.topic, schemas.get(c.schema_id, "std_msgs/msg/String"))
-                        for c_id, c in summary.channels.items()
+                        for c_id, c in summary.channels.items() if c.topic not in record_only
                     }
 
                     with self._lock:
