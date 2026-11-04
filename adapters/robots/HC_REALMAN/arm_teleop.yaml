@@ -107,7 +107,7 @@ grippers:
     - 0.90
     - -1.40
     - 1.15
-    - 0.0
+    - 1.0
     finger_closed:
     - 0.0
     - 0.0
@@ -117,7 +117,7 @@ grippers:
     - 0.0
     - 0.0
     - 0.0
-    - 1.0
+    - 0.0
   left:
     sim_joint: Z_hand_narrow1_joint
     sim_closed_position: 0.0
@@ -141,7 +141,7 @@ grippers:
     - 0.90
     - -1.40
     - 1.15
-    - 0.0
+    - 1.0
     finger_closed:
     - 0.0
     - 0.0
@@ -151,7 +151,7 @@ grippers:
     - 0.0
     - 0.0
     - 0.0
-    - 1.0
+    - 0.0
 control:
   backend: v23
   enabled_on_start: true

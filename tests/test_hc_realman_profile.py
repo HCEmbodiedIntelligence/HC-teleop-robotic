@@ -253,8 +253,8 @@ class HcRealmanProfileTest(unittest.TestCase):
             g_cfg = cfg["grippers"][side]
             self.assertIn(hw_name, g_cfg["finger_joint_names"])
             idx = g_cfg["finger_joint_names"].index(hw_name)
-            self.assertEqual(g_cfg["finger_open"][idx], 0.0)
-            self.assertEqual(g_cfg["finger_closed"][idx], 1.0)
+            self.assertEqual(g_cfg["finger_open"][idx], 1.0)
+            self.assertEqual(g_cfg["finger_closed"][idx], 0.0)
 
         # Verify PyBullet kinematic clamping motion
         cid = p.connect(p.DIRECT)
