@@ -10,18 +10,18 @@ robot:
   - 0.0
   - 1.0
   initial_joints:
-    right_joint1: -2.8798
-    right_joint2: 0.6109
-    right_joint3: 1.3090
-    right_joint4: 1.2217
-    right_joint5: 1.8326
-    right_joint6: 0.0
-    left_joint1: -3.0019
-    left_joint2: 0.6109
-    left_joint3: 1.3090
-    left_joint4: 1.2217
-    left_joint5: 1.7104
-    left_joint6: 0.0
+    right_joint1: 0.0
+    right_joint2: 0.34906585
+    right_joint3: -1.74532925
+    right_joint4: 0.0
+    right_joint5: 1.74532925
+    right_joint6: 0.48869219
+    left_joint1: 0.0
+    left_joint2: 0.34906585
+    left_joint3: -1.74532925
+    left_joint4: 0.0
+    left_joint5: 1.74532925
+    left_joint6: 0.48869219
 arms:
   right:
     base_link: ZZJ_Link
@@ -154,7 +154,8 @@ grippers:
     - 0.0
 control:
   backend: v23
-  enabled_on_start: true
+  enabled_on_start: false
+  home_on_start: false
   rate_hz: 100.0
   vr_data_topic: /vrdata
   joint_state_topic: /observation/joint_states
@@ -206,7 +207,7 @@ control:
   target_position_deadband: 0.0
   target_orientation_deadband: 0.0
   target_filter_alpha: 0.75
-  command_joint_deadband: 0.0
+  command_joint_deadband: 0.001
   collision_avoidance_enabled: false
   collision_min_distance: 0.02
   collision_home_tolerance: 0.008

@@ -169,11 +169,18 @@ else
   # this profile Fast DDS may select wlan0, while HC_X1 is restricted to the
   # robot-internal and inference Ethernet interfaces, splitting the local graph.
   export ROS_LOCALHOST_ONLY=0
-  export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-${HOME}/shm_profile.xml}"
-  [[ -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]] || {
-    echo "Fast DDS profile not found: ${FASTRTPS_DEFAULT_PROFILES_FILE}" >&2
-    exit 2
-  }
+  if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+    [[ -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]] || {
+      echo "Fast DDS profile not found: ${FASTRTPS_DEFAULT_PROFILES_FILE}" >&2
+      exit 2
+    }
+    export FASTRTPS_DEFAULT_PROFILES_FILE
+  elif [[ -f "${HOME}/shm_profile.xml" ]]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE="${HOME}/shm_profile.xml"
+  else
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+    echo "[HC] Fast DDS profile not found; using the middleware default transport." >&2
+  fi
 fi
 
 PROFILE_DIR="$(/usr/bin/python3 -m middleware.profile_cli profile-dir --config "${MIDDLEWARE_CONFIG}")"

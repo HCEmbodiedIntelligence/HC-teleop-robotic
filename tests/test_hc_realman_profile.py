@@ -64,60 +64,25 @@ class HcRealmanProfileTest(unittest.TestCase):
             hw_joints = hw_cfg["left_arm"]["joints"] + hw_cfg["right_arm"]["joints"]
             self.assertEqual(sim_joints, hw_joints)
 
-    def test_human_like_initial_pose_and_forward_z_axis(self):
-        """Verify initial arm pose has forward-pointing Z-axis (+X) and human-like geometry."""
+    def test_configured_initial_pose_and_collision_free(self):
+        """The operator-selected initial pose is identical on both arms and collision free."""
         with open(self.profile_dir / "arm_teleop.yaml") as f:
             cfg = yaml.safe_load(f)
         initial_joints = cfg["robot"]["initial_joints"]
+        expected = np.deg2rad([0.0, 20.0, -100.0, 0.0, 100.0, 28.0])
+        for side in ("right", "left"):
+            actual = [initial_joints[f"{side}_joint{i}"] for i in range(1, 7)]
+            np.testing.assert_allclose(actual, expected, atol=1e-8)
 
         cid = p.connect(p.DIRECT)
         try:
             urdf = str(self.profile_dir / "urdf/hc_realman.urdf")
             robot_id = p.loadURDF(urdf, useFixedBase=True)
-            link_map = {}
             for i in range(p.getNumJoints(robot_id)):
                 info = p.getJointInfo(robot_id, i)
                 j_name = info[1].decode("utf-8")
-                l_name = info[12].decode("utf-8")
-                link_map[l_name] = i
                 if j_name in initial_joints:
                     p.resetJointState(robot_id, i, initial_joints[j_name])
-
-            self.assertIn("right_hand_tcp", link_map)
-            self.assertIn("left_hand_tcp", link_map)
-
-            # Check Right Hand TCP
-            r_state = p.getLinkState(robot_id, link_map["right_hand_tcp"], computeForwardKinematics=True)
-            r_pos = np.array(r_state[4])
-            r_rot = np.array(p.getMatrixFromQuaternion(r_state[5])).reshape(3, 3)
-            r_z_axis = r_rot[:, 2]
-
-            # Check Left Hand TCP
-            l_state = p.getLinkState(robot_id, link_map["left_hand_tcp"], computeForwardKinematics=True)
-            l_pos = np.array(l_state[4])
-            l_rot = np.array(p.getMatrixFromQuaternion(l_state[5])).reshape(3, 3)
-            l_z_axis = l_rot[:, 2]
-
-            # 1. Z-axis must point forward (-X, front of robot)
-            self.assertLess(r_z_axis[0], -0.99, f"Right TCP Z-axis does not point forward (-X): {r_z_axis}")
-            self.assertLess(l_z_axis[0], -0.99, f"Left TCP Z-axis does not point forward (-X): {l_z_axis}")
-
-            # 2. Forward reach X in natural human range [-0.55m, -0.40m]
-            self.assertGreaterEqual(r_pos[0], -0.55)
-            self.assertLessEqual(r_pos[0], -0.40)
-            self.assertGreaterEqual(l_pos[0], -0.55)
-            self.assertLessEqual(l_pos[0], -0.40)
-
-            # 3. Comfortable working height Z in [0.80m, 1.05m]
-            self.assertGreaterEqual(r_pos[2], 0.80)
-            self.assertLessEqual(r_pos[2], 1.05)
-            self.assertGreaterEqual(l_pos[2], 0.80)
-            self.assertLessEqual(l_pos[2], 1.05)
-
-            # 4. Left-Right lateral symmetry: |Y_r + Y_l| < 0.005m
-            self.assertAlmostEqual(r_pos[1] + l_pos[1], 0.0, delta=0.005)
-
-            # 5. Collision free
             p.stepSimulation()
             contacts = p.getContactPoints(robot_id, robot_id)
             self.assertEqual(len(contacts), 0, f"Initial pose has self-collisions: {contacts}")

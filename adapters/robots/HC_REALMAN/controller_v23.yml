@@ -14,18 +14,18 @@ control:
   dt: 0.01
   damping: 5.0e-03
   joints_init:
-    right_joint1: -2.8798
-    right_joint2: 0.6109
-    right_joint3: 1.3090
-    right_joint4: 1.2217
-    right_joint5: 1.8326
-    right_joint6: 0.0
-    left_joint1: -3.0019
-    left_joint2: 0.6109
-    left_joint3: 1.3090
-    left_joint4: 1.2217
-    left_joint5: 1.7104
-    left_joint6: 0.0
+    right_joint1: 0.0
+    right_joint2: 0.34906585
+    right_joint3: -1.74532925
+    right_joint4: 0.0
+    right_joint5: 1.74532925
+    right_joint6: 0.48869219
+    left_joint1: 0.0
+    left_joint2: 0.34906585
+    left_joint3: -1.74532925
+    left_joint4: 0.0
+    left_joint5: 1.74532925
+    left_joint6: 0.48869219
 model:
   urdf: urdf/hc_realman.urdf
   free_joints:
