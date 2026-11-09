@@ -1359,14 +1359,26 @@ function initDatasetMarqueeSelection() {
 
   let isMouseDown = false;
   let isDragging = false;
-  let startX = 0;
-  let startY = 0;
+  let startPageX = 0;
+  let startPageY = 0;
   let lastClientX = 0;
   let lastClientY = 0;
   let lastKeyStates = { isCtrlOrMeta: false, isShift: false, isAlt: false };
   let initialStates = new Map();
   let scrollRafId = null;
   let scrollSpeedY = 0;
+
+  // 垂直平滑滚动统一辅助函数（优先 tableWrap，否则 window）
+  function scrollVertically(delta) {
+    if (tableWrap.scrollHeight > tableWrap.clientHeight + 4 && tableWrap.clientHeight > 0) {
+      const oldTop = tableWrap.scrollTop;
+      tableWrap.scrollTop += delta;
+      if (Math.abs(tableWrap.scrollTop - oldTop) > 0.5) {
+        return;
+      }
+    }
+    window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+  }
 
   // 支持复选框 Shift 范围点击多选
   let lastClickedCheckbox = null;
@@ -1391,17 +1403,18 @@ function initDatasetMarqueeSelection() {
     lastClickedCheckbox = cb;
   });
 
+  // 拖动时靠近边缘自动滚动
   function startAutoScroll(clientY) {
-    const rect = tableWrap.getBoundingClientRect();
-    const margin = 35;
-    const maxSpeed = 14;
+    const winH = window.innerHeight;
+    const margin = 40;
+    const maxSpeed = 16;
 
-    if (clientY > rect.bottom - margin && clientY < rect.bottom + 60) {
-      const factor = Math.min(1, (clientY - (rect.bottom - margin)) / margin);
-      scrollSpeedY = Math.max(2, maxSpeed * factor);
-    } else if (clientY < rect.top + margin && clientY > rect.top - 60) {
-      const factor = Math.min(1, ((rect.top + margin) - clientY) / margin);
-      scrollSpeedY = -Math.max(2, maxSpeed * factor);
+    if (clientY > winH - margin) {
+      const factor = Math.min(1, (clientY - (winH - margin)) / margin);
+      scrollSpeedY = Math.max(3, maxSpeed * factor);
+    } else if (clientY < margin && clientY > 0) {
+      const factor = Math.min(1, (margin - clientY) / margin);
+      scrollSpeedY = -Math.max(3, maxSpeed * factor);
     } else {
       scrollSpeedY = 0;
     }
@@ -1409,7 +1422,7 @@ function initDatasetMarqueeSelection() {
     if (scrollSpeedY !== 0 && !scrollRafId) {
       const step = () => {
         if (scrollSpeedY !== 0) {
-          tableWrap.scrollTop += scrollSpeedY;
+          scrollVertically(scrollSpeedY);
           updateSelection(lastClientX, lastClientY, lastKeyStates.isCtrlOrMeta, lastKeyStates.isShift, lastKeyStates.isAlt);
           scrollRafId = requestAnimationFrame(step);
         } else {
@@ -1431,16 +1444,29 @@ function initDatasetMarqueeSelection() {
     scrollSpeedY = 0;
   }
 
-  function updateSelection(curX, curY, isCtrlOrMeta = false, isShift = false, isAlt = false) {
-    const x1 = Math.min(startX, curX);
-    const y1 = Math.min(startY, curY);
-    const x2 = Math.max(startX, curX);
-    const y2 = Math.max(startY, curY);
+  // 选区更新与相交判定（基于文档绝对坐标 + 视口转换，支持滚动时选框跟随拓展）
+  function updateSelection(curClientX, curClientY, isCtrlOrMeta = false, isShift = false, isAlt = false) {
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
 
-    box.style.left = `${x1}px`;
-    box.style.top = `${y1}px`;
-    box.style.width = `${x2 - x1}px`;
-    box.style.height = `${y2 - y1}px`;
+    const curPageX = curClientX + scrollX;
+    const curPageY = curClientY + scrollY;
+
+    const docX1 = Math.min(startPageX, curPageX);
+    const docY1 = Math.min(startPageY, curPageY);
+    const docX2 = Math.max(startPageX, curPageX);
+    const docY2 = Math.max(startPageY, curPageY);
+
+    // 转换为视口坐标供 fixed 选框和 getBoundingClientRect 比对
+    const viewX1 = docX1 - scrollX;
+    const viewY1 = docY1 - scrollY;
+    const viewX2 = docX2 - scrollX;
+    const viewY2 = docY2 - scrollY;
+
+    box.style.left = `${viewX1}px`;
+    box.style.top = `${viewY1}px`;
+    box.style.width = `${viewX2 - viewX1}px`;
+    box.style.height = `${viewY2 - viewY1}px`;
 
     let inBoxCount = 0;
     let changed = false;
@@ -1452,10 +1478,10 @@ function initDatasetMarqueeSelection() {
 
       const rect = row.getBoundingClientRect();
       const intersects = !(
-        x2 < rect.left ||
-        x1 > rect.right ||
-        y2 < rect.top ||
-        y1 > rect.bottom
+        viewX2 < rect.left ||
+        viewX1 > rect.right ||
+        viewY2 < rect.top ||
+        viewY1 > rect.bottom
       );
 
       if (intersects) {
@@ -1507,8 +1533,10 @@ function initDatasetMarqueeSelection() {
       isAlt: e.altKey
     };
 
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    const dx = (e.clientX + scrollX) - startPageX;
+    const dy = (e.clientY + scrollY) - startPageY;
 
     if (!isDragging) {
       if (Math.hypot(dx, dy) >= 6) {
@@ -1584,8 +1612,11 @@ function initDatasetMarqueeSelection() {
 
     isMouseDown = true;
     isDragging = false;
-    startX = e.clientX;
-    startY = e.clientY;
+
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    startPageX = e.clientX + scrollX;
+    startPageY = e.clientY + scrollY;
     lastClientX = e.clientX;
     lastClientY = e.clientY;
     lastKeyStates = {
@@ -1603,46 +1634,47 @@ function initDatasetMarqueeSelection() {
     document.addEventListener('mouseup', onMouseUp);
   });
 
+  // 处理滚轮滚动事件（阻止 Ctrl 缩放 / Shift 横滚，平滑垂直滚动表格或页面）
   function handleWheel(e) {
-    if (!e.ctrlKey && !e.metaKey && !e.shiftKey) return;
+    const datasetsPage = document.getElementById('datasets');
+    if (!datasetsPage || datasetsPage.classList.contains('hidden')) return;
 
-    // 阻止 Ctrl + 滚轮缩放浏览器，阻止 Shift + 滚轮横向滚动
+    const inDatasets = datasetsPage.contains(e.target);
+    if (!inDatasets && !isDragging && !isMouseDown) return;
+
+    const isModifier = e.ctrlKey || e.metaKey || e.shiftKey;
+    if (!isModifier && !isDragging && !isMouseDown) return;
+
     e.preventDefault();
 
     let delta = e.deltaY;
-    // 当按下 Shift 键时，许多浏览器会将纵向滚动转换为 deltaX，此处统一转回纵向位移
+    // 按住 Shift 时部分浏览器将 deltaY 转入 deltaX，这里转回纵向位移
     if (e.shiftKey && (delta === 0 || Math.abs(e.deltaX) > Math.abs(delta))) {
       delta = e.deltaX;
     }
 
     if (e.deltaMode === 1) {
-      // DOM_DELTA_LINE 行模式
-      delta *= 24;
+      delta *= 28;
     } else if (e.deltaMode === 2) {
-      // DOM_DELTA_PAGE 页模式
-      delta *= tableWrap.clientHeight || 400;
+      delta *= window.innerHeight || 600;
     }
 
-    tableWrap.scrollTop += delta;
+    scrollVertically(delta);
+
+    // 如果刚按下左键还没达到 6px 移动阈值，一滚动滚轮立即激活框选
+    if (isMouseDown && !isDragging) {
+      isDragging = true;
+      window.getSelection()?.removeAllRanges();
+      document.body.classList.add('marquee-selecting');
+      box.style.display = 'block';
+    }
 
     if (isDragging) {
       updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
     }
   }
 
-  const datasetsContainer = document.getElementById('datasets');
-  if (datasetsContainer) {
-    datasetsContainer.addEventListener('wheel', handleWheel, { passive: false });
-  } else {
-    tableWrap.addEventListener('wheel', handleWheel, { passive: false });
-  }
-
-  // 拖选过程中若鼠标移出容器仍能通过滚轮顺畅滚动表格并阻止浏览器缩放
-  window.addEventListener('wheel', (e) => {
-    if (isDragging && (e.ctrlKey || e.metaKey || e.shiftKey)) {
-      handleWheel(e);
-    }
-  }, { passive: false });
+  window.addEventListener('wheel', handleWheel, { passive: false });
 
   // 拖选过程中动态响应修饰键按下与松开
   window.addEventListener('keydown', (e) => {
