@@ -327,6 +327,10 @@ control:
   home_gesture_release_threshold: 0.25
   # 回零速度（rad/s）、到位容差（rad）及输入/反馈超时（秒）。
   home_joint_velocity: 0.7
+  home_joint_acceleration: 1.4
+  home_feedback_timeout: 2.0
+  # 当前硬件启动只开放右臂控制；只读左臂和腰部不参与回零或到位判断。
+  home_joint_names: [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
   home_tolerance: 0.05
   pose_timeout: 0.5
   input_timeout: 0.5
@@ -363,6 +367,9 @@ control:
   target_position_deadband: 0.003
   target_orientation_deadband: 0.01
   target_filter_alpha: 0.4
+  # 笛卡尔末端在线限速（m/s 与 rad/s），从源头消除 VR 手柄急速挥动/反向带来的阶跃与抖动
+  target_max_linear_velocity: 0.8
+  target_max_angular_velocity: 3.0
   command_joint_deadband: 0.0005
   # 抓取数据采集需要连续通过贴近本体与折腕姿态；按现场要求完全关闭
   # 几何碰撞拦截。关节位置/速度限位和急停仍由控制链路保留。

@@ -468,6 +468,10 @@ class ControlOwnership:
             return self.snapshot()
 
     def snapshot(self):
+        # rclpy Clock.now() may briefly wait in the C extension under load.
+        # Never hold the final command/authority lock across that observer-only
+        # timestamp lookup: a dashboard snapshot must not stall actuator output.
+        published_stamp_ns = self.ros_clock()
         with self.lock:
             return dict(state=self.state, phase=self.phase, reason=self.reason,
                         dagger_enabled=self.dagger_enabled,
@@ -481,5 +485,5 @@ class ControlOwnership:
                         acknowledgements=sorted(self.acks), peers=dict(self.peers),
                         recording_error=self.recording_error, command_seq=self.command_seq,
                         cutoff_ns=self.cutoff_ns, sequence=self.event_seq,
-                        published_stamp_ns=self.ros_clock(),
+                        published_stamp_ns=published_stamp_ns,
                         metrics=list(self.metrics)[-64:], metric_count=len(self.metrics))

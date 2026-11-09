@@ -803,6 +803,14 @@ class RosBridge:
                     self._boundary = robot_api_boundary
                 self._setup_ownership_ros(control_node, publishers, permit_pub, output_publisher,
                                           subscriptions, command_node=command_node, status_node=telemetry_node)
+                # Actuator targets are overwriteable setpoints, not a FIFO.
+                # If the Python executor is briefly descheduled, retain only
+                # the newest target instead of replaying a stale burst later.
+                command_qos = QoSProfile(
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                    reliability=ReliabilityPolicy.BEST_EFFORT,
+                )
                 for source, topic in (
                     ("motion", str(mux_config.get("motion_topic", "/control/motion/joint_targets"))),
                     ("vr", str(mux_config.get("vr_topic", "/control/vr/joint_states"))),
@@ -830,7 +838,7 @@ class RosBridge:
                             JointState,
                             topic,
                             self._timed_callback('mux:'+source, mux_callback),
-                            qos_profile_sensor_data,
+                            command_qos,
                             callback_group=self._command_callback_group,
                         )
                     )
@@ -1230,7 +1238,11 @@ class RosBridge:
                 state_sequence = sequence
 
         status_executor_node = status_node if status_node is not None else node
-        status_executor_node.create_timer(.01,
+        # State is intentionally coalesced to 10 Hz above. Polling that
+        # observer at 100 Hz only contends with the shared final-command lock
+        # and has caused >150 ms action gaps under CPU load. 20 Hz preserves
+        # prompt event/status delivery while halving lock pressure.
+        status_executor_node.create_timer(.05,
             self._timed_callback('ownership_status', publish_status),
             callback_group=(self._telemetry_callback_group if status_node is not None
                             else self._ownership_callback_group))

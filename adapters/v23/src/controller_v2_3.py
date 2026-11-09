@@ -125,6 +125,19 @@ class ControllerV23:
         if raw_limits.size != len(free_joints):
             raise ValueError("velocity limit count must match free_joints")
         self.velocity_limits = np.deg2rad(raw_limits)
+        raw_acceleration = self.cfg.get("limit", {}).get("acceleration_rad_s2")
+        self.acceleration_limits = None
+        if raw_acceleration is not None:
+            self.acceleration_limits = np.asarray(raw_acceleration, dtype=float)
+            if self.acceleration_limits.ndim == 0:
+                self.acceleration_limits = np.full(len(free_joints), float(raw_acceleration))
+            if (self.acceleration_limits.shape != (len(free_joints),)
+                    or not np.all(np.isfinite(self.acceleration_limits))
+                    or np.any(self.acceleration_limits <= 0)):
+                raise ValueError("acceleration_rad_s2 must be positive scalar or one per free joint")
+            if self.method != "retarget":
+                raise ValueError("acceleration limits require continuous retarget integration")
+        self.previous_velocity = np.zeros(len(free_joints))
         self.last_result = None
 
     @classmethod
@@ -208,6 +221,8 @@ class ControllerV23:
             return
         self.command_q = self.q.copy()
 
+        self.previous_velocity[:] = 0.0
+
     def step(self, dt: float | None = None):
         if not self.have_feedback:
             raise RuntimeError("joint feedback has not been received")
@@ -223,12 +238,15 @@ class ControllerV23:
             step_dt,
             velocity_limits=self.velocity_limits,
             damping=self.damping,
+            previous_velocity=self.previous_velocity,
+            acceleration_limits=self.acceleration_limits,
         )
         next_q = self.interface.integrate_free(base_q, result.velocity, step_dt)
         next_q = self.interface.clip_configuration(next_q)
         if not np.all(np.isfinite(next_q)):
             raise FloatingPointError("IK produced a non-finite configuration")
         self.command_q = next_q
+        self.previous_velocity = result.velocity.copy()
         self.last_result = result
         return (
             self.free_joint_names.copy(),

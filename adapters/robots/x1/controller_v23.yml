@@ -61,13 +61,13 @@ task:
   - - - R_arm_0_Link
       - io_teleop_ee_link_right
     - 10.0
-    - 3.0
-    - 8.0
+    - 1.0
+    - 12.0
   - - - L_arm_0_Link
       - io_teleop_ee_link_left
     - 10.0
-    - 3.0
-    - 8.0
+    - 1.0
+    - 12.0
   axis: []   # 不额外约束某一工具轴方向。
   # 零空间关节姿态任务格式：[[关节名称列表], 权重, 增益[, 目标关节角]]。
   # 若省略目标关节角，则自动继承 control.joints_init，在不影响末端精度的前提下持续吸引肘部/肩部回归初始自然屈臂位姿。
@@ -105,3 +105,5 @@ limit:
   - 130.0
   - 130.0
   - 130.0
+  # 各自由关节最大加速度 (rad/s^2)，与 downstream hardware smoother (12 rad/s^2) 严格对齐。
+  acceleration_rad_s2: 12.0

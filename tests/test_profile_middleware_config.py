@@ -146,6 +146,20 @@ def test_x1_records_camera_metadata_and_head_poses_for_legacy_conversion():
         }
 
 
+def test_x1_records_smoother_final_joint_command_without_throttling():
+    profile_path = Path(__file__).resolve().parents[1] / 'adapters/robots/x1/middleware.yaml'
+    profile = yaml.safe_load(profile_path.read_text())
+    subscriptions = {
+        item['topic']: item for item in recording_subscriptions(profile['ros'])
+    }
+
+    item = subscriptions['/control/joint_cmd']
+    assert item['type'] == 'sensor_msgs/msg/JointState'
+    assert item['outputs'] == ['record']
+    assert item['qos_reliability'] == 'reliable'
+    assert item['max_hz'] == 0.0
+
+
 def test_legacy_profile_without_middleware_file_retains_host_settings(deployment):
     store, path = deployment
     path.unlink()

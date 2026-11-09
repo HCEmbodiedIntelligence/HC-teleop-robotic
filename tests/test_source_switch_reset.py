@@ -239,9 +239,13 @@ def test_page_home_after_switch_starts_at_measured_position(rig):
     teleop._home_topic_callback(Bool(data=True))
     assert teleop.homing
     command = dict(teleop.joint_state)
+    started = teleop.homing_last_time
+    teleop._monotonic = lambda: started + .01
     teleop._update_homing(command)
-    step = teleop.control['home_joint_velocity']/teleop.control['rate_hz']
-    assert abs(command['Joint1_R'] - (teleop.joint_state['Joint1_R']-step)) < 1e-10
+    acceleration = teleop.control['home_joint_acceleration']
+    assert abs(command['Joint1_R'] - (
+        teleop.joint_state['Joint1_R'] - .5 * acceleration * .01 ** 2
+    )) < 1e-10
     assert 'Joint1_R' not in teleop.generic_aux_command
     assert teleop.homing
 
@@ -253,10 +257,46 @@ def test_home_near_goal_does_not_snap_across_tolerance(rig):
     teleop._joint_state_callback(msg)
     teleop._home_topic_callback(Bool(data=True))
     command=dict(teleop.joint_state)
+    started = teleop.homing_last_time
+    teleop._monotonic = lambda: started + .01
     teleop._update_homing(command)
-    step=teleop.control['home_joint_velocity']/teleop.control['rate_hz']
+    step=.5*teleop.control['home_joint_acceleration']*.01**2
     assert abs(command['Joint1_R']-teleop.joint_state['Joint1_R']) <= step+1e-10
     assert teleop.homing
+
+
+def test_home_uses_acceleration_limit_and_only_enabled_joints(rig):
+    from std_msgs.msg import Bool
+    teleop, _solver = rig
+    msg = feedback(*rig, offset=.6)
+    # Disabled left arm and waist feedback must not hold Home open.
+    msg.position[msg.name.index('Joint1_L')] += .8
+    msg.position[msg.name.index('leg_1')] += .4
+    teleop._joint_state_callback(msg)
+    teleop._home_topic_callback(Bool(data=True))
+    names = teleop._homing_joint_names()
+    assert names == [f'Joint{i}_R' for i in range(1, 8)]
+    now = teleop.homing_last_time
+    previous_velocity = 0.0
+    periods = (.006, .017, .029, .011)
+    for index in range(500):
+        dt = periods[index % len(periods)]
+        now += dt
+        teleop._monotonic = lambda now=now: now
+        command = dict(teleop.joint_state)
+        teleop._update_homing(command)
+        velocity = teleop.homing_velocity.get('Joint1_R', 0.0)
+        assert abs(velocity) <= teleop.control['home_joint_velocity'] + 1e-10
+        assert abs(velocity - previous_velocity) <= (
+            teleop.control['home_joint_acceleration'] * dt + 1e-10
+        )
+        previous_velocity = velocity
+        teleop.last_command.update(command)
+        for name in names:
+            teleop.joint_state[name] = command[name]
+        if not teleop.homing:
+            break
+    assert not teleop.homing
 
 
 def test_duplicate_source_does_not_restart_reset_and_home_requires_manual_grant(rig):
@@ -333,11 +373,18 @@ def test_ros_source_delivery_reset_handshake_and_page_home(rig):
         until(lambda: teleop.solver_rearm.state in {'wait_release', 'wait_press'})
         teleop.command_pub.reset_mock()
         home.publish(Bool(data=True))
-        until(lambda: teleop.homing and teleop.command_pub.publish.called)
-        output = teleop.command_pub.publish.call_args_list[0].args[0]
+        until(lambda: teleop.homing and any(
+            call.args[0].name == teleop._homing_joint_names()
+            for call in teleop.command_pub.publish.call_args_list
+        ))
+        output = next(
+            call.args[0] for call in teleop.command_pub.publish.call_args_list
+            if call.args[0].name == teleop._homing_joint_names()
+        )
         value = output.position[output.name.index('Joint1_R')]
-        step = teleop.control['home_joint_velocity']/teleop.control['rate_hz']
-        assert abs(value - (teleop.initial_joints['Joint1_R']+.6)) <= step+1e-9
+        max_first_step = .5 * teleop.control['home_joint_acceleration'] * .05 ** 2
+        assert abs(value - (teleop.initial_joints['Joint1_R']+.6)) <= max_first_step+1e-9
+        assert output.name == teleop._homing_joint_names()
     finally:
         executor.shutdown()
         probe.destroy_node()

@@ -67,7 +67,7 @@ ros:
     event_max_hz: 20.0
     qos_reliability: reliable
   - topic: /action/joint_states
-    description: 最终下发给机器人的整机关节目标
+    description: 平滑前的整机关节目标
     type: sensor_msgs/msg/JointState
     enabled: true
     outputs:
@@ -75,6 +75,15 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 20.0
+    qos_reliability: reliable
+  - topic: /control/joint_cmd
+    description: smoother 实际下发给机器人的最终关节指令，用于定位限速、重同步和断流恢复问题
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
     qos_reliability: reliable
   - topic: /observation/hands/joint_states
     description: ''

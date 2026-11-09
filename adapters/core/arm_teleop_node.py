@@ -125,6 +125,9 @@ class RobotArmTeleopNode(Node):
         self.base_zero_pending = False
         self.home_gesture_latched = False
         self.homing = False
+        self.homing_velocity: dict[str, float] = {}
+        self.homing_last_time = 0.0
+        self.homing_target_reached_time: float | None = None
         self.motion_home_request_ns = 0
         self.motion_home_done = False
         self.initial_homing_done = False
@@ -627,15 +630,31 @@ class RobotArmTeleopNode(Node):
                 "control.home_gesture_release_threshold must be non-negative "
                 "and below home_gesture_threshold"
             )
-        for key in ("home_joint_velocity", "home_tolerance"):
-            value = float(self.config["control"].get(key, 0.0))
+        home_defaults = {
+            "home_joint_velocity": 0.0,
+            "home_joint_acceleration": 2.0 * float(self.config["control"].get("home_joint_velocity", 0.0)),
+            "home_tolerance": 0.0,
+        }
+        for key, default in home_defaults.items():
+            value = float(self.config["control"].get(key, default))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"control.{key} must be finite and positive")
-        homing_names = [
+            self.config["control"][key] = value
+        available_homing_names = [
             name
             for arm_config in self.config["arms"].values()
             for name in arm_config["joint_names"]
-        ] + list(self.config["body"]["waist_joint_names"])
+        ] + list(self.config["body"]["waist_joint_names"]) + list(
+            self.config["body"].get("neck_joint_names", [])
+        )
+        homing_names = self.config["control"].get("home_joint_names", available_homing_names)
+        if (not isinstance(homing_names, list) or not homing_names
+                or len(set(homing_names)) != len(homing_names)
+                or not all(isinstance(name, str) and name in available_homing_names for name in homing_names)):
+            raise ValueError(
+                "control.home_joint_names must be a non-empty unique subset of controllable joints"
+            )
+        self.config["control"]["home_joint_names"] = homing_names
         missing_home = [
             name
             for name in homing_names
@@ -1242,14 +1261,21 @@ class RobotArmTeleopNode(Node):
         return False
 
     def _homing_joint_names(self) -> list[str]:
-        return (
-            ordered_homing_joint_names(
-                self.arms["right"].joint_names,
-                self.arms["left"].joint_names,
-                self.body.joint_names,
-            )
-            + self.neck_joint_names
-        )
+        configured = self.control.get("home_joint_names")
+        if configured is not None:
+            return list(configured)
+        return ordered_homing_joint_names(
+            self.arms["right"].joint_names,
+            self.arms["left"].joint_names,
+            self.body.joint_names,
+        ) + self.neck_joint_names
+
+    def _begin_joint_home_trajectory(self) -> None:
+        now = self._monotonic()
+        self.homing_velocity = dict.fromkeys(self._homing_joint_names(), 0.0)
+        self.homing_last_time = now
+        self.homing_target_reached_time = None
+        self.homing_start_time = now
 
     def _check_initial_homing(self) -> None:
         if self.initial_homing_done:
@@ -1286,9 +1312,10 @@ class RobotArmTeleopNode(Node):
             if name in self.joint_state:
                 self.last_command[name] = self.joint_state[name]
         self.homing = True
-        self.homing_start_time = self._monotonic()
+        self._begin_joint_home_trajectory()
         self.get_logger().info(
-            "both sticks outward: homing both arms and waist to initial_joints"
+            "both sticks outward: homing "
+            f"{', '.join(self._homing_joint_names())} to initial_joints"
         )
 
     def _update_homing(self, command: dict[str, float]) -> None:
@@ -1298,10 +1325,48 @@ class RobotArmTeleopNode(Node):
             [self.last_command.get(name, self.joint_state.get(name, self.initial_joints[name])) for name in names],
             dtype=float,
         )
-        max_step = float(self.control["home_joint_velocity"]) / float(
-            self.control["rate_hz"]
+        now = self._monotonic()
+        nominal_dt = 1.0 / float(self.control["rate_hz"])
+        dt = min(0.05, max(0.001, now - self.homing_last_time))
+        if not self.homing_velocity or set(self.homing_velocity) != set(names):
+            self.homing_velocity = dict.fromkeys(names, 0.0)
+            dt = nominal_dt
+        self.homing_last_time = now
+        maximum_velocity = float(self.control["home_joint_velocity"])
+        maximum_acceleration = float(
+            self.control.get("home_joint_acceleration", 2.0 * maximum_velocity)
         )
-        next_values = previous + np.clip(target - previous, -max_step, max_step)
+        next_values = previous.copy()
+        for index, name in enumerate(names):
+            error = target[index] - previous[index]
+            old_velocity = float(self.homing_velocity.get(name, 0.0))
+            # Start discrete braking one acceleration step before the
+            # continuous stopping-distance boundary, so the final sample can
+            # reach zero velocity without snapping.
+            stopping_velocity = max(
+                0.0,
+                math.sqrt(max(0.0, 2.0 * maximum_acceleration * abs(error)))
+                - maximum_acceleration * dt,
+            )
+            desired_velocity = math.copysign(
+                min(maximum_velocity, stopping_velocity), error
+            ) if error else 0.0
+            velocity_delta = float(np.clip(
+                desired_velocity - old_velocity,
+                -maximum_acceleration * dt,
+                maximum_acceleration * dt,
+            ))
+            new_velocity = old_velocity + velocity_delta
+            step = 0.5 * (old_velocity + new_velocity) * dt
+            settled_distance = 0.5 * maximum_acceleration * dt * dt
+            if (not error or abs(step) >= abs(error) or step * error < 0.0
+                    or (abs(error) <= settled_distance
+                        and abs(old_velocity) <= maximum_acceleration * dt)):
+                next_values[index] = target[index]
+                new_velocity = 0.0
+            else:
+                next_values[index] = previous[index] + step
+            self.homing_velocity[name] = new_velocity
         for name, value in zip(names, next_values):
             command[name] = float(value)
             if name in self.body.joint_names or name in self.neck_joint_names:
@@ -1310,16 +1375,24 @@ class RobotArmTeleopNode(Node):
         feedback_error = max(
             abs(self.joint_state.get(name, self.initial_joints[name]) - self.initial_joints[name]) for name in names
         )
-        elapsed = self._monotonic() - getattr(self, "homing_start_time", 0.0)
-        reached = np.max(np.abs(next_values - target)) <= 1e-9
+        reached = np.max(np.abs(next_values - target)) <= 1e-9 and all(
+            abs(self.homing_velocity[name]) <= 1e-9 for name in names
+        )
+        if reached and self.homing_target_reached_time is None:
+            self.homing_target_reached_time = now
         feedback_close = feedback_error <= float(self.control.get("home_tolerance", 0.08))
-        feedback_requirement_met = feedback_close or (elapsed >= 5.0)
+        feedback_requirement_met = feedback_close or (
+            self.homing_target_reached_time is not None
+            and now - self.homing_target_reached_time
+            >= float(self.control.get("home_feedback_timeout", 2.0))
+        )
         if reached and feedback_requirement_met:
             for name, value in zip(names, target):
                 command[name] = float(value)
                 if name in self.body.joint_names or name in self.neck_joint_names:
                     self.generic_aux_command[name] = float(value)
             self.homing = False
+            self.homing_velocity.clear()
             for name in names:
                 bullet.resetJointState(
                     self.robot_id,
@@ -1346,7 +1419,7 @@ class RobotArmTeleopNode(Node):
             if self.external_ik:
                 self.solver_rearm.homing_complete()
             self.get_logger().info(
-                f"{self.backend} controller arms and waist homing complete"
+                f"{self.backend} controller homing complete: {', '.join(names)}"
             )
 
     def _input_fresh(self, arm: ArmRuntime, now: float) -> bool:
@@ -2968,6 +3041,11 @@ class RobotArmTeleopNode(Node):
             float(self.control["max_displacement"]),
             bool(self.control["orientation_enabled"]),
         )
+        rate_hz = float(self.control.get("rate_hz", 100.0))
+        max_v = float(self.control.get("target_max_linear_velocity", 0.0))
+        max_w = float(self.control.get("target_max_angular_velocity", 0.0))
+        max_linear_step = (max_v / rate_hz) if max_v > 0.0 else None
+        max_angular_step = (max_w / rate_hz) if max_w > 0.0 else None
         if arm.target_local is None:
             arm.target_local = raw_target_local
         else:
@@ -2977,6 +3055,8 @@ class RobotArmTeleopNode(Node):
                 float(self.control.get("target_position_deadband", 0.0)),
                 float(self.control.get("target_orientation_deadband", 0.0)),
                 float(self.control.get("target_filter_alpha", 1.0)),
+                max_linear_step=max_linear_step,
+                max_angular_step=max_angular_step,
             )
         arm.target_world = self._world_pose(
             self._link_pose(arm.base_index), arm.target_local
@@ -3039,6 +3119,11 @@ class RobotArmTeleopNode(Node):
             float(self.control["max_displacement"]),
             bool(self.control["orientation_enabled"]),
         )
+        rate_hz = float(self.control.get("rate_hz", 100.0))
+        max_v = float(self.control.get("target_max_linear_velocity", 0.0))
+        max_w = float(self.control.get("target_max_angular_velocity", 0.0))
+        max_linear_step = (max_v / rate_hz) if max_v > 0.0 else None
+        max_angular_step = (max_w / rate_hz) if max_w > 0.0 else None
         if arm.target_local is None:
             arm.target_local = raw_target_local
         else:
@@ -3048,6 +3133,8 @@ class RobotArmTeleopNode(Node):
                 float(self.control.get("target_position_deadband", 0.0)),
                 float(self.control.get("target_orientation_deadband", 0.0)),
                 float(self.control.get("target_filter_alpha", 1.0)),
+                max_linear_step=max_linear_step,
+                max_angular_step=max_angular_step,
             )
 
     def _trigger(self, side: str) -> float:
@@ -3148,13 +3235,13 @@ class RobotArmTeleopNode(Node):
         self.body.reference_target_link = None
         self.body.target_head_local = None
         self.homing = True
-        self.homing_start_time = self._monotonic()
         for name in self.controlled_names:
             if name in self.joint_state:
                 self.last_command[name] = float(self.joint_state[name])
+        self._begin_joint_home_trajectory()
         self.get_logger().info(
-            f"homing triggered: {self.backend} controller homing both arms and waist "
-            "to initial_joints"
+            f"homing triggered: {self.backend} controller moving "
+            f"{', '.join(self._homing_joint_names())} to initial_joints"
         )
     def _request_motion_home(self) -> bool:
         if getattr(self, 'intervention', None) and self.intervention.active:
@@ -3258,7 +3345,7 @@ class RobotArmTeleopNode(Node):
                 return
             message = JointState()
             message.header.stamp = self.get_clock().now().to_msg()
-            message.name = self.controlled_names
+            message.name = self._homing_joint_names()
             message.position = [
                 float(command.get(name, self.last_command.get(name, 0.0)))
                 for name in message.name
@@ -3442,7 +3529,7 @@ class RobotArmTeleopNode(Node):
                 return
             message = JointState()
             message.header.stamp = self.get_clock().now().to_msg()
-            message.name = self.controlled_names
+            message.name = self._homing_joint_names()
             message.position = [float(command[name]) for name in message.name]
             self.command_pub.publish(message)
             self.last_command.update(command)

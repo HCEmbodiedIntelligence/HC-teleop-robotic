@@ -129,6 +129,29 @@ class ArmTeleopMathTests(unittest.TestCase):
             atol=1e-7,
         )
 
+    def test_pose_stabilizer_limits_slew_rate(self):
+        previous_position = np.asarray([1.0, 2.0, 3.0])
+        previous_orientation = np.asarray([0.0, 0.0, 0.0, 1.0])
+        # Large jump: 0.1m step in position, 0.5 rad rotation
+        moved_position, moved_orientation = stabilize_pose(
+            [1.1, 2.0, 3.0],
+            quaternion_from_axis_angle([0, 0, 1], 0.5),
+            previous_position,
+            previous_orientation,
+            0.0,
+            0.0,
+            1.0,
+            max_linear_step=0.01,
+            max_angular_step=0.05,
+        )
+        self.assertAlmostEqual(float(np.linalg.norm(moved_position - previous_position)), 0.01)
+        np.testing.assert_allclose(moved_position, [1.01, 2.0, 3.0], atol=1e-9)
+        self.assertAlmostEqual(
+            float(np.linalg.norm(orientation_error(moved_orientation, previous_orientation))),
+            0.05,
+            places=6,
+        )
+
     def test_both_sticks_outward_gesture(self):
         self.assertTrue(sticks_outward(-0.9, 0.85, 0.8))
         self.assertFalse(sticks_outward(0.9, -0.85, 0.8))
