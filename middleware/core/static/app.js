@@ -1513,6 +1513,7 @@ function initDatasetMarqueeSelection() {
     if (!isDragging) {
       if (Math.hypot(dx, dy) >= 6) {
         isDragging = true;
+        window.getSelection()?.removeAllRanges();
         document.body.classList.add('marquee-selecting');
         box.style.display = 'block';
       } else {
@@ -1535,6 +1536,7 @@ function initDatasetMarqueeSelection() {
 
     if (isDragging) {
       isDragging = false;
+      window.getSelection()?.removeAllRanges();
       document.body.classList.remove('marquee-selecting');
       box.style.display = 'none';
 
@@ -1552,6 +1554,11 @@ function initDatasetMarqueeSelection() {
     }
   }
 
+  tableWrap.addEventListener('selectstart', (e) => {
+    // 阻止表格区域触发浏览器原生文本选中
+    e.preventDefault();
+  });
+
   tableWrap.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return; // 仅限鼠标左键
 
@@ -1568,6 +1575,12 @@ function initDatasetMarqueeSelection() {
 
     const allCbs = tbody.querySelectorAll('input[type="checkbox"]:not(:disabled)');
     if (allCbs.length === 0) return;
+
+    // 彻底清除并阻止任何可能的浏览器原生文字选择
+    window.getSelection()?.removeAllRanges();
+    if (!e.target.closest('input[type="checkbox"]')) {
+      e.preventDefault();
+    }
 
     isMouseDown = true;
     isDragging = false;
@@ -1646,6 +1659,15 @@ async function loadDatasets() {
       const nameCell = document.createElement('td');
       const nameCode = document.createElement('code');
       nameCode.textContent = `${file.marked ? '★ ' : ''}${file.filename}`;
+      nameCode.title = '双击可复制文件名';
+      nameCode.style.cursor = 'pointer';
+      nameCode.ondblclick = (e) => {
+        e.stopPropagation();
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(file.filename);
+          toast(`已复制文件名：${file.filename}`);
+        }
+      };
       nameCell.append(nameCode);
       const formatTag = document.createElement('span');
       formatTag.className = 'tag';

@@ -1046,10 +1046,28 @@ body.marquee-selecting * {
   cursor: crosshair !important;
 }
 
-#datasets .table-wrap {
+#datasets .table-wrap,
+#datasets table,
+#datasetRows tr,
+#datasetRows td,
+#datasetRows th {
   position: relative;
-  user-select: text;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
 }
+
+#datasets ::selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+
+#datasets *::-moz-selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+
 
 #datasetRows tr:has(input[type="checkbox"]:checked) {
   background-color: #f0f7ff;
