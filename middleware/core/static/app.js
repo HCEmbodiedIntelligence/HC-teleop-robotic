@@ -1338,6 +1338,265 @@ function updateSelectedDatasetCount() {
   }
 }
 
+function initDatasetMarqueeSelection() {
+  const tableWrap = document.querySelector('#datasets .table-wrap');
+  const tbody = document.querySelector('#datasetRows');
+  if (!tableWrap || !tbody) return;
+
+  // 创建全局选框 DOM 元素
+  let box = document.getElementById('datasetMarqueeBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'datasetMarqueeBox';
+    box.className = 'marquee-selection-box';
+    const badge = document.createElement('span');
+    badge.className = 'marquee-count-badge';
+    badge.style.display = 'none';
+    box.appendChild(badge);
+    document.body.appendChild(box);
+  }
+  const badge = box.querySelector('.marquee-count-badge');
+
+  let isMouseDown = false;
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+  let lastClientX = 0;
+  let lastClientY = 0;
+  let lastKeyStates = { isCtrlOrMeta: false, isShift: false, isAlt: false };
+  let initialStates = new Map();
+  let scrollRafId = null;
+  let scrollSpeedY = 0;
+
+  // 支持复选框 Shift 范围点击多选
+  let lastClickedCheckbox = null;
+  tbody.addEventListener('click', (e) => {
+    const cb = e.target.closest('input[type="checkbox"]');
+    if (!cb || cb.disabled || !tbody.contains(cb)) return;
+
+    if (e.shiftKey && lastClickedCheckbox && lastClickedCheckbox !== cb && tbody.contains(lastClickedCheckbox)) {
+      const allCbs = Array.from(tbody.querySelectorAll('input[type="checkbox"]:not(:disabled)'));
+      const start = allCbs.indexOf(lastClickedCheckbox);
+      const end = allCbs.indexOf(cb);
+      if (start !== -1 && end !== -1) {
+        const min = Math.min(start, end);
+        const max = Math.max(start, end);
+        const targetState = cb.checked;
+        for (let i = min; i <= max; i++) {
+          allCbs[i].checked = targetState;
+        }
+        updateSelectedDatasetCount();
+      }
+    }
+    lastClickedCheckbox = cb;
+  });
+
+  function startAutoScroll(clientY) {
+    const rect = tableWrap.getBoundingClientRect();
+    const margin = 35;
+    const maxSpeed = 14;
+
+    if (clientY > rect.bottom - margin && clientY < rect.bottom + 60) {
+      const factor = Math.min(1, (clientY - (rect.bottom - margin)) / margin);
+      scrollSpeedY = Math.max(2, maxSpeed * factor);
+    } else if (clientY < rect.top + margin && clientY > rect.top - 60) {
+      const factor = Math.min(1, ((rect.top + margin) - clientY) / margin);
+      scrollSpeedY = -Math.max(2, maxSpeed * factor);
+    } else {
+      scrollSpeedY = 0;
+    }
+
+    if (scrollSpeedY !== 0 && !scrollRafId) {
+      const step = () => {
+        if (scrollSpeedY !== 0) {
+          tableWrap.scrollTop += scrollSpeedY;
+          updateSelection(lastClientX, lastClientY, lastKeyStates.isCtrlOrMeta, lastKeyStates.isShift, lastKeyStates.isAlt);
+          scrollRafId = requestAnimationFrame(step);
+        } else {
+          scrollRafId = null;
+        }
+      };
+      scrollRafId = requestAnimationFrame(step);
+    } else if (scrollSpeedY === 0 && scrollRafId) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = null;
+    }
+  }
+
+  function stopAutoScroll() {
+    if (scrollRafId) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = null;
+    }
+    scrollSpeedY = 0;
+  }
+
+  function updateSelection(curX, curY, isCtrlOrMeta = false, isShift = false, isAlt = false) {
+    const x1 = Math.min(startX, curX);
+    const y1 = Math.min(startY, curY);
+    const x2 = Math.max(startX, curX);
+    const y2 = Math.max(startY, curY);
+
+    box.style.left = `${x1}px`;
+    box.style.top = `${y1}px`;
+    box.style.width = `${x2 - x1}px`;
+    box.style.height = `${y2 - y1}px`;
+
+    let inBoxCount = 0;
+    let changed = false;
+
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.forEach(row => {
+      const cb = row.querySelector('input[type="checkbox"]');
+      if (!cb || cb.disabled) return;
+
+      const rect = row.getBoundingClientRect();
+      const intersects = !(
+        x2 < rect.left ||
+        x1 > rect.right ||
+        y2 < rect.top ||
+        y1 > rect.bottom
+      );
+
+      if (intersects) {
+        inBoxCount++;
+      }
+
+      const initChecked = initialStates.get(cb) || false;
+      let targetChecked;
+
+      if (isAlt) {
+        // Alt 模式：选框内的取消选中，选框外的保持初始
+        targetChecked = intersects ? false : initChecked;
+      } else if (isCtrlOrMeta) {
+        // Ctrl/Cmd 模式：选框内的反选，选框外的保持初始
+        targetChecked = intersects ? !initChecked : initChecked;
+      } else {
+        // 默认模式（普通拖选或 Shift 拖选）：选框内的追加选中，选框外的保持初始
+        targetChecked = intersects ? true : initChecked;
+      }
+
+      if (cb.checked !== targetChecked) {
+        cb.checked = targetChecked;
+        changed = true;
+      }
+    });
+
+    if (badge) {
+      if (inBoxCount > 0) {
+        badge.textContent = isAlt ? `已框选 ${inBoxCount} 项 (取消)` : isCtrlOrMeta ? `已框选 ${inBoxCount} 项 (反选)` : `已框选 ${inBoxCount} 项`;
+        badge.style.display = 'block';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+
+    if (changed) {
+      updateSelectedDatasetCount();
+    }
+  }
+
+  function onMouseMove(e) {
+    if (!isMouseDown) return;
+
+    lastClientX = e.clientX;
+    lastClientY = e.clientY;
+    lastKeyStates = {
+      isCtrlOrMeta: e.ctrlKey || e.metaKey,
+      isShift: e.shiftKey,
+      isAlt: e.altKey
+    };
+
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+
+    if (!isDragging) {
+      if (Math.hypot(dx, dy) >= 6) {
+        isDragging = true;
+        document.body.classList.add('marquee-selecting');
+        box.style.display = 'block';
+      } else {
+        return;
+      }
+    }
+
+    e.preventDefault();
+    startAutoScroll(e.clientY);
+    updateSelection(e.clientX, e.clientY, lastKeyStates.isCtrlOrMeta, lastKeyStates.isShift, lastKeyStates.isAlt);
+  }
+
+  function onMouseUp() {
+    if (!isMouseDown) return;
+    isMouseDown = false;
+
+    stopAutoScroll();
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+
+    if (isDragging) {
+      isDragging = false;
+      document.body.classList.remove('marquee-selecting');
+      box.style.display = 'none';
+
+      // 阻止松开鼠标后可能触发的点击事件（防误触）
+      const preventClick = (clickEvent) => {
+        clickEvent.stopPropagation();
+        clickEvent.preventDefault();
+      };
+      window.addEventListener('click', preventClick, { capture: true, once: true });
+      setTimeout(() => {
+        window.removeEventListener('click', preventClick, { capture: true });
+      }, 100);
+
+      updateSelectedDatasetCount();
+    }
+  }
+
+  tableWrap.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // 仅限鼠标左键
+
+    // 排除除 checkbox 以外的交互元素（按钮、下拉、输入框、链接等）
+    const nonCheckboxInteractive = e.target.closest('button, select, textarea, a, video, summary, input:not([type="checkbox"])');
+    if (nonCheckboxInteractive) return;
+
+    // 表头 thead 不触发框选
+    if (e.target.closest('thead')) return;
+
+    // 操作列（最后一列）通常全是按钮，避免误触
+    const td = e.target.closest('td');
+    if (td && td.matches(':last-child')) return;
+
+    const allCbs = tbody.querySelectorAll('input[type="checkbox"]:not(:disabled)');
+    if (allCbs.length === 0) return;
+
+    isMouseDown = true;
+    isDragging = false;
+    startX = e.clientX;
+    startY = e.clientY;
+    lastClientX = e.clientX;
+    lastClientY = e.clientY;
+    lastKeyStates = {
+      isCtrlOrMeta: e.ctrlKey || e.metaKey,
+      isShift: e.shiftKey,
+      isAlt: e.altKey
+    };
+
+    initialStates.clear();
+    allCbs.forEach(cb => {
+      initialStates.set(cb, cb.checked);
+    });
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+
+  window.addEventListener('blur', () => {
+    if (isMouseDown || isDragging) {
+      onMouseUp();
+    }
+  });
+}
+
 async function loadDatasets() {
   const body = $('#datasetRows');
   const summary = $('#datasetsSummary');
@@ -1350,7 +1609,7 @@ async function loadDatasets() {
     const selected = new Set($$('#datasetRows input[type=checkbox]:checked').map(check => check.dataset.filename));
     body.textContent = '';
     if (summary) {
-      summary.textContent = `${datasetFormatLabels[datasetFormat]} 共 ${datasetsData.total_count || 0} 个 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''}`;
+      summary.textContent = `${datasetFormatLabels[datasetFormat]} 共 ${datasetsData.total_count || 0} 个 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''} · 提示: 可鼠标拖动框选（Alt 批量取消，Shift 连选）`;
     }
     if ($('#selectAllDatasets')) $('#selectAllDatasets').checked = false;
     updateSelectedDatasetCount();
@@ -1917,6 +2176,8 @@ async function init() {
       updateSelectedDatasetCount();
     };
   }
+  initDatasetMarqueeSelection();
+
   if($('#batchDeleteDatasets')) {
     $('#batchDeleteDatasets').onclick = async () => {
       const selected = $$('#datasetRows input[type=checkbox]:checked')

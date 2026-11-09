@@ -1007,3 +1007,55 @@ tbody tr:hover { background: #fafafa; }
 #uploads td, #uploads th { vertical-align: middle; }
 #uploads td:last-child { white-space: nowrap; }
 @media (max-width: 760px) { .platform-format-row { grid-template-columns: 1fr; gap: 8px; } }
+
+/* 数据集表格鼠标框选样式与选中高亮 */
+.marquee-selection-box {
+  position: fixed;
+  display: none;
+  border: 1.5px solid #1677ff;
+  background-color: rgba(22, 119, 255, 0.14);
+  pointer-events: none;
+  z-index: 10000;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.marquee-selection-box .marquee-count-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: #1677ff;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-family: var(--ui-font, sans-serif);
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+body.marquee-selecting {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: crosshair !important;
+}
+
+body.marquee-selecting * {
+  cursor: crosshair !important;
+}
+
+#datasets .table-wrap {
+  position: relative;
+  user-select: text;
+}
+
+#datasetRows tr:has(input[type="checkbox"]:checked) {
+  background-color: #f0f7ff;
+}
+
+#datasetRows tr:has(input[type="checkbox"]:checked):hover {
+  background-color: #e6f4ff;
+}
+
