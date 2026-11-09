@@ -1603,6 +1603,60 @@ function initDatasetMarqueeSelection() {
     document.addEventListener('mouseup', onMouseUp);
   });
 
+  function handleWheel(e) {
+    if (!e.ctrlKey && !e.metaKey && !e.shiftKey) return;
+
+    // 阻止 Ctrl + 滚轮缩放浏览器，阻止 Shift + 滚轮横向滚动
+    e.preventDefault();
+
+    let delta = e.deltaY;
+    // 当按下 Shift 键时，许多浏览器会将纵向滚动转换为 deltaX，此处统一转回纵向位移
+    if (e.shiftKey && (delta === 0 || Math.abs(e.deltaX) > Math.abs(delta))) {
+      delta = e.deltaX;
+    }
+
+    if (e.deltaMode === 1) {
+      // DOM_DELTA_LINE 行模式
+      delta *= 24;
+    } else if (e.deltaMode === 2) {
+      // DOM_DELTA_PAGE 页模式
+      delta *= tableWrap.clientHeight || 400;
+    }
+
+    tableWrap.scrollTop += delta;
+
+    if (isDragging) {
+      updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+    }
+  }
+
+  const datasetsContainer = document.getElementById('datasets');
+  if (datasetsContainer) {
+    datasetsContainer.addEventListener('wheel', handleWheel, { passive: false });
+  } else {
+    tableWrap.addEventListener('wheel', handleWheel, { passive: false });
+  }
+
+  // 拖选过程中若鼠标移出容器仍能通过滚轮顺畅滚动表格并阻止浏览器缩放
+  window.addEventListener('wheel', (e) => {
+    if (isDragging && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+      handleWheel(e);
+    }
+  }, { passive: false });
+
+  // 拖选过程中动态响应修饰键按下与松开
+  window.addEventListener('keydown', (e) => {
+    if (isDragging && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta')) {
+      updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (isDragging && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta')) {
+      updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+    }
+  });
+
   window.addEventListener('blur', () => {
     if (isMouseDown || isDragging) {
       onMouseUp();
