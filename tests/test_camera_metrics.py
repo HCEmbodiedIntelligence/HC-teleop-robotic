@@ -44,6 +44,19 @@ class PipelineMetricsTests(unittest.TestCase):
         self.assertIsNone(status['webrtc_submit_to_transport_ms'])
         self.assertEqual(status['webrtc_frames_output'], 1)
 
+    def test_latency_quantiles_use_the_live_window(self):
+        now = [0.0]
+        m = CameraPipelineMetrics(clock=lambda: now[0])
+        for duration in (1, 2, 3, 4, 100):
+            m.output(duration, duration / 2)
+        status = m.snapshot()
+        self.assertEqual(status['webrtc_submit_to_transport_p50_ms'], 3)
+        self.assertEqual(status['webrtc_submit_to_transport_p95_ms'], 100)
+        self.assertEqual(status['webrtc_transport_p99_ms'], 50)
+        self.assertEqual(status['webrtc_latency_sample_count'], 5)
+        now[0] = 3
+        self.assertIsNone(m.snapshot()['webrtc_submit_to_transport_p99_ms'])
+
     def test_submit_is_not_counted_as_output_and_session_reset_preserves_input(self):
         now = [0.0]
         m = CameraPipelineMetrics(clock=lambda: now[0])

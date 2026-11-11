@@ -116,6 +116,13 @@ class CameraProcessService:
             status = dict(self._status)
             stale = time.monotonic() - self._status_at > 2
         if stale:
+            status['receiver_stale'] = True
+            status['receiver_age_ms'] = None
+            for key in tuple(status):
+                if key.startswith('receiver_') and key not in {
+                        'receiver_stale', 'receiver_reported', 'receiver_session_id',
+                        'receiver_metrics_source', 'receiver_loss_pattern'}:
+                    status[key] = None
             for key in ("capture_fps", "decoded_fps", "webrtc_send_fps", "webrtc_submit_fps", "webrtc_output_fps"):
                 status[key] = 0.0
         return status
@@ -127,6 +134,9 @@ class CameraProcessService:
 
     async def offer(self, data: dict[str, Any]) -> dict[str, str]:
         return await asyncio.to_thread(self._request, "offer", data)
+
+    async def receiver_report(self, payload):
+        return await asyncio.to_thread(self._request, "receiver_report", payload, 3)
 
     async def stop(self) -> None:
         if self._process is None:
@@ -207,6 +217,8 @@ def _camera_worker(connection, config: dict[str, Any], domain_id: int):
                         break
                     if operation == "offer":
                         result = await camera.offer(value)
+                    elif operation == "receiver_report":
+                        result = camera.receiver_report(value)
                     elif operation == "snapshot":
                         result = camera.latest()
                     else:

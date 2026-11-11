@@ -30,6 +30,7 @@ Options:
   --log-dir DIR         Session log directory
   --no-monitor          Disable the operation event monitor
   --no-diagnostics      Disable simulation CSV diagnostics
+  --no-wifi-preflight   Skip cached, read-only Wi-Fi startup report
   --host HOST           Override Dashboard bind host
   --port PORT           Override Dashboard port
   -h, --help            Show this help
@@ -74,6 +75,10 @@ while (($#)); do
       LOG_DIR="$2"
       shift 2
       ;;
+    --no-wifi-preflight)
+      export HC_WIFI_PREFLIGHT=0
+      shift
+      ;;
     --no-monitor)
       MONITOR=false
       shift
@@ -116,6 +121,25 @@ done
   echo "Middleware config not found: ${MIDDLEWARE_CONFIG}" >&2
   exit 2
 }
+
+# Cached scans and survey reads only: never trigger an off-channel scan or
+# change network configuration while another session might already be active.
+# A missing tool/permission must not prevent starting the control stack.
+if [[ "${MODE}" != sim && "${HC_WIFI_PREFLIGHT:-1}" != 0 && -f "${PROJECT_ROOT}/tools/diagnostics/wifi_preflight.py" ]]; then
+  PREFLIGHT_DIR="${PROJECT_ROOT}/runtime/network_preflight"
+  if mkdir -p "${PREFLIGHT_DIR}"; then
+    PREFLIGHT_TMP="$(mktemp "${PREFLIGHT_DIR}/.report.XXXXXX")"
+    PREFLIGHT_ARGS=(--width "${HC_WIFI_WIDTH:-80}")
+    [[ -z "${HC_WIFI_INTERFACE:-}" ]] || PREFLIGHT_ARGS+=(--interface "${HC_WIFI_INTERFACE}")
+    if timeout 20s /usr/bin/python3 "${PROJECT_ROOT}/tools/diagnostics/wifi_preflight.py" "${PREFLIGHT_ARGS[@]}" > "${PREFLIGHT_TMP}" && [[ -s "${PREFLIGHT_TMP}" ]]; then
+      mv -- "${PREFLIGHT_TMP}" "${PREFLIGHT_DIR}/latest.json"
+      echo "[HC] Read-only Wi-Fi preflight: ${PREFLIGHT_DIR}/latest.json (unknown values do not imply a clear channel)"
+    else
+      rm -f -- "${PREFLIGHT_TMP}"
+      echo "[HC] Wi-Fi preflight unavailable or timed out; continuing startup." >&2
+    fi
+  fi
+fi
 
 # The command selects the mode, never a stale parent-shell setting.
 export HC_RUNTIME_MODE=simulation

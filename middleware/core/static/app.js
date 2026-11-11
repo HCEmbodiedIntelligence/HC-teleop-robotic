@@ -670,9 +670,10 @@ function projectionTopicChoices() {
 function renderCameraTopicOptions() {
   // Refresh choices after the custom-topic list changes, keeping pending picks.
   const pending=new Map($$('[data-camera-select]').map(select=>[select.dataset.cameraSelect,select.value]));
-  renderCameraStreams(pending);
+  const codecs=new Map($$('[data-camera-codec]').map(select=>[select.dataset.cameraCodec,select.value]));
+  renderCameraStreams(pending,codecs);
 }
-function renderCameraStreams(pending=new Map()) {
+function renderCameraStreams(pending=new Map(),codecs=new Map()) {
   const container=$('#cameraStreamCards');if(!container)return;
   container.textContent='';
   const choices=projectionTopicChoices();
@@ -689,6 +690,13 @@ function renderCameraStreams(pending=new Map()) {
     const selected=pending.has(stream.id)?pending.get(stream.id):(stream.enabled!==false?stream.topic:'');
     select.value=choices.some(item=>item.topic===selected)?selected:'';
     topicCell.append(select);
+    const codecSelect=document.createElement('select');codecSelect.dataset.cameraCodec=stream.id;
+    codecSelect.setAttribute('aria-label',`${index+1}号相机视频编码`);
+    for(const [value,label] of [['H264','H.264（支持硬编）'],['VP8','VP8（支持 FEC，软件编码）']]){
+      const option=document.createElement('option');option.value=value;option.textContent=label;codecSelect.append(option);
+    }
+    codecSelect.value=codecs.get(stream.id)||stream.codec||config.camera.codec||'H264';
+    topicCell.append(codecSelect);
     const status=document.createElement('td');status.className='camera-status';status.dataset.cameraStatus=stream.id;
     status.textContent='正在读取状态…';
     row.append(number,topicCell,status);container.append(row);
@@ -701,6 +709,8 @@ function collectCameraStreams() {
   config.camera.streams=selects.map(select=>{
     const stream={...previous.find(item=>item.id===select.dataset.cameraSelect)};
     const topic=select.value;
+    const codecSelect=$$('[data-camera-codec]').find(input=>input.dataset.cameraCodec===stream.id);
+    if(codecSelect)stream.codec=codecSelect.value;
     if(!topic)return {...stream,enabled:false};
     const item=choices.find(item=>item.topic===topic);
     if(!item)throw new Error('请先在下方自定义话题列表配置图像话题');
@@ -727,15 +737,22 @@ function cameraMonitorSummary(stream,health) {
   const codec=stream.webrtc_codec||stream.codec||'未知';
   const window=Number(stream.fps_window_seconds)>0
     ? `同窗 ${cameraMetric(stream.fps_window_seconds)} s` : '独立统计窗口';
+  const receiver=stream.receiver_reported && !stream.receiver_stale
+    ? `头显解码 ${cameraMetric(stream.receiver_decoded_fps)} FPS · 渲染回调 ${cameraMetric(stream.receiver_render_fps)} FPS · 冻结 ${cameraMetric(stream.receiver_freeze_duration_ms)} ms`
+    : '头显显示帧率 未上报';
+  const backend=stream.encoder_backend_actual || '--';
+  const qos=stream.media_qos?.state || 'disabled';
+  const fec=stream.webrtc_fec;
+  const fecText=fec ? `${fec.state}${fec.reason ? '（'+fec.reason+'）' : ''} · 校验包 ${cameraMetric(fec.fec_packets,0)} · 冗余 ${cameraMetric(fec.overhead_pct,1,'%')} · 接收FEC ${cameraMetric(stream.receiver_fec_packets_received,0)}` : '未启用';
   const loss=stream.webrtc_feedback_received
     ? cameraMetric(stream.webrtc_fraction_lost_pct,2,'%') : '未收到反馈';
-  return `${inputFps>0?'正在接收':'等待图像'} · ${window} · ROS输入 ${inputFps.toFixed(1)} FPS · 图像解码 ${cameraMetric(stream.decoded_fps)} FPS/${cameraMetric(stream.jpeg_decode_ms)} ms · 编码输入 ${cameraMetric(submitFps)} FPS · RTP输出 ${cameraMetric(stream.webrtc_output_fps)} FPS · ${codec}编码器内 ${cameraMetric(stream.webrtc_encode_ms)} ms · 发送处理 ${cameraMetric(stream.webrtc_submit_to_transport_ms)} ms · 其中传输调用 ${cameraMetric(stream.webrtc_transport_ms)} ms · 本地覆盖 ${cameraMetric(stream.decode_frames_overwritten,0)} 帧/跳帧 ${cameraMetric(stream.webrtc_frames_skipped,0)} 帧 · 网络丢包 ${loss} · 头显显示帧率 未上报 · 码率 ${cameraMetric(stream.webrtc_bitrate_mbps,2)}/${cameraMetric(stream.webrtc_target_bitrate_mbps,2)} Mbps · RTT ${cameraMetric(stream.webrtc_rtt_ms)} ms · 头显连接 ${stream.peers||0}`;
+  return `${inputFps>0?'正在接收':'等待图像'} · ${window} · ROS输入 ${inputFps.toFixed(1)} FPS · 图像解码 ${cameraMetric(stream.decoded_fps)} FPS/${cameraMetric(stream.jpeg_decode_ms)} ms · 编码输入 ${cameraMetric(submitFps)} FPS · RTP输出 ${cameraMetric(stream.webrtc_output_fps)} FPS · ${codec}编码器内 ${cameraMetric(stream.webrtc_encode_ms)} ms · 发送处理 ${cameraMetric(stream.webrtc_submit_to_transport_ms)} ms · 其中传输调用 ${cameraMetric(stream.webrtc_transport_ms)} ms · 本地覆盖 ${cameraMetric(stream.decode_frames_overwritten,0)} 帧/跳帧 ${cameraMetric(stream.webrtc_frames_skipped,0)} 帧 · 网络丢包 ${loss} · ${receiver} · 编码后端 ${backend}${stream.encoder_fallback_reason ? `（回退：${stream.encoder_fallback_reason}）` : ''} · 发送P95/P99 ${cameraMetric(stream.webrtc_submit_to_transport_p95_ms)}/${cameraMetric(stream.webrtc_submit_to_transport_p99_ms)} ms · DSCP ${qos} · FEC ${fecText} · 已配置码率 ${cameraMetric(stream.encoder_configured_bitrate == null ? null : stream.encoder_configured_bitrate/1000000,2)} Mbps/重配 ${cameraMetric(stream.encoder_reconfigurations,0)} 次 · 码率 ${cameraMetric(stream.webrtc_bitrate_mbps,2)}/${cameraMetric(stream.webrtc_target_bitrate_mbps,2)} Mbps · RTT ${cameraMetric(stream.webrtc_rtt_ms)} ms · 头显连接 ${stream.peers||0}`;
 }
 function cameraMonitorHelp(stream) {
   const timing=Number(stream?.fps_window_seconds)>0
     ? `各阶段 FPS 使用同一个最近 ${stream.fps_window_seconds} 秒窗口；跨窗口完成的帧可能造成短时帧数差异。`
     : '当前服务尚未提供统一统计窗口。';
-  return timing+' 编码器内耗时只覆盖编解码调用。发送处理从提交新帧到最后一个 RTP 包交给本机传输层，包含编码排队、线程唤醒、编码、封包、加密和 UDP 提交；其中传输调用为加密和 UDP 提交部分，不能重复相加。RTP 输出不代表头显接收或显示。覆盖为解码前压缩帧被替换，跳帧为解码后未送入编码器的中间帧，计数按本次连接累计；网络丢包来自头显 RTCP 反馈，与本地跳帧分别统计。头显实际显示帧率尚无回传。';
+  return timing+' 编码器内耗时只覆盖编解码调用。发送处理从提交新帧到最后一个 RTP 包交给本机传输层，包含编码排队、线程唤醒、编码、封包、加密和 UDP 提交；其中传输调用为加密和 UDP 提交部分，不能重复相加。RTP 输出不代表头显接收或显示。覆盖为解码前压缩帧被替换，跳帧为解码后未送入编码器的中间帧，计数按本次连接累计；网络丢包来自头显 RTCP 反馈，与本地跳帧分别统计。接入 receiver.html 或遥测SDK后可回传接收、解码与渲染回调指标；渲染回调不等于物理屏幕显示，未同步时钟不推算端到端延迟。';
 }
 function renderCameraStatus(camera,health={}) {
   for(const element of $$('[data-camera-status]')){

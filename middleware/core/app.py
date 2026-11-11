@@ -433,42 +433,54 @@ class MiddlewareRuntime:
     def _on_pose(
         self, packet: Any, pose_dict: dict[str, Any] | None = None
     ) -> None:
+        """
+        VR 位姿回调函数：接收 VR 网关解码出的姿态包与手柄输入，
+        执行手柄按键语义判断（急停恢复、录制打标、开始/停止录制）并向 ROS 话题发布位姿。
+        """
+        # 从原始数据包中获取左手柄和右手柄的输入对象（包含按键位掩码与摇杆状态）
         left_input = getattr(packet, "left_input", None)
         right_input = getattr(packet, "right_input", None)
 
+        # 提取左手柄的“持续按住掩码(held_mask)”与“刚刚按下沿触发掩码(pressed_mask)”
         left_held = int(getattr(left_input, "held_mask", 0))
         left_pressed = int(getattr(left_input, "pressed_mask", 0))
+        # 提取右手柄的“持续按住掩码(held_mask)”与“刚刚按下沿触发掩码(pressed_mask)”
         right_held = int(getattr(right_input, "held_mask", 0))
         right_pressed = int(getattr(right_input, "pressed_mask", 0))
 
-        # A resumes command output only once per physical press.  The old
-        # implementation called this for every packet while A was held.
+        # --- 1. 右手柄 A 键处理：解除系统软急停 / 恢复遥操作 ---
+        # A 键对应掩码最低位 bit 0 (即 & 1)
         a_held = bool(right_held & 1)
+        # 上升沿检测：当帧按下，或者持续按住且上一帧未按住时触发（确保一次物理按压仅触发一次）
         a_down = bool(right_pressed & 1) or (a_held and not self._last_a_held)
         self._last_a_held = a_held
-        # During DAgger, A/B and Grip are processed in one validated semantic
-        # sample by the ownership receiver, so a pause cannot race a resume.
+
+        # 检查 DAgger 算法是否正处于人类主动介入接管状态
+        # 介入激活时按键由专门的接管模块处理，避免急停恢复与介入逻辑产生竞态冲突
         intervention_active = bool(self.ros is not None and
             getattr(self.ros, 'ownership', None) and self.ros.ownership.active)
+        # 若 A 键被按下且非介入模式，通知安全系统恢复遥操作输出
         if a_down and not intervention_active:
             self._on_safety_resume("VR controller A button pressed")
 
-        # Pressing both thumbsticks marks the active recording, or the most
-        # recently completed recording.  Use the combined held edge so the
-        # gesture still works when the two sticks are pressed a few frames apart.
+        # --- 2. 双摇杆同时按下处理：录制数据打标 (Mark / Bookmark) ---
+        # 左右摇杆下压键 (Thumbstick Click) 对应二进制第 5 位: 1 << 5 (即 32)
         stick_bit = 1 << 5
+        # 检查左右摇杆是否同时处于按住状态
         both_sticks_held = bool(left_held & stick_bit) and bool(right_held & stick_bit)
+        # 检查左右摇杆是否在当前帧同时被按下
         both_sticks_pressed = bool(left_pressed & stick_bit) and bool(right_pressed & stick_bit)
+        # 组合边沿检测：支持双手稍有毫秒级先后误差的双按手势
         mark_down = both_sticks_pressed or (
             both_sticks_held and not self._last_both_sticks_held
         )
         self._last_both_sticks_held = both_sticks_held
+        # 触发打标动作（标记当前正在录制或刚刚录完的数据片段）
         if mark_down:
             self._dispatch_recording(self._handle_vr_record_mark)
 
-        # Replay control events use UDP and can be lost.  While replay is
-        # active or waiting for the A-button acknowledgement, periodically
-        # resend a compact snapshot so the headset UI converges reliably.
+        # --- 3. 轨迹重放状态同步向 VR 头显回传 ---
+        # UDP 传输可能丢包；若处于轨迹重放或等待 A 键确认状态，每秒定期向 VR 发送一次状态快照
         if self.player is not None and self.vr is not None:
             replay = self.player.status()
             now = time.monotonic()
@@ -480,6 +492,7 @@ class MiddlewareRuntime:
                     if replay.get("requires_reset")
                     else "正在重放"
                 )
+                # 使用 envelope 封装协议，通过 UDP 回传给头显更新 UI
                 self.vr.send_event(
                     envelope(
                         "replay_status",
@@ -489,29 +502,37 @@ class MiddlewareRuntime:
                 )
                 self._last_replay_status_sent_at = now
 
+        # --- 4. 左手柄 X/Y 键处理：示教数据采集开始 / 结束 ---
         if left_input is not None:
-            # X button on left controller: bit 0 (1 << 0) -> Start recording
+            # 左手柄 X 键 (bit 0): 开始录制轨迹数据
             x_down = bool(left_pressed & 1) or (bool(left_held & 1) and not self._last_x_held)
             self._last_x_held = bool(left_held & 1)
 
-            # Y button on left controller: bit 1 (1 << 1) -> Stop recording
+            # 左手柄 Y 键 (bit 1): 停止录制轨迹数据
             y_down = bool(left_pressed & 2) or (bool(left_held & 2) and not self._last_y_held)
             self._last_y_held = bool(left_held & 2)
 
+            # 派发异步录制任务
             if x_down:
                 self._dispatch_recording(self._handle_vr_record_start)
             elif y_down:
                 self._dispatch_recording(self._handle_vr_record_stop)
 
+        # --- 5. 将 VR 位姿发布到 ROS 2 话题 ---
+        # 若未开启 ROS 功能则直接返回
         if self.ros is None:
             return
+        # 检查配置中是否允许发布到 ROS
         if self.config["vr"].get("publish_to_ros", True):
+            # 优先使用已转换的字典，避免重复序列化消耗 CPU
             frame = pose_dict if pose_dict is not None else packet.as_dict()
+            # 异步发布到 ROS 话题（默认 /vrdata）
             self.ros.publish(
                 self.config["vr"]["data_topic"],
                 "std_msgs/msg/String",
                 {
                     "data": json.dumps(
+                        # 注入中间件接收的高精度纳秒时间戳 hc_received_ns 用于时延追踪
                         {**frame, 'hc_received_ns': frame.get('hc_received_ns', time.time_ns())},
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -1063,6 +1084,24 @@ def create_app(store: ConfigStore) -> web.Application:
             print(f"[WebRTC] Offer failed for {peer_ip}: {exc}\n{tb}", flush=True)
             runtime._log("error", f"WebRTC offer failed for {peer_ip}: {exc}\n{tb}")
             raise web.HTTPServiceUnavailable(text=f"WebRTC offer failed: {exc}") from exc
+
+    async def receiver_report(request: web.Request) -> web.Response:
+        _camera_id, camera = camera_for_request(request)
+        if camera is None:
+            raise web.HTTPNotFound(text="camera stream not found")
+        if request.content_length is not None and request.content_length > 16384:
+            raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=request.content_length)
+        raw = bytearray()
+        async for chunk in request.content.iter_chunked(4096):
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=len(raw))
+        try:
+            payload = json.loads(raw)
+            accepted = await camera.receiver_report(payload)
+        except (ValueError, TypeError, RuntimeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response({"accepted": accepted})
 
     async def get_camera_status(request: web.Request) -> web.Response:
         camera_id = str(request.match_info.get("camera_id", "")).strip()
@@ -1739,6 +1778,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/webrtc/offer/{camera_id}", webrtc_offer)
     app.router.add_post("/offer", webrtc_offer)
     app.router.add_post("/offer/{camera_id}", webrtc_offer)
+    app.router.add_post("/api/webrtc/receiver/{camera_id}", receiver_report)
     app.router.add_get("/api/camera/status", get_camera_status)
     app.router.add_get("/api/camera/status/{camera_id}", get_camera_status)
     app.router.add_get("/api/camera/snapshot", get_camera_snapshot)

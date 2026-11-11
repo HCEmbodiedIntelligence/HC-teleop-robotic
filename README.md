@@ -376,3 +376,10 @@ HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
 `HC_CONTROL_BACKEND=motion` 同时决定中间件公共名称转换、遥操控制链和仿真话题；切换后端需停止旧入口再重新启动。旧配置不带统一 API 文件时继续支持 v23。双方功能清单及本次合并范围见 [分支整合说明](docs/MAIN_HUMANOID_INTEGRATION.md)。
 
 DAgger 人工接管与纠正采集已从本地工作恢复：Motion 模式下握住右 Grip 接管，正常松手交还程序，每段纠正独立保存并沿用 main 的任务和上传流程。配置及使用见 [DAgger 说明](docs/DAGGER.md)。
+
+
+### 视频与无线链路优化
+
+视频保留默认 x264，可在 Dashboard 选择自动 NVENC 探测并在失败时回退；码率反馈通过限频重配置实际应用，H.264/RTX 在发送与头显端共同协商。`run.sh` 启动前默认生成只读 Wi-Fi 预检报告，DSCP 默认关闭，需按相同负载做 A/B 验证。已提供默认关闭的 VP8 + RED/ULPFEC，可在相机配置中显式启用；当前头显 M116 不支持 H.264 + ULPFEC，硬编与本版 FEC 使用不同模式。聚合丢包反馈不足以决定冗余策略。
+
+详细配置和验收步骤见 [编码后端](docs/VIDEO_ENCODING.md)、[接收端遥测](docs/RECEIVER_METRICS.md)、[无线预检与 QoS 对照](docs/NETWORK_PREFLIGHT.md)、[FEC 配置与验收](docs/FEC_ACCEPTANCE.md)。头显浏览器可打开 `/static/receiver.html` 接收视频并回传遥测；它会替换所选相机已有视频会话，须在遥操作前测试。

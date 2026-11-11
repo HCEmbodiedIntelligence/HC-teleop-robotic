@@ -82,3 +82,23 @@ test('legacy and missing feedback are labeled without inventing measurements',()
   assert.match(vm.runInContext("cameraMonitorSummary({capture_fps:30},{has_data:false})",ctx),/等待图像.*0.0/);
   assert.match(vm.runInContext("cameraMonitorSummary({error:'decode failed'})",ctx),/异常.*decode failed/);
 });
+
+// A deliberate per-camera codec selection survives a topic list refresh.
+test('VP8 selection survives refresh and is saved for FEC',()=>{
+  const {ctx,cards}=setup();
+  const selector=cards.children[0].querySelectorAll('[data-camera-codec]')[0];
+  selector.value='VP8';
+  vm.runInContext('renderCameraTopicOptions();collectCameraStreams()',ctx);
+  assert.equal(vm.runInContext('config.camera.streams[0].codec',ctx),'VP8');
+});
+test('FEC state distinguishes enabled negotiation from receiver recovery',()=>{
+  const {ctx}=setup();
+  const text=vm.runInContext("cameraMonitorSummary({capture_fps:30,webrtc_fec:{state:'enabled',fec_packets:12,overhead_pct:25},receiver_fec_packets_received:4})",ctx);
+  assert.match(text,/FEC enabled.*校验包 12.*冗余 25.0%.*接收FEC 4/);
+});
+
+test('fresh server config replaces prior codec choices',()=>{
+  const {ctx,cards}=setup();
+  vm.runInContext("config.camera.streams[0].codec='VP8';renderCameraStreams()",ctx);
+  assert.equal(cards.children[0].querySelectorAll('[data-camera-codec]')[0].value,'VP8');
+});

@@ -1,0 +1,42 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>头显视频接收与遥测</title>
+<style>body{font:18px system-ui;background:#10151c;color:#eee;margin:24px}video{width:100%;max-height:70vh;background:#000}input,button{font:inherit;padding:10px}pre{white-space:pre-wrap}</style>
+<h1>视频接收与遥测</h1><p>输入仪表盘中的相机 ID。连接会替换此相机的现有接收会话，请在遥操作前测试。</p>
+<label>相机 ID <input id="camera" value="main" pattern="[A-Za-z0-9_-]+"></label>
+<button id="connect">连接</button> <button id="stop">断开</button>
+<video id="video" autoplay muted playsinline></video><pre id="status">尚未连接</pre>
+<p>此页回传接收、解码、抖动缓冲和渲染回调指标；不能测量物理屏幕显示或无时钟同步的端到端延迟。</p>
+<script src="receiver_metrics.js"></script><script>
+let pc=null, telemetry=null, generation=0, pendingOffer=null;
+const status=document.getElementById('status'),video=document.getElementById('video');
+function disconnect(){generation++;if(pendingOffer)pendingOffer.abort();pendingOffer=null;if(telemetry)telemetry.stop();telemetry=null;if(pc)pc.close();pc=null;video.srcObject=null;status.textContent='已断开';}
+document.getElementById('stop').onclick=disconnect;
+document.getElementById('connect').onclick=async()=>{
+  disconnect();const current=generation;const id=document.getElementById('camera').value.trim();
+  if(!/^[A-Za-z0-9_-]+$/.test(id)){status.textContent='相机 ID 无效';return;}
+  const peer=new RTCPeerConnection({iceServers:[]});pc=peer;
+  const live=()=>current===generation && pc===peer;
+  peer.ontrack=e=>{if(live()){video.srcObject=new MediaStream([e.track]);video.play().catch(()=>{});}};
+  peer.onconnectionstatechange=()=>{if(live())status.textContent='连接状态：'+peer.connectionState;};
+  try{
+    peer.addTransceiver('video',{direction:'recvonly'});
+    await peer.setLocalDescription(await peer.createOffer());
+    await new Promise((resolve,reject)=>{if(peer.iceGatheringState==='complete')return resolve();
+      const timer=setTimeout(()=>{peer.removeEventListener('icegatheringstatechange',check);reject(new Error('ICE收集超时'));},10000);
+      function check(){if(peer.iceGatheringState==='complete'){clearTimeout(timer);peer.removeEventListener('icegatheringstatechange',check);resolve();}}
+      peer.addEventListener('icegatheringstatechange',check);
+    });
+    if(!live())return;
+    const controller=new AbortController();pendingOffer=controller;
+    const timeout=setTimeout(()=>controller.abort(),15000);
+    let response;
+    try{response=await fetch('/api/webrtc/offer/'+encodeURIComponent(id),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(peer.localDescription),signal:controller.signal});}
+    finally{clearTimeout(timeout);if(pendingOffer===controller)pendingOffer=null;}
+    if(!response.ok)throw new Error(await response.text());
+    const answer=await response.json();if(!live())return;
+    await peer.setRemoteDescription({sdp:answer.sdp,type:answer.type});if(!live())return;
+    telemetry=TeleopReceiverMetrics.start({pc:peer,video,sessionId:answer.telemetry_session_id,url:'/api/webrtc/receiver/'+encodeURIComponent(id)});
+  }catch(e){if(live()){disconnect();status.textContent='连接失败：'+e.message;}else peer.close();}
+};
+window.addEventListener('pagehide',disconnect);
+</script></html>

@@ -9,7 +9,7 @@ from middleware.core.camera import CameraService
 
 class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.camera = CameraService({'enabled': True, 'id': 'test', 'width': 64, 'height': 48})
+        self.camera = CameraService({'enabled': True, 'id': 'test', 'width': 64, 'height': 48, 'dscp': 34})
         self.camera._set_status(state='running')
 
     async def asyncTearDown(self):
@@ -26,6 +26,39 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
             await self.camera.offer({'sdp': 'a=candidate:invalid\r\n', 'type': 'offer'})
         self.assertEqual(self.camera.status()['peers'], 0)
         self.assertTrue(self.camera.status()['webrtc_error'])
+
+    async def test_cancelled_offer_releases_partial_peer(self):
+        import threading
+        from unittest.mock import patch
+        client = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        entered, cleaned = threading.Event(), threading.Event()
+        original_close = RTCPeerConnection.close
+        async def stalled_local(peer, description):
+            entered.set()
+            await asyncio.Event().wait()
+        async def closing(peer):
+            try:
+                return await original_close(peer)
+            finally:
+                cleaned.set()
+        try:
+            client.addTransceiver('video', direction='recvonly')
+            await client.setLocalDescription(await client.createOffer())
+            with patch.object(RTCPeerConnection, 'setLocalDescription', stalled_local), patch.object(RTCPeerConnection, 'close', closing):
+                task = asyncio.create_task(self.camera.offer({'sdp':client.localDescription.sdp,'type':'offer'}))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(await asyncio.to_thread(cleaned.wait, 3))
+                # Let the cancellation handler remove the now-closed peer.
+                for _ in range(50):
+                    if not self.camera._pcs:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(self.camera.status()['peers'], 0)
+        finally:
+            await client.close()
 
     async def test_complete_offer_delivers_camera_pixels(self):
         async def source():
@@ -51,7 +84,9 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
                 line for line in lines if line.startswith(f'a=rtpmap:{first_payload} ')
             )
             self.assertIn(' H264/', first_codec)
-            await client.setRemoteDescription(RTCSessionDescription(**answer))
+            self.assertTrue(any(' rtx/90000' in line for line in lines))
+            self.assertTrue(answer['telemetry_session_id'])
+            await client.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
             track = await asyncio.wait_for(track_ready, 10)
             frame = await asyncio.wait_for(track.recv(), 10)
             self.assertEqual((frame.width, frame.height), (64, 48))
@@ -69,6 +104,39 @@ class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(status['remote_ice_candidates'], 0)
             self.assertGreater(status['local_ice_candidates'], 0)
             self.assertIsNone(status['webrtc_error'])
+            self.assertEqual(status['media_qos']['state'], 'marked')
+            self.assertGreater(status['media_qos']['marked_sockets'], 0)
+            self.assertEqual(status['encoder_backend_actual'], 'x264')
+            self.assertIsNotNone(status['webrtc_submit_to_transport_p95_ms'])
+            # Exercise negotiated RTX with an explicit receiver NACK over a
+            # recent actual packet; inspect the wire-format repair payload.
+            from aiortc.rtp import RtcpRtpfbPacket, RtpPacket
+            from unittest.mock import AsyncMock
+            async def check_repair():
+                server_pc = next(iter(self.camera._pcs))
+                sender = server_pc.getSenders()[0]
+                history = sender._RTCRtpSender__rtp_history
+                original = next(iter(history.values()))
+                real_send = sender.transport._send_rtp
+                capture = AsyncMock()
+                sender.transport._send_rtp = capture
+                try:
+                    await sender._handle_rtcp_packet(RtcpRtpfbPacket(
+                        fmt=1, ssrc=123, media_ssrc=sender._ssrc,
+                        lost=[original.sequence_number]))
+                    repair = RtpPacket.parse(capture.call_args.args[0])
+                    self.assertEqual(repair.ssrc, sender._rtx_ssrc)
+                    self.assertEqual(repair.payload_type, sender._RTCRtpSender__rtx_payload_type)
+                    self.assertEqual(int.from_bytes(repair.payload[:2], 'big'), original.sequence_number)
+                finally:
+                    sender.transport._send_rtp = real_send
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(check_repair(), self.camera._rtc_loop))
+            payload = {'session_id': answer['telemetry_session_id'], 'sequence': 0,
+                       'sample_ms': 0, 'stats_id': 'client-video', 'frames_decoded': 0}
+            self.assertTrue(self.camera.receiver_report(payload))
+            self.assertFalse(self.camera.receiver_report(payload))
+            with self.assertRaisesRegex(ValueError, 'session mismatch'):
+                self.camera.receiver_report({**payload, 'session_id': 'old'})
         finally:
             producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)

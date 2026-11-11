@@ -74,6 +74,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "height": 400,
         "fps": 30,
         "codec": "H264",
+        "encoder_backend": "x264",
+        "dscp": None,
+        "fec": {"enabled": False, "group_size": 5, "media_bitrate_ratio": 0.8},
     },
 }
 
@@ -351,6 +354,42 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         cam_config["codec"] = str(cam_config.get("codec", "H264")).upper()
         if cam_config["codec"] not in {"H264", "VP8"}:
             raise ConfigError("camera codec must be H264 or VP8")
+        def validate_media_options(options, path, materialize=False):
+            backend = options.get("encoder_backend", cam_config.get("encoder_backend", "x264"))
+            if not isinstance(backend, str) or backend not in {"auto", "x264", "nvenc", "jetson"}:
+                raise ConfigError(path + ".encoder_backend must be auto, x264, nvenc or jetson")
+            dscp = options.get("dscp", cam_config.get("dscp"))
+            if dscp is not None and (isinstance(dscp, bool) or not isinstance(dscp, int) or not 0 <= dscp <= 63):
+                raise ConfigError(path + ".dscp must be null or an integer from 0 to 63")
+            fec = options.get("fec", cam_config.get("fec", {}))
+            if not isinstance(fec, dict):
+                raise ConfigError(path + ".fec must be an object")
+            enabled = fec.get("enabled", False)
+            group = fec.get("group_size", 5)
+            ratio = fec.get("media_bitrate_ratio", 0.8)
+            if not isinstance(enabled, bool):
+                raise ConfigError(path + ".fec.enabled must be boolean")
+            if isinstance(group, bool) or not isinstance(group, int) or not 1 <= group <= 10:
+                raise ConfigError(path + ".fec.group_size must be an integer from 1 to 10")
+            if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio) or not .25 <= ratio <= .9:
+                raise ConfigError(path + ".fec.media_bitrate_ratio must be finite and between .25 and .9")
+            if materialize or "fec" in options:
+                options["fec"] = {**fec, "enabled": enabled, "group_size": group,
+                                  "media_bitrate_ratio": ratio}
+            if materialize:
+                options.update(encoder_backend=backend, dscp=dscp)
+        def validate_h264_dimensions(options, path):
+            if options["codec"] != "H264":
+                return
+            width, height, fps = options["width"], options["height"], options["fps"]
+            mb_width, mb_height = (width + 15) // 16, (height + 15) // 16
+            # Both aiortc SDP profiles and encoder currently advertise level 3.1.
+            if (width % 2 or height % 2 or mb_width * mb_height > 3600
+                    or mb_width * mb_height * fps > 108000
+                    or mb_width > 169 or mb_height > 169):
+                raise ConfigError(path + " exceeds supported H264 level 3.1 / yuv420p dimensions or frame rate (e.g. 1280x720 at 30 FPS)")
+        validate_h264_dimensions(cam_config, "camera")
+        validate_media_options(cam_config, "camera", materialize=True)
         streams = cam_config.get("streams", [])
         if not isinstance(streams, list):
             raise ConfigError("camera.streams must be a list")
@@ -400,6 +439,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 raise ConfigError(
                     f"camera.streams[{index}] codec must be H264 or VP8"
                 )
+            validate_h264_dimensions({"width": stream_width, "height": stream_height,
+                                      "fps": stream_fps, "codec": stream_codec},
+                                     f"camera.streams[{index}]")
+            validate_media_options(item, f"camera.streams[{index}]")
             normalized_streams.append(
                 {
                     **item,

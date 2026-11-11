@@ -3,6 +3,8 @@ from collections import deque
 import threading
 import time
 
+from .receiver_metrics import percentiles
+
 
 class CameraPipelineMetrics:
     def __init__(self, window_seconds=2.0, clock=None):
@@ -52,7 +54,13 @@ class CameraPipelineMetrics:
             rates = {stage: round(len(samples) / elapsed, 1) if elapsed > 0 else 0.0
                      for stage, samples in self.events.items()}
             durations = list(self.durations)
+            quantiles = {}
+            for index, name in ((1, 'webrtc_submit_to_transport'), (2, 'webrtc_transport')):
+                for percentile, value in percentiles([sample[index] for sample in durations]).items():
+                    quantiles[f'{name}_{percentile}_ms'] = value
             return {
+                **quantiles,
+                'webrtc_latency_sample_count': len(durations),
                 'fps_window_seconds': self.window_seconds,
                 'fps_window_elapsed_seconds': round(elapsed, 3),
                 'pipeline_counts': dict(self.totals),

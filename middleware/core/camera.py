@@ -6,6 +6,7 @@ from fractions import Fraction
 import os
 import threading
 import time
+import uuid
 from typing import Any
 
 from .camera_metrics import CameraPipelineMetrics, instrument_sender
@@ -30,6 +31,9 @@ class CameraService:
 
     def __init__(self, config: dict[str, Any], domain_id: int = 14):
         self._metrics = CameraPipelineMetrics()
+        self._fec_sender = None
+        from .receiver_metrics import ReceiverMetrics
+        self._receiver_metrics = ReceiverMetrics()
         self.config = config
         self.domain_id = int(domain_id)
         self._rtc_loop = None
@@ -275,11 +279,17 @@ class CameraService:
             ),
             peers=len(self._pcs),
         )
+        if self._fec_sender is not None:
+            result["webrtc_fec"] = self._fec_sender.snapshot()
         result.update(self._metrics.snapshot())
+        result.update(self._receiver_metrics.snapshot())
         if result["state"] in ("disabled", "stopped"):
             for key in ("capture_fps", "decoded_fps", "webrtc_send_fps", "webrtc_submit_fps", "webrtc_output_fps"):
                 result[key] = 0.0
         return result
+
+    def receiver_report(self, payload):
+        return self._receiver_metrics.ingest(payload)
 
     def set_frame(self, image: Any) -> None:
         """Manually push a BGR numpy image frame."""
@@ -417,6 +427,9 @@ class CameraService:
             self._webrtc_frames_sent += 1
 
     def _reset_webrtc_rate(self) -> None:
+        self._fec_sender = None
+        self._set_status(webrtc_fec={"requested": bool(self.config.get("fec", {}).get("enabled", False)),
+                                     "state": "inactive", "reason": None})
         self._metrics.reset_sender()
         with self._lock:
             self._webrtc_frames_sent = 0
@@ -484,6 +497,12 @@ class CameraService:
                     changes["webrtc_codec"] = (
                         "H264" if "H264" in encoder_name else "VP8" if "Vp8" in encoder_name else encoder_name
                     )
+                    changes["encoder_backend_requested"] = getattr(encoder, "requested_backend", None)
+                    changes["encoder_backend_actual"] = getattr(encoder, "actual_backend", "software-vp8" if "Vp8" in encoder_name else None)
+                    changes["encoder_fallback_reason"] = getattr(encoder, "fallback_reason", "VP8 uses software encoding; Jetson/NVENC applies to H264." if "Vp8" in encoder_name and self.config.get("encoder_backend", "x264") != "x264" else None)
+                    changes["encoder_configured_bitrate"] = getattr(encoder, "configured_bitrate", None)
+                    changes["encoder_reconfigurations"] = getattr(encoder, "reconfigurations", 0)
+                    changes["encoder_dynamic_bitrate_updates"] = getattr(encoder, "dynamic_bitrate_updates", 0)
                     target_bitrate = getattr(encoder, "target_bitrate", None)
                     if target_bitrate is not None:
                         changes["webrtc_target_bitrate_mbps"] = round(
@@ -689,7 +708,12 @@ class CameraService:
         if self._offer_lock is None:
             self._offer_lock = asyncio.Lock()
         async with self._offer_lock:
-            return await self._offer_locked(data)
+            from .fast_h264 import encoder_backend
+            token = encoder_backend.set(self.config.get("encoder_backend", "x264"))
+            try:
+                return await self._offer_locked(data)
+            finally:
+                encoder_backend.reset(token)
 
     async def _offer_locked(self, data: dict[str, Any]) -> dict[str, str]:
         if self.status()["state"] not in ("running", "starting"):
@@ -740,6 +764,8 @@ class CameraService:
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers))
         self._pcs.add(pc)
         self._reset_webrtc_rate()
+        telemetry_session_id = uuid.uuid4().hex
+        self._receiver_metrics.reset(telemetry_session_id)
         self._set_status(
             webrtc_state="connecting", ice_state="new", webrtc_error=None,
             remote_ice_candidates=remote_candidates, local_ice_candidates=0,
@@ -763,7 +789,6 @@ class CameraService:
 
         track = self._create_video_track()
         sender = pc.addTrack(track)
-        instrument_sender(pc, sender, track, self._metrics)
         stats_task = asyncio.create_task(self._monitor_sender_stats(pc, sender))
         self._stats_tasks.add(stats_task)
         stats_task.add_done_callback(self._stats_tasks.discard)
@@ -775,13 +800,13 @@ class CameraService:
             preferred = [
                 codec
                 for codec in RTCRtpSender.getCapabilities("video").codecs
-                if codec.mimeType.lower() == requested_mime
+                if codec.mimeType.lower() in (requested_mime, "video/rtx")
             ]
-            if not preferred:
+            if not any(codec.mimeType.lower() == requested_mime for codec in preferred):
                 preferred = [
                     codec
                     for codec in RTCRtpSender.getCapabilities("video").codecs
-                    if codec.mimeType.lower() in ("video/h264", "video/vp8")
+                    if codec.mimeType.lower() in ("video/h264", "video/vp8", "video/rtx")
                 ]
             if preferred:
                 transceiver.setCodecPreferences(preferred)
@@ -794,19 +819,32 @@ class CameraService:
                 await pc.close()
                 self._pcs.discard(pc)
                 if not self._pcs:
+                    self._receiver_metrics.reset(None)
                     self._reset_webrtc_rate()
 
         try:
             await pc.setRemoteDescription(remote)
+            from .fec_sender import configure_fec
+            self._fec_sender, fec_status = configure_fec(
+                pc, transceiver, sender, remote.sdp, self.config.get("fec", {}))
+            self._set_status(webrtc_fec=fec_status)
+            if fec_status.get("requested") and fec_status["state"] != "enabled":
+                print(f"[WebRTC {stream_id}] FEC unavailable: {fec_status.get('reason')}", flush=True)
+            # Observe primary input above the FEC wrapper; repair packets must
+            # not appear as extra displayed/output frames in pipeline metrics.
+            instrument_sender(pc, sender, track, self._metrics)
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
+            from .media_qos import mark_media_transport
+            self._set_status(media_qos=mark_media_transport(sender, self.config.get("dscp")))
             local_candidates = sum(
                 line.startswith("a=candidate:") for line in pc.localDescription.sdp.splitlines()
             )
             self._set_status(local_ice_candidates=local_candidates)
             print(f"[WebRTC {stream_id}] answer candidates={local_candidates}", flush=True)
-            return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-        except Exception as exc:
+            return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type,
+                    "telemetry_session_id": telemetry_session_id}
+        except (Exception, asyncio.CancelledError) as exc:
             self._set_status(webrtc_error=f"{type(exc).__name__}: {exc}")
             await pc.close()
             self._pcs.discard(pc)
