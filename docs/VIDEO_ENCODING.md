@@ -54,3 +54,20 @@ HC_TEST_JETSON_ENCODER=1 PYTHONPATH=.deps:. /usr/bin/python3 -m unittest tests.t
 参考：[NVIDIA profile/level、码率、SPS/PPS 与 VBV 配置](https://docs.nvidia.com/jetson/archives/r36.3/DeveloperGuide/SD/Multimedia/AcceleratedGstreamer.html)、[GStreamer appsrc](https://gstreamer.freedesktop.org/documentation/app/appsrc.html)、[appsink 超时拉取](https://gstreamer.freedesktop.org/documentation/app/appsink.html)。
 
 Jetson 输出约束为 Constrained Baseline，兼容当前 aiortc 的 Baseline/Constrained Baseline SDP 候选。新版 JetPack 支持 profile=1 时选用该模式；旧版使用 profile=0 时仍必须通过 caps 与 SPS constraint_set1 检查，否则明确回退，避免输出与 SDP 不一致的码流。Orin Nano 的硬件限制见 [NVIDIA 官方说明](https://docs.nvidia.com/jetson/archives/r36.4.4/DeveloperGuide/SD/Multimedia/SoftwareEncodeInOrinNano.html)。
+
+
+## 2026-11-11 AGX Orin / L4T 36.4 实机修正
+
+在 `NVIDIA Jetson AGX Orin Developer Kit`、L4T R36.4.0、GStreamer 1.20.3 上，`nvvidconv`、`nvv4l2h264enc`、`h264parse` 均可用，最小硬编管线实际编码成功。旧实现把 `vbv-size` 设为帧数 7，实机触发 `BlockSide error 0x4`；其他参数保持不变，移除该属性或设为 250000 后成功。已改为按该插件的比特预算设置 `bitrate // 4`（1 Mbps 为 250000），而不是采用旧文档中的帧数解释。
+
+健康检查还修复了原生 C stdout 在 JSON 后延迟刷新日志造成的解析失败。现在会定位结构化结果、保留原生诊断尾部，并拒绝将编码后进程崩溃误报为成功。
+
+这些现场结论与开发主机的 mock 测试分别记录；独立探测不能替代直播实际后端核对，也不代表已解决原生头显 H.264+ULPFEC 的兼容限制。
+
+
+同机完整 Python 管线随后验证通过：6 帧实际硬件编码、6 帧 PyAV 软件解码，最后一帧强制 IDR 成功。该插件的标准 force-key-unit 事件虽然返回成功，却未生成实际 IDR，因此适配器现优先使用其原生 `force-IDR` 动作，仅未知信号时回退标准事件，并始终检查实际输出 NAL。设备枚举补齐 `/dev/v4l2-nvenc`。
+
+本次探测实测编码耗时为首帧 86.91 ms，随后 6.79/3.89/4.80/3.43/4.85 ms；首帧包含初始化。该结果来自合成帧独立探测，不是 PICO 直播端到端延迟，也不证明硬编一定比软件编码延迟更低。现场随后也完成头显直播验证，实际后端为 `jetson`，未回退。启用时选择 `jetson` 或 `auto` 并应用配置，之后仍须核对 `encoder_backend_actual=jetson`。
+
+
+同一批真实相机帧的独立编码调用对比（640×400、2.6 Mbps、交替先后顺序、40 帧排除前 5 帧）中，x264 编码加封包平均 2.780 ms、P95 7.060 ms；Jetson 平均 9.058 ms、P95 13.691 ms。该规格下没有观察到编码延迟收益，CPU 占用收益未量化。结果仅用于比较编码调用，不是整条直播链路或物理显示端到端延迟；不能将硬编默认视为更低延迟。

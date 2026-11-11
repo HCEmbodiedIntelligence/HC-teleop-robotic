@@ -58,6 +58,35 @@ def probe(width, height, count):
     return result
 
 
+
+def parse_probe_output(stdout, stderr="", returncode=0):
+    """Find structured results even when native stdio flushes after Python JSON."""
+    lines = stdout.splitlines()
+    result = None
+    result_index = None
+    for index in range(len(lines)-1, -1, -1):
+        try:
+            candidate = json.loads(lines[index].strip())
+        except (ValueError, TypeError):
+            continue
+        if (isinstance(candidate, dict) and candidate.get("backend") == "jetson"
+                and isinstance(candidate.get("hardware_available"), bool)
+                and candidate.get("state") in {"passed", "unavailable", "failed", "timeout"}):
+            result, result_index = candidate, index
+            break
+    if result is None:
+        return {"backend": "jetson", "state": "failed", "hardware_available": False,
+                "error": "probe child returned no valid result JSON",
+                "returncode": returncode, "native_log_tail": (stdout + "\n" + stderr)[-4000:]}
+    native = "\n".join(line for index, line in enumerate(lines) if index != result_index)
+    if native.strip() or stderr.strip():
+        result["native_log_tail"] = (native + "\n" + stderr)[-4000:]
+    if returncode != 0 and result.get("hardware_available"):
+        result.update(state="failed", hardware_available=False,
+                      error=f"probe process exited abnormally after encoding: {returncode}")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--width', type=int, default=640)
@@ -76,17 +105,13 @@ def main():
                                     '--width', str(args.width), '--height', str(args.height),
                                     '--frames', str(args.frames)], capture_output=True,
                                    text=True, timeout=args.timeout, check=False)
-            # Some NVIDIA plugins log native initialization messages to stdout.
-            # Only the structured final line is returned to the caller.
-            lines = child.stdout.strip().splitlines()
-            result = json.loads(lines[-1]) if lines else {'state': 'failed', 'hardware_available': False,
-                                                         'error': child.stderr[-2000:] or 'probe child returned no JSON'}
+            result = parse_probe_output(child.stdout, child.stderr, child.returncode)
         except subprocess.TimeoutExpired:
             result = {'state': 'timeout', 'hardware_available': False,
                       'error': f'Jetson probe exceeded {args.timeout:g}s; child process terminated'}
         except (OSError, json.JSONDecodeError) as exc:
             result = {'state': 'failed', 'hardware_available': False, 'error': str(exc)}
-    print(json.dumps(result, ensure_ascii=False))
+    print("\n" + json.dumps(result, ensure_ascii=False) if args.worker else json.dumps(result, ensure_ascii=False), flush=True)
     return 0 if result.get('hardware_available') else 1
 
 

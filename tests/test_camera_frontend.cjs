@@ -102,3 +102,24 @@ test('fresh server config replaces prior codec choices',()=>{
   vm.runInContext("config.camera.streams[0].codec='VP8';renderCameraStreams()",ctx);
   assert.equal(cards.children[0].querySelectorAll('[data-camera-codec]')[0].value,'VP8');
 });
+
+test('actual Jetson backend is shown independently of FEC compatibility',()=>{
+  const {ctx}=setup();
+  const text=vm.runInContext("cameraBackendSummary({streams:[{state:'running',id:'head',name:'头部相机',codec:'H264',encoder_backend_actual:'jetson'}]})",ctx);
+  assert.match(text,/头部相机：Jetson GStreamer 硬编 · H264/);
+  assert.equal(vm.runInContext("cameraFecHint({codec:'H264',fec:{enabled:false}})",ctx),'');
+  assert.match(vm.runInContext("cameraFecHint({codec:'H264',fec:{enabled:true}})",ctx),/FEC 不生效，硬编仍可正常使用/);
+});
+test('fallback and unsupported FEC states remain explicit',()=>{
+  const {ctx}=setup();
+  assert.match(vm.runInContext("cameraBackendSummary({streams:[{state:'running',id:'head',codec:'H264',encoder_backend_actual:'x264',encoder_fallback_reason:'missing plugin'}]})",ctx),/x264 软件编码（已回退/);
+  assert.match(vm.runInContext("cameraFecHint({fec:{enabled:true},streams:[{codec:'VP8'},{codec:'H264'}]})",ctx),/仅用于 VP8 流/);
+  assert.match(vm.runInContext("cameraFecHint({fec:{enabled:true},codec:'VP8'})",ctx),/以保存后的协商状态为准/);
+});
+test('verbose network help is collapsed and test receiver remains explicitly disruptive',()=>{
+  const html=fs.readFileSync(path.join(__dirname,'../middleware/core/static/index.html'),'utf8');
+  assert.match(html,/<details class="camera-advanced-help">/);
+  assert.doesNotMatch(html,/<details class="camera-advanced-help"[^>]*open/);
+  assert.match(html,/连接会替换所选相机当前的接收会话/);
+  assert.match(html,/id="cameraFecCompatibility"[^>]*hidden/);
+});

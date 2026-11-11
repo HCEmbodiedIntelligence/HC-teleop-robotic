@@ -98,9 +98,14 @@
         <label class="toggle"><input type="checkbox" data-path="camera.enabled"><span></span>启用头显视频投射</label>
         <label>视频编码后端 <select data-path="camera.encoder_backend"><option value="x264">x264 软件编码</option><option value="auto">自动探测 Jetson/NVENC，失败回退</option><option value="nvenc">NVENC，失败回退</option><option value="jetson">Jetson GStreamer 硬编</option></select></label>
         <label class="toggle"><input type="checkbox" data-path="camera.fec.enabled"><span></span>启用标准 RED/ULPFEC（仅对各行选择 VP8 的相机生效）</label>
-        <p>FEC 需要新头显 APK 或支持 RED/ULPFEC 的浏览器。H.264 / Jetson 硬编与本版 FEC 不兼容；选择 VP8 使用软件编码。未协商成功时显示原因，继续普通视频与 RTX。</p>
-        <p>DSCP 默认关闭。对照测试时在配置中设置 camera.dscp: 34（AF41），并检查实际 socket 打标状态及 AP 映射。</p>
-        <p><a href="/static/receiver.html" target="_blank" rel="noopener">头显浏览器接收与遥测测试页</a>（会替换所选相机的现有接收会话）</p>
+        <p id="cameraBackendStatus" class="muted" role="status">等待实际编码后端状态…</p>
+        <p id="cameraFecCompatibility" class="muted" hidden></p>
+        <details class="camera-advanced-help">
+          <summary>兼容性与网络诊断（可选）</summary>
+          <p>Jetson GStreamer 支持 H.264 硬编。本版 FEC 使用 VP8 + RED/ULPFEC；H.264 的限制只针对 FEC，不影响硬编。接收端需提供相应能力，未协商成功时保留普通视频和 RTX，并显示原因。</p>
+          <p>DSCP 默认关闭。对照测试可设置 camera.dscp: 34（AF41），并检查实际 socket 标记及 AP 映射。</p>
+          <p><a href="/static/receiver.html" target="_blank" rel="noopener">浏览器接收与遥测测试页</a>：仅用于测试，连接会替换所选相机当前的接收会话。</p>
+        </details>
         <p id="cameraConfigError" class="error" role="status"></p>
         <div class="table-wrap"><table class="camera-topic-table"><thead><tr><th>相机</th><th>自定义图像话题</th><th>实时监控</th></tr></thead><tbody id="cameraStreamCards"><tr><td colspan="3">正在加载 1–4 号相机…</td></tr></tbody></table></div>
         <p class="muted">仅选择下方已配置的自定义图像话题；录制开关、消息类型和限频统一在下方管理。选择“不投射”可停用该路。</p>
@@ -462,6 +467,6 @@
     </form>
   </dialog>
   <script src="/static/platform_panel.js?v=15-master-toggle"></script>
-  <script src="/static/app.js?v=070b60f9aa84"></script>
+  <script src="/static/app.js?v=jetson-status-20261111"></script>
 </body>
 </html>

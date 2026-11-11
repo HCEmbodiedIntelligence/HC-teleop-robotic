@@ -2,6 +2,7 @@
 from fractions import Fraction
 import os
 import re
+from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
@@ -46,18 +47,30 @@ class Pipeline:
         self.first = True
         self.force = False
         self.mutable = True
+        self.native_force_supported = True
+        self.native_force_calls = 0
+        self.standard_force_calls = 0
         self.bus_error = None
         self.source = NS(emit=self.push)
         self.sink = NS(emit=self.pull)
         self.encoder = NS(find_property=self.find_property, set_property=self.set_property,
-                          get_property=lambda name: self.properties.get(name),
+                          emit=self.native_force, get_property=lambda name: self.properties.get(name),
                           get_static_pad=lambda _: NS(send_event=self.event))
     def find_property(self, name): return NS(flags=4096 if self.mutable else 0)
     def set_property(self, name, value): self.properties[name] = value
     def get_by_name(self, name): return getattr(self, name)
     def get_bus(self): return NS(have_pending=lambda: bool(self.bus_error), timed_pop_filtered=lambda *_: self.bus_error)
     def set_state(self, state): self.states.append(state); return 'success'
-    def event(self, event): self.force = True; return True
+    def native_force(self, signal):
+        assert signal == 'force-IDR'
+        self.native_force_calls += 1
+        if not self.native_force_supported:
+            raise TypeError('unknown signal name: force-IDR')
+        self.force = True
+    def event(self, event):
+        self.standard_force_calls += 1
+        self.force = True
+        return True
     def push(self, signal, buffer):
         assert signal == 'push-buffer'
         self.buffer = buffer
@@ -108,10 +121,42 @@ class JetsonH264Tests(unittest.TestCase):
         self.assertEqual(codec.encode(video_frame(1)), [DELTA])
         self.assertEqual(self.pipeline.buffer.pts, 1_000_000_000//30)
         self.assertEqual(codec.encode(video_frame(2, force=True)), [IDR])
+        self.assertEqual(self.pipeline.native_force_calls, 1)
+        self.assertEqual(self.pipeline.standard_force_calls, 0)
         description = self.descriptions[0]
         for setting in ('nvv4l2h264enc', 'nvvidconv', 'memory:NVMM', 'max-buffers=2',
                         'max-bytes=4608', 'block=false', 'alignment=au', 'level=(string)3.1'):
             self.assertIn(setting, description)
+
+    def test_unknown_native_action_falls_back_to_standard_force_key_event(self):
+        codec = JetsonH264Codec(64, 48, 1_000_000)
+        self.addCleanup(codec.close)
+        codec.encode(video_frame())
+        self.pipeline.native_force_supported = False
+        self.assertEqual(codec.encode(video_frame(1, force=True)), [IDR])
+        self.assertEqual(self.pipeline.native_force_calls, 1)
+        self.assertEqual(self.pipeline.standard_force_calls, 1)
+
+    def test_native_force_action_failure_is_not_silently_ignored(self):
+        codec = JetsonH264Codec(64, 48, 1_000_000)
+        codec.encode(video_frame())
+        self.pipeline.encoder.emit = lambda *_: (_ for _ in ()).throw(TypeError('driver argument failure'))
+        with self.assertRaisesRegex(TypeError, 'driver argument failure'):
+            codec.encode(video_frame(1, force=True))
+        self.assertEqual(self.pipeline.standard_force_calls, 0)
+        self.assertTrue(codec.closed)
+
+    def test_device_enumeration_preserves_nvhost_and_adds_v4l2_nvenc(self):
+        # Bypass setUp's platform mock to exercise actual discovery logic.
+        function = jetson_platform
+        with patch('middleware.core.jetson_h264.Path.read_bytes',
+                   side_effect=[b'NVIDIA Jetson AGX Orin Developer Kit', b'nvidia,tegra234']), \
+             patch('middleware.core.jetson_h264.Path.glob',
+                   side_effect=[[Path('/dev/nvhost-msenc')], [], [Path('/dev/v4l2-nvenc')]]) as glob:
+            platform = function()
+        self.assertEqual(platform['encoder_devices'], ['/dev/nvhost-msenc', '/dev/v4l2-nvenc'])
+        self.assertTrue(platform['is_jetson'])
+        self.assertEqual(glob.call_count, 3)
 
     def test_i420_uses_gstreamer_plane_stride_and_offset_for_width_642(self):
         codec = JetsonH264Codec(642, 400, 1_000_000)
@@ -137,6 +182,14 @@ class JetsonH264Tests(unittest.TestCase):
             codec.encode(video_frame(1))
         codec.close()
         self.assertEqual(self.pipeline.states.count('null'), 1)
+
+    def test_vbv_size_is_a_bit_budget_not_a_frame_count(self):
+        codec = JetsonH264Codec(64, 48, 1_000_000)
+        self.addCleanup(codec.close)
+        self.assertEqual(self.pipeline.properties['vbv-size'], 250_000)
+        # Real L4T 36.4 fails with BlockSide error 0x4 when this is set to
+        # fps//4 (=7). The 250ms budget must scale with bits per second.
+        self.assertGreater(self.pipeline.properties['vbv-size'], 1_000)
 
     def test_dynamic_bitrate_requires_advertised_playing_mutability(self):
         codec = JetsonH264Codec(64, 48, 1_000_000)

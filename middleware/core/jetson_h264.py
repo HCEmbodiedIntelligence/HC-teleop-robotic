@@ -30,7 +30,7 @@ def jetson_platform():
     detected = 'nvidia,tegra' in compatible.lower() or 'jetson' in model.lower()
     return {'is_jetson': detected, 'model': model or None,
             'compatible': compatible or None,
-            'encoder_devices': [str(p) for pattern in ('/dev/nvhost-msenc*', '/dev/nvhost-nvenc*')
+            'encoder_devices': [str(p) for pattern in ('/dev/nvhost-msenc*', '/dev/nvhost-nvenc*', '/dev/v4l2-nvenc*')
                                 for p in Path('/').glob(pattern.lstrip('/'))],
             'hardware_note': ('Jetson Orin Nano has no hardware video encoder; use x264.'
                               if 'orin nano' in model.lower() else None)}
@@ -133,8 +133,9 @@ class JetsonH264Codec:
             if self.video_info is None:
                 raise RuntimeError('GStreamer could not describe the raw I420 layout')
             # profile=0 is NVIDIA's Baseline enum; level is negotiated through
-            # caps, not the desktop FFmpeg NVENC option. One VBV unit is one
-            # frame's bit budget on Jetson, hence eight units ~= 267ms at 30fps.
+            # caps, not the desktop FFmpeg NVENC option. On tested L4T 36.4,
+            # vbv-size is a bit budget (default 4,000,000), not a frame count.
+            # A tiny value such as 7 triggers NVENC BlockSide error 0x4.
             pipeline = (
                 'appsrc name=source is-live=true format=time block=false do-timestamp=false '
                 f'max-bytes={self.video_info.size} '
@@ -164,7 +165,7 @@ class JetsonH264Codec:
             # already exclude B slices; only apply optional low-latency knobs
             # if this encoder actually exports them.
             for name, value in (('num-B-Frames', 0), ('maxperf-enable', True),
-                                ('vbv-size', max(1, self.fps // 4)), ('poc-type', 2)):
+                                ('vbv-size', max(1, self.bit_rate // 4)), ('poc-type', 2)):
                 if self.encoder.find_property(name):
                     self.encoder.set_property(name, value)
             self.bus = self.pipeline.get_bus()
@@ -214,10 +215,19 @@ class JetsonH264Codec:
                         raise RuntimeError(f'Jetson encoder bus error: {detail}; {debug or ""}. {INSTALL_GUIDANCE}')
                 force = getattr(frame.pict_type, 'name', None) == 'I' or int(frame.pict_type) == 1
                 if force and self.frames:
-                    event = self.GstVideo.video_event_new_downstream_force_key_unit(
-                        self.Gst.CLOCK_TIME_NONE, self.Gst.CLOCK_TIME_NONE, self.Gst.CLOCK_TIME_NONE, True, self.frames)
-                    if not self.encoder.get_static_pad('sink').send_event(event):
-                        raise RuntimeError('Jetson rejected force-key-unit request')
+                    try:
+                        # NVIDIA's action is required on tested L4T 36.4: the
+                        # generic event is accepted but does not produce IDR.
+                        self.encoder.emit('force-IDR')
+                    except TypeError as exc:
+                        # Only older plugins without this action use the
+                        # standard event. Real action/driver failures propagate.
+                        if 'unknown signal' not in str(exc).lower():
+                            raise
+                        event = self.GstVideo.video_event_new_downstream_force_key_unit(
+                            self.Gst.CLOCK_TIME_NONE, self.Gst.CLOCK_TIME_NONE, self.Gst.CLOCK_TIME_NONE, True, self.frames)
+                        if not self.encoder.get_static_pad('sink').send_event(event):
+                            raise RuntimeError('Jetson rejected force-key-unit request')
                 raw = pack_i420(frame, self.width, self.height, self.video_info)
                 buffer = self.Gst.Buffer.new_allocate(None, len(raw), None)
                 buffer.fill(0, raw)

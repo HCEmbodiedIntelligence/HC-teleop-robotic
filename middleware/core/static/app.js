@@ -754,7 +754,41 @@ function cameraMonitorHelp(stream) {
     : '当前服务尚未提供统一统计窗口。';
   return timing+' 编码器内耗时只覆盖编解码调用。发送处理从提交新帧到最后一个 RTP 包交给本机传输层，包含编码排队、线程唤醒、编码、封包、加密和 UDP 提交；其中传输调用为加密和 UDP 提交部分，不能重复相加。RTP 输出不代表头显接收或显示。覆盖为解码前压缩帧被替换，跳帧为解码后未送入编码器的中间帧，计数按本次连接累计；网络丢包来自头显 RTCP 反馈，与本地跳帧分别统计。接入 receiver.html 或遥测SDK后可回传接收、解码与渲染回调指标；渲染回调不等于物理屏幕显示，未同步时钟不推算端到端延迟。';
 }
+function cameraBackendSummary(camera) {
+  const streams=(camera?.streams||[]).filter(stream=>!['disabled','stopped'].includes(stream.state));
+  if(!streams.length)return '暂无运行中的视频流';
+  const labels={jetson:'Jetson GStreamer 硬编',nvenc:'NVENC 硬编',x264:'x264 软件编码','software-vp8':'VP8 软件编码'};
+  return streams.map(stream=>{
+    const backend=labels[stream.encoder_backend_actual]||'实际编码后端尚未上报';
+    const fallback=stream.encoder_fallback_reason?'（已回退，详情见实时监控）':'';
+    return `${stream.name||stream.id}：${backend}${fallback} · ${stream.webrtc_codec||stream.codec||'--'}`;
+  }).join('；');
+}
+function cameraFecHint(camera) {
+  if(!camera?.fec?.enabled)return '';
+  const streams=(camera.streams?.length?camera.streams:[camera]).filter(stream=>stream.enabled!==false);
+  const codecs=streams.map(stream=>String(stream.codec||camera.codec||'H264').toUpperCase());
+  if(!codecs.length)return '请先启用需要投射的相机。';
+  if(codecs.every(codec=>codec==='VP8'))return 'FEC 将用于 VP8 流；是否生效以保存后的协商状态为准。';
+  if(codecs.includes('VP8'))return 'FEC 仅用于 VP8 流；H.264 流继续使用普通视频与 RTX。';
+  return '当前相机均为 H.264：本版 FEC 不生效，硬编仍可正常使用。需要 FEC 时请为相机选择 VP8。';
+}
+function renderCameraCompatibilityHint() {
+  const target=$('#cameraFecCompatibility');if(!target)return;
+  const camera={...(config?.camera||{})};
+  const toggle=$('[data-path="camera.fec.enabled"]');
+  camera.fec={...(camera.fec||{}),enabled:toggle?toggle.checked:Boolean(camera.fec?.enabled)};
+  camera.streams=(camera.streams||[]).map(stream=>{
+    const codec=$$('[data-camera-codec]').find(input=>input.dataset.cameraCodec===stream.id);
+    const topic=$$('[data-camera-select]').find(input=>input.dataset.cameraSelect===stream.id);
+    return {...stream,codec:codec?codec.value:stream.codec,enabled:topic?Boolean(topic.value):stream.enabled};
+  });
+  const text=cameraFecHint(camera);target.textContent=text;target.hidden=!text;
+}
 function renderCameraStatus(camera,health={}) {
+  const backendStatus=$('#cameraBackendStatus');
+  if(backendStatus)backendStatus.textContent=cameraBackendSummary(camera);
+  renderCameraCompatibilityHint();
   for(const element of $$('[data-camera-status]')){
     const stream=(camera.streams||[]).find(item=>item.id===element.dataset.cameraStatus);
     element.textContent=cameraMonitorSummary(stream,health[stream?.custom_topic||stream?.topic]);
@@ -780,6 +814,7 @@ function renderConfig() {
   if($('#topicRecordingLerobotTask')) $('#topicRecordingLerobotTask').value=recordingConfig.lerobot_task || '遥操作';
   updateRecordingFormatFields();
   renderCameraStreams();
+  renderCameraCompatibilityHint();
   renderRecordingRules();
   renderStandardTopics();
   renderConfigInterface();
@@ -2196,6 +2231,8 @@ async function init() {
       toast(result.server_restart_required?'已保存；服务地址或配置目录变更需重启进程':'配置已保存并应用');
     }catch(error){toast(error.message,true);}
   };
+  $('#cameraStreamCards')?.addEventListener('change',renderCameraCompatibilityHint);
+  $('[data-path="camera.fec.enabled"]')?.addEventListener('change',renderCameraCompatibilityHint);
   $('#saveCameras').onclick=async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
