@@ -50,6 +50,12 @@ camera:
   height: 400
   fps: 30
   codec: H264
+  encoder_backend: x264
+  dscp: null
+  fec:
+    enabled: false
+    group_size: 5
+    media_bitrate_ratio: 0.8
 safety:
   enabled: true
   stop_on_startup: true

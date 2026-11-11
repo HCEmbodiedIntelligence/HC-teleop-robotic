@@ -3,7 +3,7 @@ server:
   port: 7876
 robot_profiles:
   root: ../adapters/robots
-  active: HC_REALMAN
+  active: x1
 simulation:
   headless: true
   with_control: true

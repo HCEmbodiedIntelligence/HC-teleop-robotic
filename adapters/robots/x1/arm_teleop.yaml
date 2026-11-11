@@ -14,24 +14,50 @@ robot:
   - 0.70710678
   # 回零手势使用的目标关节角，单位为 rad；同时作为缺少反馈时的初始参考。
   initial_joints:
-    leg_1: 0.5
-    leg_2: 1.2
-    zhi: -0.6
+    # --- 原默认初始位姿 (注释备份) ---
+    # leg_1: 0.5
+    # leg_2: 1.2
+    # zhi: -0.6
+    # head_1: 0.0
+    # head_2: 0.0
+    # Joint1_R: -1.44
+    # Joint2_R: -0.77
+    # Joint3_R: 1.44
+    # Joint4_R: -1.57
+    # Joint5_R: 0.0
+    # Joint6_R: 0.0
+    # Joint7_R: 0.0
+    # Joint1_L: 1.44
+    # Joint2_L: -0.77
+    # Joint3_L: -1.44
+    # Joint4_L: -1.57
+    # Joint5_L: 0.0
+    # Joint6_L: 0.0
+    # Joint7_L: 0.0
+
+    # --- 新初始位姿 ---
+    # 腰部
+    leg_1: 0.013296794662036223
+    leg_2: 0.15890334448485993
+    zhi: 0.5292216513130104
+    # 头部
     head_1: 0.0
     head_2: 0.0
-    Joint1_R: -1.44
-    Joint2_R: -0.77
-    Joint3_R: 1.44
-    Joint4_R: -1.57
-    Joint5_R: 0.0
-    Joint6_R: 0.0
+    # 右臂 (-80°, -30°, 100°, -110°, -15°, 10°, 0°)
+    Joint1_R: -1.396263
+    Joint2_R: -0.523599
+    Joint3_R: 1.745329
+    Joint4_R: -1.919862
+    Joint5_R: -0.261799
+    Joint6_R: 0.174533
     Joint7_R: 0.0
-    Joint1_L: 1.44
-    Joint2_L: -0.77
-    Joint3_L: -1.44
-    Joint4_L: -1.57
-    Joint5_L: 0.0
-    Joint6_L: 0.0
+    # 左臂对称 (80°, -30°, -100°, -110°, 15°, 10°, 0°)
+    Joint1_L: 1.396263
+    Joint2_L: -0.523599
+    Joint3_L: -1.745329
+    Joint4_L: -1.919862
+    Joint5_L: 0.261799
+    Joint6_L: 0.174533
     Joint7_L: 0.0
 camera_metadata:
   enabled: true
