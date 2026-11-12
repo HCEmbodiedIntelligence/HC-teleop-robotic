@@ -81,7 +81,7 @@ class SimulationService:
             reason = '当前机器人包缺少 arm_teleop.yaml 或 vr_configs.yml，无法启动 PyBullet。'
         logs = list(self.logs)
         if self.state == 'failed' and self.log_dir:
-            for name in ('v23_solver.log', 'teleop_controller.log'):
+            for name in ('motion_solver.log', 'motion_bridge.log', 'v23_solver.log', 'teleop_controller.log'):
                 try:
                     with (self.log_dir / name).open('rb') as stream:
                         stream.seek(0, 2)

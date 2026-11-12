@@ -105,9 +105,6 @@ class SimRobotController(Node, AssembledRobot):
 
         self.wo_controller = False
         self.target_ee_poses = None
-        self.stream_viewer = stream_viewer
-        self.viewer_demand_file = viewer_demand_file
-        self.next_viewer_frame = 0.0
         urdf_rel = self.configs.get("urdf_path")
         if not urdf_rel and isinstance(self.configs.get("robot"), dict):
             urdf_rel = self.configs["robot"].get("urdf_path")
