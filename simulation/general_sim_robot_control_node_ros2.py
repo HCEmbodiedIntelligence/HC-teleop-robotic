@@ -157,27 +157,14 @@ class SimRobotController(Node, AssembledRobot):
             from middleware.core.robot_api import RobotApiProfile
             RobotApiProfile(self.robot_description_path)
         self.joint_state_pub = self.create_publisher(
-            JointState, "/io_teleop/joint_states", 1
-        )
-        self.internal_joint_state_pub = (
-            self.create_publisher(JointState, "/internal/robot/joint_states", 1)
-            if unified else None
+            JointState, "/internal/robot/joint_states" if unified else "/io_teleop/joint_states", 1
         )
         self.base_pose_pub = self.create_publisher(PoseStamped, "/observation/base/pose", 10)
         self.joint_cmd_sub = self.create_subscription(
             JointState,
-            "/io_teleop/joint_cmd",
+            "/internal/robot/joint_commands" if unified else "/io_teleop/joint_cmd",
             self.joint_cmd_callback,
             1,
-        )
-        self.internal_joint_cmd_sub = (
-            self.create_subscription(
-                JointState,
-                "/internal/robot/joint_commands",
-                self.joint_cmd_callback,
-                1,
-            )
-            if unified else None
         )
         self.target_finger_joint_sub = self.create_subscription(
             JointState,
@@ -337,8 +324,6 @@ class SimRobotController(Node, AssembledRobot):
         joint_state.position = [state[0] for state in states]
         joint_state.velocity = [state[1] for state in states]
         self.joint_state_pub.publish(joint_state)
-        if getattr(self, 'internal_joint_state_pub', None) is not None:
-            self.internal_joint_state_pub.publish(joint_state)
         self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
         demand_file = getattr(self, 'viewer_demand_file', None)
         viewer_enabled = getattr(self, 'stream_viewer', False) or (

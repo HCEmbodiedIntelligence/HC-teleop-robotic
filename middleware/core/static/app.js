@@ -345,7 +345,18 @@ function renderCommandMux(ros) {
 function renderJointMonitor() {
   const body=$('#jointMonitorRows');
   if(!body)return;
-  const names=[...new Set([...jointMonitor.command.keys(),...jointMonitor.feedback.keys()])];
+  const names=[];
+  const seen=new Set();
+  for(const k of jointMonitor.feedback.keys()){
+    names.push(k);
+    seen.add(k);
+  }
+  for(const k of jointMonitor.command.keys()){
+    if(!seen.has(k)){
+      names.push(k);
+      seen.add(k);
+    }
+  }
   body.textContent='';
   if(!names.length){
     const row=document.createElement('tr'),cell=document.createElement('td');
