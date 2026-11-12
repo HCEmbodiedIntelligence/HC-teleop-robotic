@@ -1,8 +1,10 @@
+> 单链接连接、按任务名称录制和自动上传请使用机器人页面，详见 [平台任务录制](../docs/PLATFORM_TASK_RECORDING.md)。以下手动字段与 CLI 保留用于旧部署维护。
+
 > HC 迁入版本 1.4.0：普通 HC 产物、服务/API、面板和文件锁接线请先阅读 [HC_INTEGRATION.md](HC_INTEGRATION.md)。以下保留原客户端协议说明；旧 manager 路径和 G0 验收记录属于来源实现，不是本轮集成通过证据。
 
 # 独立机器人上传器 v1
 
-消费 A 的最终 `export-complete.json`，通过公开 robot-ingest/v1 HTTP API 上传。包仅依赖 Python 3.10+ 和 jsonschema；不导入 ROS、LeRobot、平台代码、数据库或 Temporal。公共 schema 是 G0 `g0-20260922.1` 的逐字副本，出处和 hash 在 `humanoid_upload/schemas/provenance.json`；修改公共契约仍由 E 发布。
+消费 A 的最终 `export-complete.json`，通过公开 robot-ingest/v1 HTTP API 上传。包依赖 Python 3.10+、jsonschema 和 mcap（用于共享方案元数据一致性检查）；不导入 ROS、LeRobot、平台代码、数据库或 Temporal。schema 基于 G0 `g0-20260922.1`，本次 HC 扩展增加可选 capture_plan 引用和独立处理回执状态；原始上游哈希与扩展后的文件哈希分别保存在 `humanoid_upload/schemas/provenance.json`。服务端协议由协调终端集成发布。
 
 ## 安装与启动
 
@@ -83,3 +85,8 @@ install/uploader/bin/python -I src/humanoid_manager/upload_client/scripts/real-s
 此脚本不访问数据库。Raw 唯一性及预期 episode 集合需 C 在真实持久层独立出具证据，不能用本地队列数量代替。契约服务的成功不得标记为真实 C 联调成功。
 
 E 接线说明见 [INTEGRATION.md](INTEGRATION.md)。部署、真实跨机/IP、TLS、真人和真机负载验收由 E 统一安排。
+
+
+共享采集方案（2026-10-21）：新平台任务先只读预检，实际开始前通过 prepare-recording 固定方案。完整 capture_snapshot 保存在本地录制、MCAP 元数据、HC LeRobot capture-context、ready descriptor 和队列；上传 manifest 只携带四项 capture_plan 引用。旧封存和旧队列不补写当前方案。无 annotation_task_id 的成功处理回执有效，数据可读、标注和训练交付分别显示。
+
+隔离合同测试命令：`PYTHONPATH=.:upload_client:middleware:tests python -m pytest tests/test_shared_capture_plans.py -q`。测试使用合成 MCAP、可读 Parquet 和隔离 HTTP 服务；不证明生产平台、真实驱动或官方 LeRobot writer 已完成集成。

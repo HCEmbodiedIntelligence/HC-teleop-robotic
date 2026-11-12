@@ -1,0 +1,10 @@
+# Compatibility entry point; robot-owned settings come from the active package.
+robot_profiles:
+  root: ../adapters/robots
+  active: x1
+ros:
+  domain_id: 14
+  recording:
+    directory: ../runtime/topic_recordings
+    format: mcap
+    enabled: false

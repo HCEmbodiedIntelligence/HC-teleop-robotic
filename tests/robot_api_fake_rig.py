@@ -4,6 +4,7 @@ Only the hardware controller is simulated. No IK, RTC, public conversion,
 driver conversion, permission or command-selector code is replaced.
 """
 import fcntl
+import itertools
 import os
 from pathlib import Path
 import signal
@@ -26,9 +27,12 @@ from middleware.core.ros_bridge import RosBridge
 
 
 class FakeRig:
-    domain = 217
+    # Reusing a domain across consecutive fixtures leaves stale DDS discovery
+    # for a lease interval. Keep every rig in this suite isolated from it.
+    domains = itertools.cycle(range(200, 216))
 
     def __init__(self, profile, report, with_teleop=False):
+        self.domain = next(self.domains)
         self.api = RobotApiProfile(profile)
         self.report = Path(report)
         self.report.mkdir(parents=True, exist_ok=True)
@@ -61,7 +65,7 @@ class FakeRig:
             if self.with_teleop:
                 from adapters.core.arm_teleop_node import RobotArmTeleopNode
                 from adapters.nodes.unified_motion_teleop import UnifiedMotionTeleopBridge
-                self.teleop = RobotArmTeleopNode(str(self.api.directory/'arm_teleop.yaml'))
+                self.teleop = RobotArmTeleopNode(str(self.api.directory/'arm_teleop.yaml'), backend='motion')
                 self.vr = UnifiedMotionTeleopBridge(self.api.directory)
                 for peer in (self.teleop,self.vr):
                     self.extra_nodes.append(peer); self.executor.add_node(peer)
@@ -178,7 +182,7 @@ class FakeRig:
     def until(self, predicate, timeout=5.):
         deadline=time.monotonic()+timeout
         while not predicate():
-            assert time.monotonic()<deadline, 'timed out; inspect '+str(self.report)
+            assert time.monotonic()<deadline, 'timed out; ROS nodes='+str(self.node.get_node_names())+'; inspect '+str(self.report)
             self.pump(.01)
 
     def future(self, future, timeout=10.):

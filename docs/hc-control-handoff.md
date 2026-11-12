@@ -1,3 +1,5 @@
+> humanoid 分支历史开发记录。当前入口、默认后端和合并范围以 [分支整合说明](MAIN_HUMANOID_INTEGRATION.md) 为准。
+
 # HC 控制与硬件接入
 
 使用 `HC_ROBOT_NAME=openarmx` 或 `x1` 选择 profile；`HC_ROBOT_CONFIG_ROOT` 可指定根目录，环境变量优先于 middleware 配置。统一解析入口为 `middleware/profile_cli.py` / `core/robot_api.py`。OpenArmX、X1 统一模式均要求 Motion，不允许覆盖回 v23；旧后端只服务明确的 legacy profile。启动日志输出最终 backend 和 ROS_DOMAIN_ID。

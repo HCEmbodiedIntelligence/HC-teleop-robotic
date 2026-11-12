@@ -54,7 +54,6 @@ class ProjectLayoutTests(unittest.TestCase):
             "target_finger_joints",
             "target_ee_poses",
             "target_gripper_status",
-            "target_base_move",
         ):
             self.assertIn(
                 "/io_teleop/" + topic + ":=" + {'joint_states': '/observation/joint_states', 'joint_cmd': '/action/joint_states', 'target_ee_poses': '/action/ee_poses', 'target_base_move': '/action/base/command', 'hardware_ready': '/status/hardware/ready', 'target_finger_joints': '/action/hands/joint_targets', 'target_gripper_status': '/action/hands/gripper_status', 'target_joint_from_vr': '/control/solver/target_joint_from_vr'}[topic], launcher
@@ -81,9 +80,8 @@ class ProjectLayoutTests(unittest.TestCase):
         javascript = (
             self.root / "middleware" / "core" / "static" / "app.js"
         ).read_text(encoding="utf-8")
-        config = yaml.safe_load(
-            (self.root / "middleware" / "config.yaml").read_text(encoding="utf-8")
-        )
+        from middleware.core.config import ConfigStore
+        config = ConfigStore(self.root / "middleware" / "config.yaml").load()
 
         self.assertIn("状态监控", html)
         self.assertIn('id="sourceVr"', html)

@@ -1,5 +1,23 @@
 # HC upload integration
 
+## Main branch integration
+
+Ported from `origin/humanoid` at `f7f12c9` onto main. Main retains `TopicRecorder`;
+`middleware/core/recording_artifacts.py` provides the persistent capture-time binding,
+closed-source/export-complete handoff and deletion leases. It does not use
+`RecordingService`, raw capture/sealing, or data tools. The raw protocol remains in
+the reusable client, but the embedded main service has no raw seal callback.
+The descriptions below of RecordingService/raw integration apply to the upstream
+humanoid integration, not to capabilities enabled on main.
+
+Install with `./install.sh --upload`. See the root README for the main workflow.
+Main regression tests: `tests/test_recording_upload_handoff.py`,
+`tests/test_main_upload_app.py`, `tests/test_dataset_frontend.cjs`, and
+`upload_client/tests/test_hc_artifacts.py`. Client handoff tests requiring humanoid's
+RecordingService or external OPENARM_G0 assets are separate prerequisites.
+
+## Upstream integration contract
+
 This copy comes from humanoid_manager/upload_client at 26cbe8b7b751276cbcbc2e21d1ae2d1e627a7495. It retains the humanoid_upload package, schemas and raw protocol. Install only HC/upload_client for the new deployment; do not install two copies into one environment.
 
 Install `python -m pip install ./upload_client`; the middleware also requires its existing aiohttp dependency. The uploader itself has no ROS, training-stack, manager or platform-source imports.

@@ -1,4 +1,4 @@
-"""Exercise B's real app lifecycle with C installed; opt-in isolated worktree only."""
+"""Exercise main app upload lifecycle with ROS disabled and temporary storage."""
 import asyncio
 import os
 import sys
@@ -8,10 +8,7 @@ import pytest
 
 
 def test_integrated_upload_lifecycle(tmp_path, monkeypatch):
-    selected = os.environ.get('HC_RECORDING_WORKTREE')
-    if not selected:
-        pytest.skip('integrated HC worktree not provided')
-    root = Path(selected).resolve()
+    root = Path(__file__).resolve().parents[2]
     monkeypatch.syspath_prepend(str(root))
     # This test must never initialize a ROS context even on ROS-enabled hosts.
     monkeypatch.setitem(sys.modules, 'rclpy', None)
@@ -34,7 +31,7 @@ def test_integrated_upload_lifecycle(tmp_path, monkeypatch):
     cfg['safety']['stop_on_startup'] = False
     cfg['robot_profiles']['root'] = str(tmp_path / 'profiles')
     cfg['ros']['recording'].update(directory=str(tmp_path/'data'),
-        job_state_dir=str(tmp_path/'jobs'), artifact_state_dir=str(tmp_path/'ready'))
+        upload_job_state_dir=str(tmp_path/'jobs'), artifact_state_dir=str(tmp_path/'ready'))
     cfg['uploads'].update(enabled=True, auto_enqueue=False,
         queue_directory=str(tmp_path/'upload-queue'))
     store.save(cfg)
@@ -51,14 +48,17 @@ def test_integrated_upload_lifecycle(tmp_path, monkeypatch):
             upload_service = runtime.uploads
             assert not runtime.upload_error
             assert runtime.recorder.upload_service is runtime.uploads
-            assert runtime.uploads.request_raw_seal == runtime.recorder.request_raw_seal
+            assert runtime.uploads.request_raw_seal is None
+            assert runtime.recorder.__class__.__name__ == 'TaskRecorder'
+            assert runtime.recorder.recorder.__class__.__name__ == 'TopicRecorder'
+            assert runtime.platform.status()['auto_upload'] is False
             response = await client.post('/api/uploads/scan', json={})
             assert response.status == 200, await response.text()
             assert (await response.json())['enqueued'] == 0
-            for path in ('/', '/static/upload_panel.js', '/static/upload_panel.css'):
+            for path in ('/', '/static/upload_panel.js', '/static/upload_panel.css', '/static/simulation_viewer.js'):
                 response = await client.get(path)
                 assert response.status == 200
-                if path.endswith('.js'):
+                if path.endswith('upload_panel.js'):
                     assert 'mountUploadPanel' in await response.text()
             routes = {route.resource.canonical for route in client.app.router.routes()}
             assert '/api/recordings/upload' in routes

@@ -1,5 +1,6 @@
 # Local dependency bundles and virtual environments
 .deps/
+.sdk_deps
 .venv/
 venv/
 
@@ -23,11 +24,19 @@ runtime/
 # Runtime supervisor is source code, not generated session data.
 !tools/runtime/
 !tools/runtime/**
+tools/runtime/__pycache__/
+
+# Local waist diagnostics and incident notes
+docs/waist_monitor.md
+docs/腰部失控事件报告_*.md
+tests/test_waist_monitor.py
+tools/diagnostics/waist_monitor.py
 
 # User-imported robot profiles in adapters/robots/ (keep built-in profiles)
 adapters/robots/*
 !adapters/robots/openarmx/
 !adapters/robots/x1/
+!adapters/robots/HC_REALMAN/
 !adapters/robots/.gitkeep
 !adapters/robots/*.md
 
@@ -35,8 +44,11 @@ adapters/robots/*
 # Isolated optional LeRobot export environment
 .venv-lerobot/
 
-# Optional two-package motion workspace
+# Optional Motion workspace outputs and local environment links
 build_motion/
-install_motion/
+install_motion
 log_motion/
-log/
+/log/
+.deps
+.venv-lerobot
+*.so

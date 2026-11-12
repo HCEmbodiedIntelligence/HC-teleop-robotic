@@ -9,7 +9,7 @@ from urllib.parse import quote
 from aiohttp.test_utils import TestClient, TestServer
 from middleware.core.config import ConfigStore
 from middleware.core.topic_recorder import TopicRecorder
-from middleware.core.recording_datasets import resolve_dataset
+from middleware.core.recording_datasets import archive_datasets, resolve_dataset
 
 
 def make_dataset(root, name='episode'):
@@ -29,6 +29,21 @@ def make_dataset(root, name='episode'):
 
 
 class DatasetFilesTests(unittest.TestCase):
+    def test_archive_mixed_dataset_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            make_dataset(root)
+            (root / 'capture.mcap').write_bytes(b'mcap payload')
+            archive = archive_datasets(root, ['capture.mcap', 'lerobot:episode'])
+            try:
+                with zipfile.ZipFile(archive) as output:
+                    self.assertEqual(output.read('mcap/capture.mcap'), b'mcap payload')
+                    self.assertEqual(
+                        output.read('lerobot/episode/videos/observation.images.eye/chunk-000/file-000.mp4'),
+                        b'video payload')
+            finally:
+                archive.unlink(missing_ok=True)
+
     def test_list_and_delete_dataset_keeps_source_and_other_formats(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -82,6 +97,40 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.directory.cleanup()
 
+    async def test_tagged_mcap_download_includes_companion_without_changing_raw_api(self):
+        source = self.root / 'recordings/capture.mcap'
+        source.write_bytes(b'raw mcap')
+        url = '/api/recordings/capture.mcap/download'
+        self.assertEqual(await (await self.client.get(url + '?with_tags=1')).read(), b'raw mcap')
+        source.with_suffix('.takeovers.json').write_text('{"tag":"dagger","intervals":[]}')
+        self.assertEqual(await (await self.client.get(url)).read(), b'raw mcap')
+        data = await (await self.client.get(url + '?with_tags=1')).read()
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual(archive.read('mcap/capture.mcap'), b'raw mcap')
+            self.assertEqual(json.loads(archive.read('mcap/capture.takeovers.json'))['intervals'], [])
+
+    async def test_format_selection_saves_through_page_api_and_survives_reload(self):
+        for mode in ('mcap', 'mcap_mp4', 'lerobot', 'both'):
+            response = await self.client.get('/api/config')
+            config = await response.json()
+            config['ros']['recording']['format'] = mode
+            saved = await self.client.put('/api/config', json=config)
+            self.assertEqual(saved.status, 200, await saved.text())
+            reloaded = await (await self.client.get('/api/config')).json()
+            self.assertEqual(reloaded['ros']['recording']['format'], mode)
+            self.assertEqual(ConfigStore(self.root/'middleware.yaml').load()['ros']['recording']['format'], mode)
+
+    async def test_saving_format_during_capture_keeps_the_active_configuration(self):
+        from unittest.mock import patch
+        config = await (await self.client.get('/api/config')).json()
+        original = config['ros']['recording']['format']
+        config['ros']['recording']['format'] = 'mcap_mp4'
+        with patch.object(TopicRecorder, 'is_recording', return_value=True):
+            response = await self.client.put('/api/config', json=config)
+            self.assertEqual(response.status, 409)
+            self.assertEqual((await response.json())['code'], 'RECORDING_ACTIVE')
+        self.assertEqual(ConfigStore(self.root/'middleware.yaml').load()['ros']['recording']['format'], original)
+
     async def test_list_zip_video_range_and_batch_delete(self):
         response = await self.client.get('/api/recordings')
         data = await response.json()
@@ -104,3 +153,36 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         result = await response.json()
         self.assertEqual(result['deleted'], [item['id']])
         self.assertFalse(self.dataset.exists())
+
+    async def test_batch_download_returns_one_mixed_zip(self):
+        raw = self.root / 'recordings/capture.mcap'
+        raw.write_bytes(b'mcap payload')
+        response = await self.client.post('/api/recordings/batch-download', json={
+            'filenames': ['capture.mcap', 'lerobot:episode'],
+        })
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.headers['Content-Disposition'].endswith('.zip"'))
+        with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+            self.assertEqual(archive.read('mcap/capture.mcap'), b'mcap payload')
+            self.assertIn('lerobot/episode/meta/info.json', archive.namelist())
+
+        response = await self.client.post('/api/recordings/batch-download', data={
+            'filenames': json.dumps(['capture.mcap']),
+        })
+        self.assertEqual(response.status, 200)
+        with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+            self.assertEqual(archive.read('mcap/capture.mcap'), b'mcap payload')
+
+    async def test_recording_list_filters_formats_and_compacts_rows(self):
+        raw = self.root / 'recordings/capture.mcap'
+        raw.write_bytes(b'mcap payload')
+        response = await self.client.get('/api/recordings?format=mcap&compact=1')
+        self.assertEqual(response.status, 200)
+        result = await response.json()
+        self.assertEqual([item['id'] for item in result['files']], ['capture.mcap'])
+        self.assertNotIn('channels', result['files'][0])
+        self.assertEqual(result['format_counts'], {'mcap': 1, 'lerobot': 1, 'bundle': 0})
+
+        result = await (await self.client.get('/api/recordings?format=lerobot')).json()
+        self.assertEqual([item['id'] for item in result['files']], ['lerobot:episode'])
+        self.assertIn('channels', result['files'][0])

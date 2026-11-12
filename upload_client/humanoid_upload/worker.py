@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .bundle import manifest_for
-from .artifacts import ArtifactLocks, manifest_for_ready
+from .artifacts import ArtifactLocks, asset_stat_snapshot, manifest_for_ready
 from .common import UploadError, canonical, validate
 from .http import Http
 
@@ -16,16 +16,37 @@ def state_for(state, processing, quality):
         return "uploading", False, "继续上传"
     if state != "COMMITTED":
         return "needs_attention", True, "会话暂停、取消或失败；核对平台状态，暂停可显式 resume"
+    if processing == 'AWAITING_CONFIGURATION':
+        return 'awaiting_configuration', True, '数据已提交，采集方案待配置；请在平台修复任务方案，无需重传'
+    if processing == 'STRUCTURE_MISMATCH':
+        return 'structure_mismatch', True, '数据已提交，实际结构与任务方案不一致；请在平台查看字段差异'
     if processing in {"PARTIALLY_FAILED", "FAILED"}:
         return "processing_failed", True, "保留成功 episode；在平台重试失败处理后执行本地 retry 查询，不重新上传 Raw"
     if processing == "READY":
-        return {"PASS": ("ready", True, "进入平台标注；此状态不代表已审核发布"),
+        return {"PASS": ("ready", True, "数据处理完成；标注和训练交付状态分别查看"),
                 "RISK": ("needs_attention", True, "在平台复核质量风险"),
                 "REJECT": ("quality_rejected", True, "按源 episode 补采或复核质检"),
                 "PENDING": ("needs_attention", True, "处理结果缺少质检结论，请联系平台管理员")}[quality]
     if processing in {"DISCOVERING_EPISODES", "PROCESSING"}:
         return "processing", False, "等待平台处理"
     return "raw_committed", False, "Raw 已提交，等待平台处理；无需重传"
+
+
+def delivery_states(result):
+    """Accept current per-Episode receipts and optional older aggregate receipts."""
+    aliases = {'PENDING_CONFIGURATION': 'NOT_CONFIGURED', 'CREATED': 'READY', 'APPROVED': 'COMPLETED'}
+    episodes = result.get('episodes', [])
+    statuses = {aliases.get(ep.get('annotation_status'), ep.get('annotation_status', 'UNKNOWN')) for ep in episodes}
+    annotation = aliases.get(result.get('annotation_status'), result.get('annotation_status'))
+    if annotation is None:
+        annotation = next((state for state in ('FAILED', 'NOT_CONFIGURED', 'UNKNOWN', 'PENDING', 'READY')
+                           if state in statuses), next(iter(statuses)) if len(statuses) == 1 else 'UNKNOWN')
+    data = result.get('data_status', 'READABLE' if episodes and all(
+        ep.get('data_readable') is True and ep['status'] == 'READY' and ep['quality_status'] == 'PASS'
+        for ep in episodes) else 'UNKNOWN')
+    # Readability and annotation creation alone never prove a training delivery.
+    return dict(annotation_status=annotation, data_status=data,
+                training_status=result.get('training_status', 'UNKNOWN'))
 
 
 class Worker:
@@ -60,6 +81,11 @@ class Worker:
             return expected == actual
         if not contains(manifest, remote):
             raise UploadError("SERVER_MANIFEST_CONFLICT", "核对原 UUID 与不可变 manifest；不要重建上传")
+        remote_snapshot = upload.get('processing_config_snapshot')
+        if manifest.get('capture_plan') and remote_snapshot and remote_snapshot.get('schema_version') == 'capture-recording-snapshot/v1':
+            from .capture_plan import validate_snapshot
+            validate_snapshot(remote_snapshot, **manifest['capture_plan'],
+                              robot_id=manifest['robot_id'], collection_task_id=manifest['collection_task_id'])
         expected = {a["asset_id"]: a for a in manifest["assets"]}
         if len(upload["assets"]) != len(expected):
             raise UploadError("SERVER_ASSET_CONFLICT")
@@ -68,6 +94,12 @@ class Worker:
             if not item or any(asset["expected_" + key] != item[key] for key in ("size_bytes", "sha256", "crc64")) or asset["path"] != item["path"]:
                 raise UploadError("SERVER_ASSET_CONFLICT")
         state, terminal, action = state_for(upload["state"], upload["processing_status"], upload["quality_status"])
+        if (upload['state'] == 'COMMITTED' and manifest['source_format'] == 'MCAP'
+                and upload['processing_status'] == 'READY' and upload['quality_status'] == 'PENDING'):
+            # MCAP READY confirms continuous-recording preparation. Episode
+            # quality is unavailable until slicing; keep that distinction.
+            state, terminal, action = ('raw_committed', True,
+                'MCAP 原始录制已处理；请到平台完成切片并查看 Episode 质检结果，无需重传')
         if (upload["state"] == "COMMITTED" and self.cfg["processing_endpoint"]
                 and manifest['source_format'] == 'LEROBOT_V3'):
             terminal = False  # A crash must not strand a terminal result without its episode receipt.
@@ -75,6 +107,8 @@ class Worker:
                    server_state=upload["state"], processing_status=upload["processing_status"],
                    quality_status=upload["quality_status"], state=state, terminal=terminal,
                    next_action=action, code=None, next_at=0 if terminal else time.time()+self.cfg["poll_seconds"])
+        for field in ('annotation_status', 'data_status', 'training_status'):
+            if field in upload: job[field] = upload[field]
         self.queue.save(job)
         return upload
 
@@ -162,10 +196,15 @@ class Worker:
 
     def verify(self, job, cfg):
         self.check_cancelled(job)
+        snapshot = asset_stat_snapshot(job['root'], job['manifest']['assets'])
+        if snapshot is not None and snapshot == job.get('verified_assets'):
+            return
         _, _, manifest = (manifest_for_ready(job['descriptor'], cfg, job['id']) if job.get('descriptor')
                           else manifest_for(job["root"], cfg, job["id"]))
         if canonical(manifest) != canonical(job["manifest"]):
             raise UploadError("LOCAL_CONTENT_CHANGED", "保留旧队列；用新 export_id 重新导出")
+        job['verified_assets'] = asset_stat_snapshot(job['root'], job['manifest']['assets'])
+        self.queue.save(job)
 
     @staticmethod
     def recording_capacity(job,http):
@@ -251,9 +290,19 @@ class Worker:
             raise UploadError("PROCESSING_RESULT_INCONSISTENT")
         if state == "ready" and (not result["episodes"] or any(e["status"] != "READY" or e["quality_status"] != "PASS" for e in result["episodes"])):
             raise UploadError("PROCESSING_RESULT_INCONSISTENT")
+        codes = {episode.get('error_code') for episode in result['episodes']}
+        if codes & {'CAPTURE_PLAN_REQUIRED', 'CAPTURE_MAPPING_UNVERIFIED', 'CAPTURE_DATASET_REVIEW_REQUIRED'}:
+            state, action = 'awaiting_configuration', '原始数据已提交，采集方案或映射待配置；请在平台修复后重试处理'
+        elif codes & {'CAPTURE_STRUCTURE_MISMATCH', 'CAPTURE_DATASET_INCOMPATIBLE', 'CAPTURE_FREQUENCY_MISMATCH'}:
+            state, action = 'structure_mismatch', '实际数据与任务方案不一致；请查看字段、顺序、单位和频率差异，原始文件已保留'
         job.update(state=state, terminal=terminal, next_action=action, episodes=result["episodes"],
                    processing_status=result["processing_status"], quality_status=result["quality_status"],
                    next_at=0 if terminal else time.time()+max(1, result["poll_after_seconds"]))
+        job.update(delivery_states(result))
+        if job['annotation_status'] == 'NOT_CONFIGURED':
+            job['next_action'] += '；标注待配置'
+        elif job['annotation_status'] == 'FAILED':
+            job['next_action'] += '；标注创建失败，可在平台单独重试，数据不重复提交'
         job.pop("processing_retry_request", None)
         self.queue.save(job)
 
@@ -261,9 +310,14 @@ class Worker:
         for job in self.queue.jobs(due=True):
             if self.should_stop():
                 break
+            platform = job['frozen']['platform_base_url']
+            gate = self.queue.platform_backoff(platform)
+            if gate is not None and gate['next_at'] > time.time():
+                continue
             try:
                 self.process(job)
                 job["attempts"] = 0
+                self.queue.clear_platform_backoff(platform)
             except UploadError as error:
                 job["attempts"] += 1
                 retry = error.retry and (not self.cfg["max_attempts"] or job["attempts"] < self.cfg["max_attempts"])
@@ -274,6 +328,20 @@ class Worker:
                 delay = max(error.after, min(self.cfg["retry_max_seconds"], delay*random.uniform(1, 1.2)))
                 job.update(state="retry_wait" if retry else "needs_attention", terminal=not retry,
                            next_at=time.time()+delay if retry else 0, code=error.code, next_action=error.action)
+                if retry and error.platform_retry:
+                    failures = (gate or {}).get('failures', 0) + 1
+                    # A queue-wide outage must back off more aggressively than
+                    # one job.  After several failures this becomes one cheap
+                    # recovery attempt every five minutes, while explicit
+                    # operator retry can still clear the circuit immediately.
+                    platform_delay = min(
+                        300,
+                        self.cfg["retry_base_seconds"] * 2**min(failures - 1, 20),
+                    )
+                    platform_delay = max(error.after, platform_delay * random.uniform(1, 1.2))
+                    self.queue.set_platform_backoff(
+                        platform, failures, time.time() + platform_delay, error.code
+                    )
             except (OSError, ValueError, KeyError, TypeError):
                 job.update(state="needs_attention", terminal=True, next_at=0,
                            code="LOCAL_OR_PROTOCOL_ERROR", next_action="检查本地文件/磁盘及平台协议；修复后显式 retry")

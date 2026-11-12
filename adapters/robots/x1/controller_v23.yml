@@ -19,22 +19,41 @@ control:
   method: retarget
   dt: 0.01
   # 阻尼用于抑制奇异位形附近的数值放大。
-  damping: 2.0e-03
+  damping: 5.0e-03
   # 机械臂初始参考姿态，同时用于零空间姿态偏好目标；留空时自动从同目录 arm_teleop.yaml 继承。
   joints_init:
-    Joint1_R: -1.44
-    Joint2_R: -0.77
-    Joint3_R: 1.44
-    Joint4_R: -1.57
-    Joint5_R: 0.0
-    Joint6_R: 0.0
+    # --- 原默认姿态偏好 (注释备份) ---
+    # Joint1_R: -1.44
+    # Joint2_R: -0.77
+    # Joint3_R: 1.44
+    # Joint4_R: -1.57
+    # Joint5_R: 0.0
+    # Joint6_R: 0.0
+    # Joint7_R: 0.0
+    # Joint1_L: 1.44
+    # Joint2_L: -0.77
+    # Joint3_L: -1.44
+    # Joint4_L: -1.57
+    # Joint5_L: 0.0
+    # Joint6_L: 0.0
+    # Joint7_L: 0.0
+
+    # --- 新姿态偏好 ---
+    # 右臂 (-80°, -30°, 100°, -110°, -15°, 10°, 0°)
+    Joint1_R: -1.396263
+    Joint2_R: -0.523599
+    Joint3_R: 1.745329
+    Joint4_R: -1.919862
+    Joint5_R: -0.261799
+    Joint6_R: 0.174533
     Joint7_R: 0.0
-    Joint1_L: 1.44
-    Joint2_L: -0.77
-    Joint3_L: -1.44
-    Joint4_L: -1.57
-    Joint5_L: 0.0
-    Joint6_L: 0.0
+    # 左臂对称 (80°, -30°, -100°, -110°, 15°, 10°, 0°)
+    Joint1_L: 1.396263
+    Joint2_L: -0.523599
+    Joint3_L: -1.745329
+    Joint4_L: -1.919862
+    Joint5_L: 0.261799
+    Joint6_L: 0.174533
     Joint7_L: 0.0
 model:
   # free_joints 的顺序必须与 limit.velocity 一一对应：右臂 7 轴在前，左臂 7 轴在后。
@@ -61,13 +80,13 @@ task:
   - - - R_arm_0_Link
       - io_teleop_ee_link_right
     - 10.0
-    - 3.0
-    - 15.0
+    - 1.0
+    - 12.0
   - - - L_arm_0_Link
       - io_teleop_ee_link_left
     - 10.0
-    - 3.0
-    - 15.0
+    - 1.0
+    - 12.0
   axis: []   # 不额外约束某一工具轴方向。
   # 零空间关节姿态任务格式：[[关节名称列表], 权重, 增益[, 目标关节角]]。
   # 若省略目标关节角，则自动继承 control.joints_init，在不影响末端精度的前提下持续吸引肘部/肩部回归初始自然屈臂位姿。
@@ -105,3 +124,5 @@ limit:
   - 130.0
   - 130.0
   - 130.0
+  # 各自由关节最大加速度 (rad/s^2)，与 downstream hardware smoother (12 rad/s^2) 严格对齐。
+  acceleration_rad_s2: 12.0

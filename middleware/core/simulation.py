@@ -17,6 +17,7 @@ import yaml
 from aiohttp import web
 
 from .config import ConfigError
+from .runtime_mode import configure_environment
 from .robot_profiles import RobotProfileError, UrdfModel, validate_profile_id
 from .robot_api import selected_profile_root
 
@@ -70,8 +71,8 @@ class SimulationService:
         reason = ''
         configured_root = selected_profile_root(self.store.value, self.store.path.parent)
 
-        if os.environ.get('HC_EXTERNAL_STACK'):
-            reason = '当前由 run.sh sim/teleop 管理控制进程；请使用 ./run.sh middleware 启动后在此管理仿真。'
+        if os.environ.get('HC_RUNTIME_MODE') == 'teleop' or os.environ.get('HC_EXTERNAL_STACK'):
+            reason = '当前为真机遥操或命令行托管模式，禁止从网页启动仿真；请停止后使用 ./run.sh middleware。'
         elif configured_root.resolve() != self.profiles.root:
             reason = '机器人配置目录已变更，请先重启中间件。'
         elif not active:
@@ -158,7 +159,8 @@ class SimulationService:
             urdf.relative_to(profile.resolve())
             UrdfModel(urdf.read_bytes())
             if options['with_control']:
-                files = ('arm_teleop.yaml', 'robot_api.yaml', 'motion/motion.yaml', 'motion/sdk.yaml', 'motion/channels.yaml', 'motion/tools.yaml') if (profile/'robot_api.yaml').is_file() else ('controller_v23.yml','arm_teleop.yaml')
+                from adapters.core.runtime_config import unified_profile
+                files = ('arm_teleop.yaml', 'robot_api.yaml', 'motion/motion.yaml', 'motion/sdk.yaml', 'motion/channels.yaml', 'motion/tools.yaml') if unified_profile(profile) else ('controller_v23.yml','arm_teleop.yaml')
                 for filename in files:
                     if not (profile / filename).is_file():
                         raise SimulationError(f'当前机器人包缺少 {filename}')
@@ -174,12 +176,14 @@ class SimulationService:
         self.log_dir.mkdir(parents=True, mode=0o700)
         self.demand_file = self.log_dir / "viewer.enabled"
         self._sync_viewer_demand()
+        domain_id = configure_environment(self.store.value['ros']['domain_id'])
         env = os.environ.copy()
         for key in ('HC_CONTROLLER_CONFIG', 'HC_ARM_TELEOP_CONFIG'):
             env.pop(key, None)
         env.update(HC_ROBOT_CONFIG_ROOT=str(self.profiles.root), HC_ROBOT_NAME=name,
                    HC_MIDDLEWARE_CONFIG=str(self.store.path.resolve()), HC_TELEOP_MODE='sim',
-                   ROS_DOMAIN_ID=str(self.store.value['ros']['domain_id']), PYTHONUNBUFFERED='1',
+                   # The gateway and both children share the isolated simulation domain.
+                   ROS_DOMAIN_ID=str(domain_id), ROS_LOCALHOST_ONLY='1', HC_RUNTIME_MODE='simulation', PYTHONUNBUFFERED='1',
                    PYTHONPATH=f'{self.project}:{self.project / ".deps"}:' + env.get('PYTHONPATH', ''))
         command = ['/usr/bin/python3', str(self.project / 'simulation/general_sim_robot_control_node_ros2.py'),
                    '--profile', str(profile)]
@@ -207,15 +211,17 @@ class SimulationService:
     async def _watch(self):
         waits = [asyncio.create_task(p.wait()) for p in self.processes]
         try:
-            done, _ = await asyncio.wait(waits, timeout=45, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(waits, timeout=self.options.get("startup_timeout_sec", 120), return_when=asyncio.FIRST_COMPLETED)
             if not done and self.state == 'running':
                 done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
-            code = next(iter(done)).result() if done else '启动超时（45 秒）' 
+            code = next(iter(done)).result() if done else f'启动超时（{self.options.get("startup_timeout_sec", 120)} 秒）'
             async with self.lock:
                 self.watcher = None
                 await self.stop()
                 self.state = 'failed'
                 self.error = f'仿真或控制进程已退出（退出码 {code}），请查看日志后重新启动。'
+                if any('X connection to ' in line and 'broken' in line for line in self.logs):
+                    self.error = 'PyBullet 的 X11 显示连接已断开。请保持本机 ssh -Y 会话连接，从该会话重新启动网页服务后再启动仿真。'
         finally:
             for wait in waits:
                 wait.cancel()
@@ -339,7 +345,7 @@ def register_simulation_routes(app, service):
                 if not isinstance(value, dict) or set(value) != {'headless', 'with_control', 'debug_joints'}:
                     raise ConfigError('需要 headless、with_control、debug_joints 三个布尔选项')
                 proposed = copy.deepcopy(service.store.value)
-                proposed['simulation'] = value
+                proposed['simulation'].update(value)
                 saved = service.store.save(proposed)
                 return web.json_response(saved['simulation'])
             except (ConfigError, json.JSONDecodeError) as exc:

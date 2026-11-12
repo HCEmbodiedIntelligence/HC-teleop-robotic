@@ -8,14 +8,14 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from jsonschema import Draft202012Validator, FormatChecker
-
 
 class UploadError(Exception):
     """Only public codes/actions: never log a transport exception or response body."""
-    def __init__(self, code, action="检查导出并重新生成完成包", *, retry=False, after=0, conflict=False):
+    def __init__(self, code, action="检查导出并重新生成完成包", *, retry=False, after=0,
+                 conflict=False, platform_retry=False):
         self.code, self.action, self.retry, self.after = code, action, retry, after
         self.conflict = conflict
+        self.platform_retry = platform_retry
         super().__init__(code)
 
 
@@ -37,6 +37,7 @@ def read_json(path):
 
 @lru_cache(maxsize=8)
 def validator(name):
+    from jsonschema import Draft202012Validator, FormatChecker
     return Draft202012Validator(read_json(Path(__file__).parent / "schemas" /
                                          (name + ".schema.json")), format_checker=FormatChecker())
 
@@ -135,6 +136,8 @@ def credential(ref):
             if p.is_symlink() or p.stat().st_mode & 0o077 or p.stat().st_uid != os.getuid():
                 raise OSError()
             value = p.read_text().strip()
+        except FileNotFoundError:
+            raise UploadError("CREDENTIAL_MISSING", "凭据文件不存在；先保存平台签发的机器人令牌，文件权限设为 0600") from None
         except OSError:
             raise UploadError("CREDENTIAL_FILE_PERMISSIONS", "凭据文件须由当前用户拥有且权限为 0600") from None
     if not value or "\n" in value or "\r" in value:

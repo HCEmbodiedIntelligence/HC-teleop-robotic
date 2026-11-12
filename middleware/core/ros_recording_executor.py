@@ -9,6 +9,7 @@ from collections import deque
 from typing import Any
 
 from .topic_recorder import TopicRecorder, _counter_add, _lower_recording_priority
+from .x1_recording import is_x1
 
 
 def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -17,6 +18,45 @@ def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
         dict(item)
         for item in config.get("subscriptions", [])
         if item.get("enabled", True) and "record" in item.get("outputs", [])
+    ]
+
+
+def recording_inputs(topic: str, config: dict[str, Any]) -> tuple[str, ...]:
+    if is_x1(config) and topic in (
+        '/observation/ee_poses', '/observation/left_arm/ee_pose', '/observation/right_arm/ee_pose'
+    ):
+        return ('/internal/recording' + topic,)
+    # Public messages still arrive during ordinary teleoperation. The X1 v23
+    # ownership path produces separate recording copies during interventions.
+    if config.get("legacy_control_profile") and topic in (
+        "/action/ee_poses", "/control/solver/ee_targets", "/control/solver/joint_targets"
+    ):
+        return topic, "/internal/recording" + topic
+    return (topic,)
+
+
+_IDLE_MONITOR_TOPICS = {
+    # RosBridge already measures camera input, VR input, final joint commands
+    # and hardware feedback.  The dashboard additionally needs this one stage
+    # to show the complete live control pipeline while no capture is active.
+    "/control/solver/joint_targets",
+}
+
+
+def idle_monitoring_subscriptions(
+    subscriptions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the one recorder-only stage needed by the idle dashboard.
+
+    Keeping all small recording topics subscribed while idle used almost one
+    CPU core on X1.  More importantly, their reliable depth-64 queues could
+    back-pressure publishers whenever this low-priority process was delayed.
+    RosBridge already measures the other live pipeline stages.
+    """
+    return [
+        item
+        for item in subscriptions
+        if str(item.get("topic", "")) in _IDLE_MONITOR_TOPICS
     ]
 
 
@@ -65,13 +105,17 @@ def _health_snapshot(
     timestamps: dict[str, deque[float]],
     message_counts: dict[str, int],
     now: float,
+    active_topics: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     from .ros_bridge import DEFAULT_TOPIC_STANDARDS
 
     result: dict[str, dict[str, Any]] = {}
     for item in subscriptions:
         topic = str(item["topic"])
+        if active_topics is not None and topic not in active_topics:
+            continue
         samples = timestamps[topic]
+        sample_times = list(samples)
         last_stamp = samples[-1] if samples else 0.0
         default = DEFAULT_TOPIC_STANDARDS.get(
             topic, {"target_hz": 10.0, "min_hz": 1.0}
@@ -83,6 +127,19 @@ def _health_snapshot(
             hz = (len(samples) - 1) / elapsed if elapsed > 0.0001 else 0.0
         else:
             hz = 0.0
+        intervals = [
+            later - earlier
+            for earlier, later in zip(sample_times, sample_times[1:])
+        ]
+        max_gap_ms = round(max(intervals) * 1000.0, 1) if intervals else None
+        if intervals:
+            ordered = sorted(intervals)
+            p95_gap_ms = round(
+                ordered[int((len(ordered) - 1) * 0.95)] * 1000.0,
+                1,
+            )
+        else:
+            p95_gap_ms = None
         has_data = bool(samples) and now - last_stamp <= 1.8
         if not has_data:
             state = "no_data"
@@ -105,8 +162,26 @@ def _health_snapshot(
             "state": state,
             "message": message,
             "last_received_age": round(now - last_stamp, 2) if last_stamp else None,
+            "max_gap_ms": max_gap_ms,
+            "p95_gap_ms": p95_gap_ms,
         }
     return result
+
+
+def _should_release_subscriptions(
+    *,
+    has_subscriptions: bool,
+    capture_seen: bool,
+    accepting: bool,
+    now: float,
+    prepared_until: float,
+) -> bool:
+    """Release idle inputs after capture, or after an abandoned precheck."""
+    return bool(
+        has_subscriptions
+        and not accepting
+        and (capture_seen or now >= prepared_until)
+    )
 
 
 def _raw_recording_process(
@@ -117,9 +192,11 @@ def _raw_recording_process(
     dropped_counter: Any,
     stop_event: Any,
     reset_event: Any,
+    subscriptions_ready_event: Any,
     status_queue: Any,
+    ingress_resources: Any,
 ) -> None:
-    """Record CDR directly; additionally summarize selected CameraInfo messages."""
+    """Receive serialized ROS messages without deserializing them."""
     _lower_recording_priority()
     context = None
     executor = None
@@ -134,7 +211,16 @@ def _raw_recording_process(
     timestamps = {str(item["topic"]): deque(maxlen=120) for item in subscriptions}
     message_counts = {str(item["topic"]): 0 for item in subscriptions}
     gate = RateGate()
-    capture_subscriptions = []
+
+    def enqueue(event):
+        from .topic_recorder import enqueue_record
+        return enqueue_record(ingress_resources, event)
+
+    idle_subscriptions = idle_monitoring_subscriptions(subscriptions)
+    idle_topics = {str(item["topic"]) for item in idle_subscriptions}
+    ros_subscriptions: dict[str, Any] = {}
+    prepared_until = 0.0
+    capture_seen = False
 
     def publish_status(state: str, error: str | None = None) -> None:
         now = time.monotonic()
@@ -143,14 +229,23 @@ def _raw_recording_process(
             {
                 "state": state,
                 "active": accepting_event.is_set(),
-                "active_subscriptions": len(subscriptions),
+                "active_subscriptions": len(ros_subscriptions),
+                "idle_monitor_subscriptions": len(
+                    idle_topics.intersection(ros_subscriptions)
+                ),
+                "capture_subscriptions": len(
+                    set(ros_subscriptions).difference(idle_topics)
+                ),
                 "subscriptions": [str(item["topic"]) for item in subscriptions],
                 "topic_health": _health_snapshot(
-                    subscriptions, timestamps, message_counts, now
+                    subscriptions,
+                    timestamps,
+                    message_counts,
+                    now,
+                    {source.removeprefix('/internal/recording') for source in ros_subscriptions},
                 ),
                 "pid": __import__("os").getpid(),
                 "priority": "low",
-                "receiver_qos": {sub.topic: sub.state() for sub in capture_subscriptions},
                 "error": error,
                 **counters,
             },
@@ -160,15 +255,9 @@ def _raw_recording_process(
         import rclpy
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
-        from .ros_qos import subscription_qos
+        from rclpy.qos import qos_profile_sensor_data
+        from .ros_qos import recording_subscription_qos
         from rosidl_runtime_py.utilities import get_message
-        from rclpy.serialization import deserialize_message, serialize_message
-        from sensor_msgs.msg import CameraInfo
-        from std_msgs.msg import String
-        from .camera_calibration import CameraCalibrations
-        import json
-
-        calibrations = CameraCalibrations()
 
         domain_id = int(config.get("domain_id", 14))
         context = Context()
@@ -177,10 +266,11 @@ def _raw_recording_process(
         node = rclpy.create_node(node_name, context=context)
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
-        ros_subscriptions = []
 
-        for item in subscriptions:
+        def create_subscription(item: dict[str, Any], source: str, *, recording: bool) -> None:
             topic = str(item["topic"])
+            if source in ros_subscriptions:
+                return
             msg_type = str(item["type"])
             max_hz = float(item.get("max_hz", 0.0))
             message_type = get_message(msg_type)
@@ -196,6 +286,9 @@ def _raw_recording_process(
                 counters["received"] += 1
                 message_counts[topic] += 1
                 timestamps[topic].append(now)
+                if (topic == "/action/joint_states"
+                        and config.get("record_action_at_publication", False)):
+                    return  # Health only; the exact publication owns capture.
                 if not accepting_event.is_set():
                     return
                 if not gate.allow(topic, max_hz, now):
@@ -205,62 +298,101 @@ def _raw_recording_process(
                     counters["serialization_errors"] += 1
                     return
                 try:
-                    event_queue.put_nowait(
+                    if not enqueue(
                         {
                             "kind": "ros_message",
                             "topic": topic,
                             "msg_type": msg_type,
                             "_raw": raw_data,
+                            "record_only": source != topic,
                             "stamp_ns": time.time_ns(),
                         }
-                    )
+                    ):
+                        return
                     counters["recorded"] += 1
-                    if msg_type == 'sensor_msgs/msg/CameraInfo':
-                        candidate = calibrations.observe(
-                            topic, deserialize_message(raw_data, CameraInfo),
-                            node.get_clock().now().nanoseconds)
-                        if candidate is not None:
-                            calibration_topic, document, token = candidate
-                            event_queue.put_nowait({
-                                'kind': 'ros_message', 'topic': calibration_topic,
-                                'msg_type': 'std_msgs/msg/String',
-                                '_raw': serialize_message(String(data=json.dumps(document, allow_nan=False))),
-                                'stamp_ns': time.time_ns(),
-                            })
-                            calibrations.committed(token)
-                            counters['recorded'] += 1
                 except queue.Full:
                     counters["rejected"] += 1
                     _counter_add(dropped_counter)
 
-            capture_type = msg_type in {
-                'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage', 'sensor_msgs/msg/PointCloud2',
-                'realsense2_camera_msgs/msg/RGBD', 'realsense2_camera_msgs/msg/Metadata',
-                'realsense2_camera_msgs/msg/ImageMetadata', 'realsense2_camera_msgs/msg/RGBDMetadata',
-            }
-            if capture_type and not item.get('qos_reliability'):
-                from humanoid_camera.transport import CaptureSubscription
-                capture_subscriptions.append(CaptureSubscription(
-                    node, message_type, topic, callback,
-                    depth=2 if msg_type == 'sensor_msgs/msg/PointCloud2' else 10, raw=True))
-            else:
-                ros_subscriptions.append(node.create_subscription(
-                    message_type, topic, callback, subscription_qos(item), raw=True))
+            ros_subscriptions[source] = node.create_subscription(
+                message_type,
+                source,
+                callback,
+                recording_subscription_qos(item)
+                if recording
+                else qos_profile_sensor_data,
+                raw=True,
+            )
 
-        publish_status("running")
+        def destroy_subscriptions() -> None:
+            for subscription in ros_subscriptions.values():
+                node.destroy_subscription(subscription)
+            ros_subscriptions.clear()
+
+        def activate_subscriptions() -> None:
+            nonlocal prepared_until, capture_seen
+            prepared_until = time.monotonic() + 30.0
+            capture_seen = accepting_event.is_set()
+            gate.reset()
+            for topic in timestamps:
+                timestamps[topic].clear()
+                message_counts[topic] = 0
+            for key in counters:
+                counters[key] = 0
+            # Idle monitoring uses best-effort latest-sample QoS so it can
+            # never stall a producer. Recording recreates every subscription
+            # with the configured reliable/history policy before becoming
+            # ready, preserving capture completeness.
+            destroy_subscriptions()
+            for item in subscriptions:
+                for source in recording_inputs(str(item["topic"]), config):
+                    create_subscription(item, source, recording=True)
+            subscriptions_ready_event.set()
+            publish_status("ready")
+
+        def deactivate_capture_subscriptions() -> None:
+            nonlocal capture_seen
+            destroy_subscriptions()
+            for item in idle_subscriptions:
+                create_subscription(item, str(item["topic"]), recording=False)
+            capture_seen = False
+            subscriptions_ready_event.clear()
+            publish_status("monitoring")
+
+        for item in idle_subscriptions:
+            create_subscription(item, str(item["topic"]), recording=False)
+        publish_status("monitoring" if ros_subscriptions else "standby")
         last_status = time.monotonic()
         while not stop_event.is_set():
             if reset_event.is_set():
                 reset_event.clear()
-                gate.reset()
-                for key in counters:
-                    counters[key] = 0
-            executor.spin_once(timeout_sec=0.02)
+                activate_subscriptions()
+            accepting = accepting_event.is_set()
+            if accepting:
+                capture_seen = True
+            elif _should_release_subscriptions(
+                has_subscriptions=bool(set(ros_subscriptions).difference(idle_topics)),
+                capture_seen=capture_seen,
+                accepting=accepting,
+                now=time.monotonic(),
+                prepared_until=prepared_until,
+            ):
+                deactivate_capture_subscriptions()
+            if ros_subscriptions:
+                executor.spin_once(timeout_sec=0.02)
+            else:
+                stop_event.wait(0.05)
             now = time.monotonic()
             if now - last_status >= 0.5:
-                for subscription in capture_subscriptions:
-                    subscription.refresh()
-                publish_status("running")
+                publish_status(
+                    "recording"
+                    if accepting
+                    else "ready"
+                    if set(ros_subscriptions).difference(idle_topics)
+                    else "monitoring"
+                    if ros_subscriptions
+                    else "standby"
+                )
                 last_status = now
     except Exception as exc:
         publish_status(
@@ -299,6 +431,7 @@ class RosRecordingExecutor:
         self._mp = mp.get_context("spawn")
         self._stop_event = self._mp.Event()
         self._reset_event = self._mp.Event()
+        self._subscriptions_ready_event = self._mp.Event()
         self._status_queue = self._mp.Queue(maxsize=4)
         self._process: Any = None
         self._gate = RateGate()
@@ -321,8 +454,10 @@ class RosRecordingExecutor:
     def start(self) -> None:
         if not self.config.get("enabled", True) or self._process is not None:
             return
-        event_queue, accepting_event, dropped_counter = self.recorder.ipc_resources()
+        resources = self.recorder.ipc_resources()
+        event_queue, accepting_event, dropped_counter = resources[:3]
         self._stop_event.clear()
+        self._subscriptions_ready_event.clear()
         self._process = self._mp.Process(
             target=_raw_recording_process,
             args=(
@@ -333,7 +468,9 @@ class RosRecordingExecutor:
                 dropped_counter,
                 self._stop_event,
                 self._reset_event,
+                self._subscriptions_ready_event,
                 self._status_queue,
+                resources,
             ),
             name="ros-cdr-recorder",
             daemon=True,
@@ -345,10 +482,14 @@ class RosRecordingExecutor:
         if process is None:
             return
         self._stop_event.set()
-        process.join(timeout=8.0)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=2.0)
+        while process.is_alive():
+            process.join(timeout=.1)
+            # A multiprocessing feeder can still be flushing accepted image
+            # bytes. Normal stop must not kill it and silently truncate them.
+            with self._lock:
+                self._status.update(state='draining', active=False)
+            if self.recorder.status().get('error'):
+                raise RuntimeError('writer failed while ROS input was draining; source is incomplete')
         self._process = None
         with self._lock:
             self._status.update(state="stopped", active=False)
@@ -383,6 +524,11 @@ class RosRecordingExecutor:
         return dict(self.status().get("topic_health", {}))
 
     def prepare_recording(self) -> None:
+        if not self.config.get("enabled", True):
+            return
+        if self._process is None:
+            self.start()
+        self._subscriptions_ready_event.clear()
         self._gate.reset()
         self._reset_event.set()
         with self._lock:
@@ -392,6 +538,13 @@ class RosRecordingExecutor:
                 throttled=0,
                 rejected=0,
                 serialization_errors=0,
+            )
+        if not self._subscriptions_ready_event.wait(timeout=5.0):
+            self._refresh_status()
+            error = self._status.get("error")
+            raise TimeoutError(
+                "ROS recording subscriptions did not become ready within 5 seconds"
+                + (f": {error}" if error else "")
             )
 
     def _handle_message(

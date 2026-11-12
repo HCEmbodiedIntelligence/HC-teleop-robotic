@@ -21,6 +21,24 @@ def _crc_table():
 
 CRC_TABLE = _crc_table()
 
+import ctypes
+_fast_crc64 = None
+try:
+    _so_path = Path(__file__).parent / "_crc64.so"
+    if not _so_path.exists():
+        _c_path = Path(__file__).parent / "_crc64.c"
+        if _c_path.exists():
+            import subprocess
+            subprocess.run(["gcc", "-O3", "-shared", "-fPIC", str(_c_path), "-o", str(_so_path)],
+                           check=True, capture_output=True)
+    if _so_path.exists():
+        _clib = ctypes.CDLL(str(_so_path))
+        _clib.update_crc64.argtypes = [ctypes.c_uint64, ctypes.c_char_p, ctypes.c_size_t]
+        _clib.update_crc64.restype = ctypes.c_uint64
+        _fast_crc64 = _clib.update_crc64
+except Exception:
+    _fast_crc64 = None
+
 
 def checksum(path, limiter=None):
     sha, crc, size = hashlib.sha256(), (1 << 64)-1, 0
@@ -28,8 +46,11 @@ def checksum(path, limiter=None):
         before = os.fstat(stream.fileno())
         for block in iter(lambda: stream.read(65536), b""):
             sha.update(block)
-            for byte in block:
-                crc = CRC_TABLE[(crc ^ byte) & 255] ^ (crc >> 8)
+            if _fast_crc64 is not None:
+                crc = _fast_crc64(crc, block, len(block))
+            else:
+                for byte in block:
+                    crc = CRC_TABLE[(crc ^ byte) & 255] ^ (crc >> 8)
             size += len(block)
             if limiter:
                 limiter.account(len(block))

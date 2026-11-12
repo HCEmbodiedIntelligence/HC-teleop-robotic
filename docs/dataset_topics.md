@@ -1,5 +1,7 @@
 # Observation / action 标准接口
 
+VLA 接入的精简清单、Python 订阅/MCAP 录制 demo 及 LeRobot 转换命令见 [main 通用话题与 VLA 采集](VLA_MAIN_TOPICS.md)。
+
 公共控制接口已迁移至 /action、/observation、/control、/status。中间件 `ros.dataset_topics.enabled: true` 时同时发布以下分组投影。整机原子命令为 `/action/joint_states`，反馈为 `/observation/joint_states`；硬件不订阅分组投影，避免重复执行。
 需一起重启中间件、控制节点及对应仿真或硬件适配节点，旧进程不会自动更换话题。网页自定义话题录制规则中默认已选中这些话题以及 `/vrdata`、`/clock`，开始录制后写入同一个 MCAP。
 
@@ -16,11 +18,36 @@
 | `/observation/base/pose` | PoseStamped | `/observation/base/pose` |
 | `/action/base/velocity` | TwistStamped | `/action/base/command` |
 | `/observation/headset/pose` | PoseStamped | `/vrdata` 的 poses.head |
+| `/observation/cameras/head/calibration` | String（JSON） | 相机 CameraInfo，或旧驱动的 calibration 消息 |
+| `/observation/cameras/head/extrinsics` | String（JSON） | `zhi_Link → camera_head` 的 TF，或实测关节 + URDF；兼容旧驱动的 extrinsics 消息 |
+
+X1 实机（`HC_RUNTIME_MODE=teleop`）由硬件直接发布相机内外参；
+Profile 的 `camera_metadata.hardware_publishes: true` 使中间件不再创建这两条发布者、旧话题订阅或回退定时器。
+同一实机配置通过 `control.actual_pose_from_hardware: true` 停用 VR 节点的双臂末端反馈发布，
+头部跟踪与目标发布继续运行。仿真继续从模型生成反馈及相机元数据。
+末端力直接使用硬件 `/observation/ee_wrenches`，不再转发旧力话题。
+振动、分组关节、分组位姿和头部/头显观测仍由中间件提供，不应整体关闭 `ros.dataset_topics.enabled`。
+
+两条相机话题使用 JSON schema：`hc_camera_calibration/v1` 和 `hc_robot_camera_extrinsics/v1`。客户端只需把 `calibration_topic`、`extrinsics_topic` 换成上表的新名称。X1 默认启用，修改后重启中间件生效；网页录制默认已包含这两条话题。
+
+```bash
+# 先 source ROS 环境，ROS_DOMAIN_ID 与运行端一致（仿真以网页显示为准）。
+ros2 topic echo /observation/cameras/head/calibration --once
+ros2 topic echo /observation/cameras/head/extrinsics --once
+```
+
+内参包含 `camera=eye`、`resolution.color/depth`、`rgb/depth.fx/fy/cx/cy`、畸变模型与系数，以及各自的 CameraInfo 话题、`frame_id` 和原始 `stamp`。只收到 RGB 时只提供 RGB，不补造深度参数。来源在当前 Profile 的 `arm_teleop.yaml → camera_metadata.camera_info_topics` 配置，每个列表按顺序选择仍有新消息的来源。默认订阅 `/observation/cameras/head/{color,depth}/camera_info`，并兼容 `/cameras/head/{color,depth}/camera_info`；其他驱动需填写实际的 CameraInfo 话题。
+
+外参保留 `common_frame=zhi_Link` 与 `transforms[]`；每项有 `parent_frame`、`child_frame`、`translation_m` 和 XYZW 顺序的 `rotation_xyzw`。其方向为 `p_parent = R × p_child + t`。`source=tf` 表示直接使用 TF；`source=urdf_joint_states` 表示由实测关节反馈计算模型中的相机安装位姿，**不是额外完成了手眼标定**，也不会把 URDF 相机坐标系冒充驱动的 optical frame。消息顶层 `stamp` 保留 TF 或关节反馈时间，头部运动时外参随之变化。
+
+仿真及未声明硬件原生元数据的 Profile，本地生成频率为 2 Hz，使用 Reliable 发布；内参同时采用 Transient Local 保存最近一条，方便后加入的订阅者读取。计算外参需要完整且新鲜的头部关节反馈，默认 1 秒超时；缺失、过期或非法数据时停止生成对应消息，不发布零位或单位矩阵占位。无相机时不会生成内参。内参订阅者读取保留样本时应检查样本内的 `stamp`。若旧 `/io_teleop/camera_head/{calibration,extrinsics}` 仍在发布，优先原样转发，避免同一时间混用两种来源。
 
 关节按配置的名称顺序抽取，源消息缺少任一组内关节时不发布该组。
 position/velocity/effort 中源消息未提供的数组保持为空，不能将空数组解释为零。
 关节和末端消息保留源 header；双臂末端顺序源为右、左，分类后不再依赖数组下标。
-X1 末端目标与实际话题均使用 zhi_Link；actual 是控制节点本地模型计算结果，不是独立末端传感器。
+X1 实机 actual 由硬件桥接节点提供，当前 `header.frame_id=marvin_arm_base`；
+VR 末端目标仍使用 `zhi_Link`，两者不能直接相减或比较，需先确认并转换坐标定义。
+分组位姿保留硬件源 header，不擅自改名为 `zhi_Link`。仿真 actual 由本地模型计算。
 肩部求解器坐标系的 `/control/solver/ee_targets` 仍可从原始录制读取，不能直接与 zhi_Link 位姿比较。
 
 底盘 action 使用 linear.x=前向速度（m/s）、linear.y=横向速度（m/s）、angular.z=偏航角速度（rad/s）；frame_id=base_command 表示源命令的坐标约定，不额外旋转。

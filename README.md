@@ -38,7 +38,7 @@ chmod +x install.sh run.sh
 ./run.sh middleware
 ```
 
-然后访问 `http://<机器人IP>:7876/dashboard/#config`。相机不在系统配置页中管理；需要独立启用 WebRTC 服务时安装可选依赖：
+然后访问 `http://<机器人IP>:7876/dashboard/#config`。当前机器人包的 `middleware.yaml` 提供相机、订阅话题、安全和 VR 超时配置。需要启用 WebRTC 服务时安装可选依赖：
 
 ```bash
 ./install.sh --camera
@@ -56,7 +56,81 @@ cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
-根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择无窗口模式、关节调试和是否同时启动 IK/VR 控制。窗口显示在运行中间件的服务器桌面；无桌面环境请选择无窗口模式。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
+Jetson 首次部署时，先安装 Conda，再运行 `./install.sh`。默认 Conda 路径为
+`~/miniconda3/bin/conda`；其他安装位置通过 `CONDA_BIN` 指定。安装脚本会创建
+独立的 `~/miniconda3/envs/hc-teleop-controller` 环境，提供带 CasADi 绑定的
+Pinocchio 3.7 和 CasADi 3.7；系统 Python 中只有 Pinocchio 并不足以启动逆解。
+自定义环境位置时，安装和运行都需要设置相同的 `HC_CONTROLLER_PREFIX`。
+安装完成后先执行以下只读检查：
+
+```bash
+./run_generic_controller.sh --check
+```
+
+同时将 `HC_X1` 更新到提供 `/action`、`/observation`、`/control`、`/status`
+接口的版本；旧 `/hc_teleop` 接口不能直接连接当前遥操控制器。更新硬件部署时
+保留机器专用的相机配置。遥操测试期间停止其他关节命令源，包括 HoloBrain
+HTTP 控制网关；两个项目使用相同的 `ROS_DOMAIN_ID`。
+
+相机、话题和安全配置随机器人包提供，无需额外的 X1 配置参数：
+
+```bash
+ROS_DOMAIN_ID=14 ./run.sh
+```
+
+该命令只启动网页和 VR 网关，不启动控制器。默认模式下，网关、网页启动的
+PyBullet 和控制器统一使用自动分配的本机专用 ROS 域，并强制 localhost 通信；
+传入的域 14 不会用于仿真，也不会连接同域的 HC_X1。有效仿真域会显示在网页。系统配置分别显示“当前实际运行 ROS 域”和“默认 ROS 域（保存配置）”；显式 `ROS_DOMAIN_ID` 启动参数优先于保存的默认值。
+在网页应用机器人包后，从 PyBullet 面板勾选同时启动解算与 VR 仿真控制，再点击启动。
+VR 数据、关节反馈与动作均在同一个仿真域内流转。`run.sh` 的默认模式保持 `middleware`。
+
+控制真机必须显式启动 `ROS_DOMAIN_ID=14 ./run.sh teleop`，此时使用指定的域与
+HC_X1 通信，网页禁止启动 PyBullet。切换模式时先停止当前入口，再启动另一种模式。
+`./run.sh sim` 仍可从命令行启动完整隔离仿真，同样不会使用真机域。
+旧的 `--config middleware/config.x1_jetson.yaml` 用法仍兼容，但不再承载另一份机器人配置。
+
+每个包中的 `middleware.yaml` 统一保存 `camera`、`safety`、ROS 订阅/命令话题和
+`vr.pose_timeout_ms`。启动自动加载当前包；应用包会重新加载相机与订阅，同名包也可重新应用。
+网页修改这些设置时保存回当前包；服务器地址、ROS 域、VR 网络端口和录制目录保留在本机主配置。
+ZIP 不带 `middleware.yaml` 时导入器生成安全默认值（相机关闭、标准关节话题、启动软件停止）；
+需要相机的机器人包应填写自己的流和话题。应用或重新应用包会停止当前仿真，之后按需重新启动。
+
+网页内查看三维仿真时，真机只需启动默认入口：
+
+```bash
+cd ~/HC-teleop-robotic
+ROS_DOMAIN_ID=14 ./run.sh
+```
+
+本机浏览器打开真机网页，在 PyBullet 面板启动仿真，并按需开启“显示三维视图”。
+开关默认关闭，不自动记忆开启状态：关闭时不会加载三维库、机器人模型或网格，
+不会建立三维订阅，也不会运行三维渲染循环。打开时才加载本地静态资源并订阅显示帧。
+仿真和控制器始终在远程以无窗口模式运行，本机浏览器负责绘制；不需要 SSH X11
+或单独的 Python 显示客户端。开关视图不重启仿真、不改变 VR 控制。
+
+最后一个查看者关闭三维视图后，远程停止生成显示帧和计算 marker；
+多个浏览器可各自独立开关。视图包含左右机械臂末端、末端目标、头部相机实际和
+目标位姿的坐标轴与标签；实际和目标标签使用不同颜色。目标只在收到对应数据后显示，
+头部目标超时会移除。支持鼠标旋转和滚轮缩放。
+目前网页模型支持 URDF 基本几何体及 STL 网格；其他格式会明确报错。
+
+原 `tools/runtime/simulation_viewer.py` 仍作为可选兼容工具保留，不是网页流程的必需项。
+
+X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/base/pose`。
+`run.sh teleop` 使用 `body.head_pose_base.teleop_mode: planar_velocity`：按住左 Grip
+建立头显参考，前后/左右移动和转头分别映射为底盘前后、横移和旋转。
+松开 Grip、追踪失效、输入超时或急停后停止并清除参考，下次按住重新定中心。
+左/右摇杆手动底盘命令优先；摇杆回中后若仍按住 Grip，以当前头显位置重新定中心。
+目标是相对位移，不是持续倾身测速：头显停下后底盘根据命令积分估计到位后停止。
+估计值不是底盘实测位姿；打滑、驱动限速和丢包会产生误差，不能保证精确距离。
+头显跟随限速为前后/横向各 `0.1 m/s`、旋转 `0.2 rad/s`，需与 HC_X1
+的 `max_vx/max_vy/max_vw` 保持一致。状态中 `feedback_source: command_estimate`
+明确标记估计来源。原 `yaw_velocity` 配置仍可选择只跟随转向。
+仿真继续使用实测位姿闭环；真机提供有效位姿后可将 `teleop_mode` 改为 `pose`。
+
+根目录入口 `./run.sh` 默认只启动中间件（等价于 `./run.sh middleware`）。在网页“系统配置”导入并应用机器人 ZIP 后，可独立启动、停止或重启 PyBullet，并选择关节调试和是否同时启动 IK/VR 控制。按需开启网页三维视图；后台仿真不依赖桌面 DISPLAY。初始姿态和相机配置读取包内 `vr_configs.yml`。停止仿真保留网页、VR 网关和录制服务；导入、切换机器人或修改仿真选项、ROS Domain ID 会先停止当前仿真，再从网页重新启动。
+
+使用 `ps -ef | grep '[r]un.sh'` 查找启动主进程，执行 `kill <PID>` 即可关闭该入口启动的整套服务，也可在启动终端按 Ctrl+C。默认模式保留 `run.sh` 主进程，启动日志会打印 PID；请通过根目录入口启动。
 
 显式 `./run.sh sim` 仍启动完整仿真，`./run.sh teleop` 启动连接真机所需的 VR、Dashboard 和 IK/控制；这两种方式由命令行管理进程，不允许从网页另起一套仿真。网页管理模式下，中间件退出会清理其启动的仿真与控制进程。
 
@@ -75,19 +149,60 @@ ROS_DOMAIN_ID=14 ./run.sh teleop
 
 ### 话题录制
 
-“话题录制”页从 ROS Graph 读取当前话题和消息类型，可直接添加自定义消息，也可在“系统配置 → HC 标准 ROS 2 接口”中切换内置消息是否录制。点击“保存录制配置”后写回 `middleware/config.yaml`；启用录制时，消息按启动会话写入 `runtime/topic_recordings/`。MCAP 录制使用独立 ROS Context 和多线程执行器，不与 Dashboard 健康检测或 WebRTC 视频回调共用执行器。X1 默认只录制规范化压缩相机话题；同源 `/io_teleop` 别名和大体积未压缩回退流默认不勾选，仍可在界面按需启用。
+“话题录制”页从 ROS Graph 读取当前话题和消息类型，可直接添加自定义消息，也可在“系统配置 → HC 标准 ROS 2 接口”中切换内置消息是否录制。点击“保存录制配置”后写回 `middleware/config.yaml`；启用录制时，消息按启动会话写入 `runtime/topic_recordings/`。MCAP 录制使用独立 ROS Context 和多线程执行器，不与 Dashboard 健康检测或 WebRTC 视频回调共用执行器。X1 默认录制规范化彩色/深度压缩图像、`/observation/cameras/head/calibration` 内参 JSON、`/observation/cameras/head/extrinsics` 外参 JSON，以及机器人基座坐标系中的 `/observation/head/pose` 实际头部相机位姿和 `/action/head/pose` 目标位姿。X1 实机直接订阅硬件的 `/observation/cameras/head/{calibration,extrinsics}`，中间件不再重复发布。仿真及其他未声明原生元数据的 Profile 从 CameraInfo 生成内参，从 TF 或实测关节 + URDF 生成 `zhi_Link → camera_head` 外参（2 Hz），源数据过期后停止生成。配置与 JSON 字段见 [相机内外参接口](docs/dataset_topics.md)。同时将 `/status/head/tracking_poses` 的 `[actual, target]` 拆分为两条标准 PoseStamped；新格式 MCAP 转为旧格式时可将这两个 Pose 分别补到反馈和目标双臂 Pose 后作为第三项，无需回放 TF 重建。其他同源 `/io_teleop` 图像别名和大体积未压缩回退流默认不勾选，仍可在界面按需启用。
+
+### 自动上传到数据平台
+
+`main` 保留平台任务、共享采集方案、持久上传队列、分片续传、重试/取消和处理状态面板，并整合 Motion 与统一机器人 API。默认仍为 v23；网页三维仿真、ROS 域隔离和机器人包配置保持可用。录制支持 MCAP、MCAP＋独立 RGB MP4 原始包、LeRobot 和双格式；深度消息在 MCAP 中原样保留。标注、裁剪、审计和恢复工具由数据平台负责，不在机器人侧重复提供。
+
+现有部署先运行 `./install.sh --upload`。新版上传管理页支持粘贴平台一次性连接链接、按名称选择任务，并独立选择上传格式。下列 YAML 绑定方式用于兼容旧部署：
+
+```yaml
+uploads:
+  enabled: true
+  auto_enqueue: true
+  queue_directory: ../runtime/upload_queue
+  platform_base_url: https://your-data-platform.example
+  credential_ref: env:HC_UPLOAD_TOKEN
+  robot_id: platform-robot-id
+  local_robot_id: x1
+  task_id: collection-task-id
+```
+
+令牌由启动中间件进程的环境变量提供；也可使用 `file:/绝对路径/凭据文件`（仅服务用户可读，权限 0600）。仓库默认 `enabled: false`、`auto_enqueue: false`，不会自动上传历史数据。修改启用配置后重启中间件；“上传管理”页可切换默认机器人/任务绑定。启用自动上传但尚未选择绑定时，开始录制会明确报错，不会把数据归入未知任务。
+
+本地保存格式在“话题录制”页设置（MCAP、LeRobot 或两者），上传格式在“上传管理”页单独选择 MCAP 或 LeRobot。例如本地保存两种格式、平台仅上传 LeRobot。上传 LeRobot 时，本地保存方式须包含 LeRobot；本地仅保存 MCAP 时会提示先修改保存方式，不会静默生成或替换数据。每次录制开始时固定任务、上传格式与采集开始时间，停止写入后记录采集结束时间。所选 MCAP 正常关闭后或 LeRobot 导出成功后，后台生成产物 ID、校验和与完成标记，再自动入队；修改默认设置不改变已有录制和队列。转换失败保留源文件，不把未完成的 LeRobot 当作可上传数据。状态分别保存在 `runtime/recording_uploads/`、`runtime/artifact_state/` 和 `runtime/upload_queue/`，重启可接续已正常关闭源文件的产物交接和上传队列；采集中断不会自动标记为完整录制。
+
+数据集列表中的“上传”按钮可把已就绪的产物送到上传管理页手动入队。新功能安装前的旧文件没有可信采集生命周期/完成标记，不会仅凭文件名或修改时间自动上传；安装后未绑定的录制也不会在切换默认任务后静默绑定。上传读取期间删除会被拒绝，取消后需等读锁释放。上传完成、平台处理完成和质检通过是不同状态。
+
+上传客户端沿用 humanoid 的平台 API 契约。本地回环服务测试不代替目标平台的真实接收验收；需使用匹配的服务器地址和凭据。配置与客户端细节见 [上传集成说明](upload_client/HC_INTEGRATION.md)。
 
 ### LeRobot 数据集保存
 
 录制页可选择 MCAP、LeRobot 或两者同时保存，并设置数据集帧率和任务描述。MCAP 保留原始话题（包括 `/vrdata`）；LeRobot 在停止录制后异步生成，相机保存为 H.264 MP4，状态和动作保存为 Parquet。录制页及数据集管理页显示转换阶段、百分比和处理数量，完成后支持特征查看、相机视频预览、完整 ZIP 下载及删除。
 
-LeRobot 是可选依赖，需要先安装 `uv`，然后在项目根目录运行：
+LeRobot 是可选依赖。在项目根目录运行：
 
 ```bash
 ./tools/setup_lerobot.sh
 ```
 
-该脚本创建 Python 3.12 的 `.venv-lerobot` 环境，安装固定版本 `lerobot==0.4.3` 和 CPU PyTorch；ROS 继续使用系统 Python。也可通过 `LEROBOT_PYTHON` 指定兼容的独立解释器。原始 MCAP 不会因转换失败而删除；仅选 LeRobot 时，原始文件位于录制目录的 `.lerobot_sources/`，成功数据集位于 `lerobot/<录制名称>/`。
+脚本优先使用 `PATH` 中的 `uv`，其次查找 `~/.local/bin/uv`；仍未找到时会通过
+`python3 -m pip install --user uv` 自动安装。随后创建 Python 3.12 的
+`.venv-lerobot` 环境，安装固定版本 `lerobot==0.4.3` 和 CPU PyTorch；ROS
+继续使用系统 Python。无需激活该虚拟环境，中间件会在每次开始 LeRobot
+录制时检查并直接调用其中的解释器。也可通过 `LEROBOT_PYTHON` 指定兼容的
+独立解释器。
+
+安装完成后可执行只读检查：
+
+```bash
+.venv-lerobot/bin/python -c \
+  "import lerobot,av,pyarrow,torch; from lerobot.datasets.lerobot_dataset import LeRobotDataset; print(lerobot.__version__, torch.__version__)"
+```
+
+原始 MCAP 不会因转换失败而删除；仅选 LeRobot 时，原始文件位于录制目录的
+`.lerobot_sources/`，成功数据集位于 `lerobot/<录制名称>/`。
 
 一次录制对应一个 episode，按 MCAP 消息接收时间的完整范围生成固定帧率时间轴。采样帧率不会提高相机实际采集频率。各字段只选择当前时间及之前的最后一个样本；过期值保留并标记无效，首次收到数据之前使用明确标记的零值/黑图占位，不借用未来数据，也不因短暂缺失删帧或切分 episode。
 
@@ -246,6 +361,25 @@ X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；
 
 相机 WebRTC 仅在收到新图像后发送，不再以固定 30 FPS 重发缓存图像或占位图。视频时间戳使用图像到达中间件的单调时钟（压缩图像在解码前记录），因此表示实际接收节奏而非传感器硬件曝光时间；不直接使用可能暂停/回退的 ROS 仿真时间。编码较慢时只取最新帧，允许丢帧但不补帧；源断流时等待恢复。修改后重启中间件并让头显重新连接。
 
-## 可选 Motion 两包
+## Motion 与统一机器人 API
 
-`humanoid` 分支在主分支产品结构上仅保留 `humanoid_motion_server` 和 `humanoid_motion_interfaces` 两个原生 ROS 包。原中间件、录制及适配器入口不变；运动包的独立构建和启动见 [Motion 工作区](docs/MOTION.md)。
+默认配置沿用 v23 与原生关节名。启用 Motion 前先构建两个子模块，并使硬件适配器切换到统一 API 的 internal 接口。完整启动、名称契约和使能规则见 [Motion 工作区](docs/MOTION.md) 与 [机器人公共 API](docs/ROBOT_PUBLIC_API.md)。
+
+```bash
+git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
+./bootstrap_colcon.sh build
+HC_CONTROL_BACKEND=motion ./run.sh sim
+# 硬件适配器已按统一 API 配置后：
+HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
+```
+
+`HC_CONTROL_BACKEND=motion` 同时决定中间件公共名称转换、遥操控制链和仿真话题；切换后端需停止旧入口再重新启动。旧配置不带统一 API 文件时继续支持 v23。双方功能清单及本次合并范围见 [分支整合说明](docs/MAIN_HUMANOID_INTEGRATION.md)。
+
+DAgger 人工接管与纠正采集已从本地工作恢复：Motion 模式下握住右 Grip 接管，正常松手交还程序，每段纠正独立保存并沿用 main 的任务和上传流程。配置及使用见 [DAgger 说明](docs/DAGGER.md)。
+
+
+### 视频与无线链路优化
+
+视频保留默认 x264，可在 Dashboard 选择自动 NVENC 探测并在失败时回退；码率反馈通过限频重配置实际应用，H.264/RTX 在发送与头显端共同协商。`run.sh` 启动前默认生成只读 Wi-Fi 预检报告，DSCP 默认关闭，需按相同负载做 A/B 验证。已提供默认关闭的 VP8 + RED/ULPFEC，可在相机配置中显式启用；当前头显 M116 不支持 H.264 + ULPFEC，硬编与本版 FEC 使用不同模式。聚合丢包反馈不足以决定冗余策略。
+
+详细配置和验收步骤见 [编码后端](docs/VIDEO_ENCODING.md)、[接收端遥测](docs/RECEIVER_METRICS.md)、[无线预检与 QoS 对照](docs/NETWORK_PREFLIGHT.md)、[FEC 配置与验收](docs/FEC_ACCEPTANCE.md)。头显浏览器可打开 `/static/receiver.html` 接收视频并回传遥测；它会替换所选相机已有视频会话，须在遥操作前测试。

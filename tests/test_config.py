@@ -8,6 +8,35 @@ from middleware.core.config import ConfigError, ConfigStore, validate_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_default_config_loads_x1_package_interfaces(self):
+        root = Path(__file__).resolve().parents[1]
+        store = ConfigStore(root / "middleware" / "config.yaml")
+        config = store.load()
+        self.assertEqual(config["vr"]["web_pose_hz"], 10.0)
+
+        self.assertEqual(config["robot_profiles"]["active"], "x1")
+        profile_root = (store.path.parent / config["robot_profiles"]["root"]).resolve()
+        self.assertTrue((profile_root / "x1" / "controller_v23.yml").is_file())
+        self.assertTrue(config["safety"]["stop_on_startup"])
+        self.assertEqual(config["vr"]["pose_timeout_ms"], 600)
+        self.assertFalse(config["ros"]["recording"]["enabled"])
+        self.assertEqual(config["ros"]["domain_id"], 14)
+        self.assertEqual(config["ros"]["command_mux"]["output_topic"], "/action/joint_states")
+
+        streams = config["camera"]["streams"]
+        self.assertEqual(len(streams), 4)
+        self.assertEqual(streams[0]["topic"], "/observation/cameras/head/color/compressed")
+        self.assertFalse(streams[0]["stereo"])
+        subscriptions = {item["topic"]: item for item in config["ros"]["subscriptions"]}
+        self.assertEqual(
+            subscriptions[streams[0]["topic"]]["type"],
+            "sensor_msgs/msg/CompressedImage",
+        )
+        self.assertIn("record", subscriptions[streams[0]["topic"]]["outputs"])
+        for topic in ("/observation/joint_states", "/action/joint_states"):
+            self.assertTrue(subscriptions[topic]["enabled"])
+            self.assertIn("websocket", subscriptions[topic]["outputs"])
+
     def test_image_transport_qos_is_preserved_and_validated(self):
         item = {"topic": "/camera", "type": "sensor_msgs/msg/Image", "qos_reliability": "reliable"}
         value = validate_config({"ros": {"subscriptions": [item]}})
@@ -109,7 +138,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_head_depth_is_enabled_for_recording(self):
         path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
-        config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        config = ConfigStore(path).load()
         subscriptions = {
             item["topic"]: item for item in config["ros"]["subscriptions"]
         }
@@ -122,7 +151,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_joint_angles_are_streamed_to_dashboard_without_limiting_recording(self):
         path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
-        config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
+        config = ConfigStore(path).load()
         subscriptions = {
             item["topic"]: item for item in config["ros"]["subscriptions"]
         }
@@ -134,27 +163,19 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(item["max_hz"], 0.0)
             self.assertEqual(item["event_max_hz"], 20.0)
 
-    def test_selected_isaac_camera_is_enabled_without_duplicate_legacy_topics(self):
-        path = Path(__file__).resolve().parents[1] / "middleware" / "config.yaml"
-        config = validate_config(yaml.safe_load(path.read_text(encoding="utf-8")))
-        subscriptions = {
-            item["topic"]: item for item in config["ros"]["subscriptions"]
-        }
-
-        self.assertTrue(subscriptions["/observation/cameras/head/color/compressed"]["enabled"])
+    def test_x1_package_only_enables_its_supported_camera(self):
+        root = Path(__file__).resolve().parents[1]
+        config = ConfigStore(root / "middleware/config.yaml").load()
+        streams = config["camera"]["streams"]
+        self.assertEqual([s["id"] for s in streams if s["enabled"]], ["head", "overhead"])
+        self.assertEqual(streams[1]["topic"], "/observation/cameras/head/depth/compressed")
+        subscriptions = {s["topic"] for s in config["ros"]["subscriptions"]}
         self.assertNotIn("/io_teleop/camera_head/color", subscriptions)
-        self.assertNotIn("/io_teleop/camera_head/depth", subscriptions)
-        for topic in ("/cameras/eye/color", "/observation/cameras/wrist_left/color", "/observation/cameras/wrist_right/color"):
-            self.assertFalse(subscriptions[topic]["enabled"])
-            compressed = subscriptions[topic + "/compressed"]
-            self.assertTrue(compressed["enabled"])
-            self.assertEqual(compressed["type"], "sensor_msgs/msg/CompressedImage")
-            self.assertIn("record", compressed["outputs"])
-        self.assertTrue(subscriptions["/observation/cameras/overhead/color/compressed"]["enabled"])
-        self.assertFalse(subscriptions["/cameras/Bfront/color"]["enabled"])
+        self.assertNotIn("/observation/cameras/wrist_left/color/compressed", subscriptions)
+        self.assertEqual(config["camera"], ConfigStore(root / "middleware/config.x1_jetson.yaml").load()["camera"])
 
     def test_recording_save_modes_and_lerobot_options(self):
-        for mode in ("mcap", "lerobot", "both"):
+        for mode in ("mcap", "lerobot", "both", "mcap_mp4"):
             cfg = validate_config({"ros": {"recording": {"format": mode, "lerobot_fps": 15, "lerobot_task": "夹取箱子"}}})
             self.assertEqual(cfg["ros"]["recording"]["format"], mode)
             self.assertEqual(cfg["ros"]["recording"]["lerobot_task"], "夹取箱子")

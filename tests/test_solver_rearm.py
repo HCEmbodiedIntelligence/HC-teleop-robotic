@@ -30,7 +30,7 @@ class SolverRearmGateTests(unittest.TestCase):
         self.assertTrue(gate.observe_clutch(True))
         self.assertFalse(gate.blocked)
 
-    def test_release_before_fresh_solver_output_does_not_rearm(self):
+    def test_release_during_reset_is_remembered_but_cannot_rearm_early(self):
         gate = SolverRearmGate()
         gate.start_homing()
         gate.homing_complete()
@@ -41,8 +41,22 @@ class SolverRearmGateTests(unittest.TestCase):
         self.assertFalse(gate.observe_clutch(False))
         self.assertTrue(gate.observe_reset_ack(11))
         self.assertTrue(gate.observe_solver_output(12))
+        self.assertEqual(gate.state, SolverRearmGate.WAIT_PRESS)
+        self.assertTrue(gate.observe_clutch(True))
 
+    def test_grip_held_through_reset_still_requires_release_then_press(self):
+        gate = SolverRearmGate()
+        gate.start_homing()
+        gate.homing_complete()
+        gate.observe_feedback()
+        gate.reset_published(10)
+        gate.observe_clutch(True)
+        gate.observe_reset_ack(11)
+        gate.observe_solver_output(12)
+        self.assertEqual(gate.state, SolverRearmGate.WAIT_RELEASE)
+        self.assertFalse(gate.observe_clutch(True))
         self.assertFalse(gate.observe_clutch(False))
+        self.assertEqual(gate.state, SolverRearmGate.WAIT_PRESS)
         self.assertTrue(gate.observe_clutch(True))
 
     def test_reset_requires_positive_timestamp_and_correct_phase(self):

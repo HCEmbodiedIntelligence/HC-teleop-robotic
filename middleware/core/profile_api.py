@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from .config import ConfigStore
+from .config import ConfigError, ConfigStore
 from .robot_profiles import RobotProfileError, RobotProfileManager, STANDARD_TOPICS
 
 
@@ -99,26 +99,40 @@ def register_profile_routes(
             raise web.HTTPBadRequest(text="invalid robot profile cannot be activated")
         if (profiles.root / profile_id / "robot_api.yaml").is_file() and not profile.get("unified_api", {}).get("available"):
             raise web.HTTPBadRequest(text=profile["unified_api"]["reason"])
-        previous = str(store.value["robot_profiles"].get("active", ""))
-        if profile_id != previous:
+        try:
             proposed = copy.deepcopy(store.value)
             proposed["robot_profiles"]["active"] = profile_id
-            saved = store.save(proposed)
-            runtime.config = saved
-            runtime._on_safety_event(
-                f"robot profile changed from {previous or 'none'} to {profile_id}; restart teleop"
-            )
+            # Reapplying the same package must also reload updated runtime settings.
+            saved = store.save(store.apply_profile(proposed))
+        except ConfigError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        runtime._on_safety_event(
+            f"robot profile applied: {profile_id}; restart teleop"
+        )
+        await runtime.restart(saved)
+        control = getattr(runtime, "control_runtime", None)
+        control_status = control.status() if control else {"state": "unmanaged"}
+        if control_status["state"] == "failed":
+            return web.json_response({"ok": False, "active": profile_id, "config": saved,
+                "error": "配置已保存，但控制进程启动失败；输出保持停止",
+                "control_runtime": control_status}, status=503)
         return web.json_response(
             {
                 "ok": True,
                 "active": profile_id,
                 "profile": profile,
-                "restart_simulation_required": profile_id != previous,
+                "config": saved,
+                "restart_simulation_required": True,
+                "control_runtime": control_status,
             }
         )
 
     async def delete_robot_profile(request: web.Request) -> web.Response:
         profile_id = request.match_info["profile_id"]
+        control = getattr(runtime, "control_runtime", None)
+        if (control is not None and control.enabled
+                and profile_id == store.value["robot_profiles"].get("active")):
+            raise web.HTTPConflict(text="请先切换到其他机器人配置，再删除当前控制配置")
         try:
             await asyncio.to_thread(profiles.delete_profile, profile_id)
             active = str(store.value["robot_profiles"].get("active", ""))
@@ -127,7 +141,7 @@ def register_profile_routes(
                 proposed = copy.deepcopy(store.value)
                 proposed["robot_profiles"]["active"] = ""
                 saved = store.save(proposed)
-                runtime.config = saved
+                runtime.config["robot_profiles"]["active"] = ""
             return web.json_response(
                 {"ok": True, "deleted": profile_id, "cleared_active": cleared}
             )

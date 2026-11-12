@@ -72,8 +72,8 @@ PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
 CONTROLLER_YML="${HC_CONTROLLER_CONFIG:-${PROFILE_DIR}/controller_v23.yml}"
 ARM_CONFIG="${HC_ARM_TELEOP_CONFIG:-${PROFILE_DIR}/arm_teleop.yaml}"
 CONTROL_BACKEND="$(/usr/bin/python3 -m adapters.core.runtime_config backend "${ARM_CONFIG}")"
-if [[ -f "${PROFILE_DIR}/robot_api.yaml" ]]; then
-  [[ "${CONTROL_BACKEND}" == motion && "$(realpath -- "${ARM_CONFIG}")" == "${PROFILE_DIR}/arm_teleop.yaml" ]] || {
+if [[ -f "${PROFILE_DIR}/robot_api.yaml" && "${CONTROL_BACKEND}" == motion ]]; then
+  [[ "$(realpath -- "${ARM_CONFIG}")" == "${PROFILE_DIR}/arm_teleop.yaml" ]] || {
     err "统一 profile 必须使用同一 arm_teleop.yaml 和 Motion 后端"; exit 2;
   }
 fi
@@ -127,6 +127,12 @@ if [[ "${CONTROL_BACKEND}" == motion ]]; then
   set +u
   source "${MOTION_INSTALL}/setup.bash"
   set -u
+  if [[ -d "${PROJECT_ROOT}/.sdk_deps/lib" ]]; then
+    export LD_LIBRARY_PATH="${PROJECT_ROOT}/.sdk_deps/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+  if [[ -f "${PROJECT_ROOT}/.sdk_deps/lib/libruckig.so" ]]; then
+    export LD_PRELOAD="${PROJECT_ROOT}/.sdk_deps/lib/libruckig.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+  fi
   setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/motion_teleop_bridge.py" \
     >"${LOG_DIR}/motion_bridge.log" 2>&1 &
   PIDS+=("$!")

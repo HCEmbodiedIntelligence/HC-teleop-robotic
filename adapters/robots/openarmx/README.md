@@ -16,9 +16,10 @@ For real hardware, the robot computer must run the companion
 Before first real motion, verify joint feedback, controller order, zero/home
 pose, handedness, and emergency stop at reduced motor gains/speed.
 
-Because this profile now has a simulation configuration, running `./run.sh`
-without an explicit mode selects `sim`. Use `./run.sh teleop` explicitly when
-connecting to real hardware.
+Running `./run.sh` without a mode starts the middleware only. Start simulation
+from Dashboard or use `./run.sh sim`. Control defaults to v23; explicitly select
+`HC_CONTROL_BACKEND=motion` after building the Motion submodules to use the
+unified API. See [Motion setup](../../../docs/MOTION.md).
 
 ## Cameras (2026-10-16)
 
@@ -30,15 +31,11 @@ D405 wrist cameras and the RGB-only D435 head (`camera_hand`). From the HC proje
 bash tools/run_cameras.sh --profile adapters/robots/openarmx
 ```
 
-Select OpenArmX in Dashboard and restart middleware to use its camera preview and
-HC recording topics. Simulation (`HC_TELEOP_MODE=sim`) skips the physical camera
-list. Middleware does not automatically start camera processes. Runtime camera
-subscriptions replace legacy camera selections without overwriting saved generic
-configuration. Raw CameraInfo is retained alongside JSON String channels:
-`/camera_left/camera/calibration`, `/camera_right/camera/calibration`, and
-`/camera_hand/camera/calibration`. Only available streams are represented; the
-head has no fabricated depth intrinsics. This integration is for `workflow: hc`;
-`platform_raw` has a separate source configuration.
+Camera preview and recording subscriptions are configured through the profile's
+`middleware.yaml` and Dashboard. Select the driver topics you need there;
+`cameras.yaml` only configures the optional physical-camera launcher. Middleware
+does not automatically launch cameras or record calibration. Main's video bundle
+stores RGB as MP4 and preserves depth messages losslessly in `raw.mcap`.
 
 The URDF includes CAD camera mounts from `openarmx_urdf-1.0_basic.rar`:
 
@@ -51,8 +48,6 @@ The URDF includes CAD camera mounts from `openarmx_urdf-1.0_basic.rar`:
 The driver separately publishes `camera_left_camera_link`,
 `camera_right_camera_link`, `camera_hand_camera_link` and stream/optical frames.
 **CAD-to-driver-base transforms remain unknown and are not published as identity.**
-Robot-to-CAD and driver-internal TF are recorded, but complete robot-to-optical
-extrinsics require those three mounting registrations. CAD origins are not
-measured optical centers. Both `/tf` and transient-local `/tf_static` are selected
-in the default recording configuration. Each HC segment creates a fresh subscriber
-and retrieves retained static messages from existing broadcasters.
+Complete robot-to-optical extrinsics require those three mounting registrations.
+CAD origins are not measured optical centers. TF recording is optional and follows
+the selected recording topics.

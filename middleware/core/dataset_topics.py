@@ -32,13 +32,30 @@ class DatasetTopics:
             for side in ('right', 'left'):
                 self.publisher(f'/{category}/{side}_arm/ee_pose', PoseStamped)
             subscribe(PoseArray, source, lambda msg, c=category: self.poses(c, msg))
+        subscribe(PoseArray, '/internal/recording/action/ee_poses', lambda msg: self.poses('action', msg))
+        if config.get('x1_recording_fk'):
+            category = 'internal/recording/observation'
+            for side in ('right', 'left'):
+                self.publisher(f'/{category}/{side}_arm/ee_pose', PoseStamped)
+            subscribe(PoseArray, f'/{category}/ee_poses', lambda msg: self.poses(category, msg))
         self.publisher('/action/base/velocity', TwistStamped)
         subscribe(Float64MultiArray, '/action/base/command', self.base)
         self.publisher('/observation/headset/pose', PoseStamped)
         subscribe(String, '/vrdata', self.head)
+        self.publisher('/observation/head/pose', PoseStamped)
+        self.publisher('/action/head/pose', PoseStamped)
+        subscribe(PoseArray, '/status/head/tracking_poses', self.robot_head)
+        from .camera_metadata import CameraMetadata
+        self.camera_metadata = CameraMetadata(node, config.get('camera_metadata', {}))
+        self.publishers.update(self.camera_metadata.publishers)
+        self.subscriptions.extend(self.camera_metadata.subscriptions)
 
     def publisher(self, topic, cls):
         self.publishers[topic] = self.node.create_publisher(cls, topic, 10)
+
+    def relay(self, topic, msg):
+        """Republish immutable metadata under the standard observation namespace."""
+        self.publishers[topic].publish(msg)
 
     def joints(self, category, msg):
         from sensor_msgs.msg import JointState
@@ -77,6 +94,20 @@ class DatasetTopics:
         out.twist.angular.z, out.twist.linear.x, out.twist.linear.y = msg.data
         self.publishers['/action/base/velocity'].publish(out)
 
+    def robot_head(self, msg):
+        """Split [actual, target] camera-head poses in the robot base frame."""
+        from geometry_msgs.msg import PoseStamped
+        if len(msg.poses) < 2:
+            return
+        for topic, pose in (
+            ('/observation/head/pose', msg.poses[0]),
+            ('/action/head/pose', msg.poses[1]),
+        ):
+            out = PoseStamped()
+            out.header = msg.header
+            out.pose = pose
+            self.publishers[topic].publish(out)
+
     def head(self, msg):
         from geometry_msgs.msg import PoseStamped
         try:
@@ -103,10 +134,11 @@ class DatasetTopics:
 
 def load_joint_groups(config, config_dir):
     """Resolve split groups from the active robot profile, including profiles without waist."""
+    from adapters.core.runtime_config import unified_profile
     from .robot_api import RobotApiProfile, selected_profile
     import yaml
     directory = selected_profile(config, config_dir)
-    if (directory / 'robot_api.yaml').is_file():
+    if unified_profile(directory):
         api = RobotApiProfile(directory)
         return {group: [api.joints[n]['public_name'] for n in names]
                 for group, names in api.groups.items() if group != 'whole_body'}

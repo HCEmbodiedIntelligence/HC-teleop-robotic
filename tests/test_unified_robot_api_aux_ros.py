@@ -36,6 +36,7 @@ def test_actual_vr_auxiliary_and_clutch_paths(tmp_path):
     config=yaml.safe_load((profile/'arm_teleop.yaml').read_text())
     assert config['body']['neck_tracking_enabled'] is False
     config['body']['neck_tracking_enabled']=True
+    config['control']['backend']='motion'
     (profile/'arm_teleop.yaml').write_text(yaml.safe_dump(config))
     with FakeRig(profile,report,with_teleop=True) as rig:
         rig.select('vr')

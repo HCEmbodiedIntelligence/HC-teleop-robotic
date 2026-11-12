@@ -9,6 +9,35 @@ from pathlib import Path
 
 from .bundle import checksum, finalized_mp4, safe_path
 from .common import Limiter, UploadError, atomic_json, canonical, read_json, validate
+from .capture_plan import OWNERSHIP_FIELDS, reference, validate_snapshot, validate_lerobot_info
+
+
+def asset_stat_snapshot(root, assets):
+    """Cheaply identify the exact files covered by an already verified manifest.
+
+    Full checksums remain authoritative.  This snapshot only avoids repeating
+    them while the file identity and kernel-maintained change timestamps are
+    unchanged.
+    """
+    root = Path(root)
+    result = []
+    try:
+        for asset in assets:
+            path = root / asset['path']
+            value = path.stat()
+            if path.is_symlink() or not stat.S_ISREG(value.st_mode):
+                return None
+            result.append({
+                'path': asset['path'],
+                'size': value.st_size,
+                'device': value.st_dev,
+                'inode': value.st_ino,
+                'mtime_ns': value.st_mtime_ns,
+                'ctime_ns': value.st_ctime_ns,
+            })
+    except (KeyError, OSError, TypeError):
+        return None
+    return result
 
 
 def artifact_id(value):
@@ -67,13 +96,19 @@ def inspect_ready(descriptor, cfg):
     required = {'schema_version', 'recording_id', 'artifact_id', 'kind', 'root', 'files',
                 'profile_id', 'config_fingerprint', 'source_artifact_id', 'native_session_id',
                 'native_completion_marker', 'binding_id', 'completed_at'}
-    if not required <= descriptor.keys() or descriptor.keys() - required - {'capture_started_at', 'capture_ended_at'}:
+    if not required <= descriptor.keys() or descriptor.keys() - required - {'capture_started_at', 'capture_ended_at', 'ownership_snapshot', 'capture_snapshot'}:
         raise UploadError('ARTIFACT_SCHEMA_INVALID')
     artifact_id(descriptor.get('artifact_id'))
     artifact_id(descriptor.get('recording_id'))
     kind = descriptor.get('kind')
     if kind not in {'hc_mcap', 'hc_lerobot', 'platform_raw'}:
         raise UploadError('ARTIFACT_KIND_INVALID')
+    snapshot = descriptor.get('capture_snapshot')
+    if snapshot is not None:
+        validate_snapshot(snapshot, recording_id=descriptor['recording_id'],
+                          source_format={'hc_lerobot': 'LEROBOT_V3', 'hc_mcap': 'MCAP', 'platform_raw': 'CAPTURE_BUNDLE'}[kind])
+        if descriptor.get('ownership_snapshot') != {key: snapshot[key] for key in OWNERSHIP_FIELDS}:
+            raise UploadError('CAPTURE_SNAPSHOT_MISMATCH', '封存归属与服务端录制快照不同')
     for key in ('profile_id', 'config_fingerprint', 'completed_at'):
         if not isinstance(descriptor.get(key), str) or not descriptor[key]:
             raise UploadError('ARTIFACT_SCHEMA_INVALID')
@@ -130,12 +165,26 @@ def inspect_ready(descriptor, cfg):
             stream.seek(-8, 2)
             if stream.read(8) != magic:
                 raise UploadError('MCAP_INCOMPLETE')
+        if snapshot is not None:
+            import json
+            from mcap.reader import make_reader
+            with (root / mcaps[0]).open('rb') as stream:
+                metadata = [item.metadata for item in make_reader(stream).iter_metadata()
+                            if 'capture_snapshot' in item.metadata]
+            if len(metadata) != 1 or json.loads(metadata[0]['capture_snapshot']) != snapshot:
+                raise UploadError('CAPTURE_SNAPSHOT_MISMATCH', 'MCAP 元数据与封存快照不一致')
     if kind == 'hc_lerobot':
         if 'meta/info.json' not in paths or not any(p.endswith('.parquet') for p in paths):
             raise UploadError('LEROBOT_INCOMPLETE')
         info = read_json(root / 'meta/info.json')
         if not isinstance(info, dict) or not info.get('codebase_version') or not info.get('features') or info.get('total_frames', 0) <= 0:
             raise UploadError('LEROBOT_METADATA_INVALID')
+        if snapshot is not None:
+            presence = validate_lerobot_info(snapshot, info)
+            context = read_json(root / 'capture-context.json')
+            if context != {'schema_version': 'hc-capture-context/v1', 'recording_id': descriptor['recording_id'],
+                           'capture_snapshot': snapshot, 'feature_presence': presence}:
+                raise UploadError('CAPTURE_SNAPSHOT_MISMATCH', 'LeRobot capture-context 与封存快照不一致')
         # LeRobot is a dedicated dataset directory; missing media/shards are not optional.
         actual = set()
         for path in root.rglob('*'):
@@ -165,6 +214,13 @@ def manifest_for_ready(descriptor, cfg, client_id):
             raise UploadError('IDENTITY_MISMATCH')
         if {a['path'] for a in result[2]['assets']} != {a['path'] for a in inventory}:
             raise UploadError('ASSET_INVENTORY')
+        if descriptor.get('capture_snapshot'):
+            snapshot = validate_snapshot(descriptor['capture_snapshot'], robot_id=cfg['robot_id'],
+                collection_task_id=cfg['task_id'], source_format='CAPTURE_BUNDLE')
+            result[2]['capture_plan'] = reference(snapshot)
+        if descriptor.get('ownership_snapshot'):
+            result[2]['format_metadata']['ownership_snapshot'] = descriptor['ownership_snapshot']
+        validate(result[2], 'robot-ingest-manifest')
         return result
     if descriptor.get('native_completion_marker') is not None:
         raise UploadError('ARTIFACT_SCHEMA_INVALID')
@@ -179,11 +235,24 @@ def manifest_for_ready(descriptor, cfg, client_id):
     marker = dict(export_id=descriptor['artifact_id'], session_id=descriptor['recording_id'],
                   robot_id=cfg['robot_id'], collection_task_id=cfg['task_id'], content_sha256=digest)
     lerobot = descriptor['kind'] == 'hc_lerobot'
+    info = read_json(root / 'meta/info.json') if lerobot else None
+    episode_count = None
+    if lerobot:
+        episode_count = info.get('total_episodes')
+        if episode_count is None:
+            episodes_file = root / 'meta/episodes.jsonl'
+            if episodes_file.exists():
+                with episodes_file.open('r') as stream:
+                    episode_count = sum(1 for line in stream if line.strip())
+            else:
+                episode_count = 1
+        episode_count = int(episode_count)
     manifest = dict(schema_version='robot-ingest/v1', client_upload_id=client_id,
                     collection_task_id=cfg['task_id'], robot_id=cfg['robot_id'],
                     source_format='LEROBOT_V3' if lerobot else 'MCAP',
-                    source_format_version=read_json(root/'meta/info.json')['codebase_version'] if lerobot else '0',
+                    source_format_version=info['codebase_version'] if lerobot else '0',
                     capture_mode='PRESEGMENTED' if lerobot else 'CONTINUOUS',
+                    declared_episode_count=episode_count,
                     capture_started_at=descriptor['capture_started_at'], capture_ended_at=descriptor['capture_ended_at'],
                     cameras=[], assets=[dict(a, asset_id=f'asset-{i:03d}', role='RAW', metadata={},
                         media_type='video/mp4' if a['path'].endswith('.mp4') else 'application/octet-stream')
@@ -191,5 +260,11 @@ def manifest_for_ready(descriptor, cfg, client_id):
                     format_metadata={'hc_artifact': {k: descriptor.get(k) for k in (
                         'schema_version', 'artifact_id', 'recording_id', 'kind', 'profile_id',
                         'config_fingerprint', 'source_artifact_id', 'native_session_id')}})
+    if descriptor.get('ownership_snapshot'):
+        manifest['format_metadata']['ownership_snapshot'] = descriptor['ownership_snapshot']
+    if descriptor.get('capture_snapshot'):
+        snapshot = validate_snapshot(descriptor['capture_snapshot'], robot_id=cfg['robot_id'],
+                                     collection_task_id=cfg['task_id'], source_format=manifest['source_format'])
+        manifest['capture_plan'] = reference(snapshot)
     validate(manifest, 'robot-ingest-manifest')
     return root, marker, manifest

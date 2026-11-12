@@ -1,0 +1,22 @@
+version: 1
+id: HC_REALMAN
+display_name: HC_REALMAN ECO65-B Dual Arm
+schema: arm-teleop-v1
+managed: true
+imported_at: '2026-11-04T02:09:52.274955+00:00'
+robot_name: HC_REALMAN
+urdf: urdf/hc_realman.urdf
+primary_config: controller_v23.yml
+config_files:
+- middleware.yaml
+- arm_teleop.yaml
+- controller_v23.yml
+- vr_configs.yml
+link_count: 49
+joint_count: 48
+movable_joint_count: 33
+free_joint_count: 12
+task_count: 2
+arm_count: 2
+teleop_compatible: true
+warnings: []

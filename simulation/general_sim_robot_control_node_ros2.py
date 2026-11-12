@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 import time
+import json
 import threading
 import yaml
 import numpy as np
@@ -54,10 +55,41 @@ class SimRobotController(Node, AssembledRobot):
             sim_cfg = {}
         opengl2 = self.configs.get("sim_opengl2", sim_cfg.get("sim_opengl2", True))
         options = "--opengl2" if opengl2 and not headless else ""
+        forwarded_display = not headless and os.environ.get("DISPLAY", "").startswith("localhost:")
+        if forwarded_display:
+            options += " --width=640 --height=480"
+        started = time.monotonic()
+        self.get_logger().info(
+            f"PyBullet connect starting: DISPLAY={os.environ.get('DISPLAY', '<unset>')} "
+            f"headless={headless} options={options!r}"
+        )
         client_id = p.connect(p.DIRECT if headless else p.GUI, options=options)
         if client_id < 0:
             raise RuntimeError("Unable to connect to PyBullet")
         self.physics_clent_id = client_id
+        self.physics_stop = threading.Event()
+        self.physics_thread = None
+        self.manual_rendering = forwarded_display
+        self.visualization_enabled = bool(init_debug and not headless)
+        self.target_ee_poses = None
+        self.stream_viewer = stream_viewer
+        self.viewer_demand_file = viewer_demand_file
+        self.next_viewer_frame = 0.0
+        self.get_logger().info(f"PyBullet connect finished in {time.monotonic() - started:.3f}s")
+        try:
+            # Mesh uploads and intermediate resets must not trigger individual
+            # frames over a forwarded X11 connection.
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0, physicsClientId=client_id)
+            self._initialize_robot(config_file, sim_cfg, init_debug, headless)
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1, physicsClientId=client_id)
+            self._start_physics()
+            self.get_logger().info(f"PyBullet ready in {time.monotonic() - started:.3f}s")
+        except Exception:
+            self.close_simulation()
+            self.destroy_node()
+            raise
+
+    def _initialize_robot(self, config_file, sim_cfg, init_debug, headless):
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, int(init_debug and not headless))
         p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0)
         p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0)
@@ -92,6 +124,8 @@ class SimRobotController(Node, AssembledRobot):
         with_ee_constraint = False
         
         # Initialize the AssembledRobot
+        model_started = time.monotonic()
+        self.get_logger().info(f"PyBullet model loading: {robot_urdf_path}")
         AssembledRobot.__init__(
             self,
             robot_urdf_path,
@@ -100,32 +134,28 @@ class SimRobotController(Node, AssembledRobot):
             with_ee_constraint,
             self.physics_clent_id,
         )
+        self.get_logger().info(f"PyBullet model assembled in {time.monotonic() - model_started:.3f}s")
         self.reset_home()
         # Keep persistent IDs for every visual frame. The old implementation
         # drew the flange frames only once here, so they remained at the home
         # pose after the arm moved and looked like unrelated floating markers.
-        self.base_frame_ids = debug_draw_pose(
-            self.base.pose,
-            line_width=2.0,
-            line_length=0.16,
-            physics_client_id=self.physics_clent_id,
-        )
-        self.actual_ee_frame_ids = [
-            debug_draw_pose(
-                arm.abs_ee_pose,
-                line_width=3.0,
-                line_length=0.18,
-                physics_client_id=self.physics_clent_id,
-            )
-            for arm in self.arms
-        ]
+        self.base_frame_ids = None
+        self.actual_ee_frame_ids = [None] * len(self.arms)
+        self.feedback_joint_indices = []
+        self.feedback_joint_names = []
+        for index in range(p.getNumJoints(self.robot_id, physicsClientId=self.physics_clent_id)):
+            info = p.getJointInfo(self.robot_id, index, physicsClientId=self.physics_clent_id)
+            if info[2] != p.JOINT_FIXED:
+                self.feedback_joint_indices.append(index)
+                self.feedback_joint_names.append(info[1].decode("utf-8"))
         self.target_ee_frame_ids = [None] * len(self.arms)
         self.plane_id = None
         self.ground_frame_ids = None
         self.init_ground_plane(sim_cfg, init_debug=init_debug and not headless)
         
         # ROS2 publishers and subscribers
-        unified = os.path.isfile(os.path.join(self.robot_description_path, "robot_api.yaml"))
+        from adapters.core.runtime_config import unified_profile
+        unified = unified_profile(self.robot_description_path)
         if unified:
             from middleware.core.robot_api import RobotApiProfile
             RobotApiProfile(self.robot_description_path)
@@ -182,7 +212,7 @@ class SimRobotController(Node, AssembledRobot):
         if "fixed_link" not in self.configs:
             self.target_base_move_sub = self.create_subscription(
                 Float64MultiArray,
-                f"/io_teleop/target_base_move",
+                "/action/base/command",
                 self.target_base_move_callback,
                 1,
             )
@@ -224,15 +254,32 @@ class SimRobotController(Node, AssembledRobot):
             Trigger, "io_teleop_reset_robot", self.reset_service_callback
         )
 
-        # Start physics only after all joints and home poses are assembled.
-        self.physics_stop = threading.Event()
+        if init_debug and not headless:
+            self.debug_timer = self.create_timer(1.0 / 60, self.update_debug_joints)
+
+    def _start_physics(self):
+        # Start physics after rendering has been restored successfully.
         def physics_sim():
             try:
+                next_frame = next_debug = 0.0
                 while rclpy.ok() and not self.physics_stop.is_set():
                     with self.bullet_lock:
                         if not p.isConnected(self.physics_clent_id):
                             break
                         p.stepSimulation(physicsClientId=self.physics_clent_id)
+                        now = time.monotonic()
+                        if self.visualization_enabled and now >= next_debug:
+                            self._draw_visualizations()
+                            next_debug = now + 0.2
+                        if self.manual_rendering and now >= next_frame:
+                            # Forwarded software rendering must not run continuously
+                            # or on the ROS executor handling control and feedback.
+                            p.configureDebugVisualizer(
+                                p.COV_ENABLE_SINGLE_STEP_RENDERING, 1,
+                                physicsClientId=self.physics_clent_id)
+                            # Measure the quiet period after the frame completes;
+                            # a slow X11 frame must not cause continuous rendering.
+                            next_frame = time.monotonic() + 0.2
                     self.physics_stop.wait(1.0 / 240.0)
             except p.error:
                 pass
@@ -241,14 +288,13 @@ class SimRobotController(Node, AssembledRobot):
                     rclpy.try_shutdown()
         self.physics_thread = threading.Thread(target=physics_sim, daemon=True)
         self.physics_thread.start()
-        if init_debug and not headless:
-            self.debug_timer = self.create_timer(1.0 / 60, self.update_debug_joints)
 
     def close_simulation(self):
         self.physics_stop.set()
-        self.physics_thread.join(timeout=2)
-        if p.isConnected(self.physics_clent_id):
-            p.disconnect(self.physics_clent_id)
+        if self.physics_thread is not None and self.physics_thread.is_alive():
+            self.physics_thread.join(timeout=2)
+        if p.isConnected(physicsClientId=self.physics_clent_id):
+            p.disconnect(physicsClientId=self.physics_clent_id)
 
     def reset_service_callback(self, request, response):
         print(
@@ -284,22 +330,17 @@ class SimRobotController(Node, AssembledRobot):
     def update_joint_state(self):
         self._update_base_velocity()
         self.publish_base_pose()
-        self._draw_head_tracking()
         joint_state = JointState()
         joint_state.header.stamp = self.get_clock().now().to_msg()
-        joint_state.name = []
-        joint_state.position = []
-        for i in range(p.getNumJoints(self.robot_id)):
-            joint_info = p.getJointInfo(self.robot_id, i)
-            if joint_info[2] == p.JOINT_FIXED:
-                continue
-            joint_state.name.append(joint_info[1].decode("utf-8"))
-            measured = p.getJointState(self.robot_id, i)
-            joint_state.position.append(measured[0])
-            joint_state.velocity.append(measured[1])
-            joint_state.effort.append(measured[3])
+        joint_state.name = list(self.feedback_joint_names)
+        with self.bullet_lock:
+            states = p.getJointStates(
+                self.robot_id, self.feedback_joint_indices,
+                physicsClientId=self.physics_clent_id)
+        joint_state.position = [state[0] for state in states]
+        joint_state.velocity = [state[1] for state in states]
         self.joint_state_pub.publish(joint_state)
-        if self.internal_joint_state_pub is not None:
+        if getattr(self, 'internal_joint_state_pub', None) is not None:
             self.internal_joint_state_pub.publish(joint_state)
         self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
         demand_file = getattr(self, 'viewer_demand_file', None)
@@ -313,21 +354,6 @@ class SimRobotController(Node, AssembledRobot):
                      'base_pose': root_pose, 'markers': markers}
             print('HC_SIMULATION_FRAME ' + json.dumps(frame, separators=(',', ':'), allow_nan=False), flush=True)
             self.next_viewer_frame = time.monotonic() + 1.0 / 30.0
-        self.base_frame_ids = debug_draw_pose(
-            self.base.pose,
-            self.base_frame_ids,
-            line_width=2.0,
-            line_length=0.16,
-            physics_client_id=self.physics_clent_id,
-        )
-        for index, arm in enumerate(self.arms):
-            self.actual_ee_frame_ids[index] = debug_draw_pose(
-                arm.abs_ee_pose,
-                self.actual_ee_frame_ids[index],
-                line_width=3.0,
-                line_length=0.18,
-                physics_client_id=self.physics_clent_id,
-            )
 
     def _viewer_markers(self, root_pose):
         """Read world-space marker poses only when a viewer requests a frame.
@@ -382,6 +408,26 @@ class SimRobotController(Node, AssembledRobot):
                 self.head_tracking_poses = None
         return markers
 
+    def _draw_visualizations(self):
+        """Optional markers at 5 Hz in the physics worker, outside ROS callbacks."""
+        self._draw_head_tracking()
+        self.base_frame_ids = debug_draw_pose(
+            self.base.pose,
+            self.base_frame_ids,
+            line_width=2.0,
+            line_length=0.16,
+            physics_client_id=self.physics_clent_id,
+        )
+        for index, arm in enumerate(self.arms):
+            self.actual_ee_frame_ids[index] = debug_draw_pose(
+                arm.abs_ee_pose,
+                self.actual_ee_frame_ids[index],
+                line_width=3.0,
+                line_length=0.18,
+                physics_client_id=self.physics_clent_id,
+            )
+        self._draw_target_ee()
+
     def target_finger_joints_callback(self, msg):
         joint_pos = msg.position
         joint_names = msg.name
@@ -412,13 +458,19 @@ class SimRobotController(Node, AssembledRobot):
             gripper.reset(gripper_status[i])
 
     def target_ee_callback(self, msg):
-        self.target_ee_poses = list(msg.poses)
+        # Visualization never competes with incoming control on the ROS executor.
+        if len(msg.poses) >= len(self.arms):
+            self.target_ee_poses = list(msg.poses)
+
+    def _draw_target_ee(self):
+        if self.target_ee_poses is None:
+            return
         controller_indices = self.configs.get("controller_indices", {})
         bases = controller_indices.get("base", []) if isinstance(controller_indices, dict) else []
         if bases:
-            count = min(len(self.arms), len(msg.poses), len(bases))
+            count = min(len(self.arms), len(self.target_ee_poses), len(bases))
             for i in range(count):
-                pose = msg.poses[i]
+                pose = self.target_ee_poses[i]
                 id = bases[i]
                 pose_list = pose_msg_to_list(pose)
                 cmd_base_pose = (
@@ -442,8 +494,6 @@ class SimRobotController(Node, AssembledRobot):
                         line_length=0.3,
                         physics_client_id=self.physics_clent_id,
                     )
-        else:
-            time.sleep(0.001)
 
     def head_tracking_callback(self, msg):
         if msg.header.frame_id != "robot_base" or len(msg.poses) != 2:

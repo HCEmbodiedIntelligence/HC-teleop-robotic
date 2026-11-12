@@ -39,7 +39,12 @@ planning:
   sample_period_sec: 0.01
   limit_scale: 1.0
   ik:
-    solver: placo
+    solver: qp_servo
+    qp_servo:
+      gain: 1.0              # 遥操跟踪增益
+      joint_v_max_deg: 90.0  # 关节速度约束
+      damping: 0.002         # 奇异阻尼
+      iterations: 1
     placo:
       max_iterations: 1000
       position_tolerance: 1.0

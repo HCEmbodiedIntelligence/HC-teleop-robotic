@@ -14,6 +14,12 @@ set +u
 source /opt/ros/humble/setup.bash
 source "${MOTION_INSTALL}/setup.bash"
 set -u
+if [[ -d "${PROJECT_ROOT}/.sdk_deps/lib" ]]; then
+  export LD_LIBRARY_PATH="${PROJECT_ROOT}/.sdk_deps/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+if [[ -f "${PROJECT_ROOT}/.sdk_deps/lib/libruckig.so" ]]; then
+  export LD_PRELOAD="${PROJECT_ROOT}/.sdk_deps/lib/libruckig.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
 export PATH="/usr/bin:${PATH}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-14}"
 # The unified SDK runtime verifies its own pinned dependency provenance.

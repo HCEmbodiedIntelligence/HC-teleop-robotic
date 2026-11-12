@@ -1,4 +1,4 @@
-"""Launch mode must never override body control parameters."""
+"""Share body calibration while honoring the configured base feedback mode."""
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -18,13 +18,24 @@ def test_sim_and_teleop_load_the_same_body_parameters():
     rclpy.init(domain_id=169)
     try:
         for mode in ('sim', 'teleop'):
-            with patch.dict(os.environ, {'HC_TELEOP_MODE': mode}):
+            with patch.dict(os.environ, {'HC_TELEOP_MODE': mode, 'HC_RUNTIME_MODE': 'simulation' if mode == 'sim' else 'teleop'}):
                 node = RobotArmTeleopNode(str(path), backend='v23')
             try:
                 assert node.body_config == config['body']
                 assert node.body.joint_names == config['body']['waist_joint_names']
-                assert node.head_base_follower is not None
-                assert node.base_pose_sub.topic_name == '/observation/base/pose'
+                if mode == 'sim':
+                    assert node.actual_pub is not None
+                    assert node.head_base_mode == 'pose'
+                    assert node.head_base_follower is not None
+                    assert node.base_pose_sub.topic_name == '/observation/base/pose'
+                else:
+                    assert node.actual_pub is None
+                    with patch.object(node, '_publish_head_tracking_poses') as head:
+                        node._publish_actual_poses()
+                        head.assert_called_once_with()
+                    assert node.head_base_mode == 'planar_velocity'
+                    assert node.head_base_follower is None
+                    assert not hasattr(node, 'base_pose_sub')
             finally:
                 node.destroy_node()
     finally:

@@ -11,22 +11,33 @@ class FreshFrameTests(unittest.IsolatedAsyncioTestCase):
         self.camera=CameraService({'enabled':True,'width':64,'height':48})
         self.image=np.zeros((48,64,3),dtype=np.uint8)
 
-    async def test_no_placeholder_no_duplicates_and_variable_timestamps(self):
+    async def test_no_placeholder_or_repeated_frame(self):
         track=self.camera._create_video_track()
         pending=asyncio.create_task(track.recv())
         await asyncio.sleep(.04)
         self.assertFalse(pending.done())
         now=time.monotonic_ns()
-        self.camera._accept_frame(self.image,'test',arrival_ns=now)
+        self.camera._accept_frame(self.image,'test',arrival_ns=now,capture_ns=1_000_000_000)
         first=await asyncio.wait_for(pending,.5)
         pending=asyncio.create_task(track.recv())
-        await asyncio.sleep(.08)  # Source below 30 fps must not be padded.
+        await asyncio.sleep(.08)
         self.assertFalse(pending.done())
-        self.camera._accept_frame(self.image,'test',arrival_ns=now+80_000_000)
+        self.camera.set_frame(self.image)
         second=await asyncio.wait_for(pending,.5)
-        self.assertEqual(second.pts-first.pts,7200)
+        self.assertGreater(second.pts-first.pts,6000)
         self.assertEqual(float(second.time_base),1/90000)
         self.assertEqual(self.camera._webrtc_frames_sent,2)
+        track.stop()
+
+    async def test_rtp_clock_follows_real_time_despite_source_stamp_jitter(self):
+        track=self.camera._create_video_track()
+        self.camera._accept_frame(self.image,'test',capture_ns=2_000_000_000)
+        first=await track.recv()
+        started=time.monotonic()
+        await asyncio.sleep(.075)
+        self.camera._accept_frame(self.image,'test',capture_ns=2_033_333_333)
+        second=await track.recv()
+        self.assertAlmostEqual((second.pts-first.pts)/90000,time.monotonic()-started,delta=.025)
         track.stop()
 
     async def test_each_peer_receives_newest_frame_without_consuming_other_peer(self):

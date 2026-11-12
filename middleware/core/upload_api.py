@@ -4,7 +4,7 @@ from aiohttp import web
 from humanoid_upload.common import UploadError
 
 
-def register_upload_routes(app, service):
+def register_upload_routes(app, service, update_settings=None):
     async def dispatch(request):
         operation = request.match_info.get('operation', 'status')
         try:
@@ -16,6 +16,18 @@ def register_upload_routes(app, service):
                 body = await request.json()
                 if not isinstance(body, dict):
                     raise ValueError()
+                if operation == 'settings':
+                    if update_settings is None:
+                        raise UploadError('SETTINGS_UNAVAILABLE', '当前启动方式不支持在线设置')
+                    return web.json_response(await update_settings(body))
+                if operation == 'check-connection':
+                    from humanoid_upload.cli import check_connection
+                    from humanoid_upload.common import validate_config
+                    if set(body) != set(service.binding_fields):
+                        raise ValueError()
+                    cfg = validate_config({**service.cfg, **body})
+                    result = await asyncio.to_thread(check_connection, cfg)
+                    return web.json_response(result)
                 service.require_enabled()
                 if operation == 'binding':
                     result = await asyncio.to_thread(service.set_binding, body)

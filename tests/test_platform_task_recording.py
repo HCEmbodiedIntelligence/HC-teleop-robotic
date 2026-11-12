@@ -1,0 +1,781 @@
+"""Real MCAP files, durable queues and isolated platform HTTP simulations."""
+import copy
+import json
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from middleware.core.platform_connection import PlatformConnection
+from middleware.core.task_recording import TaskRecorder
+from middleware.core.topic_recorder import TopicRecorder, read_recording_metadata
+from humanoid_upload.common import UploadError, atomic_json, read_json
+from capture_contract_support import task_document, snapshot_document
+
+LOCAL = dict(local_robot_id='real-local-robot', profile_id='test-profile', config_fingerprint='a'*64,
+             serial_no=None, model_version_id=None)
+
+
+def create_service(tmp_path, monkeypatch, *, legacy=None):
+    cfg = {'ros': {'recording': {'format': 'mcap', 'directory': str(tmp_path/'data')}},
+           'uploads': {'queue_directory': str(tmp_path/'queue'), **(legacy or {})}}
+    service = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+    service.config['ros']['subscriptions'] = [{'topic': '/test', 'type': 'sensor_msgs/msg/JointState', 'outputs': ['record']}]
+    service.capture_health = lambda: {'/test': {'has_data': True, 'hz': 15, 'state': 'ok'}}
+    # Tests advance the worker explicitly, so no timing-dependent real platform access.
+    monkeypatch.setattr(service.upload, 'start', lambda: None)
+    def request(connection, method, endpoint, payload=None, **kw):
+        if endpoint == 'connections:redeem':
+            return dict(token='hcri_'+'a'*32+'.'+'b'*64, robot_id='robot', robot_name='Robot',
+                organization_id='org', ingest_identity_id='identity', platform_name='Platform', local_robot=LOCAL)
+        if endpoint == 'me':
+            return dict(robot_id='robot', robot_name='Robot', organization_id='org', platform_name='Platform', local_robot=LOCAL)
+        if endpoint.startswith('tasks/'):
+            task = endpoint.split('/')[1].split(':')[0]
+            document = task_document(task, payload['source_format'])
+            return snapshot_document(document, payload) if endpoint.endswith(':prepare-recording') else document
+        return {'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'projects': []}
+    monkeypatch.setattr(service, 'request', request)
+    return cfg, service
+
+
+def connected(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    return cfg, service, TaskRecorder(TopicRecorder(cfg['ros']['recording'], tmp_path), service)
+
+
+def test_upload_master_switch_disables_platform_work_and_preserves_local_capture(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    service.set_recording_selection(choice(service, 'A'))
+    try:
+        status = service.set_enabled(False)
+        assert status['uploads_enabled'] is False
+        assert status['jobs'] == []
+        assert service.recording_selection() == {'mode': 'local'}
+        assert service.state['worker_enabled'] is False
+        assert service.state['auto_upload'] is True
+        with pytest.raises(UploadError, match='UPLOAD_DISABLED'):
+            service.tasks()
+        with pytest.raises(UploadError, match='UPLOAD_DISABLED'):
+            recorder.upload_recording('missing')
+        path = capture(recorder, {'mode': 'local'})
+        assert Path(path).is_file()
+        assert service.set_enabled(True)['uploads_enabled'] is True
+        assert service.recording_selection()['task_id'] == 'A'
+    finally:
+        recorder.close()
+
+
+def choice(service, task, request_id=None):
+    result = dict(mode='platform', connection_id=service.state['current'], task_id=task, expected_plan_revision=1)
+    if request_id: result['request_id'] = request_id
+    return result
+
+
+def finish(recorder):
+    deadline = time.monotonic()+10
+    while recorder.pending:
+        assert time.monotonic() < deadline, recorder.records()
+        time.sleep(.02)
+
+
+def capture(recorder, selection):
+    path = recorder.start(metadata={'profile_id': LOCAL['profile_id']}, selection=selection)
+    for i in range(3): recorder.record({'topic': '/test', 'payload': {'frame': i}, 'stamp_ns': time.time_ns()})
+    recorder.stop()
+    finish(recorder)
+    return path
+
+
+def test_single_link_saved_secret_and_retry_request_survive_restart(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    requests = []
+    original = service.request
+    def request(*args, **kwargs):
+        requests.append(copy.deepcopy(args[3]))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(service, 'request', request)
+    link = 'http://platform.invalid/#robot-connect='+'c'*48
+    service.connect(link)
+    first = service.state['current']
+    assert service.status()['auto_upload'] is True
+    secret_path = next((tmp_path/'queue/credentials').glob('*.token'))
+    token = secret_path.read_text()
+    assert secret_path.stat().st_mode & 0o777 == 0o600
+    assert token not in json.dumps(service.status())
+    assert token not in (tmp_path/'queue/connections.json').read_text()
+    restored = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+    monkeypatch.setattr(restored.upload, 'start', lambda: None)
+    monkeypatch.setattr(restored, 'request', request)
+    restored.connect(link)
+    assert restored.state['current'] == first
+    assert requests[0]['request_id'] == requests[1]['request_id']
+    assert len(list((tmp_path/'queue/credentials').glob('*'))) == 1
+    def fail(*a, **kw): raise UploadError('NETWORK_UNCERTAIN', retry=True)
+    monkeypatch.setattr(restored, 'request', fail)
+    with pytest.raises(UploadError): restored.connect('http://other.invalid/#robot-connect='+'d'*48)
+    assert restored.state['current'] == first
+
+
+@pytest.mark.parametrize('code', ['NETWORK_TIMEOUT', 'ROBOT_CREDENTIAL_REVOKED'])
+def test_saved_connection_reverifies_after_failure_and_restart_without_a_link(tmp_path, monkeypatch, code):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect=' + 'c' * 48)
+    service.set_recording_selection(choice(service, 'A'))
+    service.set_auto(False)
+    before = copy.deepcopy(service.state)
+    credential_path = next((tmp_path / 'queue/credentials').glob('*.token'))
+    credential = credential_path.read_bytes()
+    original = service.request
+
+    def offline(*args, **kwargs):
+        raise UploadError(code, retry=code == 'NETWORK_TIMEOUT')
+
+    monkeypatch.setattr(service, 'request', offline)
+    with pytest.raises(UploadError, match=code):
+        service.verify()
+    assert service.status()['connection']['verified'] is False
+    assert service.error == code
+    assert service.state['current'] == before['current']
+    assert service.recording_selection() == before['recording_selection']
+    assert service.state['auto_upload'] is False
+    assert credential_path.read_bytes() == credential
+    if code == 'ROBOT_CREDENTIAL_REVOKED':
+        return  # Revocation needs a replacement credential; retry cannot revive it.
+
+    calls = []
+
+    def recovered(connection, method, endpoint, *args, **kwargs):
+        calls.append((method, endpoint, connection['credential_ref']))
+        return original(connection, method, endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(service, 'request', recovered)
+    assert service.verify()['connection']['verified'] is True
+    assert service.error is None
+    restored = PlatformConnection(cfg, tmp_path, tmp_path / 'data', identity_provider=lambda: dict(LOCAL))
+    monkeypatch.setattr(restored, 'request', recovered)
+    assert restored.status()['connection']['verified'] is False
+    assert restored.verify()['connection']['verified'] is True
+    assert restored.state == before
+    assert calls == [('GET', 'me', 'file:' + str(credential_path))] * 2
+    assert credential_path.read_bytes() == credential
+    assert len(list(credential_path.parent.glob('*.token'))) == 1
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_old_verification_cannot_replace_a_new_connection(tmp_path, monkeypatch, failed):
+    import threading
+
+    _, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect=' + 'c' * 48)
+    entered, release = threading.Event(), threading.Event()
+    original = service.request
+
+    def request(*args, **kwargs):
+        if args[2] == 'me':
+            entered.set()
+            assert release.wait(5)
+            if failed:
+                raise UploadError('ROBOT_CREDENTIAL_INVALID')
+            return {**original(*args, **kwargs), 'robot_name': 'Outdated name'}
+        return {**original(*args, **kwargs), 'robot_name': 'Current Robot'}
+
+    monkeypatch.setattr(service, 'request', request)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(service.verify)
+        try:
+            assert entered.wait(2)
+            service.connect('http://platform.invalid/#robot-connect=' + 'd' * 48)
+        finally:
+            release.set()
+        assert pending.result()['connection']['robot_name'] == 'Current Robot'
+    assert service.status()['connection']['verified']
+    assert service.error is None
+
+
+def test_two_windows_a_b_queued_independently_and_restart_preserves_ownership(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        a = choice(service, 'A', 'request-a')
+        b = choice(service, 'B', 'request-b')
+        first = capture(recorder, a)
+        second = capture(recorder, b)
+        jobs = service.upload.queue.jobs()
+        assert [j['frozen']['task_id'] for j in jobs] == ['A', 'B']
+        assert [j['manifest']['format_metadata']['ownership_snapshot']['dataset_id'] for j in jobs] == ['dataset-A', 'dataset-B']
+        assert json.loads(read_recording_metadata(Path(first))['platform_task'])['collection_task_id'] == 'A'
+        assert json.loads(read_recording_metadata(Path(second))['platform_task'])['collection_task_id'] == 'B'
+        assert 'hcri_' not in Path(first).read_bytes().decode(errors='ignore')
+        snapshot = copy.deepcopy(jobs)
+        reloaded = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+        assert reloaded.upload.queue.jobs() == snapshot
+        assert reloaded.status()['recent']['task_id'] == 'B'
+        assert recorder.start(selection=a) == first  # Lost start response cannot record twice.
+        with pytest.raises(UploadError, match='RECORDING_REQUEST_CONFLICT'):
+            recorder.start(selection={**a, 'task_id': 'B'})
+    finally: recorder.close()
+
+
+def test_offline_active_capture_continues_new_platform_start_fails_and_local_can_bind_later(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    original = service.request
+    try:
+        recorder.start(selection=choice(service, 'A'))
+        monkeypatch.setattr(service, 'request', lambda *a, **kw: (_ for _ in ()).throw(UploadError('NETWORK_UNCERTAIN', retry=True)))
+        assert recorder.record({'topic': '/test', 'payload': {'offline': True}})
+        recorder.stop(); finish(recorder)
+        assert len(service.upload.queue.jobs()) == 1
+        with pytest.raises(UploadError, match='NETWORK_UNCERTAIN'):
+            recorder.start(selection=choice(service, 'B'))
+        local = capture(recorder, {'mode': 'local'})
+        assert len(service.upload.queue.jobs()) == 1
+        record = next(j for j in recorder.records() if j['path'] == local)
+        monkeypatch.setattr(service, 'request', original)
+        recorder.upload_recording(record['recording_id'], choice(service, 'B')); finish(recorder)
+        assert [j['frozen']['task_id'] for j in service.upload.queue.jobs()] == ['A', 'B']
+        with pytest.raises(UploadError, match='TASK_BINDING_MISMATCH'):
+            recorder.upload_recording(record['recording_id'], choice(service, 'A'))
+    finally: recorder.close()
+
+
+def test_concurrent_starts_are_serialized(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        def start(task):
+            try: return recorder.start(selection=choice(service, task))
+            except UploadError as error: return error.code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(start, ('A','B')))
+        assert results.count('RECORDING_ACTIVE') == 1
+        assert len(recorder.records()) == 1
+        recorder.stop(); finish(recorder)
+    finally: recorder.close()
+
+
+@pytest.mark.parametrize('with_platform', [True, False])
+def test_controller_x_starts_y_stops_without_browser_setup(tmp_path, monkeypatch, with_platform):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from middleware.core.app import MiddlewareRuntime
+    from middleware.core.config import validate_config
+
+    cfg, service = create_service(tmp_path, monkeypatch)
+    raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
+    recorder = TaskRecorder(raw, service) if with_platform else raw
+    runtime = MiddlewareRuntime(validate_config(cfg), tmp_path)
+    runtime.recorder = recorder
+    runtime.platform = service if with_platform else None
+    runtime.upload_error = None if with_platform else 'optional uploader unavailable'
+    runtime.recording_ros = SimpleNamespace(prepare_recording=Mock())
+    runtime.emit = Mock()
+    runtime.session_profile_metadata = {'profile_id': LOCAL['profile_id']}
+    try:
+        with ThreadPoolExecutor(max_workers=1) as commands:
+            runtime._record_commands = commands
+            def packet(held, pressed=0):
+                runtime._on_pose(SimpleNamespace(left_input=SimpleNamespace(held_mask=held, pressed_mask=pressed)))
+                commands.submit(lambda: None).result(timeout=5)
+            packet(1, 1)
+            assert recorder.is_recording()
+            path = Path(recorder.status()['path'])
+            packet(1)  # Holding X must not create another recording.
+            assert recorder.status()['path'] == str(path)
+            for i in range(3): recorder.record({'topic': '/test', 'payload': {'frame': i}})
+            packet(0)
+            packet(2, 2)
+            assert not recorder.is_recording()
+            assert path.is_file()
+            assert not any(call.args[0]['kind'] == 'recording_error' for call in runtime.emit.call_args_list)
+            if with_platform:
+                finish(recorder)
+                assert len(recorder.records()) == 1
+                assert recorder.records()[0]['binding'] is None
+                assert service.upload.queue.jobs() == []
+            else:
+                runtime.recording_ros.prepare_recording.assert_called_once()
+    finally:
+        recorder.close() if with_platform else recorder.shutdown()
+
+
+def test_shared_selection_survives_restart_and_local_mode_does_not_reuse_recent_task(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    service.set_auto(False)
+    try:
+        recorder.set_selection(choice(service, 'A', 'must-not-be-reused'))
+        recorder.start()
+        assert recorder.status()['task_recording']['binding']['collection_task_id'] == 'A'
+        with pytest.raises(UploadError, match='RECORDING_ACTIVE'):
+            recorder.set_selection(choice(service, 'B'))
+        for i in range(3): recorder.record({'topic': '/test', 'payload': {'frame': i}})
+        recorder.stop(); finish(recorder)
+    finally: recorder.close()
+    restored = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+    monkeypatch.setattr(restored, 'request', service.request)
+    restored.config = copy.deepcopy(service.config)
+    restored.capture_health = service.capture_health
+    assert restored.recording_selection() == choice(service, 'A')
+    recorder = TaskRecorder(TopicRecorder(cfg['ros']['recording'], tmp_path), restored)
+    try:
+        capture(recorder, None)
+        assert len(recorder.records()) == 2
+        assert len({job['request_id'] for job in recorder.records()}) == 2
+        assert all(job['binding']['collection_task_id'] == 'A' for job in recorder.records())
+        recorder.set_selection({'mode': 'local'})
+        capture(recorder, None)
+        assert recorder.records()[-1]['binding'] is None
+        assert restored.status()['recent']['task_id'] == 'A'
+        reloaded = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+        assert reloaded.recording_selection() == {'mode': 'local'}
+        assert reloaded.upload.queue.jobs() == []
+    finally: recorder.close()
+
+
+def test_failed_selection_keeps_saved_task_and_new_connection_clears_it(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_selection(choice(service, 'A'))
+        request = service.request
+        monkeypatch.setattr(service, 'request', lambda *a, **kw: (_ for _ in ()).throw(UploadError('NETWORK_UNCERTAIN')))
+        with pytest.raises(UploadError, match='NETWORK_UNCERTAIN'):
+            recorder.set_selection(choice(service, 'B'))
+        assert service.recording_selection() == choice(service, 'A')
+        with pytest.raises(UploadError, match='NETWORK_UNCERTAIN'):
+            recorder.start()  # Invalid bound task must not silently become a local recording.
+        assert not recorder.is_recording()
+        monkeypatch.setattr(service, 'request', request)
+        service.connect('http://other-platform.invalid/#robot-connect='+'z'*48)
+        assert service.recording_selection() == {'mode': 'local'}
+    finally: recorder.close()
+
+
+def test_legacy_configuration_and_queue_unchanged_when_automatic_upload_was_off(tmp_path, monkeypatch):
+    old = dict(enabled=True, auto_enqueue=False, platform_base_url='http://platform.invalid',
+               credential_ref='env:LEGACY_ROBOT_CREDENTIAL', robot_id='robot',
+               local_robot_id=LOCAL['local_robot_id'], task_id='A')
+    cfg, service = create_service(tmp_path, monkeypatch, legacy=old)
+    assert service.status()['auto_upload'] is False
+    assert service.status()['recent']['task_id'] == 'A'
+    recorder = TaskRecorder(TopicRecorder(cfg['ros']['recording'], tmp_path), service)
+    try:
+        capture(recorder, choice(service, 'A'))
+        assert service.upload.queue.jobs() == []
+        service.connect('http://platform.invalid/#robot-connect='+'e'*48)
+        assert service.status()['auto_upload'] is False
+        assert old['credential_ref'] in (tmp_path/'queue/bindings.json').read_text()
+    finally: recorder.close()
+
+
+def test_interrupted_recording_is_preserved_without_auto_upload(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    state = service.directory/'task-recordings'
+    atomic_json(state/'old.json', {'recording_id': 'old', 'state': 'recording', 'binding': None, 'path': '/preserved.mcap'})
+    recorder = TaskRecorder(TopicRecorder(cfg['ros']['recording'], tmp_path), service)
+    assert recorder.records()[0]['state'] == 'interrupted'
+    assert service.upload.queue.jobs() == []
+    recorder.close()
+
+
+def test_reconnect_repairs_managed_credential_without_retargeting_existing_queue(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        capture(recorder, choice(service, 'A'))
+        original = copy.deepcopy(service.upload.queue.jobs())
+        secret = Path(original[0]['frozen']['credential_ref'].removeprefix('file:'))
+        request = service.request
+        def renew(*args, **kwargs):
+            value = request(*args, **kwargs)
+            if args[2] == 'connections:redeem': value['token'] = 'hcri_'+'d'*32+'.'+'e'*64
+            return value
+        monkeypatch.setattr(service, 'request', renew)
+        service.connect('http://platform.invalid/#robot-connect='+'f'*48)
+        assert secret.read_text() == 'hcri_'+'d'*32+'.'+'e'*64
+        assert service.upload.queue.jobs() == original
+        assert len(list((service.directory/'credentials').glob('*.token'))) == 1
+    finally: recorder.close()
+
+
+def test_restart_completes_history_binding_after_durable_intent_before_descriptor(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    capture(recorder, {'mode': 'local'})
+    job = recorder.records()[0]
+    descriptor = service.upload.state_dir/(job['recording_id']+'.json')
+    assert read_json(descriptor)['binding_id'] is None
+    job.update(binding=service.freeze(choice(service,'B'),remember=False),
+               upload_requested=True,state='upload_pending')
+    recorder.save(job)
+    recorder.close()
+    restored = TaskRecorder(TopicRecorder(cfg['ros']['recording'],tmp_path),service)
+    try:
+        finish(restored)
+        queued = service.upload.queue.jobs()
+        assert len(queued) == 1 and queued[0]['manifest']['collection_task_id'] == 'B'
+        assert read_json(descriptor)['binding_id'] == job['binding']['binding_id']
+        assert queued[0]['manifest']['format_metadata']['ownership_snapshot'] == job['binding']['task']['ownership']
+    finally: restored.close()
+
+
+def test_existing_queue_without_connection_registry_migrates_without_rewriting_jobs(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    capture(recorder, choice(service, 'A'))
+    recorder.close()
+    before = service.upload.queue.jobs()
+    bindings = (service.directory/'bindings.json').read_bytes()
+    service.path.unlink()  # Simulate the pre-connection-registry queue format.
+    cfg['uploads'].update(enabled=True, auto_enqueue=False)
+    migrated = PlatformConnection(cfg,tmp_path,tmp_path/'data',identity_provider=lambda:dict(LOCAL))
+    assert migrated.upload.queue.jobs() == before
+    assert (service.directory/'bindings.json').read_bytes() == bindings
+    assert migrated.status()['auto_upload'] is False
+    assert migrated.status()['recent']['task_id'] == 'A'
+
+
+def test_historical_lerobot_uses_source_capture_and_its_own_format(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    raw = TopicRecorder(cfg['ros']['recording'],tmp_path)
+    raw.start('old.mcap', {'profile_id': LOCAL['profile_id']})
+    raw.record({'topic':'/test','payload':{'old':True},'stamp_ns':time.time_ns()})
+    time.sleep(.002)
+    raw.record({'topic':'/test','payload':{'old':True},'stamp_ns':time.time_ns()})
+    raw.stop()
+    dataset = tmp_path/'data/lerobot/old'
+    (dataset/'meta').mkdir(parents=True)
+    (dataset/'data').mkdir()
+    atomic_json(dataset/'meta/info.json', {'codebase_version':'v3.0','total_frames':1,
+        'total_episodes':1,'fps':10,'robot_type':LOCAL['profile_id'],
+        'features':{'observation.state':{'dtype':'float32','shape':[1]}}})
+    (dataset/'data/part.parquet').write_bytes(b'PAR1synthetic-closed-filePAR1')
+    calls=[]; original=service.request
+    def request(*args, **kwargs):
+        if args[2].startswith('tasks/'): calls.append(args[3]['source_format'])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(service,'request',request)
+    recorder=TaskRecorder(raw,service)
+    try:
+        recorder.upload_recording('lerobot:old',choice(service,'B')); finish(recorder)
+        assert calls == ['LEROBOT_V3']
+        queued=service.upload.queue.jobs()
+        assert len(queued)==1 and queued[0]['manifest']['source_format']=='LEROBOT_V3'
+        assert queued[0]['manifest']['collection_task_id']=='B'
+        with pytest.raises(ValueError,match='上传队列'): recorder.delete_recording('lerobot:old')
+    finally: recorder.close()
+
+
+def test_delete_unstarted_prepared_recording_without_mcap_file(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
+    recorder = TaskRecorder(raw, service)
+    try:
+        # Create a job that failed at preparation / check_device before starting
+        job = {
+            'recording_id': 'aborted-job-1',
+            'state': 'prepared',
+            'started_at': None,
+            'path': str(tmp_path / 'data' / 'teleop_aborted.mcap'),
+            'error': 'test error',
+        }
+        recorder.jobs[job['recording_id']] = job
+        recorder.save(job)
+        assert (recorder.state_dir / 'aborted-job-1.json').is_file()
+        assert len(recorder.records()) == 1
+
+        res = recorder.delete_recording('teleop_aborted.mcap')
+        assert res['deleted'] == 'teleop_aborted.mcap'
+        assert not (recorder.state_dir / 'aborted-job-1.json').exists()
+        assert len(recorder.records()) == 0
+    finally:
+        recorder.close()
+
+
+
+def test_historical_lerobot_matches_source_mcap_with_custom_suffix(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
+    raw.start('teleop_20261012_093510.mcap', {'profile_id': LOCAL['profile_id']})
+    raw.record({'topic': '/test', 'payload': {'old': True}, 'stamp_ns': time.time_ns()})
+    time.sleep(.002)
+    raw.record({'topic': '/test', 'payload': {'old': True}, 'stamp_ns': time.time_ns()})
+    raw.stop()
+    dataset = tmp_path / 'data/lerobot/teleop_20261012_093510_sync_fixed'
+    (dataset / 'meta').mkdir(parents=True)
+    (dataset / 'data').mkdir()
+    atomic_json(dataset / 'meta/info.json', {
+        'codebase_version': 'v3.0', 'total_frames': 1, 'total_episodes': 1, 'fps': 10,
+        'robot_type': LOCAL['profile_id'], 'features': {'observation.state': {'dtype': 'float32', 'shape': [1]}}
+    })
+    (dataset / 'data/part.parquet').write_bytes(b'PAR1synthetic-closed-filePAR1')
+    recorder = TaskRecorder(raw, service)
+    try:
+        recorder.upload_recording('lerobot:teleop_20261012_093510_sync_fixed', choice(service, 'B'), new_upload=True, source_format='LEROBOT_V3')
+        finish(recorder)
+        queued = service.upload.queue.jobs()
+        assert len(queued) == 1 and queued[0]['manifest']['source_format'] == 'LEROBOT_V3'
+        assert queued[0]['manifest']['collection_task_id'] == 'B'
+    finally:
+        recorder.close()
+
+def test_historical_lerobot_adopts_without_source_mcap_via_metadata(tmp_path, monkeypatch):
+    cfg, service = create_service(tmp_path, monkeypatch)
+    service.connect('http://platform.invalid/#robot-connect='+'c'*48)
+    raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
+    dataset = tmp_path / 'data/lerobot/pure_dataset_without_mcap'
+    (dataset / 'meta').mkdir(parents=True)
+    (dataset / 'data').mkdir()
+    atomic_json(dataset / 'meta/info.json', {
+        'codebase_version': 'v3.0', 'total_frames': 1, 'total_episodes': 1, 'fps': 10,
+        'robot_type': LOCAL['profile_id'], 'features': {'observation.state': {'dtype': 'float32', 'shape': [1]}}
+    })
+    atomic_json(dataset / 'meta/teleop_sync.json', {
+        'grid_start_log_time_ns': 1791768910000000000,
+        'grid_end_log_time_ns': 1791768920000000000,
+    })
+    (dataset / 'data/part.parquet').write_bytes(b'PAR1synthetic-closed-filePAR1')
+    recorder = TaskRecorder(raw, service)
+    try:
+        recorder.upload_recording('lerobot:pure_dataset_without_mcap', choice(service, 'B'), new_upload=True, source_format='LEROBOT_V3')
+        finish(recorder)
+        queued = service.upload.queue.jobs()
+        assert len(queued) == 1 and queued[0]['manifest']['source_format'] == 'LEROBOT_V3'
+        assert queued[0]['manifest']['collection_task_id'] == 'B'
+    finally:
+        recorder.close()
+
+
+def test_upload_format_persists_and_is_frozen_per_recording(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_upload_format('mcap')
+        recorder.start(selection=choice(service, 'A'))
+        with pytest.raises(UploadError, match='RECORDING_ACTIVE'):
+            recorder.set_upload_format('lerobot')
+        recorder.record({'topic': '/test', 'payload': {'frame': 1}, 'stamp_ns': time.time_ns()})
+        recorder.stop(); finish(recorder)
+        recorder.set_upload_format('lerobot')
+        assert recorder.records()[0]['upload_format'] == 'mcap'
+        assert service.upload.queue.jobs()[0]['manifest']['source_format'] == 'MCAP'
+        restored = PlatformConnection(cfg, tmp_path, tmp_path/'data', identity_provider=lambda: dict(LOCAL))
+        assert restored.status()['upload_format'] == 'lerobot'
+        with pytest.raises(UploadError, match='UPLOAD_FORMAT_UNAVAILABLE'):
+            recorder.start(selection=choice(service, 'A'))
+        assert not recorder.is_recording()
+    finally:
+        recorder.close()
+
+
+def configure_lerobot_upload(recorder, service, monkeypatch):
+    recorder.recorder.save_format = 'both'
+    recorder.set_upload_format('lerobot')
+    topics = ['/test', '/observation/joint_states', '/action/joint_states']
+    service.config['ros']['subscriptions'] = [
+        {'topic': topic, 'type': 'sensor_msgs/msg/JointState', 'outputs': ['record']}
+        for topic in topics
+    ]
+    recorder.capture_health = lambda: {topic: {'has_data': True, 'hz': 15} for topic in topics}
+    monkeypatch.setattr('middleware.core.lerobot_export.ensure_export_available', lambda: 'synthetic-converter')
+
+
+def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
+    from middleware.core.export_progress import progress_path
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    configure_lerobot_upload(recorder, service, monkeypatch)
+    # Keep this policy test deterministic; BackgroundProcess transport has its
+    # own coverage and does not affect which descriptor is upload-eligible.
+    monkeypatch.setattr(service.upload.artifact_process, 'call', lambda function, *args: function(*args))
+    monkeypatch.setattr('middleware.core.artifact_jobs.enqueue_ready', lambda descriptor, cfg: {'queued': True})
+    def exported():
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        dataset = recorder.directory/'lerobot'/recorder.recorder.path.stem
+        snapshot = json.loads(read_recording_metadata(recorder.recorder.path)['capture_snapshot'])
+        features = {key: {field: value for field, value in feature.items()
+                         if field in ('dtype', 'shape', 'names', 'units')}
+                    for key, feature in snapshot['output']['features'].items() if feature['required']}
+        (dataset/'meta').mkdir(parents=True)
+        (dataset/'data').mkdir()
+        atomic_json(dataset/'meta/info.json', {'codebase_version':'v3.0','total_frames':1,
+            'total_episodes':1,'fps':15,'robot_type':LOCAL['profile_id'], 'features':features})
+        pq.write_table(pa.table({'observation.state': [[1.0]], 'action': [[2.0]], 'timestamp': [0.0]}),
+                       dataset/'data/part.parquet')
+        atomic_json(progress_path(dataset), {'state':'completed'})
+    monkeypatch.setattr(recorder.recorder, '_start_lerobot_export', exported)
+    try:
+        path = capture(recorder, choice(service, 'A'))
+        assert Path(path).is_file()
+        record = recorder.records()[0]
+        assert record['format'] == 'both'
+        assert record['upload_format'] == 'lerobot'
+        rows = recorder.upload_records()
+        assert len(rows) == 1
+        assert rows[0]['format'] == 'lerobot'
+        assert not rows[0]['display_name'].endswith('.mcap')
+        selected = read_json(service.upload.state_dir / (record['recording_id'] + '.json'))
+        mcap = read_json(service.upload.state_dir / (record['recording_id'] + '-mcap.json'))
+        assert selected['kind'] == 'hc_lerobot'
+        assert selected['binding_id'] == record['binding']['binding_id']
+        assert mcap['binding_id'] is None
+        scanned = []
+        monkeypatch.setattr(service.upload, 'enqueue', lambda identity, binding_id, **kw: scanned.append(identity))
+        service.upload.cfg['auto_enqueue'] = True
+        assert service.upload.scan()['enqueued'] == 1
+        assert scanned == [record['recording_id']]
+    finally:
+        recorder.close()
+
+
+def test_upload_history_only_exposes_selected_format_and_dataset_name():
+    recorder = TaskRecorder.__new__(TaskRecorder)
+    recorder.lock = threading.RLock()
+    recorder.jobs = {'capture': {
+        'recording_id': 'capture', 'path': '/data/teleop_20261023_135933.mcap',
+        'format': 'both', 'upload_format': 'lerobot', 'state': 'ready',
+    }}
+    rows = recorder.upload_records()
+    assert len(rows) == 1
+    assert rows[0]['format'] == 'lerobot'
+    assert rows[0]['display_name'] == 'teleop_20261023_135933'
+    summaries = recorder.upload_record_summaries()
+    assert summaries[0]['recording_id'] == rows[0]['recording_id']
+    assert summaries[0]['format'] == 'lerobot'
+    assert summaries[0]['display_name'] == 'teleop_20261023_135933'
+
+
+def test_capture_check_wakes_recording_inputs_before_reading_health():
+    task = task_document(source_format='LEROBOT_V3')
+    snapshot = snapshot_document(task, dict(recording_id='capture', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    topics = ('/observation/joint_states', '/action/joint_states')
+    cfg = {'ros': {'subscriptions': [dict(topic=topic, type='sensor_msgs/msg/JointState', outputs=['record'])
+                                    for topic in topics]}}
+    recorder = TaskRecorder.__new__(TaskRecorder)
+    recorder.platform = SimpleNamespace(config=cfg)
+    awake = False
+    health_reads = 0
+    def prepare():
+        nonlocal awake
+        awake = True
+    recorder.prepare_recording = prepare
+    def health():
+        nonlocal health_reads
+        health_reads += 1
+        ready = awake and health_reads >= 3
+        return {
+            '/observation/joint_states': {'has_data': ready, 'state': 'ok' if ready else 'no_data'},
+            '/action/joint_states': {'has_data': False, 'state': 'no_data'},
+        }
+    recorder.capture_health = health
+    recorder.prepare_and_check([snapshot], SimpleNamespace(lerobot_fps=15))
+    assert awake and health_reads == 3
+
+
+def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):
+    from middleware.core.export_progress import progress_path
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    configure_lerobot_upload(recorder, service, monkeypatch)
+    def failed_export():
+        dataset = recorder.directory/'lerobot'/recorder.recorder.path.stem
+        atomic_json(progress_path(dataset), {'state':'error'})
+    monkeypatch.setattr(recorder.recorder, '_start_lerobot_export', failed_export)
+    try:
+        path = capture(recorder, choice(service, 'A'))
+        assert Path(path).is_file()
+        assert service.upload.queue.jobs() == []
+        assert recorder.records()[0]['code'] == 'EXPORT_FAILED'
+    finally:
+        recorder.close()
+
+
+def test_explicit_upload_to_new_task_preserves_original(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        capture(recorder, choice(service, 'A'))
+        original = copy.deepcopy(next(iter(recorder.jobs.values())))
+        result = recorder.upload_recording(original['recording_id'], choice(service, 'B'), 'MCAP', True)
+        finish(recorder)
+        assert result['recording_id'] != original['recording_id']
+        assert recorder.jobs[original['recording_id']] == original
+        new = recorder.jobs[result['recording_id']]
+        assert new['binding']['collection_task_id'] == 'B'
+        assert new['source_recording_id'] == original['recording_id']
+        assert new['path'] == original['path']
+        assert len(service.upload.queue.jobs()) == 2
+        again = recorder.upload_recording(original['recording_id'], choice(service, 'B'), 'MCAP', True)
+        finish(recorder)
+        assert again['recording_id'] == result['recording_id']
+        assert len(service.upload.queue.jobs()) == 2
+    finally:
+        recorder.close()
+
+
+def test_historical_bundle_upload_preserves_original_package_and_retries(tmp_path, monkeypatch):
+    _, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_upload_format('mcap_mp4')
+        source = Path(capture(recorder, {'mode': 'local'}))
+        original = copy.deepcopy(next(iter(recorder.jobs.values())))
+        original_root = recorder.directory / 'bundles' / source.stem
+        original_files = {p.relative_to(original_root): p.read_bytes()
+                          for p in original_root.rglob('*') if p.is_file()}
+        assert original_files and original['state'] == 'ready'
+        result = recorder.upload_recording(original['recording_id'], choice(service, 'B'),
+                                           'CAPTURE_BUNDLE', True)
+        finish(recorder)
+        job = recorder.jobs[result['recording_id']]
+        assert job['state'] == 'queued', job.get('error')
+        descriptor = read_json(service.upload.state_dir / (job['recording_id'] + '.json'))
+        root = Path(descriptor['root'])
+        assert root != original_root
+        assert read_json(root / 'session.json')['session_id'] == job['recording_id']
+        assert read_json(root / 'recording-complete.json')['collection_task_id'] == 'B'
+        assert recorder.jobs[original['recording_id']] == original
+        assert {p.relative_to(original_root): p.read_bytes()
+                for p in original_root.rglob('*') if p.is_file()} == original_files
+        again = recorder.upload_recording(original['recording_id'], choice(service, 'B'),
+                                          'CAPTURE_BUNDLE', True)
+        finish(recorder)
+        assert again['recording_id'] == job['recording_id']
+        assert len(service.upload.queue.jobs()) == 1
+    finally:
+        recorder.close()
+
+
+def test_adopt_and_upload_historical_recording_with_platform_task_to_new_task(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        path = capture(recorder, choice(service, 'A'))
+        filename = Path(path).name
+        recorder.close()
+
+        # Reopen with fresh task-recordings state directory so jobs dict is empty
+        fresh_state = tmp_path / 'fresh_state'
+        recorder2 = TaskRecorder(recorder.recorder, recorder.platform)
+        recorder2.state_dir = fresh_state
+        recorder2.state_dir.mkdir(parents=True, exist_ok=True)
+        recorder2.jobs = {}
+
+        result = recorder2.upload_recording(filename, choice(service, 'B'), 'MCAP', True)
+        finish(recorder2)
+        assert result['recording_id'] in recorder2.jobs
+        new_job = recorder2.jobs[result['recording_id']]
+        assert new_job['binding']['collection_task_id'] == 'B'
+        jobs = service.upload.queue.jobs()
+        assert any(j['manifest']['collection_task_id'] == 'B' for j in jobs)
+    finally:
+        recorder2.close()
+
+
+def test_lerobot_local_rejects_mcap_upload_format(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.recorder.save_format = 'lerobot'
+        recorder.platform.state['upload_format'] = 'mcap'
+        with pytest.raises(UploadError, match='UPLOAD_FORMAT_UNAVAILABLE'):
+            recorder.start(selection=choice(service, 'A'))
+    finally:
+        recorder.close()

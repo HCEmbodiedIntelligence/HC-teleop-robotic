@@ -12,6 +12,14 @@ def backend(config, override=None):
     return value
 
 
+def unified_profile(profile_dir):
+    """Use one explicit backend choice for middleware, controller and simulation."""
+    profile = Path(profile_dir)
+    teleop = profile / 'arm_teleop.yaml'
+    config = (yaml.safe_load(teleop.read_text()) or {}) if teleop.is_file() else {}
+    return (profile / 'robot_api.yaml').is_file() and backend(config, os.environ.get('HC_CONTROL_BACKEND')) == 'motion'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('field', choices=['backend', 'domain'])

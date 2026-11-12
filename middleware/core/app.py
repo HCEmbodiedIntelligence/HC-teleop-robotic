@@ -1,33 +1,51 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import copy
 import json
+import logging
 import os
 import socket
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
 import yaml
 
-from .camera import CameraService
+from .camera_process import CameraProcessService as CameraService
 from .simulation import SimulationService, register_simulation_routes
 from .config import ConfigError, ConfigStore, validate_config
 from .profile_api import register_profile_routes
 from .protocol import envelope
 from .robot_profiles import RobotProfileManager
 from .robot_api import RobotApiProfile, selected_profile, selected_profile_root
+from adapters.core.runtime_config import unified_profile
 from .ros_bridge import RosBridge
-from .ros_recording_executor import RosRecordingExecutor
+from .ros_recording_executor import RosRecordingExecutor, recording_subscriptions
 from .topic_player import TopicPlayer
 from .topic_recorder import TopicRecorder
-from .recording_service import RecordingService
+from .takeover_log import TakeoverLog
 from .vr_gateway import VrGateway
+from .runtime_mode import configure_environment
+
+
+def _upload_failure(exc: Exception) -> dict[str, Any] | None:
+    """Identify optional uploader errors without making uploads a hard dependency."""
+    try:
+        from humanoid_upload.common import UploadError
+    except ImportError:
+        return None
+    if not isinstance(exc, UploadError):
+        return None
+    return {"ok": False, "code": exc.code, "reason": exc.action}
+
+
+def _upload_failure_status(code: str) -> int:
+    return 409 if code in {"ARTIFACT_BUSY", "WORKER_ALREADY_RUNNING", "BINDING_REQUIRED"} else 400
 
 
 def local_ip() -> str:
@@ -43,7 +61,7 @@ def local_ip() -> str:
 
 class MiddlewareRuntime:
     def __init__(self, config: dict[str, Any], config_dir: Path):
-        self.config = config
+        self.config = copy.deepcopy(config)
         self.config_dir = config_dir
         self.ros: RosBridge | None = None
         self.recording_ros: RosRecordingExecutor | None = None
@@ -52,13 +70,16 @@ class MiddlewareRuntime:
         self.cameras: dict[str, CameraService] = {}
         self._cameras_by_topic: dict[str, list[CameraService]] = {}
         self.recorder: TopicRecorder | None = None
-        self.uploads = None
-        self.upload_error = None
+        self.platform = None
         self._record_commands = None
         self._record_command_slots = threading.BoundedSemaphore(8)
+        self.uploads = None
+        self.upload_error = None
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.websockets: set[web.WebSocketResponse] = set()
+        self._broadcast_pending: dict[str, dict[str, Any]] = {}
+        self._broadcast_drain_task: asyncio.Task | None = None
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
@@ -70,6 +91,8 @@ class MiddlewareRuntime:
         self._last_both_sticks_held = False
         self._last_replay_status_sent_at = 0.0
         self.session_profile_metadata: dict[str, str] = {}
+        self.control_runtime = None
+        self._control_watch_task = None
 
     def _load_session_profile_metadata(self) -> dict[str, str]:
         """Describe the Profile actually selected when this runtime starts."""
@@ -114,7 +137,7 @@ class MiddlewareRuntime:
                 )
         except (OSError, TypeError, yaml.YAMLError):
             pass
-        if (profile_dir / "robot_api.yaml").is_file():
+        if unified_profile(profile_dir):
             api = RobotApiProfile(profile_dir)
             metadata.update(robot_api_schema="hc-robot-api/v1", robot_api_revision=api.revision,
                             robot_api_info=json.dumps(api.describe(), separators=(",", ":")),
@@ -123,15 +146,11 @@ class MiddlewareRuntime:
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
-        # Keep runtime-derived camera selections separate from saved config.
-        self.config = copy.deepcopy(self.config)
         configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 14))
-        domain_id = int(os.environ.get("ROS_DOMAIN_ID", configured_domain_id))
-        # Keep all contexts created below (bridge, recorder and cameras) on the
-        # launcher's effective domain. Previously only the parent process used
-        # ROS_DOMAIN_ID while child contexts silently returned to config.yaml.
+        domain_id = configure_environment(configured_domain_id)
+        # Every ROS context (VR, safety, recording and camera) uses the selected
+        # runtime domain, including after a Dashboard configuration reload.
         self.config.setdefault("ros", {})["domain_id"] = domain_id
-        os.environ["ROS_DOMAIN_ID"] = str(domain_id)
         try:
             import rclpy
             if not rclpy.ok():
@@ -139,33 +158,37 @@ class MiddlewareRuntime:
         except Exception:
             pass
 
-        self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vr-recording")
+        from concurrent.futures import ThreadPoolExecutor
+        self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recording-command")
         self.session_profile_metadata = self._load_session_profile_metadata()
-        if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active"):
-            from .profile_cameras import apply_profile_cameras
-            apply_profile_cameras(self.config, selected_profile(self.config, self.config_dir),
-                                  simulation=os.environ.get('HC_TELEOP_MODE') == 'sim')
         profile_dir = (selected_profile(self.config, self.config_dir)
                        if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
-        if profile_dir is not None and (profile_dir / "robot_api.yaml").is_file():
-            # Both recorder and ROS bridge must freeze the same startup profile.
+        self.config["ros"].pop("robot_api_profile", None)
+        self.config["ros"].pop("legacy_control_profile", None)
+        if profile_dir is not None and unified_profile(profile_dir):
             RobotApiProfile(profile_dir)
             self.config["ros"]["robot_api_profile"] = str(profile_dir)
-        self.recorder = RecordingService(self.config["ros"]["recording"], self.config_dir, self.config["ros"], self.topic_health)
+        elif profile_dir is not None and self.config["ros"].get("intervention", {}).get("legacy_topics", False):
+            self.config["ros"]["legacy_control_profile"] = str(profile_dir)
+        recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir,
+                                 topics=recording_subscriptions(self.config["ros"]))
+        self.recorder = recorder
         try:
-            from .upload_service import UploadService
-            upload_config = copy.deepcopy(self.config.get('uploads', {'enabled': False}))
-            queue_path = Path(upload_config.get('queue_directory', '../runtime/upload_queue')).expanduser()
-            upload_config['queue_directory'] = str((self.config_dir/queue_path).resolve() if not queue_path.is_absolute() else queue_path)
-            self.uploads = UploadService(upload_config, artifact_state_dir=self.recorder.artifact_state_dir,
-                                         data_directory=self.recorder.directory, request_raw_seal=self.recorder.request_raw_seal)
-            await asyncio.to_thread(self.uploads.start)
-            self.recorder.upload_service = self.uploads
-            if upload_config.get('auto_enqueue', False):
-                self.recorder.binding_snapshot = self.uploads.binding_snapshot
-        except Exception as exc:
-            self.upload_error = str(exc)
-            self._log('error', 'upload unavailable: ' + str(exc))
+            from .platform_connection import PlatformConnection
+            from .task_recording import TaskRecorder
+            self.platform = PlatformConnection(self.config, self.config_dir, recorder.directory)
+            self.recorder = TaskRecorder(recorder, self.platform)
+            self.platform.activity_provider = lambda: "COLLECTING" if self.recorder.is_recording() else (
+                "UPLOADING" if any(job['state'] == 'uploading' for job in self.platform.upload.jobs()) else "IDLE")
+            self.platform.start()
+            self.uploads = self.platform.upload
+        except ImportError as exc:
+            logging.getLogger(__name__).warning(
+                "Platform connection component could not load: %s", exc.name or type(exc).__name__
+            )
+            self.platform = None
+            await self._start_uploads()
+            self.recorder.binding_snapshot = None
         self.player = TopicPlayer(
             self.recorder.directory,
             lambda: self.ros,
@@ -215,14 +238,40 @@ class MiddlewareRuntime:
         dataset_config = self.config["ros"].get("dataset_topics", {})
         if dataset_config.get("enabled", False):
             from .dataset_topics import load_joint_groups
+            from .x1_recording import is_x1
+            dataset_config["x1_recording_fk"] = is_x1(self.config["ros"])
+            from .camera_metadata import load_camera_metadata
             dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
+            dataset_config["camera_metadata"] = load_camera_metadata(self.config, self.config_dir)
         self.ros = RosBridge(
             self.config["ros"],
             self.emit,
             on_frame=self._handle_camera_ros_message,
             camera_topics=list(self._cameras_by_topic),
         )
+        self.recorder.configure_corrections(self.config['ros'])
+        recorder.takeovers = TakeoverLog(self.ros.ownership.ros_clock)
+        self.ros.ownership.manual_changed = recorder.takeovers.manual_changed
+        self.ros.ownership.dagger_changed = recorder.takeovers.dagger_changed
+        self.ros.ownership.open_segment = self.recorder.correction_open
+        self.ros.ownership.close_segment = self.recorder.correction_close
+        def capture_ready():
+            capture = self.recorder.corrections
+            return bool(capture and capture.status()['ready'])
+        self.ros.ownership.capture_ready = capture_ready
+        self.ros._action_sink = self.recorder.correction_action
+        # Ordinary MCAP action capture uses the same accepted publication,
+        # without a second, lossy DDS hop. Keep the subscriber for health only.
+        action_max_hz = next((float(item.get("max_hz", 0))
+            for item in self.config["ros"].get("subscriptions", [])
+            if item.get("topic") == "/action/joint_states"), 0.)
+        self.config["ros"]["record_action_at_publication"] = bool(
+            self.config["ros"].get("legacy_control_profile") and action_max_hz <= 0)
+        self.ros._published_action_sink = self._record_published_action
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
+        self.recorder.prepare_recording = self.recording_ros.prepare_recording
+        if self.platform is not None:
+            self.recorder.capture_health = self.recording_ros.get_topic_health
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_vr_timeout
         )
@@ -235,8 +284,66 @@ class MiddlewareRuntime:
         if self.config["safety"].get("stop_on_startup", True):
             self._on_safety_event("middleware startup")
         self._safety_sync_task = asyncio.create_task(self._sync_safety_state())
+        if self.control_runtime is not None and self.control_runtime.enabled:
+            self._on_safety_event("loading control configuration; explicit resume required", force=True)
+            await self.control_runtime.start(self.config)
+            if self.control_runtime.status()["state"] != "running":
+                self._on_safety_event(self.control_runtime.error, force=True)
+            else:
+                self._control_watch_task = asyncio.create_task(self._watch_control())
+
+    async def _watch_control(self) -> None:
+        process = self.control_runtime.process
+        await process.wait()
+        self.control_runtime.status()
+        self._on_safety_event("control process exited; see control runtime status", force=True)
+
+    async def _start_uploads(self) -> None:
+        """Optional uploader; unavailable dependencies must not prevent local recording."""
+        self.uploads = None
+        self.upload_error = None
+        try:
+            from .upload_service import UploadService
+            upload_config = copy.deepcopy(self.config.get("uploads", {"enabled": False}))
+            queue_path = Path(upload_config.get("queue_directory", "../runtime/upload_queue")).expanduser()
+            upload_config["queue_directory"] = str(
+                (self.config_dir / queue_path).resolve() if not queue_path.is_absolute() else queue_path
+            )
+            service = UploadService(
+                upload_config, artifact_state_dir=self.recorder.artifact_state_dir,
+                data_directory=self.recorder.directory,
+            )
+            try:
+                await asyncio.to_thread(service.start)
+            except Exception:
+                await asyncio.to_thread(service.stop)
+                raise
+            self.uploads = service
+            self.recorder.upload_service = service
+            if upload_config.get("enabled", False) and upload_config.get("auto_enqueue", False):
+                self.recorder.binding_snapshot = service.binding_snapshot
+        except Exception as exc:
+            self.upload_error = str(exc)
+            self._log("error", "upload unavailable: " + str(exc))
 
     async def stop(self) -> None:
+        if self.control_runtime is not None and self.control_runtime.enabled:
+            self._on_safety_event("control configuration reload; explicit resume required", force=True)
+            if self._control_watch_task is not None:
+                self._control_watch_task.cancel()
+                await asyncio.gather(self._control_watch_task, return_exceptions=True)
+                self._control_watch_task = None
+            await self.control_runtime.stop()
+        if self._broadcast_drain_task is not None:
+            self._broadcast_drain_task.cancel()
+            try:
+                await self._broadcast_drain_task
+            except asyncio.CancelledError:
+                pass
+            self._broadcast_drain_task = None
+        self._broadcast_pending.clear()
+        if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            self.ros.ownership.disable()
         if self._safety_sync_task is not None:
             self._safety_sync_task.cancel()
             try:
@@ -248,9 +355,6 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.player.stop, False)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
-        if self._record_commands is not None:
-            await asyncio.to_thread(self._record_commands.shutdown, wait=True)
-            self._record_commands = None
         for camera in self.cameras.values():
             await camera.stop()
         self.cameras.clear()
@@ -260,11 +364,16 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.recording_ros.stop)
         if self.ros is not None:
             await asyncio.to_thread(self.ros.stop)
+        if self._record_commands is not None:
+            await asyncio.to_thread(self._record_commands.shutdown, wait=True)
+            self._record_commands = None
         if self.recorder is not None:
             await asyncio.to_thread(self.recorder.shutdown)
-        if self.uploads is not None:
-            await asyncio.to_thread(self.uploads.stop)
-            self.uploads = None
+        if self.platform is not None:
+            await asyncio.to_thread(self.platform.stop)
+        elif self.uploads is not None:
+            await asyncio.to_thread(getattr(self.uploads, 'close', self.uploads.stop))
+        self.uploads = None
         try:
             import rclpy
             if rclpy.ok():
@@ -280,8 +389,21 @@ class MiddlewareRuntime:
     async def restart(self, config: dict[str, Any]) -> None:
         async with self._restart_lock:
             await self.stop()
-            self.config = config
+            self.config = copy.deepcopy(config)
+            if self.control_runtime is not None and self.control_runtime.enabled:
+                os.environ["ROS_DOMAIN_ID"] = str(config["ros"]["domain_id"])
             await self.start()
+
+    def _record_published_action(self, message) -> bool:
+        """Queue exactly the published action, respecting recording selection."""
+        if (not self.config["ros"].get("record_action_at_publication", False)
+                or not self.recorder.is_recording()):
+            return False
+        from rclpy.serialization import serialize_message
+        return self.recorder.record(dict(
+            kind="ros_message", topic="/action/joint_states",
+            msg_type="sensor_msgs/msg/JointState", record_only=True,
+            stamp_ns=time.time_ns(), _raw=serialize_message(message)))
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
@@ -291,8 +413,35 @@ class MiddlewareRuntime:
             self.vr.send_event(event)
         if "websocket" in outputs and self.loop is not None:
             self.loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self._broadcast(event))
+                self._schedule_broadcast, event
             )
+
+    def _schedule_broadcast(self, event: dict[str, Any]) -> None:
+        """Coalesce live telemetry without dropping state-change events."""
+        kind = str(event.get("kind", ""))
+        key = ""
+        if kind == "vr_pose":
+            key = kind
+        elif kind == "ros_message":
+            key = f"ros_message:{event.get('topic', '')}"
+        if not key:
+            asyncio.create_task(self._broadcast(event))
+            return
+        self._broadcast_pending[key] = event
+        if self._broadcast_drain_task is None or self._broadcast_drain_task.done():
+            self._broadcast_drain_task = asyncio.create_task(
+                self._drain_broadcast_pending()
+            )
+
+    async def _drain_broadcast_pending(self) -> None:
+        while self._broadcast_pending:
+            pending = tuple(self._broadcast_pending.values())
+            self._broadcast_pending.clear()
+            for event in pending:
+                await self._broadcast(event)
+                # send_str can complete synchronously. Give RTP/timers a turn
+                # even when telemetry keeps refilling the pending dictionary.
+                await asyncio.sleep(0)
 
     async def _broadcast(self, event: dict[str, Any]) -> None:
         if not self.websockets:
@@ -324,39 +473,57 @@ class MiddlewareRuntime:
         for ws in dead:
             self.websockets.discard(ws)
 
-    def _on_pose(self, packet: Any) -> None:
+    def _on_pose(
+        self, packet: Any, pose_dict: dict[str, Any] | None = None
+    ) -> None:
+        """
+        VR 位姿回调函数：接收 VR 网关解码出的姿态包与手柄输入，
+        执行手柄按键语义判断（急停恢复、录制打标、开始/停止录制）并向 ROS 话题发布位姿。
+        """
+        # 从原始数据包中获取左手柄和右手柄的输入对象（包含按键位掩码与摇杆状态）
         left_input = getattr(packet, "left_input", None)
         right_input = getattr(packet, "right_input", None)
 
+        # 提取左手柄的“持续按住掩码(held_mask)”与“刚刚按下沿触发掩码(pressed_mask)”
         left_held = int(getattr(left_input, "held_mask", 0))
         left_pressed = int(getattr(left_input, "pressed_mask", 0))
+        # 提取右手柄的“持续按住掩码(held_mask)”与“刚刚按下沿触发掩码(pressed_mask)”
         right_held = int(getattr(right_input, "held_mask", 0))
         right_pressed = int(getattr(right_input, "pressed_mask", 0))
 
-        # A resumes command output only once per physical press.  The old
-        # implementation called this for every packet while A was held.
+        # --- 1. 右手柄 A 键处理：解除系统软急停 / 恢复遥操作 ---
+        # A 键对应掩码最低位 bit 0 (即 & 1)
         a_held = bool(right_held & 1)
+        # 上升沿检测：当帧按下，或者持续按住且上一帧未按住时触发（确保一次物理按压仅触发一次）
         a_down = bool(right_pressed & 1) or (a_held and not self._last_a_held)
         self._last_a_held = a_held
-        if a_down:
+
+        # 检查 DAgger 算法是否正处于人类主动介入接管状态
+        # 介入激活时按键由专门的接管模块处理，避免急停恢复与介入逻辑产生竞态冲突
+        intervention_active = bool(self.ros is not None and
+            getattr(self.ros, 'ownership', None) and self.ros.ownership.active)
+        # 若 A 键被按下且非介入模式，通知安全系统恢复遥操作输出
+        if a_down and not intervention_active:
             self._on_safety_resume("VR controller A button pressed")
 
-        # Pressing both thumbsticks marks the active recording, or the most
-        # recently completed recording.  Use the combined held edge so the
-        # gesture still works when the two sticks are pressed a few frames apart.
+        # --- 2. 双摇杆同时按下处理：录制数据打标 (Mark / Bookmark) ---
+        # 左右摇杆下压键 (Thumbstick Click) 对应二进制第 5 位: 1 << 5 (即 32)
         stick_bit = 1 << 5
+        # 检查左右摇杆是否同时处于按住状态
         both_sticks_held = bool(left_held & stick_bit) and bool(right_held & stick_bit)
+        # 检查左右摇杆是否在当前帧同时被按下
         both_sticks_pressed = bool(left_pressed & stick_bit) and bool(right_pressed & stick_bit)
+        # 组合边沿检测：支持双手稍有毫秒级先后误差的双按手势
         mark_down = both_sticks_pressed or (
             both_sticks_held and not self._last_both_sticks_held
         )
         self._last_both_sticks_held = both_sticks_held
+        # 触发打标动作（标记当前正在录制或刚刚录完的数据片段）
         if mark_down:
             self._dispatch_recording(self._handle_vr_record_mark)
 
-        # Replay control events use UDP and can be lost.  While replay is
-        # active or waiting for the A-button acknowledgement, periodically
-        # resend a compact snapshot so the headset UI converges reliably.
+        # --- 3. 轨迹重放状态同步向 VR 头显回传 ---
+        # UDP 传输可能丢包；若处于轨迹重放或等待 A 键确认状态，每秒定期向 VR 发送一次状态快照
         if self.player is not None and self.vr is not None:
             replay = self.player.status()
             now = time.monotonic()
@@ -368,6 +535,7 @@ class MiddlewareRuntime:
                     if replay.get("requires_reset")
                     else "正在重放"
                 )
+                # 使用 envelope 封装协议，通过 UDP 回传给头显更新 UI
                 self.vr.send_event(
                     envelope(
                         "replay_status",
@@ -377,29 +545,38 @@ class MiddlewareRuntime:
                 )
                 self._last_replay_status_sent_at = now
 
+        # --- 4. 左手柄 X/Y 键处理：示教数据采集开始 / 结束 ---
         if left_input is not None:
-            # X button on left controller: bit 0 (1 << 0) -> Start recording
+            # 左手柄 X 键 (bit 0): 开始录制轨迹数据
             x_down = bool(left_pressed & 1) or (bool(left_held & 1) and not self._last_x_held)
             self._last_x_held = bool(left_held & 1)
 
-            # Y button on left controller: bit 1 (1 << 1) -> Stop recording
+            # 左手柄 Y 键 (bit 1): 停止录制轨迹数据
             y_down = bool(left_pressed & 2) or (bool(left_held & 2) and not self._last_y_held)
             self._last_y_held = bool(left_held & 2)
 
+            # 派发异步录制任务
             if x_down:
                 self._dispatch_recording(self._handle_vr_record_start)
             elif y_down:
                 self._dispatch_recording(self._handle_vr_record_stop)
 
+        # --- 5. 将 VR 位姿发布到 ROS 2 话题 ---
+        # 若未开启 ROS 功能则直接返回
         if self.ros is None:
             return
+        # 检查配置中是否允许发布到 ROS
         if self.config["vr"].get("publish_to_ros", True):
+            # 优先使用已转换的字典，避免重复序列化消耗 CPU
+            frame = pose_dict if pose_dict is not None else packet.as_dict()
+            # 异步发布到 ROS 话题（默认 /vrdata）
             self.ros.publish(
                 self.config["vr"]["data_topic"],
                 "std_msgs/msg/String",
                 {
                     "data": json.dumps(
-                        packet.as_dict(),
+                        # 注入中间件接收的高精度纳秒时间戳 hc_received_ns 用于时延追踪
+                        {**frame, 'hc_received_ns': frame.get('hc_received_ns', time.time_ns())},
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
@@ -423,6 +600,9 @@ class MiddlewareRuntime:
     def _handle_vr_record_start(self) -> None:
         if self.recorder is None:
             return
+        if getattr(self.recorder, 'corrections', None):
+            self._log('info', 'DAgger 会话按所选范围录制，X/Y 普通录制已停用')
+            return
         status = self.recorder.status()
         if status.get("recording", False):
             self._log("info", "VR requested record start, but already recording")
@@ -441,9 +621,9 @@ class MiddlewareRuntime:
             )
             return
         try:
-            filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
-            if self.recording_ros is not None:
+            if self.platform is None and self.recording_ros is not None:
                 self.recording_ros.prepare_recording()
+            filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
             path = self.recorder.start(filename, self.session_profile_metadata)
             self._log("info", f"Recording started by VR X button: {filename}")
             if self.ros is not None:
@@ -467,21 +647,29 @@ class MiddlewareRuntime:
                 ["websocket", "udp"],
             )
         except Exception as exc:
-            self._log("error", f"Failed to start recording on VR X button: {exc}")
+            upload_failure = _upload_failure(exc)
+            error_text = (f"{upload_failure['code']}: {upload_failure['reason']}"
+                          if upload_failure else str(exc))
+            self._log("error", f"Failed to start recording on VR X button: {error_text}")
             self.emit(
                 envelope(
                     "recording_error",
                     "middleware",
                     {
                         "recording": False,
-                        "error": str(exc),
+                        "error": error_text,
                         "action": "start_failed",
+                        **({"code": upload_failure["code"], "reason": upload_failure["reason"]}
+                           if upload_failure else {}),
                     },
                 ),
                 ["websocket", "udp"],
             )
 
     def _handle_vr_record_stop(self) -> None:
+        if self.recorder is not None and getattr(self.recorder, 'corrections', None):
+            self._log('info', '纠正采集使用 Grip 自动分段，X/Y 不结束纠正会话')
+            return
         if self.recorder is None:
             return
         status = self.recorder.status()
@@ -596,6 +784,11 @@ class MiddlewareRuntime:
             await asyncio.sleep(0.5)
 
     def _on_vr_timeout(self, reason: str) -> None:
+        if self.ros and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            # Headset availability gates manual takeover, not model inference
+            # or already-authorized program output. Manual loss still faults.
+            self.ros.ownership.input_lost(reason)
+            return
         source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
         if source is None:
             source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
@@ -607,13 +800,23 @@ class MiddlewareRuntime:
                 self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
             self.emit(envelope("vr_timeout", "middleware", {"reason": reason}), ["websocket", "udp"])
 
-    def _on_safety_event(self, reason: str) -> None:
+    def _on_safety_event(self, reason: str, *, force: bool = False) -> None:
         self._safety_reason = reason
-        if self.ros is not None and self.config["safety"].get("enabled", True):
+        if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
         self.emit(envelope("safety_stop", "middleware", {"reason": reason}), ["websocket", "udp"])
 
     def _on_safety_resume(self, reason: str) -> None:
+        if (self.control_runtime is not None and self.control_runtime.enabled
+                and self.control_runtime.status()["state"] != "running"):
+            self._on_safety_event("control configuration is not ready; resume rejected", force=True)
+            return
+        if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            try:
+                self.ros.recover_intervention()
+            except ValueError as exc:
+                self._log('warning', str(exc))
+            return
         self._safety_reason = ""
         if self.ros is not None:
             stop_topic = self.config["safety"].get("stop_topic", "/control/emergency_stop")
@@ -663,7 +866,10 @@ class MiddlewareRuntime:
         bridge_health = (
             self.ros.get_topic_health() if self.ros is not None else {}
         )
-        return {**recording_health, **bridge_health}
+        # The isolated raw subscriber measures source arrival rate without
+        # competing with control, WebSocket serialization or camera callbacks.
+        # Prefer it whenever both paths observe the same recorded topic.
+        return {**bridge_health, **recording_health}
 
     def status(self) -> dict[str, Any]:
         recording_executor_status = (
@@ -673,8 +879,8 @@ class MiddlewareRuntime:
         )
         ros_status = self.ros.status() if self.ros else {"state": "stopped"}
         ros_status["topic_health"] = {
-            **recording_executor_status.get("topic_health", {}),
             **ros_status.get("topic_health", {}),
+            **recording_executor_status.get("topic_health", {}),
         }
         camera_streams = [camera.status() for camera in self.cameras.values()]
         camera_status = (
@@ -687,6 +893,7 @@ class MiddlewareRuntime:
             "status": "ok",
             "version": 1,
             "runtime_profile": self.session_profile_metadata,
+            "control_runtime": self.control_runtime.status() if self.control_runtime else {"state": "unmanaged"},
             "control_backend": os.environ.get("HC_CONTROL_BACKEND") or None,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
@@ -704,15 +911,7 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
     if request.method == "OPTIONS":
         response: web.StreamResponse = web.Response(status=204)
     else:
-        try:
-            response = await handler(request)
-        except ValueError as exc:
-            response = web.json_response({'error': str(exc)}, status=400)
-        except Exception as exc:
-            if getattr(exc, 'code', None) in {'ARTIFACT_BUSY', 'ARTIFACT_DELETED'}:
-                response = web.json_response({'error': str(exc), 'code': exc.code}, status=409)
-            else:
-                raise
+        response = await handler(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
@@ -722,6 +921,8 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
 def create_app(store: ConfigStore) -> web.Application:
     config = store.load()
     runtime = MiddlewareRuntime(config, store.path.parent)
+    from .control_runtime import ControlRuntime
+    runtime.control_runtime = ControlRuntime(store.path)
     profile_root = selected_profile_root(config, store.path.parent)
     profiles = RobotProfileManager(profile_root)
     app = web.Application(
@@ -736,6 +937,10 @@ def create_app(store: ConfigStore) -> web.Application:
         if request.method in {"POST", "PUT", "DELETE"} and (
             request.path.startswith("/api/robot-profiles") or request.path == "/api/config"
         ):
+            if runtime.recorder is not None and runtime.recorder.is_recording():
+                raise web.HTTPConflict(text="请先停止录制，再修改配置或机器人型号")
+            if runtime.ros and getattr(runtime.ros, 'ownership', None) and runtime.ros.ownership.active:
+                raise web.HTTPConflict(text='请先退出人工干预会话，再修改配置或机器人型号')
             async with simulation.lock:
                 stop_required = True
                 if request.path == "/api/config":
@@ -749,7 +954,8 @@ def create_app(store: ConfigStore) -> web.Application:
                     except (ConfigError, ValueError, TypeError):
                         stop_required = False  # Let the config handler report validation errors.
                 elif request.path.endswith("/activate"):
-                    stop_required = request.match_info["profile_id"] != store.value["robot_profiles"].get("active")
+                    # Even the same ID may now contain newly imported assets/settings.
+                    stop_required = True
                 elif request.method == "DELETE":
                     stop_required = request.match_info["profile_id"] == simulation.profile_id
                 if simulation.processes and stop_required:
@@ -758,6 +964,8 @@ def create_app(store: ConfigStore) -> web.Application:
         return await handler(request)
 
     app.middlewares.append(serialize_simulation_changes)
+    from .intervention_api import register_intervention_routes
+    register_intervention_routes(app, runtime)
     register_simulation_routes(app, simulation)
     static_dir = Path(__file__).parent / "static"
 
@@ -771,40 +979,27 @@ def create_app(store: ConfigStore) -> web.Application:
         return web.json_response(store.value)
 
     async def put_config(request: web.Request) -> web.Response:
+        if runtime.recorder is not None and runtime.recorder.is_recording():
+            return web.json_response({'ok': False, 'code': 'RECORDING_ACTIVE',
+                'reason': '请先停止当前录制，再保存配置；新保存方式用于下一段录制'}, status=409)
         try:
             proposed = await request.json()
             old_server = dict(store.value["server"])
             old_profile_root = store.value["robot_profiles"]["root"]
-            proposed = validate_config(proposed)
-            old_without_recording, new_without_recording = copy.deepcopy(store.value), copy.deepcopy(proposed)
-            old_without_recording['ros'].pop('recording', None)
-            new_without_recording['ros'].pop('recording', None)
-            recording_only = old_without_recording == new_without_recording
-            if not recording_only and runtime.recorder and any(j['artifact_state'] in {'pending','draining','source_complete','exporting','sealing','seal_queued'} for j in runtime.recorder.jobs.values()):
-                raise web.HTTPConflict(text="请等待录制和后台作业结束后修改运行配置")
-            paths_changed = any(store.value['ros']['recording'].get(key) != proposed['ros']['recording'].get(key) for key in ('directory','job_state_dir','artifact_state_dir','capture_config_file'))
-            if paths_changed and runtime.recorder and any(j['artifact_state'] in {'pending','draining','source_complete','exporting','sealing','seal_queued'} for j in runtime.recorder.jobs.values()):
-                raise web.HTTPConflict(text="路径变更需要所有录制作业结束")
-            if paths_changed:
-                recording_only = False
             saved = store.save(proposed)
-            if recording_only and runtime.recorder:
-                # Freeze active jobs; the next start reads this new recording configuration.
-                with runtime.recorder.lock:
-                    old = runtime.recorder.config
-                    for key in ('directory','job_state_dir','artifact_state_dir','capture_config_file'):
-                        if old.get(key) != saved['ros']['recording'].get(key):
-                            raise web.HTTPConflict(text="路径变更需要所有录制作业结束后重启服务")
-                    runtime.recorder.config = copy.deepcopy(saved['ros']['recording'])
-                runtime.config = saved
-            else:
-                await runtime.restart(saved)
+            await runtime.restart(saved)
+            control_status = runtime.control_runtime.status()
+            if control_status["state"] == "failed":
+                return web.json_response({"ok": False, "config": saved,
+                    "error": "配置已保存，但控制进程启动失败；输出保持停止",
+                    "control_runtime": control_status}, status=503)
             restart_required = (
                 saved["server"] != old_server
                 or saved["robot_profiles"]["root"] != old_profile_root
             )
             return web.json_response(
-                {"ok": True, "config": saved, "server_restart_required": restart_required}
+                {"ok": True, "config": saved, "server_restart_required": restart_required,
+                 "control_runtime": control_status}
             )
         except (ConfigError, json.JSONDecodeError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
@@ -829,14 +1024,21 @@ def create_app(store: ConfigStore) -> web.Application:
         return web.json_response({"accepted": True}, status=202)
 
     async def safety_resume(request: web.Request) -> web.Response:
+        if (runtime.control_runtime.enabled
+                and runtime.control_runtime.status()["state"] != "running"):
+            return web.json_response({"accepted": False, "error": "控制进程尚未就绪，不能恢复输出",
+                "control_runtime": runtime.control_runtime.status()}, status=409)
         data = await request.json() if request.can_read_body else {}
         runtime._on_safety_resume(str(data.get("reason", "dashboard safety resume")))
         return web.json_response({"accepted": True}, status=202)
 
     async def teleop_home(request: web.Request) -> web.Response:
-        source = store.value.get("ros", {}).get("command_mux", {}).get(
-            "source", "vr"
-        )
+        if runtime.ros and runtime.ros.ownership.active:
+            if not runtime.ros.request_manual_home():
+                raise web.HTTPConflict(text='请先握住右 Grip 完成人工接管，确认硬件就绪后再回零')
+            return web.json_response({"accepted": True}, status=202)
+        source = (runtime.ros.status().get("command_mux", {}).get("source", "vr")
+                  if runtime.ros else store.value.get("ros", {}).get("command_mux", {}).get("source", "vr"))
         if source != "vr":
             raise web.HTTPConflict(text="回零仅在 VR/IK 控制源下可用")
         if runtime.ros is not None:
@@ -851,10 +1053,13 @@ def create_app(store: ConfigStore) -> web.Application:
         if runtime.ros is None or runtime.ros.status().get("state") != "running":
             raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
 
+        if runtime.ros.ownership.active:
+            raise web.HTTPConflict(text='人工干预会话正在管理控制来源')
+
         proposed = copy.deepcopy(store.value)
         proposed["ros"]["command_mux"]["source"] = source
         saved = store.save(proposed)
-        runtime.config = saved
+        runtime.config["ros"]["command_mux"]["source"] = source
         accepted = runtime.ros.set_control_source(source)
         runtime.ros.publish(
             "/control/teleop/enabled",
@@ -875,7 +1080,8 @@ def create_app(store: ConfigStore) -> web.Application:
         )
 
     async def websocket(request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024)
+        # Telemetry shares the event loop with RTP; synchronous deflate stalls video.
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024, compress=False)
         await ws.prepare(request)
         runtime.websockets.add(ws)
         await ws.send_json(envelope("connected", "middleware", runtime.status()))
@@ -941,6 +1147,24 @@ def create_app(store: ConfigStore) -> web.Application:
             runtime._log("error", f"WebRTC offer failed for {peer_ip}: {exc}\n{tb}")
             raise web.HTTPServiceUnavailable(text=f"WebRTC offer failed: {exc}") from exc
 
+    async def receiver_report(request: web.Request) -> web.Response:
+        _camera_id, camera = camera_for_request(request)
+        if camera is None:
+            raise web.HTTPNotFound(text="camera stream not found")
+        if request.content_length is not None and request.content_length > 16384:
+            raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=request.content_length)
+        raw = bytearray()
+        async for chunk in request.content.iter_chunked(4096):
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=len(raw))
+        try:
+            payload = json.loads(raw)
+            accepted = await camera.receiver_report(payload)
+        except (ValueError, TypeError, RuntimeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response({"accepted": accepted})
+
     async def get_camera_status(request: web.Request) -> web.Response:
         camera_id = str(request.match_info.get("camera_id", "")).strip()
         if camera_id:
@@ -957,7 +1181,7 @@ def create_app(store: ConfigStore) -> web.Application:
         _camera_id, camera = camera_for_request(request)
         if camera is None:
             raise web.HTTPServiceUnavailable(text="camera service is unavailable")
-        frame = camera.latest()
+        frame = await asyncio.to_thread(camera.latest)
         if frame is None:
             raise web.HTTPNotFound(text="no frame available")
         try:
@@ -982,7 +1206,7 @@ def create_app(store: ConfigStore) -> web.Application:
         try:
             import cv2
             while True:
-                frame = camera.latest()
+                frame = await asyncio.to_thread(camera.latest)
                 if frame is not None:
                     success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if success:
@@ -996,12 +1220,74 @@ def create_app(store: ConfigStore) -> web.Application:
         return response
 
     async def precheck_recording(_request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder is not initialized")
-        try:
-            return web.json_response(await asyncio.to_thread(runtime.recorder.precheck))
-        except (ValueError, OSError, ImportError) as exc:
-            return web.json_response({"ready": False, "reason": str(exc)}, status=400)
+        if runtime.recording_ros is not None:
+            try:
+                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
+                # Frequency checks need more than one sample. Keep this work off
+                # the WebRTC/media path while the recorder warms up.
+                await asyncio.sleep(1.9)
+            except (RuntimeError, TimeoutError) as exc:
+                return web.json_response(
+                    {"ok": False, "ready": False, "reason": str(exc), "issues": []},
+                    status=503,
+                )
+        subs = store.value.get("ros", {}).get("subscriptions", [])
+        recording_topics = [
+            item for item in subs
+            if item.get("enabled", True) and "record" in item.get("outputs", [])
+        ]
+        topic_health = runtime.topic_health()
+
+        checked = []
+        issues = []
+        for item in recording_topics:
+            topic = item["topic"]
+            info = topic_health.get(topic)
+            if info is None:
+                from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+                std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
+                target_hz = float(item.get("target_hz", 0) or std["target_hz"])
+                min_hz = float(item.get("min_hz", 0) or std["min_hz"])
+                item_stat = {
+                    "topic": topic,
+                    "type": item.get("type", "std_msgs/msg/String"),
+                    "messages": 0,
+                    "hz": 0.0,
+                    "target_hz": target_hz,
+                    "min_hz": min_hz,
+                    "has_data": False,
+                    "state": "no_data",
+                    "message": "未检测到消息发布 (0 Hz)",
+                }
+            else:
+                item_stat = dict(info)
+            checked.append(item_stat)
+            if item_stat["state"] == "no_data":
+                issues.append({
+                    "topic": topic,
+                    "state": "no_data",
+                    "hz": 0.0,
+                    "min_hz": item_stat["min_hz"],
+                    "reason": f"{topic}: 未检测到消息发布 (0 Hz，标准: ≥ {item_stat['min_hz']:.1f} Hz)",
+                })
+            elif item_stat["state"] == "low_rate":
+                issues.append({
+                    "topic": topic,
+                    "state": "low_rate",
+                    "hz": item_stat["hz"],
+                    "min_hz": item_stat["min_hz"],
+                    "reason": f"{topic}: 消息频率偏低 ({item_stat['hz']:.1f} Hz < 标准 {item_stat['min_hz']:.1f} Hz)",
+                })
+
+        ready = len(issues) == 0 and len(recording_topics) > 0
+        return web.json_response({
+            "ok": True,
+            "ready": ready,
+            "topic_count": len(recording_topics),
+            "topics": checked,
+            "issues": issues,
+            "reason": "" if ready else ("未勾选任何录制话题" if not recording_topics else f"{len(issues)} 个待录制话题未达标"),
+        })
 
     async def start_recording(request: web.Request) -> web.Response:
         if runtime.recorder is None:
@@ -1012,18 +1298,74 @@ def create_app(store: ConfigStore) -> web.Application:
                 data = await request.json()
             except Exception:
                 pass
+        if runtime.recording_ros is not None:
+            try:
+                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
+            except (RuntimeError, TimeoutError) as exc:
+                return web.json_response({"ok": False, "reason": str(exc)}, status=503)
+        if runtime.platform is None and runtime.upload_error:
+            if (data.get('selection') or {}).get('mode', 'local') != 'local':
+                return web.json_response({'ok': False, 'code': 'PLATFORM_UNAVAILABLE',
+                    'reason': '平台模块尚未安装，可暂不关联平台任务录制到本机'}, status=409)
+        force = bool(data.get("force", False))
         filename = str(data.get("filename", "")).strip()
 
-        if runtime.recording_ros is not None:
-            runtime.recording_ros.prepare_recording()
+        if not force:
+            subs = store.value.get("ros", {}).get("subscriptions", [])
+            recording_topics = [
+                item for item in subs
+                if item.get("enabled", True) and "record" in item.get("outputs", [])
+            ]
+            if not recording_topics:
+                return web.json_response({
+                    "ok": False,
+                    "can_force": True,
+                    "reason": "尚未勾选任何需要录制的话题，请先在下方勾选录制话题",
+                    "issues": [{"topic": "none", "reason": "未勾选录制话题"}],
+                }, status=400)
+
+            topic_health = runtime.topic_health()
+            issues = []
+            for item in recording_topics:
+                topic = item["topic"]
+                info = topic_health.get(topic)
+                if not info or info.get("state") != "ok":
+                    hz = info.get("hz", 0.0) if info else 0.0
+                    from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+                    std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
+                    min_hz = float(item.get("min_hz", 0) or (info.get("min_hz") if info else std["min_hz"]))
+                    issues.append({
+                        "topic": topic,
+                        "state": info.get("state", "no_data") if info else "no_data",
+                        "hz": hz,
+                        "min_hz": min_hz,
+                        "reason": f"{topic}: 未检测到消息发布 (0 Hz)" if hz == 0 else f"{topic}: 频率不足 ({hz:.1f} Hz < 标准 {min_hz:.1f} Hz)",
+                    })
+            if issues:
+                return web.json_response({
+                    "ok": False,
+                    "can_force": True,
+                    "reason": "待录制话题未检测到消息或频率未达标",
+                    "issues": issues,
+                }, status=400)
+
         try:
             path = await asyncio.to_thread(
                 runtime.recorder.start,
                 filename,
                 runtime.session_profile_metadata,
+                *([data.get("selection")] if runtime.platform is not None else []),
             )
         except (ValueError, RuntimeError, FileExistsError, ImportError) as exc:
             return web.json_response({"ok": False, "reason": str(exc)}, status=400)
+        except Exception as exc:
+            failure = _upload_failure(exc)
+            if failure is None:
+                raise
+            return web.json_response(failure, status=_upload_failure_status(failure["code"]))
+        status = runtime.recorder.status()
+        if not status.get("recording") or status.get("path") != path:
+            return web.json_response({"ok": True, "recording": False, "path": path, "replayed": True})
         if runtime.ros is not None:
             runtime.ros.publish(
                 "/teleop/recording_state",
@@ -1076,7 +1418,7 @@ def create_app(store: ConfigStore) -> web.Application:
             return web.json_response({"recording": False, "enabled": False})
         return web.json_response(runtime.recorder.status())
 
-    async def get_recordings(_request: web.Request) -> web.Response:
+    async def get_recordings(request: web.Request) -> web.Response:
         if runtime.recorder is None:
             return web.json_response({
                 "files": [],
@@ -1085,7 +1427,19 @@ def create_app(store: ConfigStore) -> web.Application:
                 "total_size_bytes": 0,
                 "total_size_human": "0 B",
             })
-        files = await asyncio.to_thread(runtime.recorder.list_recordings)
+        format_filter = request.query.get('format', 'all')
+        identifier = request.query.get('identifier', '')
+        compact = request.query.get('compact') == '1'
+        try:
+            files, format_counts = await asyncio.gather(
+                asyncio.to_thread(runtime.recorder.list_recordings, format_filter, identifier, compact),
+                asyncio.to_thread(runtime.recorder.recording_format_counts),
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        if compact:
+            files = [{key: value for key, value in item.items() if key not in {'channels', 'videos'}}
+                     for item in files]
         total_bytes = sum(f["size_bytes"] for f in files)
         if total_bytes < 1024:
             human = f"{total_bytes} B"
@@ -1101,10 +1455,13 @@ def create_app(store: ConfigStore) -> web.Application:
             "total_count": len(files),
             "total_size_bytes": total_bytes,
             "total_size_human": human,
+            "format": format_filter,
+            "format_counts": format_counts,
         })
 
     async def download_recording(request: web.Request) -> web.StreamResponse:
-        from .recording_datasets import resolve_dataset, archive_dataset
+        from .recording_datasets import resolve_dataset, archive_dataset, archive_datasets
+        from .takeover_log import takeover_file
         from urllib.parse import quote
         identifier = request.match_info["filename"]
         if runtime.recorder is None:
@@ -1113,19 +1470,19 @@ def create_app(store: ConfigStore) -> web.Application:
             target = resolve_dataset(runtime.recorder.directory, identifier)
         except (ValueError, FileNotFoundError) as exc:
             raise web.HTTPNotFound(text=str(exc)) from exc
-        try:
-            runtime.recorder.assert_file_idle(target)
-        except ValueError as exc:
-            raise web.HTTPConflict(text=str(exc)) from exc
         if target.is_file():
             if runtime.recorder.is_recording() and runtime.recorder.path == target:
                 raise web.HTTPConflict(text="recording is still being written")
-            return web.FileResponse(target, headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name)}",
-                "Content-Type": "application/octet-stream",
-            })
+            if request.query.get("with_tags") != "1" or not takeover_file(target):
+                return web.FileResponse(target, headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name)}",
+                    "Content-Type": "application/octet-stream",
+                })
         try:
-            archive = await asyncio.to_thread(archive_dataset, target)
+            if target.is_file():
+                archive = await asyncio.to_thread(archive_datasets, target.parent, [identifier])
+            else:
+                archive = await asyncio.to_thread(archive_dataset, target)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         try:
@@ -1148,7 +1505,7 @@ def create_app(store: ConfigStore) -> web.Application:
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
         identifier = request.match_info["filename"]
-        if not identifier.startswith("lerobot:"):
+        if not identifier.startswith(("lerobot:", "bundle:")):
             raise web.HTTPNotFound(text="not a LeRobot dataset")
         try:
             target = resolve_dataset(runtime.recorder.directory, identifier)
@@ -1168,6 +1525,11 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPNotFound(text=str(exc)) from exc
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
+        except Exception as exc:
+            failure = _upload_failure(exc)
+            if failure is None:
+                raise
+            return web.json_response(failure, status=_upload_failure_status(failure["code"]))
 
     async def batch_delete_recordings(request: web.Request) -> web.Response:
         if runtime.recorder is None:
@@ -1181,8 +1543,56 @@ def create_app(store: ConfigStore) -> web.Application:
                 await asyncio.to_thread(runtime.recorder.delete_recording, fname)
                 deleted.append(fname)
             except Exception as exc:
-                failed.append({"filename": fname, "error": str(exc)})
+                failure = _upload_failure(exc)
+                failed.append({"filename": fname, "error": str(exc),
+                               **({"code": failure["code"], "reason": failure["reason"]}
+                                  if failure else {})})
         return web.json_response({"ok": True, "deleted": deleted, "failed": failed})
+
+    async def batch_convert_lerobot(request: web.Request) -> web.Response:
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        data = await request.json() if request.can_read_body else {}
+        try:
+            result = await asyncio.to_thread(
+                runtime.recorder.convert_recordings_to_lerobot, data.get('filenames')
+            )
+            return web.json_response(result, status=202 if result.get('accepted') else 200)
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
+            return web.json_response({'ok': False, 'error': str(exc)}, status=400)
+
+    async def batch_download_recordings(request: web.Request) -> web.StreamResponse:
+        from .recording_datasets import archive_datasets
+        if runtime.recorder is None:
+            raise web.HTTPServiceUnavailable(text="recorder not available")
+        if request.content_type == 'application/json':
+            data = await request.json() if request.can_read_body else {}
+            filenames = data.get('filenames') if isinstance(data, dict) else None
+        else:
+            form = await request.post()
+            try:
+                filenames = json.loads(str(form.get('filenames', '[]')))
+            except (TypeError, ValueError):
+                filenames = None
+        try:
+            archive = await asyncio.to_thread(
+                archive_datasets, runtime.recorder.directory, filenames
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        try:
+            response = web.StreamResponse(headers={
+                'Content-Disposition': f'attachment; filename="hc-datasets-{datetime.now().strftime("%Y%m%d-%H%M%S")}.zip"',
+                'Content-Type': 'application/zip', 'Content-Length': str(archive.stat().st_size),
+            })
+            await response.prepare(request)
+            with archive.open('rb') as handle:
+                while chunk := await asyncio.to_thread(handle.read, 256 * 1024):
+                    await response.write(chunk)
+            await response.write_eof()
+            return response
+        finally:
+            archive.unlink(missing_ok=True)
 
     async def start_replay(request: web.Request) -> web.Response:
         if runtime.player is None:
@@ -1197,8 +1607,6 @@ def create_app(store: ConfigStore) -> web.Application:
         selected_topics = data.get("topics")
         topic_remap = data.get("remap")
         try:
-            if runtime.recorder:
-                runtime.recorder.assert_file_idle(runtime.recorder.directory / filename)
             status = await asyncio.to_thread(
                 runtime.player.play,
                 filename,
@@ -1326,50 +1734,95 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/teleop/source", set_control_source)
     try:
         from .upload_api import register_upload_routes
+
         class UploadProxy:
+            def status(self):
+                if runtime.platform is not None and not runtime.platform.state.get('uploads_enabled', False):
+                    return {
+                        'enabled': False, 'running': False, 'auto_enqueue': False,
+                        'jobs': [], 'scan_errors': {}, 'platform_backoffs': {},
+                        'processes': {'artifacts': {'running': False}, 'upload': {'running': False}},
+                    }
+                if runtime.uploads is None:
+                    raise web.HTTPServiceUnavailable(
+                        text=json.dumps({'enabled': False, 'state': 'unavailable',
+                                         'error': runtime.upload_error or 'upload service unavailable'}),
+                        content_type='application/json',
+                    )
+                return runtime.uploads.status()
+
             def __getattr__(self, key):
                 if runtime.uploads is None:
-                    raise web.HTTPServiceUnavailable(text=runtime.upload_error or 'upload service unavailable')
+                    raise web.HTTPServiceUnavailable(
+                        text=json.dumps({"enabled": False, "state": "unavailable",
+                                         "error": runtime.upload_error or "upload service unavailable"}),
+                        content_type="application/json",
+                    )
                 return getattr(runtime.uploads, key)
-        register_upload_routes(app, UploadProxy())
+
+        async def update_upload_settings(body):
+            from humanoid_upload.common import UploadError
+            from .upload_service import UploadService
+            if set(body) != {"enabled", "auto_enqueue"} or any(type(v) is not bool for v in body.values()):
+                raise ValueError()
+            async with runtime._restart_lock:
+                if runtime.recorder is None:
+                    raise UploadError("UPLOAD_UNAVAILABLE", "录制服务尚未就绪")
+                if runtime.recorder.status().get("recording"):
+                    raise UploadError("ARTIFACT_BUSY", "请停止当前录制后修改上传设置")
+                proposed = copy.deepcopy(store.value)
+                proposed["uploads"].update(body)
+                if runtime.platform is not None:
+                    saved = store.save(proposed)
+                    runtime.config['uploads'] = copy.deepcopy(saved['uploads'])
+                    platform = runtime.platform
+                    await asyncio.to_thread(platform.set_enabled, body['enabled'])
+                    if body['enabled']:
+                        await asyncio.to_thread(platform.set_auto, body['auto_enqueue'])
+                    return {**UploadProxy().status(), **body}
+                upload_config = copy.deepcopy(proposed["uploads"])
+                queue_path = Path(upload_config["queue_directory"]).expanduser()
+                upload_config["queue_directory"] = str((store.path.parent / queue_path).resolve())
+                candidate = UploadService(upload_config,
+                    artifact_state_dir=runtime.recorder.artifact_state_dir,
+                    data_directory=runtime.recorder.directory)
+                old = runtime.uploads
+                if old is not None:
+                    stopped = await asyncio.to_thread(old.stop)
+                    if not stopped.get("stopped"):
+                        raise UploadError("ARTIFACT_BUSY", "上传请求尚未结束，请稍后重试")
+                try:
+                    saved = store.save(proposed)
+                except Exception:
+                    if old is not None:
+                        old.start()
+                    raise
+                if old is not None:
+                    await asyncio.to_thread(old.close)
+                runtime.config["uploads"] = copy.deepcopy(saved["uploads"])
+                runtime.uploads = candidate
+                runtime.upload_error = None
+                runtime.recorder.upload_service = candidate
+                runtime.recorder.binding_snapshot = (candidate.binding_snapshot
+                    if body["enabled"] and body["auto_enqueue"] else None)
+                candidate.start()
+                return candidate.status()
+
+        register_upload_routes(app, UploadProxy(), update_settings=update_upload_settings)
     except ImportError:
         async def upload_unavailable(request):
-            return web.json_response({'enabled': False, 'state': 'unavailable', 'error': 'upload module is not installed'}, status=503)
-        app.router.add_get('/api/uploads', upload_unavailable)
-
-    from .data_tools import register_data_routes
-    register_data_routes(app, runtime)
-
-    async def recording_jobs(request):
-        return web.json_response(runtime.recorder.status()["jobs"] if runtime.recorder else [])
-
-    async def raw_seal(request):
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable()
-        try:
-            return web.json_response(runtime.recorder.request_raw_seal(request.match_info['recording_id'], await request.json()), status=202)
-        except (ValueError, KeyError) as exc:
-            return web.json_response({'error': str(exc)}, status=409)
-
-    async def retry_recording_job(request):
-        try:
-            return web.json_response(runtime.recorder.retry(request.match_info['recording_id']), status=202)
-        except (ValueError, KeyError) as exc:
-            return web.json_response({'error': str(exc)}, status=409)
-
-    async def delete_artifact(request):
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable()
-        return web.json_response(await asyncio.to_thread(runtime.recorder.delete_artifact, request.match_info['artifact_id']))
-
-    app.router.add_delete('/api/recording/artifacts/{artifact_id}', delete_artifact)
-    app.router.add_post('/api/recording/jobs/{recording_id}/retry', retry_recording_job)
-    app.router.add_get('/api/recording/jobs', recording_jobs)
-    app.router.add_post('/api/recording/jobs/{recording_id}/seal', raw_seal)
+            return web.json_response(
+                {"enabled": False, "state": "unavailable", "error": "upload module is not installed"},
+                status=503,
+            )
+        app.router.add_get("/api/uploads", upload_unavailable)
+        app.router.add_post("/api/uploads/{operation}", upload_unavailable)
     app.router.add_post("/api/recording/precheck", precheck_recording)
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)
     app.router.add_post("/api/recording/stop", stop_recording)
+    from .platform_api import register_platform_routes
+    register_platform_routes(app, runtime)
     app.router.add_get("/api/recording/status", get_recording_status)
     app.router.add_get("/api/recordings", get_recordings)
     app.router.add_post("/api/recordings/upload", import_mcap_file)
@@ -1377,6 +1830,8 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)
     app.router.add_delete("/api/recordings/{filename}", delete_recording)
     app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
+    app.router.add_post("/api/recordings/batch-convert-lerobot", batch_convert_lerobot)
+    app.router.add_post("/api/recordings/batch-download", batch_download_recordings)
     app.router.add_post("/api/replay/start", start_replay)
     app.router.add_post("/api/replay/pause", pause_replay)
     app.router.add_post("/api/replay/resume", resume_replay)
@@ -1387,6 +1842,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/webrtc/offer/{camera_id}", webrtc_offer)
     app.router.add_post("/offer", webrtc_offer)
     app.router.add_post("/offer/{camera_id}", webrtc_offer)
+    app.router.add_post("/api/webrtc/receiver/{camera_id}", receiver_report)
     app.router.add_get("/api/camera/status", get_camera_status)
     app.router.add_get("/api/camera/status/{camera_id}", get_camera_status)
     app.router.add_get("/api/camera/snapshot", get_camera_snapshot)

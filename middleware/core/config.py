@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -12,11 +13,17 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {"host": "0.0.0.0", "port": 7876},
     "robot_profiles": {"root": "../adapters/robots", "active": "x1"},
-    "simulation": {"headless": False, "with_control": True, "debug_joints": False},
+    "simulation": {"headless": False, "with_control": True, "debug_joints": False, "startup_timeout_sec": 120},
     "ros": {
         "enabled": True,
         "domain_id": 14,
         "node_name": "hc_teleop_middleware",
+        "intervention": {
+            "legacy_topics": False,
+            "automatic_recording": True,
+            "max_arm_velocity_rad_s": 0.25,
+            "max_target_error_rad": 0.30,
+        },
         "command_mux": {
             "enabled": True,
             "source": "vr",
@@ -24,7 +31,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "exoskeleton_topic": "/control/exoskeleton/joint_states",
             "output_topic": "/action/joint_states",
             "control_source_topic": "/control/source",
+            "hardware_ready_topic": "/status/hardware/ready",
             "hardware_enable_topic": "/control/hardware/enabled",
+            "motion_topic": "/control/motion/joint_targets",
+            "motion_permit_topic": "/control/motion/permit",
+            "hardware_ready_timeout_sec": 0.5,
         },
         "subscriptions": [],
         "recording": {
@@ -44,6 +55,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pose_timeout_ms": 200,
         "publish_to_ros": True,
         "data_topic": "/vrdata",
+        # Dashboard pose rendering is diagnostic only.  Keeping it below the
+        # camera/control rates prevents UI JSON from competing with WebRTC.
+        "web_pose_hz": 10.0,
     },
     "safety": {
         "enabled": True,
@@ -60,7 +74,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "height": 400,
         "fps": 30,
         "codec": "H264",
+        "encoder_backend": "x264",
+        "dscp": None,
+        "fec": {"enabled": False, "group_size": 5, "media_bitrate_ratio": 0.8},
     },
+}
+
+
+ROBOT_MIDDLEWARE_DEFAULTS: dict[str, Any] = {
+    "camera": copy.deepcopy(DEFAULT_CONFIG["camera"]),
+    "safety": copy.deepcopy(DEFAULT_CONFIG["safety"]),
+    "ros": {
+        "subscriptions": [
+            {"topic": topic, "type": "sensor_msgs/msg/JointState", "enabled": True,
+             "outputs": ["websocket", "record"], "event_max_hz": 20.0}
+            for topic in ("/observation/joint_states", "/action/joint_states")
+        ],
+        "command_mux": copy.deepcopy(DEFAULT_CONFIG["ros"]["command_mux"]),
+        "intervention": copy.deepcopy(DEFAULT_CONFIG["ros"]["intervention"]),
+    },
+    "vr": {"pose_timeout_ms": 600, "web_pose_hz": 10.0},
 }
 
 
@@ -95,6 +128,19 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     for key in ("headless", "with_control", "debug_joints"):
         if not isinstance(simulation.get(key), bool):
             raise ConfigError(f"simulation.{key} must be boolean")
+
+    timeout = simulation.get("startup_timeout_sec")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 600:
+        raise ConfigError("simulation.startup_timeout_sec must be between 0 and 600 seconds")
+
+    web_pose_hz = value["vr"].get("web_pose_hz", 10.0)
+    if (
+        isinstance(web_pose_hz, bool)
+        or not isinstance(web_pose_hz, (int, float))
+        or not 0 < web_pose_hz <= 60
+    ):
+        raise ConfigError("vr.web_pose_hz must be between 0 and 60")
+    value["vr"]["web_pose_hz"] = float(web_pose_hz)
 
     profile_config = value.get("robot_profiles")
     if not isinstance(profile_config, dict):
@@ -214,14 +260,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         description = item.get("description", "")
         if not isinstance(description, str) or len(description) > 500:
             raise ConfigError(f"ros.subscriptions[{index}].description must be a string of at most 500 characters")
-        mode = item.get("recording_mode", "event" if topic.startswith(("/action/", "/control/", "/status/")) else "continuous")
-        if mode not in ("continuous", "event") or not isinstance(item.get("required", True), bool):
-            raise ConfigError("invalid recording_mode/required")
         normalized.append(
             {
                 "topic": topic,
-                "recording_mode": mode,
-                "required": item.get("required", True),
                 "description": description,
                 "type": msg_type,
                 "enabled": bool(item.get("enabled", True)),
@@ -247,33 +288,20 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     directory = recording.get("directory")
     if not isinstance(directory, str) or not directory.strip():
         raise ConfigError("ros.recording.directory must be a non-empty path")
-    workflow = recording.setdefault("workflow", "hc")
-    if workflow not in ("hc", "platform_raw"):
-        raise ConfigError("ros.recording.workflow must be hc or platform_raw")
-    if type(recording.setdefault("derive_action_from_next_state", False)) is not bool:
-        raise ConfigError("ros.recording.derive_action_from_next_state must be boolean")
-    if workflow != "platform_raw" and recording["derive_action_from_next_state"]:
-        raise ConfigError("测试 action 补齐仅支持平台 raw 录制工作流")
-    for key, default in (("capture_config_file", ""), ("job_state_dir", "../runtime/recording_jobs"),
-                         ("artifact_state_dir", "../runtime/artifact_ready")):
-        value_path = recording.setdefault(key, default)
-        if not isinstance(value_path, str) or (key != "capture_config_file" and not value_path.strip()):
-            raise ConfigError("ros.recording." + key + " must be a path")
-    if workflow == "platform_raw" and not recording["capture_config_file"].strip():
-        raise ConfigError("platform_raw requires capture_config_file")
-    for key, default in (("max_pending_jobs", 8), ("min_free_bytes", 268435456)):
-        number = recording.setdefault(key, default)
-        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
-            raise ConfigError("ros.recording." + key + " must be a positive integer")
-    gap_rules = recording.setdefault("gap_rules", [])
-    if not isinstance(gap_rules, list):
-        raise ConfigError("recording.gap_rules must be a list")
-    for rule in gap_rules:
-        if not isinstance(rule, dict) or set(rule) != {"topic", "max_gap_seconds"}:
-            raise ConfigError("gap_rules requires topic and max_gap_seconds")
-        gap = rule["max_gap_seconds"]
-        if not isinstance(rule["topic"], str) or not rule["topic"].startswith("/") or isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(gap) or gap <= 0:
-            raise ConfigError("gap_rules requires an absolute topic and positive finite gap")
+    corrections = recording.setdefault('corrections', {})
+    if not isinstance(corrections, dict):
+        raise ConfigError('recording.corrections must be an object')
+    for key, default, lower, upper in (
+        ('prepared_slots', 4, 2, 16), ('action_queue_items', 4096, 64, 65536),
+        ('total_queue_bytes', 268435456, 8388608, 2147483648),
+        ('observation_cache_bytes', 67108864, 1048576, 536870912)):
+        number = corrections.setdefault(key, default)
+        if type(number) is not int or not lower <= number <= upper:
+            raise ConfigError('recording.corrections.'+key+' is outside supported bounds')
+    for key, default in (('observation_max_age_sec', .25), ('late_message_sec', .2), ('long_gap_sec', .2)):
+        number = corrections.setdefault(key, default)
+        if isinstance(number, bool) or not isinstance(number, (float, int)) or not .01 <= number <= 2.:
+            raise ConfigError('recording.corrections.'+key+' must be between .01 and 2 seconds')
     sources = recording.setdefault("action_sources", [])
     if not isinstance(sources, list):
         raise ConfigError("action_sources must be a list")
@@ -295,8 +323,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         used_topics.add(item['topic'])
         used_names.update(item['names'])
     recording_format = recording.get("format", "mcap")
-    if recording_format not in ("mcap", "lerobot", "both"):
-        raise ConfigError("ros.recording.format must be mcap, lerobot or both")
+    if recording_format not in ("mcap", "lerobot", "both", "mcap_mp4"):
+        raise ConfigError("ros.recording.format must be mcap, lerobot, both or mcap_mp4")
     lerobot_fps = recording.get("lerobot_fps", 15)
     if isinstance(lerobot_fps, bool) or not isinstance(lerobot_fps, int) or not 1 <= lerobot_fps <= 60:
         raise ConfigError("ros.recording.lerobot_fps must be an integer from 1 to 60")
@@ -326,6 +354,42 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         cam_config["codec"] = str(cam_config.get("codec", "H264")).upper()
         if cam_config["codec"] not in {"H264", "VP8"}:
             raise ConfigError("camera codec must be H264 or VP8")
+        def validate_media_options(options, path, materialize=False):
+            backend = options.get("encoder_backend", cam_config.get("encoder_backend", "x264"))
+            if not isinstance(backend, str) or backend not in {"auto", "x264", "nvenc", "jetson"}:
+                raise ConfigError(path + ".encoder_backend must be auto, x264, nvenc or jetson")
+            dscp = options.get("dscp", cam_config.get("dscp"))
+            if dscp is not None and (isinstance(dscp, bool) or not isinstance(dscp, int) or not 0 <= dscp <= 63):
+                raise ConfigError(path + ".dscp must be null or an integer from 0 to 63")
+            fec = options.get("fec", cam_config.get("fec", {}))
+            if not isinstance(fec, dict):
+                raise ConfigError(path + ".fec must be an object")
+            enabled = fec.get("enabled", False)
+            group = fec.get("group_size", 5)
+            ratio = fec.get("media_bitrate_ratio", 0.8)
+            if not isinstance(enabled, bool):
+                raise ConfigError(path + ".fec.enabled must be boolean")
+            if isinstance(group, bool) or not isinstance(group, int) or not 1 <= group <= 10:
+                raise ConfigError(path + ".fec.group_size must be an integer from 1 to 10")
+            if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio) or not .25 <= ratio <= .9:
+                raise ConfigError(path + ".fec.media_bitrate_ratio must be finite and between .25 and .9")
+            if materialize or "fec" in options:
+                options["fec"] = {**fec, "enabled": enabled, "group_size": group,
+                                  "media_bitrate_ratio": ratio}
+            if materialize:
+                options.update(encoder_backend=backend, dscp=dscp)
+        def validate_h264_dimensions(options, path):
+            if options["codec"] != "H264":
+                return
+            width, height, fps = options["width"], options["height"], options["fps"]
+            mb_width, mb_height = (width + 15) // 16, (height + 15) // 16
+            # Both aiortc SDP profiles and encoder currently advertise level 3.1.
+            if (width % 2 or height % 2 or mb_width * mb_height > 3600
+                    or mb_width * mb_height * fps > 108000
+                    or mb_width > 169 or mb_height > 169):
+                raise ConfigError(path + " exceeds supported H264 level 3.1 / yuv420p dimensions or frame rate (e.g. 1280x720 at 30 FPS)")
+        validate_h264_dimensions(cam_config, "camera")
+        validate_media_options(cam_config, "camera", materialize=True)
         streams = cam_config.get("streams", [])
         if not isinstance(streams, list):
             raise ConfigError("camera.streams must be a list")
@@ -375,6 +439,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 raise ConfigError(
                     f"camera.streams[{index}] codec must be H264 or VP8"
                 )
+            validate_h264_dimensions({"width": stream_width, "height": stream_height,
+                                      "fps": stream_fps, "codec": stream_codec},
+                                     f"camera.streams[{index}]")
+            validate_media_options(item, f"camera.streams[{index}]")
             normalized_streams.append(
                 {
                     **item,
@@ -404,19 +472,110 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                     normalized.append(subscription)
                 elif subscription["type"] != stream["type"]:
                     raise ConfigError(f"conflicting camera types for topic: {stream['topic']}")
-    uploads = value.setdefault('uploads', {})
+    uploads = value.setdefault("uploads", {})
     if not isinstance(uploads, dict):
-        raise ConfigError('uploads must be an object')
-    for key in ('enabled', 'auto_enqueue'):
+        raise ConfigError("uploads must be an object")
+    for key in ("enabled", "auto_enqueue"):
         if not isinstance(uploads.setdefault(key, False), bool):
-            raise ConfigError('uploads.' + key + ' must be boolean')
-    for key, default in (('queue_directory','../runtime/upload_queue'), ('platform_base_url',''), ('credential_ref',''), ('robot_id',''), ('local_robot_id',''), ('task_id','')):
+            raise ConfigError("uploads." + key + " must be boolean")
+    for key, default in (("queue_directory", "../runtime/upload_queue"),
+                         ("platform_base_url", ""), ("credential_ref", ""),
+                         ("robot_id", ""), ("local_robot_id", ""), ("task_id", "")):
         if not isinstance(uploads.setdefault(key, default), str):
-            raise ConfigError('uploads.' + key + ' must be string')
-    if uploads['credential_ref'] and not uploads['credential_ref'].startswith(('env:', 'file:')):
-        raise ConfigError('uploads credentials must use env: or file: reference')
+            raise ConfigError("uploads." + key + " must be string")
+    if not uploads["queue_directory"].strip():
+        raise ConfigError("uploads.queue_directory must be a non-empty path")
+    if uploads["credential_ref"] and not uploads["credential_ref"].startswith(("env:", "file:")):
+        raise ConfigError("uploads credentials must use env: or file: reference")
+    for key, default in (("artifact_state_dir", "../runtime/artifact_state"),
+                         ("upload_job_state_dir", "../runtime/recording_uploads")):
+        if not isinstance(recording.setdefault(key, default), str) or not recording[key].strip():
+            raise ConfigError("ros.recording." + key + " must be a non-empty path")
+    intervention = value["ros"]["intervention"]
+    if not isinstance(intervention, dict):
+        raise ConfigError("ros.intervention must be an object")
+    for key in ("legacy_topics", "automatic_recording"):
+        if type(intervention[key]) is not bool:
+            raise ConfigError("ros.intervention." + key + " must be boolean")
+    for key in ("max_arm_velocity_rad_s", "max_target_error_rad"):
+        item = intervention[key]
+        if type(item) not in (int, float) or not math.isfinite(item) or item <= 0:
+            raise ConfigError("ros.intervention." + key + " must be finite and positive")
     value["camera"] = cam_config
     return value
+
+
+def _robot_middleware_fields(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        section: {key: copy.deepcopy(value[section][key]) for key in defaults}
+        for section, defaults in ROBOT_MIDDLEWARE_DEFAULTS.items()
+    }
+
+
+def validate_robot_middleware(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate a portable robot configuration, excluding host settings."""
+    if not isinstance(value, dict):
+        raise ConfigError("robot middleware configuration must be an object")
+    for section, settings in value.items():
+        if section not in ROBOT_MIDDLEWARE_DEFAULTS:
+            raise ConfigError(f"robot middleware cannot configure {section}")
+        if not isinstance(settings, dict):
+            raise ConfigError(f"robot middleware {section} must be an object")
+        unknown = set(settings) - set(ROBOT_MIDDLEWARE_DEFAULTS[section])
+        if unknown:
+            raise ConfigError(f"robot middleware cannot configure {section}.{sorted(unknown)[0]}")
+    mux = value.get("ros", {}).get("command_mux", {})
+    if not isinstance(mux, dict) or set(mux) - set(DEFAULT_CONFIG["ros"]["command_mux"]):
+        raise ConfigError("robot middleware ros.command_mux contains unsupported fields")
+    for key, setting in value.get("safety", {}).items():
+        if key != "stop_topic" and not isinstance(setting, bool):
+            raise ConfigError(f"safety.{key} must be boolean")
+    try:
+        normalized = validate_config(_merge(ROBOT_MIDDLEWARE_DEFAULTS, value))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigError(str(exc)) from exc
+    return _robot_middleware_fields(normalized)
+
+
+def _replace_files(payloads: dict[Path, bytes]) -> None:
+    """Stage every write before replacing files; restore prior files on failure."""
+    staged: dict[Path, str] = {}
+    previous: dict[Path, bytes | None] = {}
+    replaced: list[Path] = []
+    try:
+        for path, payload in payloads.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            previous[path] = path.read_bytes() if path.exists() else None
+            fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            staged[path] = name
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        for path, name in staged.items():
+            os.replace(name, path)
+            replaced.append(path)
+    except Exception:
+        for path in reversed(replaced):
+            original = previous[path]
+            if original is None:
+                path.unlink(missing_ok=True)
+            else:
+                fd, name = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(original)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(name, path)
+                finally:
+                    if os.path.exists(name):
+                        os.unlink(name)
+        raise
+    finally:
+        for name in staged.values():
+            if os.path.exists(name):
+                os.unlink(name)
 
 
 class ConfigStore:
@@ -424,32 +583,74 @@ class ConfigStore:
         self.path = Path(path).expanduser().resolve()
         self.value = copy.deepcopy(DEFAULT_CONFIG)
 
+    @staticmethod
+    def _runtime_selection(value: dict[str, Any]) -> dict[str, Any]:
+        validated = validate_config(value)
+        # The controller, API and simulator honor these startup overrides.
+        # Load camera/recording settings from that same profile as well.
+        for variable, key in (("HC_ROBOT_NAME", "active"), ("HC_ROBOT_CONFIG_ROOT", "root")):
+            if os.environ.get(variable):
+                validated["robot_profiles"][key] = os.environ[variable]
+        return validate_config(validated)
+
+    def _profile_middleware_path(self, value: dict[str, Any]) -> Path | None:
+        selection = value["robot_profiles"]
+        active = selection.get("active", "")
+        if not active:
+            return None
+        root = Path(selection["root"]).expanduser()
+        if not root.is_absolute():
+            root = self.path.parent / root
+        return root.resolve() / active / "middleware.yaml"
+
+    def apply_profile(self, value: dict[str, Any]) -> dict[str, Any]:
+        """Load the selected robot's settings without modifying either file."""
+        validated = self._runtime_selection(value)
+        path = self._profile_middleware_path(validated)
+        if path is None or not path.is_file():
+            return validated
+        try:
+            with path.open(encoding="utf-8") as stream:
+                robot = validate_robot_middleware(yaml.safe_load(stream))
+        except (OSError, yaml.YAMLError) as exc:
+            raise ConfigError(f"unable to read robot middleware {path}: {exc}") from exc
+        # Replace each robot-owned field, including complete lists and camera
+        # settings, so no settings from the previously selected robot survive.
+        for section, settings in robot.items():
+            if section in {"camera", "safety"}:
+                validated[section] = copy.deepcopy(settings)
+            else:
+                validated[section].update(copy.deepcopy(settings))
+        return validate_config(validated)
+
     def load(self) -> dict[str, Any]:
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as stream:
                 loaded = yaml.safe_load(stream) or {}
-            self.value = validate_config(loaded)
+            self.value = self.apply_profile(loaded)
         else:
-            self.value = validate_config({})
+            self.value = self.apply_profile({})
             self.save(self.value)
         return copy.deepcopy(self.value)
 
     def save(self, value: dict[str, Any]) -> dict[str, Any]:
-        validated = validate_config(value)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.", dir=self.path.parent, text=True
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                yaml.safe_dump(
-                    validated, stream, allow_unicode=True, sort_keys=False
-                )
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp_name, self.path)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+        validated = self._runtime_selection(value)
+        path = self._profile_middleware_path(validated)
+        previous_path = self._profile_middleware_path(self.value)
+        package_exists = path is not None and path.is_file()
+        switching = path != previous_path
+        if switching:
+            validated = self.apply_profile(validated)
+        host = copy.deepcopy(validated)
+        payloads: dict[Path, bytes] = {}
+        if package_exists:
+            robot = validate_robot_middleware(_robot_middleware_fields(validated))
+            if not switching:
+                payloads[path] = yaml.safe_dump(robot, allow_unicode=True, sort_keys=False).encode("utf-8")
+            for section, defaults in ROBOT_MIDDLEWARE_DEFAULTS.items():
+                for key in defaults:
+                    host[section].pop(key, None)
+        payloads[self.path] = yaml.safe_dump(host, allow_unicode=True, sort_keys=False).encode("utf-8")
+        _replace_files(payloads)
         self.value = validated
         return copy.deepcopy(validated)

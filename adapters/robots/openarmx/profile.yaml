@@ -13,6 +13,7 @@ config_files:
 - controller_v23.yml
 - arm_teleop.yaml
 - vr_configs.yml
+- middleware.yaml
 - robot_api.yaml
 - cameras.yaml
 - motion/motion.yaml

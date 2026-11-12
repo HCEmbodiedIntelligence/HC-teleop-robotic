@@ -7,3 +7,12 @@
 .upload-panel table { width: 100%; border-collapse: collapse; }
 .upload-panel th, .upload-panel td { text-align: left; padding: .7rem; border-bottom: 1px solid #8885; vertical-align: top; }
 .upload-panel [data-error] { color: #c45a39; overflow-wrap: anywhere; }
+.upload-panel form { padding-block: .75rem; border-bottom: 1px solid var(--border, #e5e7eb); }
+.upload-panel label { min-width: min(240px, 100%); }
+.upload-panel h3, .upload-panel form > p { flex-basis: 100%; margin: 0; }
+.upload-panel td:last-child { min-width: 240px; }
+.upload-panel td { overflow-wrap: anywhere; }
+
+.upload-panel .upload-toggle { display: flex; align-items: center; gap: .5rem; }
+.upload-panel .upload-toggle input { width: auto; }
+.upload-panel button:disabled { cursor: not-allowed; opacity: .5; }

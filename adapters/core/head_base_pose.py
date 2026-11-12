@@ -76,3 +76,34 @@ class HeadBasePoseFollower:
         scale = max(1., abs(velocity[0]) / limits[0], abs(velocity[1]) / limits[1])
         return (float(np.clip(yaw_velocity, -limits[2], limits[2])),
                 float(velocity[0] / scale), float(velocity[1] / scale))
+
+
+class HeadBaseVelocityFollower(HeadBasePoseFollower):
+    """Follow relative headset motion using command integration, not odometry.
+
+    The caller must pass the same velocity limits enforced by the driver and
+    reset on release, stale input or output inhibition. Slippage and dropped
+    commands cannot be observed; the estimate is discarded at every clutch.
+    """
+
+    def reset(self):
+        super().reset()
+        self.estimate = np.zeros(3)
+        self.previous_command = (0., 0., 0.)
+        self.previous_time = None
+
+    def update_velocity(self, head, now, limits, timeout):
+        if self.previous_time is not None:
+            dt = now - self.previous_time
+            if not math.isfinite(dt) or dt < 0. or dt > timeout:
+                self.reset()
+            else:
+                yaw, forward, lateral = self.previous_command
+                # Midpoint heading reduces integration error during combined motion.
+                self.estimate[:2] += rotate(
+                    (forward, lateral), self.estimate[2] + yaw * dt / 2.) * dt
+                self.estimate[2] = wrap(self.estimate[2] + yaw * dt)
+        command = super().update(head, self.estimate, limits)
+        self.previous_time = now
+        self.previous_command = command
+        return command

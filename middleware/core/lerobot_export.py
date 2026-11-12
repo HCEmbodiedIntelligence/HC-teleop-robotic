@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALL_COMMAND = "./tools/setup_lerobot.sh"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / 'upload_client') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'upload_client'))
 from middleware.core.export_progress import ExportProgress, progress_path
 
 
@@ -104,6 +107,30 @@ def synchronized_episodes(streams: dict[str, list], fps: int, audit: dict | None
     yield current
 
 
+def preserved_episode(streams, fps, audit):
+    """Shared plans preserve source state timestamps/count; never synthesize frames."""
+    from humanoid_upload.common import UploadError
+    timeline = streams['observation.state']
+    stamps = [sample[0] for sample in timeline]
+    if any(b <= a for a, b in zip(stamps, stamps[1:])):
+        raise UploadError('CAPTURE_STRUCTURE_MISMATCH', '状态时间戳不是严格递增')
+    if len(stamps) > 1:
+        actual_hz = (len(stamps) - 1) * 1e9 / (stamps[-1] - stamps[0])
+        audit['source_frequency_hz'] = actual_hz
+    rows = []
+    for stamp, _ in timeline:
+        selected = {key: latest_sample(samples, stamp, sample_max_age(key)) for key, samples in streams.items()}
+        missing = [key for key, value in selected.items()
+                   if value is None and (streams[key] or required_stream(key))]
+        if missing:
+            raise UploadError('CAPTURE_SOURCE_GAPS_UNSUPPORTED', '当前 LeRobot 导出无法无损表达这些字段的帧内缺失：' + ', '.join(missing) + '；原始 MCAP 已保留')
+        rows.append((stamp, selected))
+    audit.update(candidate_frames=len(rows), retained_frames=len(rows), rejected_frames=0,
+                 invalid_frames=0, invalid_required_frames=0, invalid_by_stream={},
+                 frequency_policy='PRESERVE', timeline='original_state_log_time')
+    return [rows]
+
+
 def decode_rgb(message: Any, compressed: bool):
     import cv2
     import numpy as np
@@ -132,6 +159,19 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     from mcap.reader import make_reader
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
+    from .topic_recorder import read_recording_metadata
+    metadata = read_recording_metadata(source)
+    if metadata.get('capture_snapshot'):
+        from humanoid_upload.capture_plan import validate_snapshot
+        validate_snapshot(json.loads(metadata['capture_snapshot']), recording_id=metadata.get('recording_id'))
+    from .capture_formats import lerobot_snapshot
+    snapshot = lerobot_snapshot(metadata)
+    if snapshot:
+        from humanoid_upload.capture_plan import validate_snapshot
+        expected_id = metadata.get('recording_id')
+        if metadata.get('capture_snapshots'):
+            expected_id += '-lerobot'
+        validate_snapshot(snapshot, source_format='LEROBOT_V3', recording_id=expected_id)
 
     progress = progress or ExportProgress(None)
     progress.update("读取 MCAP", 0, force=True)
@@ -156,6 +196,15 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
         '/action/base/velocity': 'action.base.velocity',
     }
     raw_cameras = {}
+    correction = None
+    session = None
+    session_sidecar = source.with_suffix('.session.json')
+    if session_sidecar.is_file():
+        session = json.loads(session_sidecar.read_text())
+    sidecar = source.with_suffix('.correction.json')
+    if sidecar.is_file():
+        correction = json.loads(sidecar.read_text())
+    first_observations = {}
     recording_start = recording_end = None
     with source.open('rb') as handle:
         reader = make_reader(handle)
@@ -170,6 +219,14 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             progress.update('读取 MCAP', 25 * message_index / max(1, message_total) if message_total else 0,
                             message_index, message_total, '条消息')
             topic = channel.topic
+            if channel.message_encoding == 'json' and topic in ('/events/control/intervention', '/events/recording/sample_provenance'):
+                event = json.loads(message.data)
+                if event.get('kind') == 'session_close' and event.get('capture_mode') == 'full_session':
+                    session = session or event
+                elif event.get('kind') == 'manual_close' and event.get('capture_mode') != 'full_session':
+                    correction = correction or event
+                elif event.get('role') == 'initial_observation':
+                    first_observations[event['topic']] = event
             if channel.message_encoding != 'cdr' or schema is None:
                 continue
             kind = schema.name
@@ -230,22 +287,73 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                     raise RuntimeError(f'Cannot save staging image {filename}')
                 streams.setdefault(key, []).append((message.log_time, str(filename)))
                 source_topics[key] = topic
+    if snapshot:
+        # Preserve required auxiliary numeric columns even when their device
+        # source is entirely absent. The schema's presence_and_validity policy
+        # encodes this as zero values with source_available/source_valid = 0.
+        topic_by_numeric = {key: topic for topic, key in numeric_topics.items()}
+        feature_sources = snapshot['effective_adapter']['feature_sources']
+        for name, declaration in snapshot['output']['features'].items():
+            key = feature_sources.get(name, name)
+            topic = topic_by_numeric.get(key)
+            if (topic and declaration.get('required', True)
+                    and declaration.get('missing') == 'presence_and_validity'):
+                streams.setdefault(key, [])
+                numeric_names.setdefault(key, list(declaration.get('names') or []))
+                source_topics.setdefault(key, topic)
     if not names or not raw_cameras.get('action'):
         raise ValueError('LeRobot requires recorded /observation/joint_states and /action/joint_states; missing grid samples are explicitly masked')
-    first_action_names = list(raw_cameras['action'][0][1].name)
+    observed_action_names = list(dict.fromkeys(
+        name for _, message in raw_cameras['action'] for name in message.name
+    ))
+    first_action_names = observed_action_names
     if not first_action_names:
         raise ValueError('Action has no joint names')
     # A command may intentionally omit passive/free joints in the feedback.
     # Keep common joints in feedback order, with command-only joints appended.
     action_names = [name for name in names if name in first_action_names]
     action_names.extend(name for name in first_action_names if name not in names)
+    if snapshot:
+        action_feature = next((declaration for name, declaration in snapshot['output']['features'].items()
+                               if snapshot['effective_adapter']['feature_sources'].get(name, name) == 'action'), None)
+        action_names = list(action_feature.get('names') or first_action_names) if action_feature else first_action_names
+    action_axis_samples = []
     for key, samples in raw_cameras.items():
         stream_names = (names if key == 'observation.state' else action_names if key == 'action'
                         else action_map[source_topics[key]]['names'])
         if key.startswith('action.source.'):
             numeric_names[key] = stream_names
         try:
-            streams[key] = [(stamp, joint_vector(message, stream_names)) for stamp, message in samples]
+            if key == 'action' and correction:
+                values, times, aggregate = {}, {}, []
+                for stamp, message in samples:
+                    partial = joint_vector(message, list(message.name))
+                    values.update(zip(message.name, partial))
+                    times.update((name, stamp) for name in message.name)
+                    aggregate.append((stamp, [values.get(name, 0.) for name in stream_names]))
+                    action_axis_samples.append((stamp, [times.get(name, -1) for name in stream_names]))
+                streams[key] = aggregate
+            elif key == 'action':
+                # /action/joint_states is intentionally a partial command: an
+                # inactive subsystem is omitted so it cannot be driven. Keep a
+                # stable union (or the frozen task schema), hold only the stored
+                # numeric placeholder, and expose per-axis validity so absence
+                # is never interpreted as a command.
+                aggregate = []
+                held = {}
+                for stamp, message in samples:
+                    if (len(message.name) != len(message.position)
+                            or len(set(message.name)) != len(message.name)):
+                        raise ValueError('JointState names/positions malformed')
+                    current = {name: float(value) for name, value in zip(message.name, message.position)}
+                    if not all(math.isfinite(value) for value in current.values()):
+                        raise ValueError('JointState contains non-finite positions')
+                    aggregate.append((stamp, [current.get(name, held.get(name, 0.0)) for name in action_names]))
+                    action_axis_samples.append((stamp, [name in current for name in action_names]))
+                    held.update(current)
+                streams[key] = aggregate
+            else:
+                streams[key] = [(stamp, joint_vector(message, stream_names)) for stamp, message in samples]
         except ValueError as error:
             raise ValueError(f"{source_topics[key]}: {error}") from error
     for topic, key in extra_keys.items():
@@ -253,13 +361,23 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             streams[key] = []
             source_topics[key] = topic
             numeric_names[key] = action_map[topic]['names']
+    partial_action = bool(action_axis_samples) and any(not all(sample[1]) for sample in action_axis_samples)
     progress.update("对齐时间轴", 25, force=True)
     episodes = []
     origin = recording_start
+    if correction:
+        # Extra command sources are not final HC evidence. A correction export
+        # must never append a public program target or fabricate a held axis.
+        if action_sources:
+            raise ValueError('correction export uses only final HC actions; disable extra action_sources for this session')
+        recording_start = correction.get('quality', {}).get('first_action_ns')
+        recording_end = correction['end_ns']-1
+        if recording_start is None:
+            raise ValueError('No final human action in this correction; source remains downloadable')
     keys = list(streams)
     audit = {'source_counts': {key: len(samples) for key, samples in streams.items()}}
     placeholders = {}
-    for key, shape in dimensions.items():
+    for key, shape in (dimensions.items() if not snapshot else []):
         import numpy as np
         filename = staging / key / 'missing.png'
         if not cv2.imwrite(str(filename), np.zeros(shape, dtype=np.uint8)):
@@ -268,25 +386,59 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     for key in streams:
         if key not in placeholders:
             placeholders[key] = [0.0] * (len(names) if key == 'observation.state' else len(action_names) if key == 'action' else len(numeric_names[key]))
-    for episode in synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages):
+    aligned = (preserved_episode(streams, fps, audit) if snapshot else
+               synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages))
+    if snapshot and audit.get('source_frequency_hz'):
+        # LeRobot uses an integer nominal rate; original timestamps remain in rows.
+        fps = max(1, round(audit['source_frequency_hz']))
+    for episode in aligned:
         rows = []
         for stamp, selected in episode:
             values = {key: sample[1] if sample is not None else placeholders[key]
                       for key, sample in selected.items()}
             values['action'] = list(values['action']) + [v for key in extra_keys.values() for v in values[key]]
             ages = [(stamp - selected[key][0]) / 1e9 if selected[key] is not None else -1.0 for key in keys]
-            rows.append({'values': values,
+            row = {'values': values,
                          'source_times': [(selected[key][0] - origin) / 1e9 if selected[key] is not None else -1.0 for key in keys],
                          'source_available': [float(selected[key] is not None) for key in keys],
                          'source_valid': [float(selected[key] is not None and ages[i] <= max_ages.get(key, sample_max_age(key)) / 1e9) for i, key in enumerate(keys)],
-                         'source_age': ages, 'grid_time': (stamp - origin) / 1e9})
-        episodes.append(rows)
+                         'source_age': ages, 'grid_time': (stamp - origin) / 1e9}
+            if session:
+                row['intervention'] = any(interval['start_ns'] <= stamp < interval.get('end_ns', session['end_ns'])
+                                           for interval in session.get('interventions', []))
+            if correction:
+                axis_times = latest_sample(action_axis_samples, stamp, None)
+                valid = [value >= 0 and 0 <= stamp-value <= sample_max_age('action')
+                         for value in axis_times[1]] if axis_times else [False]*len(action_names)
+                row['action_valid'] = valid
+                row['source_valid'][keys.index('action')] *= float(all(valid))
+                usable = all(row['source_valid'][index] for index, key in enumerate(keys) if required_stream(key))
+                if not usable:
+                    if rows:
+                        episodes.append(rows)
+                        rows = []
+                    audit['rejected_frames'] += 1
+                    audit['retained_frames'] -= 1
+                    continue
+            elif partial_action:
+                axis_sample = latest_sample(action_axis_samples, stamp, sample_max_age('action'))
+                row['action_valid'] = ([bool(value) for value in axis_sample[1]] if axis_sample
+                                       else [False] * len(action_names))
+            rows.append(row)
+        if rows:
+            episodes.append(rows)
     if not episodes:
         raise ValueError('No recording timeline samples; check recorded topics')
     action_names = action_names + [name for item in action_sources for name in item['names']]
     if len(set(action_names)) != len(action_names):
         raise ValueError('action source joint names overlap')
-    manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
+    manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'action_axis_validity': partial_action, 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': action_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
+    if snapshot: manifest["capture_snapshot"] = snapshot
+    if session:
+        manifest['session'] = session
+    if correction:
+        manifest.update(correction=correction, initial_observations=first_observations,
+                        action_semantics='HC final sent goal; measured feedback is observation.state; outcome unknown')
     path = staging / 'manifest.json'
     path.write_text(json.dumps(manifest), encoding='utf-8')
     progress.update("对齐完成", 30, sum(map(len, episodes)), sum(map(len, episodes)), "帧", force=True)
@@ -318,6 +470,7 @@ def encode_episode_mp4(image_dir: Path, destination: Path, fps: int, on_frame=No
         stream.width, stream.height = width, height
         stream.pix_fmt = "yuv420p" if width % 2 == 0 and height % 2 == 0 else "yuv444p"
         stream.codec_context.max_b_frames = 0
+        stream.codec_context.thread_count = 1
         stream.codec_context.gop_size = fps
         stream.codec_context.time_base = Fraction(1, fps)
         for index, filename in enumerate(files):
@@ -358,9 +511,27 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
         features[key] = {'dtype': 'video', 'shape': tuple(shape), 'names': ['height', 'width', 'channels']}
     features['observation.source_time'] = {'dtype': 'float64', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
     features['observation.recording_time'] = {'dtype': 'float64', 'shape': (1,), 'names': ['seconds_since_first_log_time']}
+    if manifest.get('correction') or manifest.get('session'):
+        features['intervention'] = {'dtype': 'bool', 'shape': (1,), 'names': ['human_action']}
+    if manifest.get('correction') or manifest.get('action_axis_validity'):
+        features['action.valid'] = {'dtype': 'bool', 'shape': (len(joint_names['action']),), 'names': joint_names['action']}
     if 'sync_audit' in manifest:
         for field in ('source_available', 'source_valid', 'source_age'):
             features['observation.' + field] = {'dtype': 'float32', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
+    if manifest.get('capture_snapshot'):
+        from humanoid_upload.capture_plan import LEROBOT_GENERATED_FEATURES, validate_lerobot_info
+        snapshot = manifest['capture_snapshot']
+        for name, declaration in snapshot['output']['features'].items():
+            source = snapshot['effective_adapter']['feature_sources'].get(name, name)
+            if source in features and features[source]['dtype'] in ('float32', 'float64'):
+                # JointState contains float64. Preserve it when the shared MCAP/LeRobot
+                # contract explicitly requires that precision.
+                if declaration['dtype'] in ('float32', 'float64'):
+                    features[source]['dtype'] = declaration['dtype']
+                if declaration.get('units'):
+                    features[source]['units'] = declaration['units']
+        validate_lerobot_info(manifest['capture_snapshot'], {'fps': manifest['fps'], 'codebase_version': 'v3.0',
+            'features': {**LEROBOT_GENERATED_FEATURES, **json.loads(json.dumps(features))}})
     repo_id = 'local/' + re.sub('[^a-zA-Z0-9_-]', '_', destination.name)
     class TeleopLeRobotDataset(LeRobotDataset):
         def _encode_temporary_episode_video(self, video_key, episode_index):
@@ -386,9 +557,13 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
         for row in episode:
             frame = {'task': manifest['task']}
             for key, value in row['values'].items():
-                frame[key] = np.asarray(Image.open(value).convert('RGB')) if key in manifest['dimensions'] else np.asarray(value, dtype=np.float32)
+                frame[key] = np.asarray(Image.open(value).convert('RGB')) if key in manifest['dimensions'] else np.asarray(value, dtype=features[key]['dtype'])
             frame['observation.source_time'] = np.asarray(row['source_times'], dtype=np.float64)
             frame['observation.recording_time'] = np.asarray([row['grid_time']], dtype=np.float64)
+            if manifest.get('correction') or manifest.get('session'):
+                frame['intervention'] = np.asarray([True if manifest.get('correction') else row['intervention']], dtype=bool)
+            if manifest.get('correction') or manifest.get('action_axis_validity'):
+                frame['action.valid'] = np.asarray(row['action_valid'], dtype=bool)
             if 'sync_audit' in manifest:
                 for field in ('source_available', 'source_valid', 'source_age'):
                     frame['observation.' + field] = np.asarray(row[field], dtype=np.float32)
@@ -414,6 +589,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     synchronization['action_joint_names'] = joint_names['action']
     synchronization['action_sources'] = manifest.get('action_sources', [])
     synchronization['action_semantics'] = manifest.get('action_semantics', 'upstream_command_not_execution')
+    synchronization['action_axis_validity'] = bool(manifest.get('action_axis_validity'))
     synchronization['joint_alignment'] = 'observation.state uses feedback joints; action uses commanded joints; ordered by joint name, no feedback substituted for absent commands'
     synchronization['task'] = manifest['task']
     synchronization['source_frame_ids'] = manifest.get('source_frame_ids', {})
@@ -421,6 +597,18 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     synchronization['missing_policy'] = 'all sources: hold last observed value when stale, source_valid=0; before first sample use zero numeric/black image placeholders with source_available=0, source_valid=0 and source_time/source_age=-1; no future samples used'
     synchronization['auxiliary_policy'] = 'causal last observed value; never gates row selection; source_available=0 and value=0/source_time=-1/source_age=-1 before first sample; source_valid=0 when missing or stale; stale velocity is not asserted to remain active'
     synchronization.update({'clock': 'MCAP log_time (wall receive time), not ROS header time', 'selection': 'one recording is one episode, full MCAP log_time span on fixed FPS grid; causal last sample, no rows deleted for missing/stale values', 'state_action_max_age_seconds': 0.2, 'camera_max_age_seconds': 0.25, 'source_mcap_preserved': True, 'images': 'H.264 MP4 with no B frames, CRF 23; short episodes stream-concatenated without padding or dropping frames', 'joint_position_units': 'source ROS JointState units (revolute radians, prismatic meters)' })
+    if manifest.get('capture_snapshot'):
+        synchronization.update(selection='original state log_time samples, original frame count and frequency',
+            missing_policy='absent optional streams remain absent; unsupported per-frame gaps stop export',
+            auxiliary_policy='actual causal samples only; no numeric or image placeholders')
+    if manifest.get('correction'):
+        synchronization.update(correction=manifest['correction'], initial_observations=manifest['initial_observations'],
+            clock='MCAP log_time equals original source header or final HC send time; receive provenance retained in source',
+            selection='one correction identity; continuous valid subepisodes split at gaps; recording_time preserves original offsets',
+            intervention_semantics='true means human action, not success; outcome unknown')
+    if manifest.get('session'):
+        synchronization.update(session=manifest['session'],
+            intervention_semantics='true during human-control intervals; false outside; not a success label')
     (destination / 'meta' / 'teleop_sync.json').write_text(json.dumps(synchronization, ensure_ascii=False, indent=2))
     return {'path': str(destination), 'format': 'lerobot', 'frames': len(loaded), 'episodes': len(manifest['episodes']), 'fps': manifest['fps'], 'cameras': list(manifest['dimensions']), 'episode_lengths': [len(episode) for episode in manifest['episodes']], 'image_storage': 'mp4_h264', 'sync_audit': manifest.get('sync_audit', {})}
 
@@ -443,6 +631,18 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
         if process.returncode:
             raise RuntimeError('LeRobot writer failed: ' + process.stderr[-6000:])
         result = json.loads(process.stdout.strip().splitlines()[-1])
+        prepared = json.loads(manifest.read_text())
+        if prepared.get('capture_snapshot'):
+            from humanoid_upload.capture_plan import validate_lerobot_info
+            from humanoid_upload.common import atomic_json, read_json
+            snapshot = prepared['capture_snapshot']
+            presence = validate_lerobot_info(snapshot, read_json(staged_dataset / 'meta/info.json'))
+            atomic_json(staged_dataset / 'capture-context.json', {'schema_version': 'hc-capture-context/v1',
+                'recording_id': snapshot['recording_id'], 'capture_snapshot': snapshot, 'feature_presence': presence})
+        from middleware.core.takeover_log import takeover_file
+        takeovers = takeover_file(source)
+        if takeovers:
+            shutil.copyfile(takeovers, staged_dataset / 'meta/takeovers.json')
         if destination.exists():
             raise FileExistsError(f'Destination was created during export: {destination}')
         staged_dataset.rename(destination)

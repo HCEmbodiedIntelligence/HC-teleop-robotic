@@ -168,8 +168,10 @@ def stabilize_pose(
     position_deadband: float,
     orientation_deadband: float,
     filter_alpha: float,
+    max_linear_step: float | None = None,
+    max_angular_step: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply radial deadbands and low-pass smoothing to a pose target."""
+    """Apply radial deadbands, low-pass smoothing, and slew-rate limits to a pose target."""
     if position_deadband < 0.0 or orientation_deadband < 0.0:
         raise ValueError("pose deadbands must be non-negative")
     if not 0.0 < filter_alpha <= 1.0:
@@ -185,7 +187,12 @@ def stabilize_pose(
         effective_delta = position_delta * (
             (position_distance - position_deadband) / position_distance
         )
-        position = previous_position_array + filter_alpha * effective_delta
+        step_delta = filter_alpha * effective_delta
+        if max_linear_step is not None and max_linear_step > 0.0:
+            step_norm = float(np.linalg.norm(step_delta))
+            if step_norm > max_linear_step:
+                step_delta = step_delta * (max_linear_step / step_norm)
+        position = previous_position_array + step_delta
 
     previous_quaternion = normalize_quaternion(previous_orientation)
     rotation_delta = orientation_error(target_orientation, previous_quaternion)
@@ -194,6 +201,8 @@ def stabilize_pose(
         orientation = previous_quaternion
     else:
         step_angle = filter_alpha * (rotation_angle - orientation_deadband)
+        if max_angular_step is not None and max_angular_step > 0.0:
+            step_angle = min(step_angle, float(max_angular_step))
         step = quaternion_from_axis_angle(rotation_delta / rotation_angle, step_angle)
         orientation = quaternion_multiply(step, previous_quaternion)
     return position, orientation

@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from conftest import G0
+from pathlib import Path
 from humanoid_upload.bundle import checksum
 from humanoid_upload.cli import scan, exports
 from humanoid_upload.common import UploadError, atomic_json, canonical, read_json
@@ -17,7 +17,7 @@ def recording(tmp_path,cfg):
     root=tmp_path/'data/recording'
     root.mkdir(parents=True)
     cfg['data_directory']=str(root.parent)
-    shutil.copyfile(next((G0/'fixtures/valid-openarm').rglob('*.mp4')),root/'front.mp4')
+    shutil.copyfile(Path(__file__).parent/'fixtures/openarm-raw-v1/videos/camera_left/000000.mp4',root/'front.mp4')
     (root/'sensors.mcap').write_bytes(b'protocol-only-test-fixture')
     config={'schema_version':'recording-config/v1','recorder_version':'openarm-session/v2',
         'primary_clock_domain':'recording_grid','cameras':[{'camera_id':'front','topic':'/camera/front/image_raw',

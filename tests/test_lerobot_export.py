@@ -229,6 +229,37 @@ def test_prepare_mcap_action_joint_subset_has_independent_names(subset_action_jo
     assert all(row['source_available'] == row['source_valid'] == [1., 1.] for row in rows)
 
 
+def test_prepare_mcap_preserves_changing_partial_action_with_axis_validity(tmp_path, monkeypatch):
+    import json
+    import sys
+    from types import SimpleNamespace
+    from mcap.writer import Writer
+    from middleware.core.lerobot_export import prepare_mcap
+
+    monkeypatch.setitem(sys.modules, 'rclpy.serialization', SimpleNamespace(
+        deserialize_message=lambda data, _: SimpleNamespace(**json.loads(data))))
+    monkeypatch.setitem(sys.modules, 'rosidl_runtime_py.utilities', SimpleNamespace(get_message=lambda _: object))
+    source = tmp_path / 'changing_action.mcap'
+    with source.open('wb') as handle:
+        writer = Writer(handle); writer.start()
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        state = writer.register_channel('/observation/joint_states', 'cdr', schema)
+        action = writer.register_channel('/action/joint_states', 'cdr', schema)
+        for index, command in enumerate(({'arm': 1., 'waist': 2.}, {'arm': 3.})):
+            stamp = 1_000_000_000 + index * 100_000_000
+            writer.add_message(state, stamp, json.dumps({'name': ['arm', 'waist'],
+                'position': [10. + index, 20. + index]}).encode(), stamp)
+            writer.add_message(action, stamp, json.dumps({'name': list(command),
+                'position': list(command.values())}).encode(), stamp)
+        writer.finish()
+    staging = tmp_path / 'stage'; staging.mkdir()
+    manifest = json.loads(prepare_mcap(source, staging, 10, 'changing action', 'x1').read_text())
+    assert manifest['action_joint_names'] == ['arm', 'waist']
+    assert manifest['action_axis_validity'] is True
+    assert [row['values']['action'] for row in manifest['episodes'][0]] == [[1., 2.], [3., 2.]]
+    assert [row['action_valid'] for row in manifest['episodes'][0]] == [[True, True], [True, False]]
+
+
 def test_official_loader_independent_action_joint_dimensions(subset_action_joint_manifest):
     import os
     import subprocess

@@ -160,6 +160,46 @@ def _solve_box_lsq(matrix, target, damping, lower, upper, max_iter=None):
     return np.minimum(np.maximum(velocity, lower), upper)
 
 
+def acceleration_velocity_bounds(interface, q, dt, lower, upper,
+                                 previous_velocity, acceleration_limits):
+    """Intersect rate bounds with discrete stopping-distance constraints.
+
+    q_next = q + v_next * dt.  Braking by a*dt on subsequent ticks travels
+    dt * sum(max(v_next - k*a*dt, 0)).  Inverting that sum prevents reaching
+    a position limit with a velocity that cannot be stopped on the next tick.
+    """
+    previous = np.asarray(previous_velocity, dtype=float)
+    acceleration = np.asarray(acceleration_limits, dtype=float)
+    if (previous.shape != lower.shape or acceleration.shape != lower.shape
+            or not np.all(np.isfinite(previous))
+            or not np.all(np.isfinite(acceleration)) or np.any(acceleration <= 0)):
+        raise ValueError("invalid acceleration limits or previous velocity")
+    q_lower, q_upper = interface.configuration_bounds_free()
+    q_free = interface.free_configuration(q)
+
+    def stopping_speed(distance):
+        result = np.full(distance.shape, np.inf)
+        finite = np.isfinite(distance)
+        d = np.maximum(distance[finite], 0.0)
+        a = acceleration[finite]
+        n = np.floor((np.sqrt(1.0 + 8.0*d/(a*dt*dt)) - 1.0)/2.0)
+        result[finite] = d/((n+1.0)*dt) + 0.5*a*dt*n
+        return result
+
+    lower = np.maximum(lower, -stopping_speed(q_free - q_lower))
+    upper = np.minimum(upper, stopping_speed(q_upper - q_free))
+    lower = np.maximum(lower, previous - acceleration * dt)
+    upper = np.minimum(upper, previous + acceleration * dt)
+    conflict = lower > upper
+    if np.any(conflict):
+        mid = 0.5 * (q_lower + q_upper)
+        towards_lower = q_free > mid
+        safe_val = np.where(towards_lower, upper, lower)
+        lower = np.where(conflict, safe_val, lower)
+        upper = np.where(conflict, safe_val, upper)
+    return np.minimum(lower, upper), np.maximum(lower, upper)
+
+
 def _compute_adaptive_damping(matrix: np.ndarray, base_damping: float) -> float:
     base = max(float(base_damping), 1.5e-3)
     if matrix.shape[0] == 0:
@@ -180,10 +220,16 @@ def _compute_adaptive_damping(matrix: np.ndarray, base_damping: float) -> float:
 def solve_ik(
     interface, q: np.ndarray, tasks: Sequence, targets, dt: float,
     velocity_limits=None, damping: float = 1e-5,
+    previous_velocity=None, acceleration_limits=None,
 ) -> SolveIKResult:
     q = np.asarray(q, dtype=float)
     matrix, target = _stack_tasks(interface, q, tasks, targets)
     lower, upper = velocity_bounds(interface, q, float(dt), velocity_limits)
+    if acceleration_limits is not None:
+        lower, upper = acceleration_velocity_bounds(
+            interface, q, float(dt), lower, upper,
+            previous_velocity, acceleration_limits,
+        )
     if matrix.shape[0] == 0:
         velocity = np.zeros(interface.nv_free)
         residual = 0.0

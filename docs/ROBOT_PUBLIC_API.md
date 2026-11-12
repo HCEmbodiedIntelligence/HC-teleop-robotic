@@ -1,10 +1,10 @@
 # 第三方机械臂控制与订阅接口
 
-当前源码实现 `hc-robot-api/v1`。OpenArmX、X1 的统一模式均使用 Motion；算法客户端在线获取本机能力，无需机型参数或厂商 SDK。机械臂名称为 `left_joint_1…N`、`right_joint_1…N`，数量和限位由 profile 决定。专用六轴测试模型验证了动态 DOF。
+显式启用 `HC_CONTROL_BACKEND=motion` 时，本仓库提供 `hc-robot-api/v1`。默认 v23 模式沿用原生名称与接口，不发布统一 API 能力。OpenArmX、X1 的统一模式均使用 Motion；算法客户端在线获取本机能力，无需机型参数或厂商 SDK。机械臂名称为 `left_joint_1…N`、`right_joint_1…N`，数量和限位由 profile 决定。专用六轴测试模型验证了动态 DOF。
 
-本次软件验收使用实际 Motion/IK/最终 RTC、HC 中间件、实际适配器和假硬件闭环。详细结论、失败及复测日志见工作区 [本次验收报告](../../../reports/unified-robot-api-20261015-165101/RESULT.md)。没有连接真实电机或 CAN；没有运行 Isaac 图形仿真、跨电脑 DDS 或外部 X1 真机驱动。
+humanoid 分支的历史软件验收使用实际 Motion/IK/最终 RTC、HC 中间件、实际适配器和假硬件闭环。详细结论、失败及复测日志见工作区 [本次验收报告](../../../reports/unified-robot-api-20261015-165101/RESULT.md)。没有连接真实电机或 CAN；没有运行 Isaac 图形仿真、跨电脑 DDS 或外部 X1 真机驱动。
 
-另已使用仓库现有 PyBullet 仿真和两种机型原有 URDF，分别通过实际 `RecordingService` 录制公共关节状态、动作及 FK，并用 `UploadService` 上传至本机平台的独立仿真任务。对象存储读回校验一致；此次没有相机流。MCAP 原始文件接收已验证，Episode/质检未完成，不等同于训练数据就绪。
+该分支历史上另使用 PyBullet 仿真和两种机型原有 URDF，分别通过实际 `RecordingService` 录制公共关节状态、动作及 FK，并用 `UploadService` 上传至本机平台的独立仿真任务。对象存储读回校验一致；此次没有相机流。MCAP 原始文件接收已验证，Episode/质检未完成，不等同于训练数据就绪。
 
 ## 在线能力与公共端点
 
@@ -94,7 +94,7 @@ VR 映射位姿 ─独立 VR 来源检查─┘
 
 统一解析器为 `middleware/core/robot_api.py`。`robot_api.yaml` 引用 `arm_teleop.yaml` 的 arms/body 有序分组和 `robot.initial_joints`，结合 URDF 及 Motion 限位解析；不维护第二套模型或 home。Motion/SDK 分组必须一致，不支持的配置在启动前拒绝。
 
-导出的完整 profile ZIP 保留 `robot_api.yaml`、Motion 配置和资源；导入时重新校验。只含 URDF/旧 VR 配置的历史 profile 保留旧能力，但明确标记统一 API 不可用及原因。OpenArmX、X1 统一模式要求 Motion，不可覆盖回 v23 来绕过新边界。
+导出的完整 profile ZIP 保留 `robot_api.yaml`、Motion 配置和资源；导入时重新校验。只含 URDF/旧 VR 配置的历史 profile 保留旧能力，但明确标记统一 API 不可用及原因。OpenArmX、X1 的统一模式要求 Motion；显式使用 v23 时整条链恢复为旧接口模式，不声明统一 API 能力。
 
 各入口共同遵循 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 优先于配置文件；配置中的相对 root 相对配置文件目录解析。运行时固定所选 profile。切换／修改配置应停止旧输出，并一致重启中间件、Motion、遥操作和硬件适配器；不能在旧控制器仍运行时只换能力描述。
 
@@ -103,6 +103,7 @@ VR 映射位姿 ─独立 VR 来源检查─┘
 ```bash
 source /home/hc_op/workspace/teleop_ws/setup_hc.bash
 cd /home/hc_op/workspace/teleop_ws/src/HC-teleop-robotic
+export HC_CONTROL_BACKEND=motion
 export HC_ROBOT_NAME=openarmx     # 换 X1 时设为 x1
 # 可选 export HC_ROBOT_CONFIG_ROOT=/path/to/profiles
 /usr/bin/python3 middleware/profile_cli.py api
@@ -111,7 +112,7 @@ export HC_ROBOT_NAME=openarmx     # 换 X1 时设为 x1
 
 生成目录含可审阅的 `robot_api.resolved.yaml`、`robot_info.json`、`motion.yaml`、`sdk.yaml`、`channels.yaml`、`driver.yaml`。`tools/run_motion.sh` 与 `tools/run_robot_driver.sh` 分别生成并实际消费对应参数，驱动连接话题来自 profile。
 
-构建 HC 内 Motion 后设置与构建一致的 `HC_MOTION_INSTALL`；`./run.sh teleop` 启动中间件和统一控制链。硬件项目单独启动厂商控制器，适配器使用 `bash tools/run_robot_driver.sh` 消费当前 profile。OpenArmX `--fake` 只选择假硬件健康契约，不会自动创建假控制器。避免同时启动旧话题参数的第二个 adapter。选择 profile、启动中间件或订阅能力都不会自动连接或使能真机。
+构建 HC 内 Motion 后设置与构建一致的 `HC_MOTION_INSTALL`；`HC_CONTROL_BACKEND=motion ./run.sh teleop` 启动中间件和统一控制链。硬件项目单独启动厂商控制器，适配器使用 `bash tools/run_robot_driver.sh` 消费当前 profile。OpenArmX `--fake` 只选择假硬件健康契约，不会自动创建假控制器。避免同时启动旧话题参数的第二个 adapter。选择 profile、启动中间件或订阅能力都不会自动连接或使能真机。
 
 硬件契约见 [hardware_interface_v2.yaml](../interfaces/hardware_interface_v2.yaml)：统一模式增加 `robot_api_schema: hc-robot-api/v1`，驱动使用 internal 模型话题，公共话题由 HC 转换持有。旧原生名进程必须整体迁移或隔离到显式 legacy 命名空间，不能在同一公共话题混发。
 
@@ -138,3 +139,5 @@ export HC_ROBOT_NAME=openarmx     # 换 X1 时设为 x1
 录制元数据保存公共 `free_joints`、`robot_api_schema`、`robot_api_revision`、完整 `robot_api_info`。公共总状态、分组状态、选中目标和 Action 使用同一名称表。Drive 回放要求当前 schema/revision 匹配，并再次校验目标；显式授予回放后才将历史采样时间换成当前执行时间。缺少统一 API 元数据的历史原生名录制明确拒绝驱动，不静默当作新格式；只读查看不受此迁移限制。需驱动历史数据时，应先进行显式离线转换并审阅。
 
 外骨骼仍是独立选中来源，输入 `/control/exoskeleton/joint_states` 必须使用公共名；原生名目标在选择器入口拒绝。夹爪手指、底盘和相机沿用各自可选话题，不能仅根据双臂 API 假定硬件具备这些能力。更多示例与复测入口见 [examples/README.md](../examples/README.md)。
+
+当前 main 的录制生命周期由 TopicRecorder/TaskRecorder 管理，支持 MCAP、MCAP＋RGB MP4（深度消息原样保留）、LeRobot 与双格式。历史验收中提到的 RecordingService、平台数据工作台及相机标定录制不在本次合并范围。当前结果以 [分支整合说明](MAIN_HUMANOID_INTEGRATION.md) 为准。

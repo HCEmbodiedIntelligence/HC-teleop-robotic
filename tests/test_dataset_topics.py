@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+import pytest
 
 from geometry_msgs.msg import PoseArray, Pose, PoseStamped
 from sensor_msgs.msg import JointState
@@ -81,17 +82,59 @@ def test_head_tracking_and_raw_coordinate_preservation():
     assert out[0].pose.position.y == 2.
 
 
-def test_config_records_all_projected_topics_and_raw_vr():
+def test_robot_head_actual_and_target_are_split_with_frame_preserved():
+    b = bridge()
+    sources = dict(b.subscriptions)
+    msg = PoseArray(poses=[Pose(), Pose()])
+    msg.header.frame_id = 'robot_base'
+    msg.header.stamp.sec = 9
+    msg.poses[0].position.x = 1.
+    msg.poses[1].position.x = 2.
+
+    sources['/status/head/tracking_poses'](msg)
+
+    actual = b.publishers['/observation/head/pose'].messages[0]
+    target = b.publishers['/action/head/pose'].messages[0]
+    assert actual.pose.position.x == 1.
+    assert target.pose.position.x == 2.
+    assert actual.header.frame_id == target.header.frame_id == 'robot_base'
+    assert actual.header.stamp.sec == target.header.stamp.sec == 9
+
+
+def test_camera_metadata_is_relayed_unchanged_to_standard_topics():
+    b = bridge()
+    sources = dict(b.subscriptions)
+    calibration = String(data='{"schema":"hc_camera_calibration/v1"}')
+    extrinsics = String(data='{"schema":"hc_robot_camera_extrinsics/v1"}')
+
+    sources['/io_teleop/camera_head/calibration'](calibration)
+    sources['/io_teleop/camera_head/extrinsics'](extrinsics)
+
+    assert b.publishers['/observation/cameras/head/calibration'].messages == [calibration]
+    assert b.publishers['/observation/cameras/head/extrinsics'].messages == [extrinsics]
+
+
+def test_native_force_and_retired_vibration_topics_are_not_relayed():
+    b = bridge()
+    sources = dict(b.subscriptions)
+
+    assert '/io_teleop/state_ee_wrenches' not in sources
+    assert '/observation/ee_wrenches' not in b.publishers
+    assert '/io_teleop/vibration_feedback_exo' not in sources
+    assert '/observation/hands/vibration_feedback' not in b.publishers
+
+
+def test_config_offers_projected_topics_and_raw_vr_for_page_selection():
     from pathlib import Path
-    import yaml
-    from middleware.core.config import validate_config
-    config = validate_config(yaml.safe_load((Path(__file__).parents[1] / 'middleware/config.yaml').read_text()))
+    from middleware.core.config import ConfigStore
+    config = ConfigStore(Path(__file__).parents[1] / 'middleware/config.yaml').load()
     from middleware.core.dataset_topics import load_joint_groups
     config['ros']['dataset_topics']['joint_groups'] = load_joint_groups(config, Path(__file__).parents[1] / 'middleware')
     b = DatasetTopics(Node(), config['ros']['dataset_topics'])
-    recorded = {i['topic'] for i in config['ros']['subscriptions'] if i['enabled'] and 'record' in i['outputs']}
-    assert set(b.publishers) <= recorded
-    assert {'/vrdata', '/clock'} <= recorded
+    # Presence in the topic catalogue does not force the page to record it.
+    available = {i['topic'] for i in config['ros']['subscriptions']}
+    assert set(b.publishers) <= available
+    assert '/vrdata' in available
 
 
 def test_no_projection_subscribes_to_its_own_output():
@@ -99,22 +142,49 @@ def test_no_projection_subscribes_to_its_own_output():
     assert not ({topic for topic, callback in b.subscriptions} & set(b.publishers))
 
 
-def test_groups_follow_every_bundled_profile():
+@pytest.mark.parametrize('backend', ['v23', 'motion'])
+def test_groups_follow_every_bundled_profile(backend, monkeypatch):
     from pathlib import Path
     import yaml
     from middleware.core.dataset_topics import load_joint_groups
+    monkeypatch.setenv('HC_CONTROL_BACKEND', backend)
+    monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
+    monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
     root = Path(__file__).parents[1]
     config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
-    bundled = sorted((root / 'adapters/robots').glob('*/arm_teleop.yaml'))
-    assert bundled
-    for adapter in bundled:
-        profile = adapter.parent.name
+    profiles = sorted(path.parent.name for path in (root / 'adapters/robots').glob('*/arm_teleop.yaml'))
+    assert {'x1', 'openarmx'} <= set(profiles)
+    for profile in profiles:
         config['robot_profiles']['active'] = profile
         groups = load_joint_groups(config, root / 'middleware')
         source = yaml.safe_load((root / 'adapters/robots' / profile / 'arm_teleop.yaml').read_text())
         for side in ('left', 'right'):
             expected = source['arms'][side]['joint_names']
-            if (adapter.parent / 'robot_api.yaml').is_file():
+            if backend == 'motion':
                 expected = [f'{side}_joint_{i}' for i in range(1,len(expected)+1)]
             assert groups[side + '_arm'] == expected
         assert bool(groups.get('waist')) == bool(source.get('body', {}).get('waist_joint_names'))
+
+
+def test_groups_follow_profile_without_waist(tmp_path, monkeypatch):
+    from pathlib import Path
+    import yaml
+    from middleware.core.dataset_topics import load_joint_groups
+
+    root = Path(__file__).parents[1]
+    config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
+    profile = tmp_path / 'arms_only'
+    profile.mkdir()
+    source = {'arms': {
+        'left': {'joint_names': ['left_1', 'left_2']},
+        'right': {'joint_names': ['right_1', 'right_2']},
+    }, 'body': {'enabled': False, 'waist_joint_names': []}}
+    (profile / 'arm_teleop.yaml').write_text(yaml.safe_dump(source))
+    monkeypatch.setenv('HC_ROBOT_CONFIG_ROOT', str(tmp_path))
+    config['robot_profiles']['active'] = 'arms_only'
+
+    groups = load_joint_groups(config, root / 'middleware')
+    assert groups == {
+        'left_arm': ['left_1', 'left_2'],
+        'right_arm': ['right_1', 'right_2'],
+    }

@@ -207,6 +207,7 @@ def check_recovery_and_invalid(rig, info):
     rig.pump(.3,exo_target)
     model=rig.api.public[names[3]]
     assert abs(rig.positions[model['model_name']]-(model['scale']*target.position[3]+model['offset']))<.005
+    rig.pump(.1)  # Drain public feedback from the last valid exoskeleton sample.
     before=len(rig.received['/action/joint_states'])
     bad=JointState(name=[model['model_name']],position=[0.])
     def native_exo():

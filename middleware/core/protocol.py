@@ -9,6 +9,9 @@ from typing import Any
 
 
 DISCOVERY_REQUEST = b"PICO_DISCOVER_V1"
+DISCOVERY_RESPONSE_PREFIX = b"PICO_RECEIVER_V1|"
+DISCOVERY_BUSY_PREFIX = b"PICO_RECEIVER_BUSY|"
+RELEASE_REQUEST = b"PICO_RELEASE_V1"
 # v2 adds held/pressed/released masks and six analog values per controller.
 LEGACY_PACKET_FORMAT = "<4sBIdB21f"
 LEGACY_PACKET_SIZE = struct.calcsize(LEGACY_PACKET_FORMAT)

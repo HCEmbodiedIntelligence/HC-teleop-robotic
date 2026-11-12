@@ -86,9 +86,9 @@ class ArmTeleopConfigTests(unittest.TestCase):
     def test_robot_profile_uses_only_standard_command_topics(self):
         control = self.load_config()["control"]
         self.assertNotIn("command_smoothing", control)
-        self.assertEqual(control["joint_state_topic"], "/internal/robot/joint_states")
-        self.assertEqual(control["command_topic"], "/internal/vr/aux_joint_targets")
-        self.assertEqual(control["backend"], "motion")
+        self.assertEqual(control["joint_state_topic"], "/observation/joint_states")
+        self.assertEqual(control["command_topic"], "/control/vr/joint_states")
+        self.assertEqual(control["backend"], "v23")
 
     def test_x1_preserves_enabled_waist_group(self):
         config = self.load_config()

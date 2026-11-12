@@ -35,6 +35,10 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(os.environ)
         self.env.start()
         os.environ.pop('HC_EXTERNAL_STACK', None)
+        os.environ.pop('ROS_DOMAIN_ID', None)
+        os.environ.pop('HC_RUNTIME_MODE', None)
+        os.environ.pop('HC_SIMULATION_DOMAIN_ID', None)
+        os.environ.pop('HC_HARDWARE_DOMAIN_ID', None)
         self.commands = []
         real_spawn = asyncio.create_subprocess_exec
 
@@ -73,12 +77,25 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(self.profiles.root / 'test_bot'), args)
         self.assertIn('--headless', args)
         self.assertEqual(env['HC_ROBOT_NAME'], 'test_bot')
-        self.assertEqual(env['ROS_DOMAIN_ID'], str(self.store.value['ros']['domain_id']))
+        self.assertNotEqual(env['ROS_DOMAIN_ID'], '14')
+        self.assertEqual(env['ROS_LOCALHOST_ONLY'], '1')
         self.assertEqual(env['HC_TELEOP_MODE'], 'sim')
         async with self.service.lock:
             await self.service.stop()
         self.assertIsNotNone(process.returncode)
         self.assertEqual(self.service.state, 'stopped')
+
+    async def test_launcher_domain_override_reaches_simulation_and_controller(self):
+        os.environ['ROS_DOMAIN_ID'] = '229'
+        self.store.value['simulation']['with_control'] = True
+        self.assertEqual(self.store.value['ros']['domain_id'], 14)
+        async with self.service.lock:
+            await self.service.start()
+        await self.wait_state('running')
+        self.assertEqual(len(self.commands), 2)
+        self.assertEqual(len({env['ROS_DOMAIN_ID'] for _, env in self.commands}), 1)
+        self.assertTrue(all(env['ROS_DOMAIN_ID'] not in ('14', '229') for _, env in self.commands))
+        self.assertTrue(all(env['ROS_LOCALHOST_ONLY'] == '1' for _, env in self.commands))
 
     async def test_child_exit_is_reported_and_owned_peers_stop(self):
         self.store.value['simulation']['with_control'] = True
@@ -116,10 +133,14 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         try:
             response = await client.put('/api/simulation/options', json={'headless':'yes'})
             self.assertEqual(response.status, 400)
+            config = await (await client.get('/api/config')).json()
+            self.assertEqual(config['ros']['domain_id'], 14)
+            self.assertNotEqual(os.environ['ROS_DOMAIN_ID'], '14')
             response = await client.put('/api/simulation/options', json={
                 'headless':True, 'with_control':False, 'debug_joints':True})
             self.assertEqual(response.status, 200)
             self.assertTrue(ConfigStore(self.store.path).load()['simulation']['debug_joints'])
+            self.assertEqual(ConfigStore(self.store.path).load()['simulation']['startup_timeout_sec'], 120)
             response = await client.post('/api/simulation/start')
             self.assertEqual(response.status, 200, await response.text())
             response = await client.post('/api/simulation/start')
@@ -144,6 +165,69 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             response = await client.get('/api/status')
             self.assertEqual(response.status, 200)
+        finally:
+            await client.close()
+
+    async def test_native_viewer_uses_headless_backend_and_receives_frames(self):
+        self.store.value['simulation']['headless'] = False
+        self.store.save(self.store.value)
+        os.environ.pop('DISPLAY', None)
+        client = TestClient(TestServer(create_app(self.store)))
+        await client.start_server()
+        ws = await client.ws_connect('/ws')
+        try:
+            await ws.send_json({'type': 'simulation_viewer', 'data': {'enabled': True}})
+            while (await ws.receive_json()) .get('type') != 'simulation_viewer_ack':
+                pass
+            response = await client.post('/api/simulation/start')
+            self.assertEqual(response.status, 200, await response.text())
+            status = await response.json()
+            self.assertEqual(status['display_mode'], 'local_viewer')
+            self.assertIn('--headless', self.commands[0][0])
+            self.assertIn('--viewer-demand-file', self.commands[0][0])
+            async def frame():
+                while True:
+                    message = await ws.receive_json()
+                    if message.get('type') == 'simulation_frame':
+                        return message
+            message = await asyncio.wait_for(frame(), timeout=3)
+            self.assertEqual(message['data']['positions'], {'a': 0.1})
+            self.assertEqual(message['data']['profile_id'], 'test_bot')
+            await ws.close()
+            await asyncio.sleep(0.01)
+            status = await (await client.get('/api/simulation')).json()
+            self.assertEqual(status['viewer_clients'], 0)
+        finally:
+            await ws.close()
+            await client.close()
+
+    async def test_stalled_viewer_close_does_not_freeze_healthy_viewer(self):
+        received = asyncio.Queue()
+
+        class StalledViewer:
+            async def send_json(self, event):
+                await asyncio.sleep(60)
+
+            async def close(self):
+                await asyncio.sleep(60)
+
+        class HealthyViewer:
+            async def send_json(self, event):
+                await received.put(event)
+
+        stalled, healthy = StalledViewer(), HealthyViewer()
+        self.service.viewers.update((stalled, healthy))
+        self.service.state = 'running'
+        self.service.latest_frame = {'positions': {'a': 0.1}, 'base_pose': [[0, 0, 0], [0, 0, 0, 1]]}
+        with patch('middleware.core.app.SimulationService', return_value=self.service):
+            client = TestClient(TestServer(create_app(self.store)))
+        await client.start_server()
+        try:
+            await asyncio.wait_for(received.get(), timeout=2)
+            self.service.latest_frame = {'positions': {'a': 0.2}, 'base_pose': [[0, 0, 0], [0, 0, 0, 1]]}
+            event = await asyncio.wait_for(received.get(), timeout=2)
+            self.assertEqual(event['data']['positions'], {'a': 0.2})
+            self.assertNotIn(stalled, self.service.viewers)
         finally:
             await client.close()
 
@@ -206,3 +290,23 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             cfg['simulation'][key] = 'false'
             with self.assertRaises(ConfigError):
                 validate_config(cfg)
+
+
+def test_startup_timeout_validation():
+    for invalid in (True, 0, -1, 601, float("nan"), float("inf"), "120"):
+        with unittest.TestCase().assertRaises(ConfigError):
+            validate_config({"simulation": {"startup_timeout_sec": invalid}})
+    assert validate_config({"simulation": {"startup_timeout_sec": 180}})["simulation"]["startup_timeout_sec"] == 180
+
+
+class TeleopSimulationBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_teleop_cannot_start_simulation_without_external_stack_flag(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"HC_RUNTIME_MODE": "teleop"}):
+            os.environ.pop("HC_EXTERNAL_STACK", None)
+            store = ConfigStore(Path(root) / "config.yaml")
+            store.load()
+            service = SimulationService(store, RobotProfileManager(Path(root) / "profiles"))
+            self.assertFalse(service.status()["available"])
+            with self.assertRaises(SimulationError):
+                await service.start()
+            self.assertEqual(service.processes, [])

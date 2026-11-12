@@ -1,0 +1,69 @@
+urdf_path: urdf/hc_realman.urdf
+robot_name: HC_REALMAN
+wo_controller: false
+joint_index_order: pybullet
+base_pose:
+  position:
+  - 0.0
+  - 0.0
+  - 0.0
+  orientation:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+sim_camera:
+  distance: 3.2
+  yaw: 45
+  pitch: -20
+  target_position:
+  - 0.0
+  - 0.0
+  - 0.8
+sim_opengl2: true
+arms:
+  right:
+    base_link: ZZJ_Link
+    generic_task_base_link: base_arm_link
+    ee_link: right_hand_tcp
+    joint_names:
+    - right_joint1
+    - right_joint2
+    - right_joint3
+    - right_joint4
+    - right_joint5
+    - right_joint6
+  left:
+    base_link: ZZJ_Link
+    generic_task_base_link: Z_base_arm_link
+    ee_link: left_hand_tcp
+    joint_names:
+    - left_joint1
+    - left_joint2
+    - left_joint3
+    - left_joint4
+    - left_joint5
+    - left_joint6
+grippers:
+- joint_index:
+  - hand_narrow1_joint
+  - hand_wide1_joint
+- joint_index:
+  - Z_hand_narrow1_joint
+  - Z_hand_wide1_joint
+controller_indices:
+  cmd_ee:
+  - right_hand_tcp
+  - left_hand_tcp
+  base:
+  - ZZJ_Link
+  - ZZJ_Link
+vibration_thresholds:
+  ee_dist:
+  - 0.1
+  - 0.15
+arm_pos_scale: 1.0
+ee_wrt_head: false
+finger_command_topics:
+- /action/right_hand/joint_states
+- /action/left_hand/joint_states

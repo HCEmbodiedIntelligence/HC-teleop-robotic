@@ -7,7 +7,7 @@ function element(tag='div') {
   return {tag,children:[],style:{},dataset:{},textContent:'',append(...items){this.children.push(...items);},setAttribute(key,value){this[key]=value;},showModal(){this.open=true;},pause(){this.paused=true;},load(){this.loaded=true;}};
 }
 function setup(files=[]) {
-  const fields=Object.fromEntries(['datasetRows','datasetsSummary','selectAllDatasets','selectedDatasetCount','batchDeleteDatasets','datasetDetailDialog','datasetDetailTitle','datasetDetailMeta','datasetDetailSummary','datasetDetailChannelRows','datasetDetailVideos'].map(key=>['#'+key,element()]));
+  const fields=Object.fromEntries(['datasetRows','datasetsSummary','datasetsTitle','datasetFormatTabs','datasetMcapCount','datasetLerobotCount','datasetBundleCount','selectAllDatasets','selectedDatasetCount','batchDeleteDatasets','datasetDetailDialog','datasetDetailTitle','datasetDetailMeta','datasetDetailSummary','datasetDetailChannelRows','datasetDetailVideos'].map(key=>['#'+key,element()]));
   const calls=[];
   const ctx=vm.createContext({document:{querySelector:s=>fields[s]||null,querySelectorAll:()=>[],createElement:element},confirm:()=>true});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../middleware/core/static/app.js'),'utf8').replace(/init\(\);\s*$/,''),ctx);
@@ -24,10 +24,10 @@ test('LeRobot list uses opaque identifier, ZIP download and details without ROS 
   assert.match(cells[5].textContent,/122 帧.*1 episode/);
   assert.match(cells[6].textContent,/3 路相机.*15 FPS/);
   const actions=cells[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['详情','下载','删除']);
+  assert.deepEqual(actions.map(el=>el.textContent),['详情','下载','选择任务后上传','删除']);
   assert.equal(actions[1].href,'/api/recordings/lerobot%3Ateleop%20test/download');
   assert.equal(actions[1].download,'teleop test.zip');
-  await actions[2].onclick();
+  await actions.find(el=>el.textContent==='删除').onclick();
   assert.equal(calls.find(call=>call.options?.method==='DELETE').url,'/api/recordings/lerobot%3Ateleop%20test');
 });
 test('LeRobot details show aligned frame statistics, task, features and camera preview',()=>{
@@ -44,9 +44,9 @@ test('MCAP keeps replay and plain file download',async()=>{
   const {ctx,fields}=setup([{filename:'test.mcap',format:'MCAP',message_count:12,channels:[{topic:'/clock'}]}]);
   await vm.runInContext('loadDatasets()',ctx);
   const actions=fields['#datasetRows'].children[0].children[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['重放','编辑 / 预览','详情','下载','删除']);
-  assert.equal(actions[3].href,'/api/recordings/test.mcap/download');
-  assert.equal(actions[3].download,'test.mcap');
+  assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','下载','选择任务后上传','删除']);
+  assert.equal(actions[2].href,'/api/recordings/test.mcap/download');
+  assert.equal(actions[2].download,'test.mcap');
 });
 
 test('pending export appears immediately with stage, percentage and counters; operations disabled',async()=>{
@@ -59,7 +59,7 @@ test('pending export appears immediately with stage, percentage and counters; op
   assert.match(progress.children[0].textContent,/编码相机视频.*62%.*1 \/ 3 路视频/);
   assert.equal(progress.children[1].value,62);
   const actions=cells[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['下载','删除']);
+  assert.deepEqual(actions.map(el=>el.textContent),['下载','选择任务后上传','删除']);
   assert.ok(actions.every(el=>el.disabled));
   assert.equal(actions[0].href,undefined);
 });
@@ -84,13 +84,28 @@ test('refresh does not overlap requests and preserves checked dataset IDs',async
 test('dataset polling runs only on visible dataset page',()=>{
   const {ctx}=setup();let count=0,clears=0;
   ctx.location={hash:'#datasets'};ctx.document.visibilityState='visible';
-  ctx.setInterval=(callback,ms)=>{assert.equal(ms,2000);ctx.tick=callback;return 7;};
-  ctx.clearInterval=()=>clears++;
+  ctx.setTimeout=(callback,ms)=>{assert.equal(ms,30000);ctx.tick=callback;return 7;};
+  ctx.clearTimeout=()=>clears++;
   ctx.loadDatasets=()=>count++;
   vm.runInContext("updateDatasetPolling('datasets')",ctx);
-  assert.equal(count,1);ctx.tick();assert.equal(count,2);
+  assert.equal(count,1);
+  vm.runInContext('scheduleDatasetPolling([])',ctx);ctx.tick();assert.equal(count,2);
   ctx.location.hash='#topics';ctx.tick();assert.equal(count,2);
-  vm.runInContext("updateDatasetPolling('topics')",ctx);assert.equal(clears,1);
+  vm.runInContext("updateDatasetPolling('topics')",ctx);
   ctx.location.hash='#datasets';ctx.document.visibilityState='hidden';
   vm.runInContext("updateDatasetPolling('datasets')",ctx);assert.equal(count,2);
+});
+
+test('historical recording opens task selection without asking for artifact IDs',async()=>{
+  const {ctx,fields}=setup([{...dataset,artifact_id:'artifact-123',upload_artifact_state:'ready'},
+    {...dataset,id:'pending',is_current:true}]);
+  let selected=null;
+  ctx.window={platformUploadHistory:(...args)=>{selected=args;}};
+  await vm.runInContext('loadDatasets()',ctx);
+  const action = row => row.children[9].children[0].children.find(button=>button.textContent==='选择任务后上传');
+  const upload=action(fields['#datasetRows'].children[0]);
+  assert.equal(upload.disabled,false); upload.onclick();
+  assert.equal(selected[0],dataset.id);
+  assert.equal(selected[2],'LEROBOT_V3');
+  assert.equal(action(fields['#datasetRows'].children[1]).disabled,true);
 });

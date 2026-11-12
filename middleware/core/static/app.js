@@ -45,10 +45,16 @@ let profilesData = {active:'', profiles:[], standard_topics:{}};
 let ws = null;
 let pendingVrPose = null;
 let vrPoseFramePending = false;
-const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', config:'系统配置'};
+let interventionPending = false;
+let interventionStatus = null;
+let interventionCapture = null;
+const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', uploads:'上传管理', config:'系统配置'};
 let discoveredTopics = [];
 let latestTopicHealth = {};
 const jointMonitor = {command:new Map(), feedback:new Map()};
+let jointMonitorRenderTimer = null;
+let pipelineCounterSample = null;
+let latestPipelineActionRate = null;
 const standardTopicStandards = {
   vr_frame: { target_hz: 60, min_hz: 30 },
   joint_state: { target_hz: 100, min_hz: 50 },
@@ -117,8 +123,47 @@ async function api(url, options={}) {
     request.headers = {'Content-Type':'application/json', ...(request.headers||{})};
   }
   const response = await fetch(url, request);
-  if (!response.ok) throw new Error((await response.text()) || `${response.status}`);
+  if (!response.ok) {
+    const body=await response.text();
+    let payload;
+    try {payload=JSON.parse(body);} catch(_) {}
+    if(payload?.control_runtime)renderControlRuntime(payload.control_runtime);
+    throw new Error(payload?.control_runtime?.error||payload?.error||payload?.detail||body||`${response.status}`);
+  }
   return response.json();
+}
+
+function renderControlRuntime(runtime) {
+  const el=$('#controlRuntimeStatus');
+  if(!el)return;
+  const labels={running:'运行中',failed:'启动失败',stopped:'已停止',unmanaged:'未托管，需手动重启遥操入口'};
+  el.textContent=runtime
+    ?`控制进程：${labels[runtime.state]||runtime.state}；模型：${runtime.profile_id||'未选择'}${runtime.error?`；${runtime.error}`:''}`
+    :'控制进程状态未知，尚未确认配置生效';
+}
+
+function notifyConfigApplied(result,message) {
+  renderControlRuntime(result.control_runtime);
+  const runtime=result.control_runtime;
+  if(runtime?.state==='running') {
+    toast(`${message}；控制进程已同步重启。请重新使能，并松开再按 Grip 接管。${result.server_restart_required?'服务地址或配置目录变更仍需重启入口。':''}`);
+  } else {
+    toast(`${message}；${runtime?.state==='unmanaged'?'控制进程未托管，需手动重启遥操入口':runtime?.state==='stopped'?'控制进程未运行':'尚未确认控制进程生效'}`,true);
+  }
+}
+
+async function configAction(action) {
+  const buttons=['activateProfile','saveConfig','saveCameras','saveRecording'].map(id=>$('#'+id)).filter(Boolean);
+  const disabled=buttons.map(button=>button.disabled);
+  buttons.forEach(button=>button.disabled=true);
+  setText('#controlRuntimeStatus','正在应用配置并等待控制进程重启…');
+  try {await action();}
+  catch(error){toast(`配置应用未完成：${error.message}`,true);}
+  finally {buttons.forEach((button,index)=>button.disabled=disabled[index]);}
+}
+
+function updateUploadPanel(page) {
+  if (page === 'uploads' && typeof window !== 'undefined') window.platformRefreshRecords?.();
 }
 
 function route() {
@@ -129,6 +174,7 @@ function route() {
   $('#pageTitle').textContent = titles[page];
   if (page === 'topics') loadTopics();
   updateDatasetPolling(page);
+  updateUploadPanel(page);
   if (page === 'config') loadProfiles($('#robotProfileSelect')?.value);
 }
 
@@ -152,6 +198,117 @@ function messageState(info) {
   return ['正常',`${Number(info.hz||0).toFixed(1)} Hz`,'running'];
 }
 
+function renderIntervention(status,capture) {
+  interventionStatus=status;
+  interventionCapture=capture;
+  const state=status?.state||'OFF';
+  const needsRestart=Boolean(status?.state)&&typeof status.dagger_enabled!=='boolean';
+  const dagger=needsRestart?state!=='OFF':Boolean(status?.dagger_enabled);
+  const supported=!needsRestart&&(status?.required_peers||['motion','teleop']).every(peer=>Boolean(status?.peers?.[peer]));
+  const recording=status?.recording_enabled!==false;
+  const captureReady=!dagger||!recording||Boolean(capture?.ready);
+  for(const button of $$('.source-switch button'))button.disabled=interventionPending||state!=='OFF';
+  setText('#controlSourceHint',state==='OFF'?'选择普通控制源，或点击“开始模型控制”允许推理端下发动作。':
+    dagger?'DAgger 已开启：右 Grip 接管，松开交还模型。':'模型控制已开启，DAgger 关闭：手柄不会抢占模型。');
+  const homeButton=$('#interventionHome');
+  if(homeButton)homeButton.disabled=interventionPending||!dagger||state!=='MANUAL'||!status?.gripped;
+  const captureMode=$('#interventionCaptureMode');
+  if(captureMode) {
+    if(capture?.capture_mode)captureMode.value=capture.capture_mode;
+    captureMode.disabled=!recording||interventionPending||dagger;
+    renderInterventionCaptureHint();
+  }
+  const labels={OFF:'模型控制未开启',HOLD:'机器人已暂停',AUTO:'模型控制中',TAKEOVER:'正在接管',MANUAL:'手柄控制中',RETURNING:'等待模型控制授权',FAULT:'故障暂停',ESTOP:'急停暂停'};
+  setText('#interventionState',labels[state]||state);
+  const details=[dagger?'DAgger 已开启':'DAgger 已关闭'];
+  if(state==='OFF')details.push(supported?'点击“开始模型控制”，推理端即可下发动作；需要人工接管时再开启 DAgger。':'等待控制后端就绪（不要求头显在线）。');
+  else if(state==='AUTO')details.push('推理端可下发动作');
+  else if(state==='HOLD')details.push('点击“继续模型控制”恢复动作');
+  if(dagger) {
+    details.push(!recording?'自动录制已关闭；左 X 开始录制，左 Y 停止录制':capture?.capture_mode==='full_session'?'正在连续录制整个会话':`仅人工接管片段 · 可用片段 ${capture?.prepared_slots||0}`);
+    if(status?.preparing_capture)details.push('等待采集准备，暂不可接管');
+    if(!status?.input_valid)details.push('VR 未就绪，暂不可接管；模型控制不受影响');
+    else if(!status.input_armed)details.push('先松开右 Grip，再握持接管');
+    if(state==='MANUAL')details.push('保持右 Grip 时可回零；松开会取消回零并交还模型');
+    if(capture?.sources?.issues?.length)details.push('等待采集：'+capture.sources.issues.join('、'));
+  }
+  if(state==='FAULT'||state==='ESTOP')details.push(status?.reason||'', '排除故障后复位，再点击“继续模型控制”；复位本身不恢复动作');
+  if(capture?.error)details.push(capture.error);
+  if(status?.recording_error)details.push(status.recording_error);
+  if(status?.legacy_control?.recent_rejection)details.push('最近目标拒绝：'+status.legacy_control.recent_rejection);
+  setText('#interventionReadiness',needsRestart?'请在空闲时重启 HC 遥操作会话，以启用独立的模型控制和 DAgger 按钮。':interventionPending?'正在处理请求…':details.filter(Boolean).join(' · '));
+  for(const button of $$('[data-intervention]')) {
+    const action=button.dataset.intervention;
+    if(action==='start_model')button.textContent=state==='OFF'?'开始模型控制':'继续模型控制';
+    const allowed={
+      start_model:(state==='OFF'||state==='HOLD')&&supported&&captureReady&&!(dagger&&status?.input_valid&&status?.gripped),
+      enable_dagger:!dagger&&(state==='AUTO'||state==='HOLD')&&supported,
+      disable_dagger:!needsRestart&&dagger,
+      hold:!['OFF','HOLD','FAULT','ESTOP'].includes(state),
+      recover:['FAULT','ESTOP'].includes(state)&&!(dagger&&status?.input_valid&&status?.gripped),
+      disable:state!=='OFF',
+    };
+    button.disabled=interventionPending||!allowed[action];
+  }
+}
+
+function bindInterventionControls() {
+  const homeButton=$('#interventionHome');
+  if(homeButton)homeButton.onclick=async()=>{
+    if(interventionPending||homeButton.disabled)return;
+    interventionPending=true;
+    setText('#interventionError','');
+    renderIntervention(interventionStatus,interventionCapture);
+    try {
+      await api('/api/teleop/home',{method:'POST'});
+    } catch(error) {
+      setText('#interventionError','回零未完成：'+error.message);
+    } finally {
+      interventionPending=false;
+      renderIntervention(interventionStatus,interventionCapture);
+    }
+  };
+  const captureMode=$('#interventionCaptureMode');
+  if(captureMode)captureMode.onchange=renderInterventionCaptureHint;
+  for(const button of $$('[data-intervention]'))button.onclick=async()=>{
+    if(interventionPending)return;
+    interventionPending=true;
+    setText('#interventionError','');
+    renderIntervention(interventionStatus,interventionCapture);
+    try {
+      const status=await api('/api/control/ownership');
+      // getRandomValues also works on the LAN HTTP origins used by the Dashboard.
+      const requestId=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
+      const result=await api('/api/control/intervention/'+button.dataset.intervention, {
+        method:'POST', body:JSON.stringify({request_id:requestId, session_id:status.session_id,
+                                          ...(button.dataset.intervention==='enable_dagger'?{capture_mode:captureMode?.value||'corrections_only'}:{}),
+                                          expected_epoch:status.epoch})});
+      renderIntervention(result.ownership,result.capture);
+    } catch(error) {
+      setText('#interventionError','操作未完成：'+error.message);
+      toast(error.message,true);
+      try {
+        const status=await api('/api/control/ownership');
+        renderIntervention(status,status.capture);
+      } catch(_) {}
+    } finally {
+      interventionPending=false;
+      renderIntervention(interventionStatus,interventionCapture);
+    }
+  };
+}
+
+function renderInterventionCaptureHint() {
+  if(interventionStatus?.recording_enabled===false) {
+    setText('#interventionCaptureHint','自动录制已关闭：接管与交还不会自动创建录制；手柄左 X 开始录制，左 Y 停止录制，与普通遥操作相同。');
+    return;
+  }
+  const full=$('#interventionCaptureMode')?.value==='full_session';
+  setText('#interventionCaptureHint',full?
+    '从启用 DAgger 到退出 DAgger 连续录制，包括模型动作执行、人工接管和暂停，并保留接管标记；使用“话题录制”中勾选的数据项。':
+    '自动录制开启时，每次人工接管（含接管回零）单独保存；使用“话题录制”中勾选的数据项。');
+}
+
 function renderCommandMux(ros) {
   const mux=ros.command_mux||{};
   const source=mux.source||'vr';
@@ -162,6 +319,7 @@ function renderCommandMux(ros) {
   if(sourceState)sourceState.className=mux.output_enabled===false?'error':'running';
   for(const button of $$('.source-switch button')) {
     button.classList.toggle('active',button.dataset.source===source);
+    button.disabled=Boolean(ros.ownership && ros.ownership.state!=='OFF');
   }
   setText('#vrCommandTopic',mux.vr_topic||'/control/vr/joint_states');
   setText('#exoCommandTopic',mux.exoskeleton_topic||'/control/exoskeleton/joint_states');
@@ -210,16 +368,89 @@ function renderJointMonitor() {
   setText('#jointMonitorCount',`${names.length} 个关节`);
 }
 
+function scheduleJointMonitorRender() {
+  if(jointMonitorRenderTimer!==null)return;
+  jointMonitorRenderTimer=setTimeout(()=>{
+    jointMonitorRenderTimer=null;
+    if(!$('#overview')?.classList.contains('hidden'))renderJointMonitor();
+  },100);
+}
+
 function updateJointMonitor(event,kind) {
   const names=event.payload?.name||[], positions=event.payload?.position||[];
   if(!Array.isArray(names)||!Array.isArray(positions)||names.length!==positions.length)return;
   const target=kind==='command'?jointMonitor.command:jointMonitor.feedback;
   target.clear();
   names.forEach((name,index)=>{
-    const value=Number(positions[index]);
-    if(Number.isFinite(value))target.set(String(name),value);
+    const value=positions[index];
+    if(typeof value==='number'&&Number.isFinite(value))target.set(String(name),value);
   });
-  renderJointMonitor();
+  scheduleJointMonitorRender();
+}
+
+function renderControlPipeline(ros) {
+  const health=ros.topic_health||{}, mux=ros.command_mux||{};
+  const source=mux.source||'vr';
+  const now=performance.now();
+  const count=Number(mux.received?.[source]||0);
+  const forwarded=Number(mux.forwarded||0);
+  let muxHz=null;
+  let forwardedHz=null;
+  if(pipelineCounterSample&&count>=pipelineCounterSample.count&&forwarded>=pipelineCounterSample.forwarded) {
+    const seconds=(now-pipelineCounterSample.time)/1000;
+    if(seconds>=0.35&&seconds<=5) {
+      muxHz=(count-pipelineCounterSample.count)/seconds;
+      forwardedHz=(forwarded-pipelineCounterSample.forwarded)/seconds;
+    }
+  }
+  pipelineCounterSample={time:now,count,forwarded};
+  if(Number.isFinite(mux.received_hz?.[source]))muxHz=Number(mux.received_hz[source]);
+  if(Number.isFinite(mux.forwarded_hz))forwardedHz=Number(mux.forwarded_hz);
+
+  const topicRate=(topic,target)=>{
+    const item=health[topic];
+    return {hz:item?.has_data?Number(item.hz||0):0,target,hasData:Boolean(item?.has_data),
+      gap:Number.isFinite(item?.max_gap_ms)?Number(item.max_gap_ms):null};
+  };
+  const stages=[
+    ['pipelineVr',topicRate('/vrdata',60)],
+    ['pipelineSolver',topicRate('/control/solver/joint_targets',100)],
+    ['pipelineMux',{hz:muxHz??0,target:100,hasData:muxHz!==null||Number(mux.last_received_age?.[source])<=1.8,gap:null}],
+    ['pipelineAction',forwardedHz!==null?{hz:forwardedHz,target:100,hasData:Number(mux.last_received_age?.[source])<=1.8,gap:null}:topicRate('/action/joint_states',100)],
+    ['pipelineFeedback',topicRate('/observation/joint_states',100)],
+  ];
+  const paused=mux.output_enabled===false;
+  for(const [id,item] of stages) {
+    const element=$('#'+id), rate=$('#'+id+'Rate'), meta=$('#'+id+'Meta');
+    if(!element||!rate)continue;
+    const ratio=item.target?item.hz/item.target:0;
+    const optionalUnavailable=id==='pipelineSolver'&&!item.hasData;
+    const state=optionalUnavailable?'neutral':!item.hasData?'bad':ratio>=.8?'good':ratio>=.5?'warn':'bad';
+    element.className=`pipeline-stage ${paused&&id!=='pipelineVr'?'idle':state}`;
+    rate.textContent=item.hasData?`${item.hz.toFixed(1)} Hz`:optionalUnavailable?'未监控':'无数据';
+    if(meta) {
+      const base=meta.dataset.base||(meta.dataset.base=meta.textContent);
+      meta.textContent=`${base}${item.gap!==null?` · 最大间隔 ${item.gap.toFixed(1)} ms`:''}`;
+    }
+  }
+
+  const vr=stages[0][1], solver=stages[1][1], input=stages[2][1], action=stages[3][1], feedback=stages[4][1];
+  latestPipelineActionRate=action.hasData?action.hz:null;
+  let state='good', label='链路稳定', diagnosis='控制命令与硬件反馈频率正常。';
+  if(ros.state!=='running') {state='bad';label='ROS 异常';diagnosis='ROS 2 中间件未正常运行。';}
+  else if(paused) {state='idle';label='输出已暂停';diagnosis='命令输出当前被急停门控关闭。';}
+  else if(!vr.hasData||vr.hz<30) {state='bad';label='VR 输入异常';diagnosis='VR 姿态数据不足，检查头显连接和跟踪状态。';}
+  else if(solver.hasData&&solver.hz<80) {state='warn';label='逆解掉速';diagnosis='VR 输入正常，但逆解输出未达到 80 Hz。';}
+  else if(!input.hasData) {state='idle';label='等待采样';diagnosis='正在计算命令仲裁的实时接收率。';}
+  else if(input.hasData&&input.hz<80) {state='warn';label='控制节点掉速';diagnosis='逆解正常，但控制节点送入命令仲裁的频率偏低。';}
+  else if(!action.hasData||action.hz<80) {state='bad';label='命令转发掉速';diagnosis='上游控制正常，但最终下发频率偏低，请检查命令仲裁。';}
+  else if(!feedback.hasData||feedback.hz<80) {state='bad';label='硬件反馈掉速';diagnosis='命令下发正常，但硬件反馈频率偏低。';}
+  const rejected=Number(mux.rejected||0), forwardedTotal=Number(mux.forwarded||0);
+  const total=rejected+forwardedTotal;
+  const rejectText=total?`累计转发 ${forwardedTotal.toLocaleString()}，拒绝 ${rejected.toLocaleString()}。`:'';
+  const banner=$('#controlPipelineDiagnosis'), badge=$('#controlPipelineBadge');
+  if(banner){banner.className=`pipeline-diagnosis ${state}`;banner.querySelector('span').textContent=`${diagnosis} ${rejectText}`.trim();}
+  if(badge){badge.textContent=label;badge.className=`tag pipeline-badge ${state}`;}
 }
 
 let safetyOutputEnabled=null;
@@ -265,11 +496,14 @@ async function toggleSafety() {
 }
 
 function renderStatus(data) {
+  renderControlRuntime(data.control_runtime);
   const ros=data.ros||{}, vr=data.vr||{}, cam=data.camera||{};
   const domain = ros.domain_id ?? config?.ros?.domain_id ?? 0;
   setState('#rosState',ros.state);
   setText('#rosMeta',`${(ros.subscriptions||[]).length} 个订阅 · ${ros.messages||0} 条消息 · Domain ${domain}`);
   renderCommandMux(ros);
+  renderControlPipeline(ros);
+  renderIntervention(ros.ownership, (data.recording?.status||data.recording)?.corrections);
   renderSafetyButton(ros);
   setState('#vrState', vr.state);
   setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
@@ -277,7 +511,7 @@ function renderStatus(data) {
   setState('#cameraState', cam.state);
   setText(
     '#cameraMeta',
-    cam.error || `实际帧率 ${cameraActualFps(cam,ros.topic_health?.[cam.topic]).toFixed(1)} FPS · 头显连接 ${cam.peers||0}`
+    cam.error || cameraMonitorSummary(cam,ros.topic_health?.[cam.topic])
   );
   setText('#wsClients',data.websocket_clients||0);
   const recording=data.recording||{};
@@ -288,12 +522,16 @@ function renderStatus(data) {
   }
   if($('#startRecordingBtn')) $('#startRecordingBtn').disabled = isRecording;
   if($('#stopRecordingBtn')) $('#stopRecordingBtn').disabled = !isRecording;
+  for (const id of ['#topicRecordingFormat', '#saveRecording']) {
+    if ($(id)) $(id).disabled = isRecording;
+  }
   if($('#recordingMeta')) {
     $('#recordingMeta').textContent = isRecording
       ? `正在录制：已写入 ${recording.messages||0} 条消息到 ${recording.path||''}`
       : `未录制 · 保存目录：${config?.ros?.recording?.directory || 'runtime/topic_recordings'}`;
   }
   renderRecordingExport(recording.status || recording);
+  if (typeof window !== "undefined") window.platformRecordingStatus?.(recording.status || recording);
   setText('#vrPeer',vr.peer ? `${vr.peer[0]}:${vr.peer[1]}` : 'VR 未连接');
   for (const name of ['Head','Left','Right']) {
     const indicator=$('#track'+name);
@@ -301,7 +539,9 @@ function renderStatus(data) {
   }
   if (ros.topic_health) {
     latestTopicHealth = ros.topic_health;
-    const commandInfo=messageState(ros.topic_health['/action/joint_states']);
+    const commandInfo=latestPipelineActionRate===null?messageState(ros.topic_health['/action/joint_states']):
+      latestPipelineActionRate>=80?['正常',`${latestPipelineActionRate.toFixed(1)} Hz`,'running']:
+      ['偏低',`${latestPipelineActionRate.toFixed(1)} Hz`,'warning'];
     const feedbackInfo=messageState(ros.topic_health['/observation/joint_states']);
     setState('#jointCommandState',commandInfo[0]);
     setText('#jointCommandMeta',commandInfo[1]+' · /action/joint_states');
@@ -390,7 +630,7 @@ function renderTeleopStatus(event) {
     const external=value.backend==='generic'||value.backend==='v23';
     const solver=value.generic_controller||{};
     const healthy=solver.solver_fresh&&solver.command_fresh;
-    const backendLabel=value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
+    const backendLabel=value.backend==='motion'?'Motion':value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
     const modeName=value.mode==='ik_rearming'?(rearmNames[solver.rearm_state]||'IK 重新武装'):(names[value.mode]||value.mode);
     setText('#teleopMode',value.enabled?modeName:'已停用');
     setText('#teleopBackend',external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel);
@@ -415,10 +655,6 @@ function connectWebSocket() {
       else if(value.kind==='ros_message'&&value.topic==='/status/teleop')renderTeleopStatus(value);
       else if(value.kind==='ros_message'&&value.topic==='/action/joint_states')updateJointMonitor(value,'command');
       else if(value.kind==='ros_message'&&value.topic==='/observation/joint_states')updateJointMonitor(value,'feedback');
-      else if(value.kind==='data_preview_message') {
-        const output=document.getElementById('dataResult');
-        if(output) output.textContent=JSON.stringify(value,null,2);
-      }
       else if(value.kind==='control_source')api('/api/status').then(renderStatus).catch(()=>{});
       else if(String(value.kind||'').startsWith('replay_') || value.kind==='safety_resume' || value.kind==='safety_stop') {
         api('/api/status').then(renderStatus).catch(()=>{});
@@ -470,9 +706,10 @@ function projectionTopicChoices() {
 function renderCameraTopicOptions() {
   // Refresh choices after the custom-topic list changes, keeping pending picks.
   const pending=new Map($$('[data-camera-select]').map(select=>[select.dataset.cameraSelect,select.value]));
-  renderCameraStreams(pending);
+  const codecs=new Map($$('[data-camera-codec]').map(select=>[select.dataset.cameraCodec,select.value]));
+  renderCameraStreams(pending,codecs);
 }
-function renderCameraStreams(pending=new Map()) {
+function renderCameraStreams(pending=new Map(),codecs=new Map()) {
   const container=$('#cameraStreamCards');if(!container)return;
   container.textContent='';
   const choices=projectionTopicChoices();
@@ -489,6 +726,13 @@ function renderCameraStreams(pending=new Map()) {
     const selected=pending.has(stream.id)?pending.get(stream.id):(stream.enabled!==false?stream.topic:'');
     select.value=choices.some(item=>item.topic===selected)?selected:'';
     topicCell.append(select);
+    const codecSelect=document.createElement('select');codecSelect.dataset.cameraCodec=stream.id;
+    codecSelect.setAttribute('aria-label',`${index+1}号相机视频编码`);
+    for(const [value,label] of [['H264','H.264（支持硬编）'],['VP8','VP8（支持 FEC，软件编码）']]){
+      const option=document.createElement('option');option.value=value;option.textContent=label;codecSelect.append(option);
+    }
+    codecSelect.value=codecs.get(stream.id)||stream.codec||config.camera.codec||'H264';
+    topicCell.append(codecSelect);
     const status=document.createElement('td');status.className='camera-status';status.dataset.cameraStatus=stream.id;
     status.textContent='正在读取状态…';
     row.append(number,topicCell,status);container.append(row);
@@ -501,6 +745,8 @@ function collectCameraStreams() {
   config.camera.streams=selects.map(select=>{
     const stream={...previous.find(item=>item.id===select.dataset.cameraSelect)};
     const topic=select.value;
+    const codecSelect=$$('[data-camera-codec]').find(input=>input.dataset.cameraCodec===stream.id);
+    if(codecSelect)stream.codec=codecSelect.value;
     if(!topic)return {...stream,enabled:false};
     const item=choices.find(item=>item.topic===topic);
     if(!item)throw new Error('请先在下方自定义话题列表配置图像话题');
@@ -508,24 +754,83 @@ function collectCameraStreams() {
   });
   config.camera.source='ros';
 }
-// Measure the selected image topic, independently of configured/send FPS.
+// Prefer the pipeline's common window. Legacy servers still use topic health.
 function cameraActualFps(stream,health) {
-  if(health && !health.has_data)return 0;
-  const fps=Number(health ? health.hz : stream?.capture_fps);
+  const commonWindow=Number(stream?.fps_window_seconds)>0;
+  if(!commonWindow && health && !health.has_data)return 0;
+  const fps=Number(commonWindow ? stream.capture_fps : health ? health.hz : stream?.capture_fps);
   return Number.isFinite(fps)&&fps>0?fps:0;
+}
+function cameraMetric(value,digits=1,suffix='') {
+  return value!=null && Number.isFinite(Number(value)) && Number(value)>=0
+    ? `${Number(value).toFixed(digits)}${suffix}` : '--';
 }
 function cameraMonitorSummary(stream,health) {
   if(!stream)return '未启用 / 尚未应用';
   if(stream.error)return `异常：${stream.error}`;
-  const fps=cameraActualFps(stream,health);
-  return `${fps>0?'正在接收':'等待图像'} · 实际帧率 ${fps.toFixed(1)} FPS · 头显连接 ${stream.peers||0}`;
+  const inputFps=cameraActualFps(stream,health);
+  const submitFps=stream.webrtc_submit_fps ?? stream.webrtc_send_fps;
+  const codec=stream.webrtc_codec||stream.codec||'未知';
+  const window=Number(stream.fps_window_seconds)>0
+    ? `同窗 ${cameraMetric(stream.fps_window_seconds)} s` : '独立统计窗口';
+  const receiver=stream.receiver_reported && !stream.receiver_stale
+    ? `头显解码 ${cameraMetric(stream.receiver_decoded_fps)} FPS · 渲染回调 ${cameraMetric(stream.receiver_render_fps)} FPS · 冻结 ${cameraMetric(stream.receiver_freeze_duration_ms)} ms`
+    : '头显显示帧率 未上报';
+  const backend=stream.encoder_backend_actual || '--';
+  const qos=stream.media_qos?.state || 'disabled';
+  const fec=stream.webrtc_fec;
+  const fecText=fec ? `${fec.state}${fec.reason ? '（'+fec.reason+'）' : ''} · 校验包 ${cameraMetric(fec.fec_packets,0)} · 冗余 ${cameraMetric(fec.overhead_pct,1,'%')} · 接收FEC ${cameraMetric(stream.receiver_fec_packets_received,0)}` : '未启用';
+  const loss=stream.webrtc_feedback_received
+    ? cameraMetric(stream.webrtc_fraction_lost_pct,2,'%') : '未收到反馈';
+  return `${inputFps>0?'正在接收':'等待图像'} · ${window} · ROS输入 ${inputFps.toFixed(1)} FPS · 图像解码 ${cameraMetric(stream.decoded_fps)} FPS/${cameraMetric(stream.jpeg_decode_ms)} ms · 编码输入 ${cameraMetric(submitFps)} FPS · RTP输出 ${cameraMetric(stream.webrtc_output_fps)} FPS · ${codec}编码器内 ${cameraMetric(stream.webrtc_encode_ms)} ms · 发送处理 ${cameraMetric(stream.webrtc_submit_to_transport_ms)} ms · 其中传输调用 ${cameraMetric(stream.webrtc_transport_ms)} ms · 本地覆盖 ${cameraMetric(stream.decode_frames_overwritten,0)} 帧/跳帧 ${cameraMetric(stream.webrtc_frames_skipped,0)} 帧 · 网络丢包 ${loss} · ${receiver} · 编码后端 ${backend}${stream.encoder_fallback_reason ? `（回退：${stream.encoder_fallback_reason}）` : ''} · 发送P95/P99 ${cameraMetric(stream.webrtc_submit_to_transport_p95_ms)}/${cameraMetric(stream.webrtc_submit_to_transport_p99_ms)} ms · DSCP ${qos} · FEC ${fecText} · 已配置码率 ${cameraMetric(stream.encoder_configured_bitrate == null ? null : stream.encoder_configured_bitrate/1000000,2)} Mbps/重配 ${cameraMetric(stream.encoder_reconfigurations,0)} 次 · 码率 ${cameraMetric(stream.webrtc_bitrate_mbps,2)}/${cameraMetric(stream.webrtc_target_bitrate_mbps,2)} Mbps · RTT ${cameraMetric(stream.webrtc_rtt_ms)} ms · 头显连接 ${stream.peers||0}`;
+}
+function cameraMonitorHelp(stream) {
+  const timing=Number(stream?.fps_window_seconds)>0
+    ? `各阶段 FPS 使用同一个最近 ${stream.fps_window_seconds} 秒窗口；跨窗口完成的帧可能造成短时帧数差异。`
+    : '当前服务尚未提供统一统计窗口。';
+  return timing+' 编码器内耗时只覆盖编解码调用。发送处理从提交新帧到最后一个 RTP 包交给本机传输层，包含编码排队、线程唤醒、编码、封包、加密和 UDP 提交；其中传输调用为加密和 UDP 提交部分，不能重复相加。RTP 输出不代表头显接收或显示。覆盖为解码前压缩帧被替换，跳帧为解码后未送入编码器的中间帧，计数按本次连接累计；网络丢包来自头显 RTCP 反馈，与本地跳帧分别统计。接入 receiver.html 或遥测SDK后可回传接收、解码与渲染回调指标；渲染回调不等于物理屏幕显示，未同步时钟不推算端到端延迟。';
+}
+function cameraBackendSummary(camera) {
+  const streams=(camera?.streams||[]).filter(stream=>!['disabled','stopped'].includes(stream.state));
+  if(!streams.length)return '暂无运行中的视频流';
+  const labels={jetson:'Jetson GStreamer 硬编',nvenc:'NVENC 硬编',x264:'x264 软件编码','software-vp8':'VP8 软件编码'};
+  return streams.map(stream=>{
+    const backend=labels[stream.encoder_backend_actual]||'实际编码后端尚未上报';
+    const fallback=stream.encoder_fallback_reason?'（已回退，详情见实时监控）':'';
+    return `${stream.name||stream.id}：${backend}${fallback} · ${stream.webrtc_codec||stream.codec||'--'}`;
+  }).join('；');
+}
+function cameraFecHint(camera) {
+  if(!camera?.fec?.enabled)return '';
+  const streams=(camera.streams?.length?camera.streams:[camera]).filter(stream=>stream.enabled!==false);
+  const codecs=streams.map(stream=>String(stream.codec||camera.codec||'H264').toUpperCase());
+  if(!codecs.length)return '请先启用需要投射的相机。';
+  if(codecs.every(codec=>codec==='VP8'))return 'FEC 将用于 VP8 流；是否生效以保存后的协商状态为准。';
+  if(codecs.includes('VP8'))return 'FEC 仅用于 VP8 流；H.264 流继续使用普通视频与 RTX。';
+  return '当前相机均为 H.264：本版 FEC 不生效，硬编仍可正常使用。需要 FEC 时请为相机选择 VP8。';
+}
+function renderCameraCompatibilityHint() {
+  const target=$('#cameraFecCompatibility');if(!target)return;
+  const camera={...(config?.camera||{})};
+  const toggle=$('[data-path="camera.fec.enabled"]');
+  camera.fec={...(camera.fec||{}),enabled:toggle?toggle.checked:Boolean(camera.fec?.enabled)};
+  camera.streams=(camera.streams||[]).map(stream=>{
+    const codec=$$('[data-camera-codec]').find(input=>input.dataset.cameraCodec===stream.id);
+    const topic=$$('[data-camera-select]').find(input=>input.dataset.cameraSelect===stream.id);
+    return {...stream,codec:codec?codec.value:stream.codec,enabled:topic?Boolean(topic.value):stream.enabled};
+  });
+  const text=cameraFecHint(camera);target.textContent=text;target.hidden=!text;
 }
 function renderCameraStatus(camera,health={}) {
+  const backendStatus=$('#cameraBackendStatus');
+  if(backendStatus)backendStatus.textContent=cameraBackendSummary(camera);
+  renderCameraCompatibilityHint();
   for(const element of $$('[data-camera-status]')){
     const stream=(camera.streams||[]).find(item=>item.id===element.dataset.cameraStatus);
-    element.textContent=cameraMonitorSummary(stream,health[stream?.topic]);
+    element.textContent=cameraMonitorSummary(stream,health[stream?.custom_topic||stream?.topic]);
+    element.title=cameraMonitorHelp(stream);
     const topic=document.createElement('div');topic.className='camera-active-topic';
-    topic.textContent=stream?`当前生效话题：${stream.topic}`:'保存并应用配置后开始监控';
+    topic.textContent=stream?`当前生效话题：${stream.custom_topic||stream.topic}`:'保存并应用配置后开始监控';
     element.append(topic);
   }
 }
@@ -540,29 +845,35 @@ function renderConfig() {
     $('#topicRecordingDirectory').value = config?.ros?.recording?.directory || 'runtime/topic_recordings';
   }
   const recordingConfig=config?.ros?.recording || {};
-  if($('#captureConfigFile')) $('#captureConfigFile').value=recordingConfig.capture_config_file || '';
-  if($('#deriveActionFromNextState')) $('#deriveActionFromNextState').checked=recordingConfig.derive_action_from_next_state === true;
-  if($('#topicRecordingFormat')) $('#topicRecordingFormat').value=recordingConfig.workflow === 'platform_raw' ? 'platform_raw' : recordingConfig.format || 'mcap';
+  if($('#topicRecordingFormat')) $('#topicRecordingFormat').value=recordingConfig.format || 'mcap';
   if($('#topicRecordingLerobotFps')) $('#topicRecordingLerobotFps').value=recordingConfig.lerobot_fps ?? 15;
   if($('#topicRecordingLerobotTask')) $('#topicRecordingLerobotTask').value=recordingConfig.lerobot_task || '遥操作';
   updateRecordingFormatFields();
   renderCameraStreams();
+  renderCameraCompatibilityHint();
   renderRecordingRules();
   renderStandardTopics();
   renderConfigInterface();
+  renderRuntimeDomain(simulationLastState);
 }
 
 function updateRecordingFormatFields() {
-  const usesLeRobot=['lerobot','both'].includes($('#topicRecordingFormat')?.value);
-  const usesRaw=$('#topicRecordingFormat')?.value === 'platform_raw';
-  if($('#captureConfigFile')) $('#captureConfigFile').disabled=!usesRaw;
-  if($('#deriveActionFromNextState')) {
-    $('#deriveActionFromNextState').disabled=!usesRaw;
-    if(!usesRaw) $('#deriveActionFromNextState').checked=false;
-  }
+  const format=$('#topicRecordingFormat')?.value;
+  const usesLeRobot=['lerobot','both'].includes(format);
+  const help = {
+    mcap: '本地保存 MCAP，RGB/深度保留在所选话题中。实际上传什么，在“上传管理 → 上传格式”选择。',
+    mcap_mp4: '本地整理为 MCAP＋独立 RGB MP4＋时间戳清单，深度保留在 MCAP 中。上传该原始包时，在上传管理中选择同名格式。',
+    lerobot: '本地保存 LeRobot v3 目录：RGB MP4、Parquet 和元数据。上传格式在上传管理中单独选择。',
+    both: '本地同时保存 MCAP 和 LeRobot。上传其中一份还是两份，在上传管理中选择；双份上传要求平台方案同时支持 MCAP 和 LeRobot。'
+  };
+  if ($('#recordingFormatHelp')) $('#recordingFormatHelp').textContent=(help[format] || '') + ' 保存配置后对下一段录制生效。';
   for(const id of ['#topicRecordingLerobotFps','#topicRecordingLerobotTask']) {
     if($(id)) $(id).disabled=!usesLeRobot;
   }
+  if (typeof window !== 'undefined') window.platformSyncLocalFormat?.(format);
+}
+if (typeof window !== 'undefined') {
+  window.getLocalRecordingFormat = () => $('#topicRecordingFormat')?.value || 'both';
 }
 
 function exportProgressText(progress={}) {
@@ -694,11 +1005,6 @@ function updateReadinessBanner() {
   const banner = $('#recordingReadinessBanner');
   const text = $('#recordingReadinessText');
   if (!banner || !text || !config) return;
-  if (config.ros?.recording?.workflow === 'platform_raw') {
-    banner.className = 'recording-readiness-banner';
-    text.textContent = '自定义格式按采集配置检查相机、状态和 action 来源；点击开始录制时执行预检查。';
-    return;
-  }
 
   const recordingSubs = (config.ros?.subscriptions || []).filter(
     item => item.enabled !== false && (item.outputs || []).includes('record')
@@ -824,13 +1130,7 @@ function collectConfig() {
     if(!config.ros) config.ros = {};
     if(!config.ros.recording) config.ros.recording = {};
     config.ros.recording.directory = $('#topicRecordingDirectory').value.trim() || 'runtime/topic_recordings';
-    if($('#topicRecordingFormat')) {
-      const selected=$('#topicRecordingFormat').value;
-      config.ros.recording.workflow=selected === 'platform_raw' ? 'platform_raw' : 'hc';
-      config.ros.recording.format=selected === 'platform_raw' ? 'mcap' : selected;
-      config.ros.recording.derive_action_from_next_state=selected === 'platform_raw' && $('#deriveActionFromNextState')?.checked === true;
-    }
-    if($('#captureConfigFile')) config.ros.recording.capture_config_file=$('#captureConfigFile').value.trim();
+    if($('#topicRecordingFormat')) config.ros.recording.format=$('#topicRecordingFormat').value;
     if($('#topicRecordingLerobotFps')) {
       const fps=Number($('#topicRecordingLerobotFps').value);
       if(!Number.isInteger(fps) || fps<1 || fps>60) throw new Error('LeRobot 帧率需为 1–60 的整数');
@@ -902,8 +1202,7 @@ function renderProfileDetail() {
   const profile=profilesData.profiles.find(item=>item.id===select.value);
   const detail=$('#profileDetail');
   detail.textContent='';
-  const isCurrent = profile && profile.id === profilesData.active;
-  $('#activateProfile').disabled=!profile||isCurrent||profile.schema==='invalid';
+  $('#activateProfile').disabled=!profile||profile.schema==='invalid';
   if($('#deleteProfile')) $('#deleteProfile').disabled=!profile;
   $('#activeProfileBadge').textContent=profilesData.active?`当前：${profilesData.active}`:'未选择';
   if(!profile) {
@@ -1010,19 +1309,43 @@ async function loadTopics() {
 let datasetsData = { files: [] };
 let datasetLoading = false;
 let datasetPollTimer = null;
+let datasetFormat = 'mcap';
+const datasetFormatLabels = {mcap: 'MCAP', lerobot: 'LeRobot', bundle: 'MCAP＋MP4'};
 
 function datasetPageVisible() {
   return typeof location !== 'undefined' && location.hash === '#datasets' && document.visibilityState === 'visible';
 }
 
 function updateDatasetPolling(page) {
-  if (datasetPollTimer !== null) clearInterval(datasetPollTimer);
+  if (datasetPollTimer !== null) clearTimeout(datasetPollTimer);
   datasetPollTimer = null;
   if (page !== 'datasets' || document.visibilityState !== 'visible') return;
   loadDatasets();
-  datasetPollTimer = setInterval(() => {
+}
+
+function scheduleDatasetPolling(files, failed=false) {
+  if (datasetPollTimer !== null) clearTimeout(datasetPollTimer);
+  datasetPollTimer = null;
+  if (!datasetPageVisible()) return;
+  const busy = files.some(file => file.is_current || file.export_state === 'exporting' || file.inspection_pending);
+  datasetPollTimer = setTimeout(() => {
+    datasetPollTimer = null;
     if (datasetPageVisible()) loadDatasets();
-  }, 2000);
+  }, failed ? 5000 : busy ? 2000 : 30000);
+}
+
+function renderDatasetFormatTabs(counts={}) {
+  const values = {mcap: counts.mcap || 0, lerobot: counts.lerobot || 0, bundle: counts.bundle || 0};
+  if ($('#datasetMcapCount')) $('#datasetMcapCount').textContent = values.mcap;
+  if ($('#datasetLerobotCount')) $('#datasetLerobotCount').textContent = values.lerobot;
+  if ($('#datasetBundleCount')) $('#datasetBundleCount').textContent = values.bundle;
+  $$('[data-dataset-format]').forEach(button => {
+    const active = button.dataset.datasetFormat === datasetFormat;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    if (button.dataset.datasetFormat === 'bundle') button.hidden = values.bundle === 0;
+  });
+  if ($('#datasetsTitle')) $('#datasetsTitle').textContent = `${datasetFormatLabels[datasetFormat]} 数据集`;
 }
 
 
@@ -1034,8 +1357,13 @@ function datasetIdentifier(file) {
   return file.id || file.filename;
 }
 
+async function fetchDatasetDetails(file) {
+  const result = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&identifier=${encodeURIComponent(datasetIdentifier(file))}`);
+  return result.files?.[0] || file;
+}
+
 function datasetSummaryValues(file) {
-  const profile = file.profile_display_name || file.profile_id || file.robot_name || '未知（旧数据）';
+  const profile = file.profile_display_name || file.profile_id || file.robot_name || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
   if (isLeRobotDataset(file)) return [
     ['机器人', profile], ['数据大小', file.size_human || '--'],
     ['时长', file.duration_human || '--'], ['总帧数', String(file.frames ?? file.total_frames ?? 0)],
@@ -1058,7 +1386,7 @@ function renderDatasetVideos(file) {
   previousVideo?.pause();
   panel.textContent = '';
   const videos = file.videos || [];
-  panel.hidden = !isLeRobotDataset(file) || !videos.length;
+  panel.hidden = (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') || !videos.length;
   if (panel.hidden) return;
   const label = document.createElement('label');
   label.textContent = '相机视频';
@@ -1088,11 +1416,372 @@ function updateSelectedDatasetCount() {
   const count = checked.length;
   if ($('#selectedDatasetCount')) $('#selectedDatasetCount').textContent = count;
   if ($('#batchDeleteDatasets')) $('#batchDeleteDatasets').disabled = count === 0;
+  if ($('#batchDownloadDatasets')) $('#batchDownloadDatasets').disabled = count === 0;
+  if ($('#batchUploadDatasets')) $('#batchUploadDatasets').disabled = count === 0;
+  if ($('#batchConvertLerobot')) $('#batchConvertLerobot').disabled = !checked.some(cb => cb.dataset.convertible === 'true');
   const all = $$('#datasetRows input[type=checkbox]:not(:disabled)');
   if ($('#selectAllDatasets')) {
     $('#selectAllDatasets').checked = all.length > 0 && checked.length === all.length;
     $('#selectAllDatasets').indeterminate = checked.length > 0 && checked.length < all.length;
   }
+}
+
+function initDatasetMarqueeSelection() {
+  const tableWrap = document.querySelector('#datasets .table-wrap');
+  const tbody = document.querySelector('#datasetRows');
+  if (!tableWrap || !tbody) return;
+
+  // 创建全局选框 DOM 元素
+  let box = document.getElementById('datasetMarqueeBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'datasetMarqueeBox';
+    box.className = 'marquee-selection-box';
+    const badge = document.createElement('span');
+    badge.className = 'marquee-count-badge';
+    badge.style.display = 'none';
+    box.appendChild(badge);
+    document.body.appendChild(box);
+  }
+  const badge = box.querySelector('.marquee-count-badge');
+
+  let isMouseDown = false;
+  let isDragging = false;
+  let startPageX = 0;
+  let startPageY = 0;
+  let lastClientX = 0;
+  let lastClientY = 0;
+  let lastKeyStates = { isCtrlOrMeta: false, isShift: false, isAlt: false };
+  let initialStates = new Map();
+  let scrollRafId = null;
+  let scrollSpeedY = 0;
+
+  // 垂直平滑滚动统一辅助函数（优先 tableWrap，否则 window）
+  function scrollVertically(delta) {
+    if (tableWrap.scrollHeight > tableWrap.clientHeight + 4 && tableWrap.clientHeight > 0) {
+      const oldTop = tableWrap.scrollTop;
+      tableWrap.scrollTop += delta;
+      if (Math.abs(tableWrap.scrollTop - oldTop) > 0.5) {
+        return;
+      }
+    }
+    window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+  }
+
+  // 支持复选框 Shift 范围点击多选
+  let lastClickedCheckbox = null;
+  tbody.addEventListener('click', (e) => {
+    const cb = e.target.closest('input[type="checkbox"]');
+    if (!cb || cb.disabled || !tbody.contains(cb)) return;
+
+    if (e.shiftKey && lastClickedCheckbox && lastClickedCheckbox !== cb && tbody.contains(lastClickedCheckbox)) {
+      const allCbs = Array.from(tbody.querySelectorAll('input[type="checkbox"]:not(:disabled)'));
+      const start = allCbs.indexOf(lastClickedCheckbox);
+      const end = allCbs.indexOf(cb);
+      if (start !== -1 && end !== -1) {
+        const min = Math.min(start, end);
+        const max = Math.max(start, end);
+        const targetState = cb.checked;
+        for (let i = min; i <= max; i++) {
+          allCbs[i].checked = targetState;
+        }
+        updateSelectedDatasetCount();
+      }
+    }
+    lastClickedCheckbox = cb;
+  });
+
+  // 拖动时靠近边缘自动滚动
+  function startAutoScroll(clientY) {
+    const winH = window.innerHeight;
+    const margin = 40;
+    const maxSpeed = 16;
+
+    if (clientY > winH - margin) {
+      const factor = Math.min(1, (clientY - (winH - margin)) / margin);
+      scrollSpeedY = Math.max(3, maxSpeed * factor);
+    } else if (clientY < margin && clientY > 0) {
+      const factor = Math.min(1, (margin - clientY) / margin);
+      scrollSpeedY = -Math.max(3, maxSpeed * factor);
+    } else {
+      scrollSpeedY = 0;
+    }
+
+    if (scrollSpeedY !== 0 && !scrollRafId) {
+      const step = () => {
+        if (scrollSpeedY !== 0) {
+          scrollVertically(scrollSpeedY);
+          updateSelection(lastClientX, lastClientY, lastKeyStates.isCtrlOrMeta, lastKeyStates.isShift, lastKeyStates.isAlt);
+          scrollRafId = requestAnimationFrame(step);
+        } else {
+          scrollRafId = null;
+        }
+      };
+      scrollRafId = requestAnimationFrame(step);
+    } else if (scrollSpeedY === 0 && scrollRafId) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = null;
+    }
+  }
+
+  function stopAutoScroll() {
+    if (scrollRafId) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = null;
+    }
+    scrollSpeedY = 0;
+  }
+
+  // 选区更新与相交判定（基于文档绝对坐标 + 视口转换，支持滚动时选框跟随拓展）
+  function updateSelection(curClientX, curClientY, isCtrlOrMeta = false, isShift = false, isAlt = false) {
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+
+    const curPageX = curClientX + scrollX;
+    const curPageY = curClientY + scrollY;
+
+    const docX1 = Math.min(startPageX, curPageX);
+    const docY1 = Math.min(startPageY, curPageY);
+    const docX2 = Math.max(startPageX, curPageX);
+    const docY2 = Math.max(startPageY, curPageY);
+
+    // 转换为视口坐标供 fixed 选框和 getBoundingClientRect 比对
+    const viewX1 = docX1 - scrollX;
+    const viewY1 = docY1 - scrollY;
+    const viewX2 = docX2 - scrollX;
+    const viewY2 = docY2 - scrollY;
+
+    box.style.left = `${viewX1}px`;
+    box.style.top = `${viewY1}px`;
+    box.style.width = `${viewX2 - viewX1}px`;
+    box.style.height = `${viewY2 - viewY1}px`;
+
+    let inBoxCount = 0;
+    let changed = false;
+
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.forEach(row => {
+      const cb = row.querySelector('input[type="checkbox"]');
+      if (!cb || cb.disabled) return;
+
+      const rect = row.getBoundingClientRect();
+      const intersects = !(
+        viewX2 < rect.left ||
+        viewX1 > rect.right ||
+        viewY2 < rect.top ||
+        viewY1 > rect.bottom
+      );
+
+      if (intersects) {
+        inBoxCount++;
+      }
+
+      const initChecked = initialStates.get(cb) || false;
+      let targetChecked;
+
+      if (isAlt) {
+        // Alt 模式：选框内的取消选中，选框外的保持初始
+        targetChecked = intersects ? false : initChecked;
+      } else if (isCtrlOrMeta) {
+        // Ctrl/Cmd 模式：选框内的反选，选框外的保持初始
+        targetChecked = intersects ? !initChecked : initChecked;
+      } else {
+        // 默认模式（普通拖选或 Shift 拖选）：选框内的追加选中，选框外的保持初始
+        targetChecked = intersects ? true : initChecked;
+      }
+
+      if (cb.checked !== targetChecked) {
+        cb.checked = targetChecked;
+        changed = true;
+      }
+    });
+
+    if (badge) {
+      if (inBoxCount > 0) {
+        badge.textContent = isAlt ? `已框选 ${inBoxCount} 项 (取消)` : isCtrlOrMeta ? `已框选 ${inBoxCount} 项 (反选)` : `已框选 ${inBoxCount} 项`;
+        badge.style.display = 'block';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+
+    if (changed) {
+      updateSelectedDatasetCount();
+    }
+  }
+
+  function onMouseMove(e) {
+    if (!isMouseDown) return;
+
+    lastClientX = e.clientX;
+    lastClientY = e.clientY;
+    lastKeyStates = {
+      isCtrlOrMeta: e.ctrlKey || e.metaKey,
+      isShift: e.shiftKey,
+      isAlt: e.altKey
+    };
+
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    const dx = (e.clientX + scrollX) - startPageX;
+    const dy = (e.clientY + scrollY) - startPageY;
+
+    if (!isDragging) {
+      if (Math.hypot(dx, dy) >= 6) {
+        isDragging = true;
+        window.getSelection()?.removeAllRanges();
+        document.body.classList.add('marquee-selecting');
+        box.style.display = 'block';
+      } else {
+        return;
+      }
+    }
+
+    e.preventDefault();
+    startAutoScroll(e.clientY);
+    updateSelection(e.clientX, e.clientY, lastKeyStates.isCtrlOrMeta, lastKeyStates.isShift, lastKeyStates.isAlt);
+  }
+
+  function onMouseUp() {
+    if (!isMouseDown) return;
+    isMouseDown = false;
+
+    stopAutoScroll();
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+
+    if (isDragging) {
+      isDragging = false;
+      window.getSelection()?.removeAllRanges();
+      document.body.classList.remove('marquee-selecting');
+      box.style.display = 'none';
+
+      // 阻止松开鼠标后可能触发的点击事件（防误触）
+      const preventClick = (clickEvent) => {
+        clickEvent.stopPropagation();
+        clickEvent.preventDefault();
+      };
+      window.addEventListener('click', preventClick, { capture: true, once: true });
+      setTimeout(() => {
+        window.removeEventListener('click', preventClick, { capture: true });
+      }, 100);
+
+      updateSelectedDatasetCount();
+    }
+  }
+
+  tableWrap.addEventListener('selectstart', (e) => {
+    // 阻止表格区域触发浏览器原生文本选中
+    e.preventDefault();
+  });
+
+  tableWrap.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // 仅限鼠标左键
+
+    // 排除除 checkbox 以外的交互元素（按钮、下拉、输入框、链接等）
+    const nonCheckboxInteractive = e.target.closest('button, select, textarea, a, video, summary, input:not([type="checkbox"])');
+    if (nonCheckboxInteractive) return;
+
+    // 表头 thead 不触发框选
+    if (e.target.closest('thead')) return;
+
+    // 操作列（最后一列）通常全是按钮，避免误触
+    const td = e.target.closest('td');
+    if (td && td.matches(':last-child')) return;
+
+    const allCbs = tbody.querySelectorAll('input[type="checkbox"]:not(:disabled)');
+    if (allCbs.length === 0) return;
+
+    // 彻底清除并阻止任何可能的浏览器原生文字选择
+    window.getSelection()?.removeAllRanges();
+    if (!e.target.closest('input[type="checkbox"]')) {
+      e.preventDefault();
+    }
+
+    isMouseDown = true;
+    isDragging = false;
+
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    startPageX = e.clientX + scrollX;
+    startPageY = e.clientY + scrollY;
+    lastClientX = e.clientX;
+    lastClientY = e.clientY;
+    lastKeyStates = {
+      isCtrlOrMeta: e.ctrlKey || e.metaKey,
+      isShift: e.shiftKey,
+      isAlt: e.altKey
+    };
+
+    initialStates.clear();
+    allCbs.forEach(cb => {
+      initialStates.set(cb, cb.checked);
+    });
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+
+  // 处理滚轮滚动事件（阻止 Ctrl 缩放 / Shift 横滚，平滑垂直滚动表格或页面）
+  function handleWheel(e) {
+    const datasetsPage = document.getElementById('datasets');
+    if (!datasetsPage || datasetsPage.classList.contains('hidden')) return;
+
+    const inDatasets = datasetsPage.contains(e.target);
+    if (!inDatasets && !isDragging && !isMouseDown) return;
+
+    const isModifier = e.ctrlKey || e.metaKey || e.shiftKey;
+    if (!isModifier && !isDragging && !isMouseDown) return;
+
+    e.preventDefault();
+
+    let delta = e.deltaY;
+    // 按住 Shift 时部分浏览器将 deltaY 转入 deltaX，这里转回纵向位移
+    if (e.shiftKey && (delta === 0 || Math.abs(e.deltaX) > Math.abs(delta))) {
+      delta = e.deltaX;
+    }
+
+    if (e.deltaMode === 1) {
+      delta *= 28;
+    } else if (e.deltaMode === 2) {
+      delta *= window.innerHeight || 600;
+    }
+
+    scrollVertically(delta);
+
+    // 如果刚按下左键还没达到 6px 移动阈值，一滚动滚轮立即激活框选
+    if (isMouseDown && !isDragging) {
+      isDragging = true;
+      window.getSelection()?.removeAllRanges();
+      document.body.classList.add('marquee-selecting');
+      box.style.display = 'block';
+    }
+
+    if (isDragging) {
+      updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+    }
+  }
+
+  window.addEventListener('wheel', handleWheel, { passive: false });
+
+  // 拖选过程中动态响应修饰键按下与松开
+  window.addEventListener('keydown', (e) => {
+    if (isDragging && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta')) {
+      updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (isDragging && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta')) {
+      updateSelection(lastClientX, lastClientY, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+    }
+  });
+
+  window.addEventListener('blur', () => {
+    if (isMouseDown || isDragging) {
+      onMouseUp();
+    }
+  });
 }
 
 async function loadDatasets() {
@@ -1101,12 +1790,13 @@ async function loadDatasets() {
   if (!body || datasetLoading) return;
   datasetLoading = true;
   try {
-    datasetsData = await api('/api/recordings');
+    datasetsData = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&compact=1`);
     const files = datasetsData.files || [];
+    renderDatasetFormatTabs(datasetsData.format_counts);
     const selected = new Set($$('#datasetRows input[type=checkbox]:checked').map(check => check.dataset.filename));
     body.textContent = '';
     if (summary) {
-      summary.textContent = `共 ${datasetsData.total_count || 0} 个数据集 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''}`;
+      summary.textContent = `${datasetFormatLabels[datasetFormat]} 共 ${datasetsData.total_count || 0} 个 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''} · 提示: 可鼠标拖动框选（Alt 批量取消，Shift 连选）`;
     }
     if ($('#selectAllDatasets')) $('#selectAllDatasets').checked = false;
     updateSelectedDatasetCount();
@@ -1131,6 +1821,10 @@ async function loadDatasets() {
       const check = document.createElement('input');
       check.type = 'checkbox';
       check.dataset.filename = datasetIdentifier(file);
+      check.dataset.sourceFormat = isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP';
+      check.dataset.displayName = file.filename;
+      check.dataset.uploadIdentity = file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file);
+      check.dataset.convertible = String(!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE' && String(file.filename).endsWith('.mcap'));
       check.disabled = datasetUnavailable(file);
       check.checked = !check.disabled && selected.has(datasetIdentifier(file));
       check.onchange = updateSelectedDatasetCount;
@@ -1139,20 +1833,29 @@ async function loadDatasets() {
       const nameCell = document.createElement('td');
       const nameCode = document.createElement('code');
       nameCode.textContent = `${file.marked ? '★ ' : ''}${file.filename}`;
+      nameCode.title = '双击可复制文件名';
+      nameCode.style.cursor = 'pointer';
+      nameCode.ondblclick = (e) => {
+        e.stopPropagation();
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(file.filename);
+          toast(`已复制文件名：${file.filename}`);
+        }
+      };
       nameCell.append(nameCode);
       const formatTag = document.createElement('span');
       formatTag.className = 'tag';
       formatTag.style.cssText = 'margin-left:8px;font-size:11px;';
-      formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : 'MCAP';
+      formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : file.format === 'CAPTURE_BUNDLE' ? 'MCAP＋MP4' : 'MCAP';
       nameCell.append(formatTag);
 
       const profileCell = document.createElement('td');
       const profileTag = document.createElement('span');
       profileTag.className = 'tag';
-      profileTag.textContent = file.profile_display_name || file.profile_id || '未知（旧数据）';
+      profileTag.textContent = file.profile_display_name || file.profile_id || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
       profileTag.title = file.profile_id
         ? `Profile: ${file.profile_id}${file.robot_name ? ` · Robot: ${file.robot_name}` : ''}`
-        : '该文件没有 HC Teleop Profile metadata';
+        : file.inspection_pending ? '后台正在读取 MCAP 元数据' : '该文件没有 HC Teleop Profile metadata';
       if (!file.profile_id) {
         profileTag.style.color = 'var(--muted)';
         profileTag.style.borderColor = 'var(--border)';
@@ -1165,12 +1868,12 @@ async function loadDatasets() {
 
       const durationCell = document.createElement('td');
       durationCell.style.font = '12px monospace';
-      durationCell.textContent = file.duration_human || '--';
+      durationCell.textContent = file.inspection_pending ? '分析中…' : (file.duration_human || '--');
 
       const msgCountCell = document.createElement('td');
       msgCountCell.style.font = '12px monospace';
       msgCountCell.style.color = 'var(--cyan)';
-      msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : '--');
+      msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--');
 
       const topicsCell = document.createElement('td');
       topicsCell.style.fontSize = '12px';
@@ -1179,7 +1882,7 @@ async function loadDatasets() {
       } else if (file.topic_count) {
         topicsCell.textContent = `${file.topic_count} 个话题 (${file.avg_rate_hz || 0} Hz)`;
       } else {
-        topicsCell.textContent = file.is_current ? '录制中…' : '--';
+        topicsCell.textContent = file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--';
       }
 
       const timeCell = document.createElement('td');
@@ -1202,28 +1905,25 @@ async function loadDatasets() {
       const group = document.createElement('div');
       group.className = 'btn-group';
 
-      if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.channels?.length || file.message_count)) {
-        if (!isLeRobotDataset(file)) {
+      if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.details_available || file.channels?.length || file.message_count)) {
+        if (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') {
           const replayBtn = document.createElement('button');
           replayBtn.className = 'primary btn-sm';
           replayBtn.textContent = '重放';
-          replayBtn.onclick = () => openStartReplayDialog(file);
-          group.append(replayBtn);
-          const editBtn = document.createElement('button');
-          editBtn.className = 'btn-sm';
-          editBtn.textContent = '编辑 / 预览';
-          editBtn.onclick = () => {
-            $('#dataSource').value=file.filename;
-            $('#dataWorkbench').scrollIntoView({behavior:'smooth'});
-            $('[data-data-action="overview"]').click();
+          replayBtn.onclick = async () => {
+            try { openStartReplayDialog(await fetchDatasetDetails(file)); }
+            catch (error) { toast(`读取 MCAP 详情失败：${error.message}`, true); }
           };
-          group.append(editBtn);
+          group.append(replayBtn);
         }
 
         const detailBtn = document.createElement('button');
         detailBtn.className = 'btn-sm';
         detailBtn.textContent = '详情';
-        detailBtn.onclick = () => showDatasetDetails(file);
+        detailBtn.onclick = async () => {
+          try { showDatasetDetails(await fetchDatasetDetails(file)); }
+          catch (error) { toast(`读取数据集详情失败：${error.message}`, true); }
+        };
         group.append(detailBtn);
       }
 
@@ -1233,8 +1933,8 @@ async function loadDatasets() {
         downloadLink.disabled = true;
         downloadLink.title = '数据集生成完成后可下载';
       } else {
-        downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download`;
-        downloadLink.setAttribute('download', isLeRobotDataset(file) ? `${file.filename}.zip` : file.filename);
+        downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download?with_tags=1`;
+        downloadLink.setAttribute('download', '');
       }
       downloadLink.textContent = '下载';
 
@@ -1254,7 +1954,16 @@ async function loadDatasets() {
         }
       };
 
-      group.append(downloadLink, deleteBtn);
+      const platformBtn = document.createElement('button');
+      platformBtn.className = 'btn-sm';
+      platformBtn.textContent = file.platform_recording?.binding ? '另选任务上传' : '选择任务后上传';
+      platformBtn.disabled = datasetUnavailable(file);
+      platformBtn.title = datasetUnavailable(file) ? '数据生成完成后可上传' : '选择目标任务和上传；已有上传记录保持不变';
+      platformBtn.onclick = () => window.platformUploadHistory?.(
+        file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file),
+        file.filename,
+        isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP');
+      group.append(downloadLink, platformBtn, deleteBtn);
       actionCell.append(group);
 
       row.append(selectCell, nameCell, profileCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
@@ -1266,6 +1975,7 @@ async function loadDatasets() {
     toast(`加载数据集失败：${error.message}`, true);
   } finally {
     datasetLoading = false;
+    scheduleDatasetPolling(datasetsData.files || [], Boolean(summary?.textContent?.startsWith('读取数据集列表失败')));
   }
 }
 
@@ -1409,10 +2119,23 @@ async function toggleSimulationView() {
 }
 let simulationBusy=false;
 let simulationActionError='';
+function renderRuntimeDomain(value) {
+  const field=$('#runtimeRosDomain'), hint=$('#runtimeRosDomainHint');
+  if(!field||!hint)return;
+  const actual=value?.ros_domain_id;
+  field.value=Number.isInteger(actual)?String(actual):'—';
+  if(!Number.isInteger(actual)) {hint.textContent='尚未取得运行时域，请检查服务连接';return;}
+  const configured=config?.ros?.domain_id;
+  if(value.runtime_mode==='teleop') {
+    hint.textContent=`真机遥操实际使用域 ${actual}`+(Number.isInteger(configured)&&configured!==actual?`；启动参数覆盖了保存的默认域 ${configured}`:'');
+  } else {
+    hint.textContent=`隔离仿真实际使用域 ${actual}；启动指定的真机域 ${value.hardware_domain_id??'—'} 不用于仿真`;
+  }
+}
 async function loadSimulation() {
   try {
     const value=await api('/api/simulation');
-    simulationLastState=value;simulationView?.updateState(value);
+    simulationLastState=value;simulationView?.updateState(value);renderRuntimeDomain(value);
     const states={stopped:'已停止',starting:'启动中',running:'运行中',stopping:'停止中',failed:'启动失败 / 已退出'};
     if(!simulationBusy)$('#simulationState').textContent=states[value.state]||value.state;
     $('#simulationProfile').textContent=`运行模式：${value.runtime_mode==='teleop'?'真机遥操':'隔离仿真'} · 显示：${$('#simulationViewEnabled')?.checked?'网页三维已开启':'网页三维已关闭'} · ROS 域：${value.ros_domain_id??'—'} · 当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
@@ -1423,6 +2146,7 @@ async function loadSimulation() {
     $('#restartSimulation').disabled=simulationBusy||!value.available||value.state==='stopping';
     $('#stopSimulation').disabled=simulationBusy||!active;
   } catch(error) {
+    renderRuntimeDomain(null);
     $('#simulationError').textContent=`无法读取仿真状态：${error.message}`;
     for(const id of ['startSimulation','restartSimulation','stopSimulation']) $('#'+id).disabled=true;
   }
@@ -1472,7 +2196,7 @@ function bindSimulationControls() {
 }
 
 async function init() {
-  initDataWorkbench();
+  bindInterventionControls();
   route();
   bindSimulationControls();
   loadSimulation();
@@ -1523,44 +2247,47 @@ async function init() {
       await loadProfiles();
     } catch(error){toast(`删除失败：${error.message}`,true);}
   };
-  $('#activateProfile').onclick=async()=>{
+  $('#activateProfile').onclick=()=>configAction(async()=>{
     const profileId=$('#robotProfileSelect').value;
     if(!profileId)return;
     try {
       const result=await api(`/api/robot-profiles/${encodeURIComponent(profileId)}/activate`,{method:'POST'});
       profilesData.active=result.active;
-      if(config?.robot_profiles)config.robot_profiles.active=result.active;
-      renderProfiles(result.active);
-      toast(result.restart_simulation_required?'配置已应用；可在下方启动当前机器人仿真':'配置已经是活动配置');
+      config=result.config;
+      renderConfig();
+      await loadProfiles(result.active);
+      notifyConfigApplied(result,'机器人配置已保存');
     } catch(error){toast(`应用失败：${error.message}`,true);}
-  };
-  $('#saveConfig').onclick=async()=>{
+  });
+  $('#saveConfig').onclick=()=>configAction(async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
       config=result.config;
       renderConfig();
-      toast(result.server_restart_required?'已保存；服务地址或配置目录变更需重启进程':'配置已保存并应用');
+      notifyConfigApplied(result,'配置已保存');
     }catch(error){toast(error.message,true);}
-  };
-  $('#saveCameras').onclick=async()=>{
+  $('#cameraStreamCards')?.addEventListener('change',renderCameraCompatibilityHint);
+  $('[data-path="camera.fec.enabled"]')?.addEventListener('change',renderCameraCompatibilityHint);
+  });
+  $('#saveCameras').onclick=()=>configAction(async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
-      config=result.config;renderConfig();toast('四路相机话题绑定已保存并应用');
+      config=result.config;renderConfig();notifyConfigApplied(result,'四路相机话题绑定已保存');
     }catch(error){toast(error.message,true);}
-  };
-  $('#saveRecording').onclick=async()=>{
+  });
+  $('#saveRecording').onclick=()=>configAction(async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
       config=result.config; renderConfig();
-      toast('录制配置已保存，用于下一段录制');
+      notifyConfigApplied(result,'录制配置已保存');
     }catch(error){toast(error.message,true);}
-  };
+  });
   if($('#topicRecordingFormat')) $('#topicRecordingFormat').onchange=updateRecordingFormatFields;
   async function triggerStartRecording(force = false) {
     try {
       const result = await api('/api/recording/start', {
         method: 'POST',
-        body: JSON.stringify({ force }),
+        body: JSON.stringify({ force, selection: await window.platformRecordingSelection() }),
       });
       toast(`已开始话题录制：${result.path}`);
       renderStatus(await api('/api/status'));
@@ -1574,38 +2301,38 @@ async function init() {
       try {
         const precheck = await api('/api/recording/precheck', { method: 'POST' });
         if (!precheck.ready) {
-          if (!precheck.topic_count && config?.ros?.recording?.workflow !== 'platform_raw') {
+          if (!precheck.topic_count) {
             toast('尚未勾选任何需要录制的话题，请先在下方勾选待录制话题', true);
             return;
           }
           const dialog = $('#precheckWarningDialog');
           if (dialog) {
-            $('#precheckWarningSummary').textContent = `检测到 ${precheck.issues.length} 项录制源检查未通过：`;
+            $('#precheckWarningSummary').textContent = `检测到 ${precheck.issues.length} 个待录制话题未检测到消息或频率未达标：`;
             const tbody = $('#precheckIssueRows');
             tbody.textContent = '';
             for (const iss of precheck.issues) {
               const tr = document.createElement('tr');
               const tdTopic = document.createElement('td');
               const code = document.createElement('code');
-              code.textContent = iss.topic || iss.source_id || iss.source || 'capture';
+              code.textContent = iss.topic;
               tdTopic.append(code);
               const tdHz = document.createElement('td');
               tdHz.className = 'topic-rate ' + (iss.hz > 0 ? 'low' : 'none');
-              tdHz.textContent = iss.hz == null ? '—' : `${Number(iss.hz).toFixed(1)} Hz`;
+              tdHz.textContent = `${Number(iss.hz || 0).toFixed(1)} Hz`;
               const tdStd = document.createElement('td');
               tdStd.className = 'topic-target-rate';
-              tdStd.textContent = iss.min_hz == null ? '—' : `≥ ${Number(iss.min_hz).toFixed(0)} Hz`;
+              tdStd.textContent = `≥ ${Number(iss.min_hz || 0).toFixed(0)} Hz`;
               const tdDiag = document.createElement('td');
               const badge = document.createElement('span');
               badge.className = 'topic-status-badge ' + (iss.hz > 0 ? 'status-low' : 'status-none');
-              badge.textContent = iss.reason || iss.message || '录制源未就绪';
+              badge.textContent = iss.state === 'no_data' ? '未检测到消息' : '频率偏低';
               tdDiag.append(badge);
               tr.append(tdTopic, tdHz, tdStd, tdDiag);
               tbody.append(tr);
             }
             $('#confirmForceStartBtn').onclick = async () => {
               dialog.close();
-              toast('请修复录制源后重试；可将事件源设为 event、非必需源设为 required: false');
+              await triggerStartRecording(true);
             };
             dialog.showModal();
             return;
@@ -1621,12 +2348,23 @@ async function init() {
     $('#stopRecordingBtn').onclick=async()=>{
       try {
         const result=await api('/api/recording/stop',{method:'POST'});
-        toast('已停止接收，后台正在完成源文件；请在录制作业中查看结果');
+        window.platformRecordingStopped?.();
+        toast(`话题录制已停止，本次共录制 ${result.status?.messages||0} 条消息`);
         renderStatus(await api('/api/status'));
       } catch(error){toast(`停止录制失败：${error.message}`,true);}
     };
   }
   if($('#refreshDatasets')) $('#refreshDatasets').onclick = loadDatasets;
+  $$('[data-dataset-format]').forEach(button => {
+    button.onclick = async () => {
+      const selected = button.dataset.datasetFormat;
+      if (!datasetFormatLabels[selected] || selected === datasetFormat) return;
+      datasetFormat = selected;
+      renderDatasetFormatTabs(datasetsData.format_counts);
+      if ($('#datasetsSummary')) $('#datasetsSummary').textContent = `正在加载 ${datasetFormatLabels[selected]} 数据集…`;
+      await loadDatasets();
+    };
+  });
   if($('#selectAllDatasets')) {
     $('#selectAllDatasets').onchange = () => {
       const checked = $('#selectAllDatasets').checked;
@@ -1636,6 +2374,8 @@ async function init() {
       updateSelectedDatasetCount();
     };
   }
+  initDatasetMarqueeSelection();
+
   if($('#batchDeleteDatasets')) {
     $('#batchDeleteDatasets').onclick = async () => {
       const selected = $$('#datasetRows input[type=checkbox]:checked')
@@ -1653,6 +2393,42 @@ async function init() {
       } catch (err) {
         toast(`批量删除失败：${err.message}`, true);
       }
+    };
+  }
+  if($('#batchConvertLerobot')) {
+    $('#batchConvertLerobot').onclick = async () => {
+      const selected = $$('#datasetRows input[type=checkbox]:checked')
+        .map(cb => cb.dataset.filename);
+      if (!selected.length) return;
+      try {
+        const res = await api('/api/recordings/batch-convert-lerobot', {
+          method: 'POST', body: JSON.stringify({ filenames: selected }),
+        });
+        const skipped = res.skipped?.length || 0;
+        toast(`已加入 LeRobot 转换队列 ${res.accepted?.length || 0} 个${skipped ? `，跳过 ${skipped} 个` : ''}`);
+        await loadDatasets();
+      } catch (err) { toast(`批量转换失败：${err.message}`, true); }
+    };
+  }
+  if($('#batchDownloadDatasets')) {
+    $('#batchDownloadDatasets').onclick = () => {
+      const selected = $$('#datasetRows input[type=checkbox]:checked').map(cb => cb.dataset.filename);
+      if (!selected.length) return;
+      const form = document.createElement('form'); form.method = 'POST'; form.action = '/api/recordings/batch-download';
+      const input = document.createElement('input'); input.type = 'hidden'; input.name = 'filenames';
+      input.value = JSON.stringify(selected); form.append(input); document.body.append(form); form.submit(); form.remove();
+      toast(`正在打包下载 ${selected.length} 个数据集`);
+    };
+  }
+  if($('#batchUploadDatasets')) {
+    $('#batchUploadDatasets').onclick = async () => {
+      const checked = $$('#datasetRows input[type=checkbox]:checked');
+      if (!checked.length) return;
+      const formats = new Set(checked.map(cb => cb.dataset.sourceFormat));
+      if (formats.size !== 1) { toast('批量上传需选择同一种格式的数据集', true); return; }
+      const targets = checked.map(cb => ({ identity: cb.dataset.uploadIdentity,
+        name: cb.dataset.displayName, source_format: cb.dataset.sourceFormat }));
+      await window.platformUploadBatch?.(targets, [...formats][0]);
     };
   }
   if($('#importMcapBtn') && $('#importMcapInput')) {
@@ -1787,51 +2563,6 @@ async function init() {
   if($('#sourceExoskeleton'))$('#sourceExoskeleton').onclick=()=>setControlSource('exoskeleton');
   document.addEventListener('visibilitychange', () => updateDatasetPolling(location.hash.slice(1)));
   configureProfileDialog();
-}
-
-
-
-// Standalone browser data tools share the application's recording registry.
-function initDataWorkbench() {
-  let detail = null;
-  const el = id => document.getElementById(id);
-  const call = async (url, data) => {
-    const response = await fetch(url, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
-    const text = await response.text();
-    if (!response.ok) throw new Error(text);
-    return JSON.parse(text);
-  };
-  const show = value => { el('dataResult').textContent = JSON.stringify(value, null, 2); };
-  async function refresh() {
-    try {
-      const jobs = await call('/api/recording/jobs');
-      el('recordingJobsStatus').textContent = JSON.stringify(jobs.map(j => ({recording_id:j.recording_id, workflow:j.workflow, profile:j.profile_id, binding:j.binding, capture_state:j.capture_state, artifact_state:j.artifact_state, artifacts:j.artifacts, error:j.error})), null, 2);
-      const tasks = await call('/api/data/jobs');
-      if (tasks.length) show(tasks);
-    } catch (error) { show({error:error.message}); }
-  }
-  el('refreshRecordingJobs').onclick = refresh;
-  document.querySelectorAll('[data-data-action]').forEach(button => button.onclick = async () => {
-    const operation = button.dataset.dataAction, filename = el('dataSource').value;
-    try {
-      if (['play','pause','stop'].includes(operation)) {
-        show(await call('/api/data-preview/'+operation, {filename, position:Number(el('dataPosition').value), speed:Number(el('dataSpeed').value)}));
-      } else if (operation === 'overview') {
-        detail = await call('/api/data/'+encodeURIComponent(filename));
-        el('dataNotes').value = detail.edit.notes;
-        el('dataTrimStart').value = detail.edit.trim.start;
-        el('dataTrimEnd').value = detail.edit.trim.end;
-        el('dataAnnotations').value = JSON.stringify(detail.edit.annotations, null, 2);
-        show(detail);
-      } else {
-        const data = {etag:detail?.etag, filename:el('dataOutput').value, notes:el('dataNotes').value, trim:{start:Number(el('dataTrimStart').value), end:Number(el('dataTrimEnd').value)}, annotations:JSON.parse(el('dataAnnotations').value)};
-        const result = await call('/api/data/'+encodeURIComponent(filename)+'/'+operation, data);
-        if (operation === 'edit') detail = result;
-        show(result);
-      }
-    } catch (error) { show({error:error.message}); }
-  });
-  if (window.mountUploadPanel) window.mountUploadPanel(document.getElementById('uploadPanel'));
 }
 
 init();

@@ -8,12 +8,17 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from mcap.well_known import MessageEncoding, SchemaEncoding
 from mcap.writer import Writer as McapWriter
+from .background_process import background_environment
+from .takeover_log import takeover_path
+from .x1_recording import ordinary_x1_capture
 
 
 _PRIMITIVE_TYPES = {
@@ -55,6 +60,27 @@ def _counter_set(counter: Any, value: int) -> None:
 def _counter_add(counter: Any, value: int = 1) -> None:
     with counter.get_lock():
         counter.value += int(value)
+
+
+def enqueue_record(resources, event):
+    """Bound both message count and payload bytes under the ingress barrier."""
+    target, accepting, dropped, lock, accepted, queued_bytes, budget = resources
+    raw = event.get('_raw')
+    size = len(raw)+1024 if isinstance(raw, bytes) else len(json.dumps(event, ensure_ascii=False).encode())+1024
+    with lock:
+        if not accepting.is_set():
+            return False
+        if _counter_get(queued_bytes)+size > budget:
+            _counter_add(dropped)
+            return False
+        try:
+            target.put_nowait({**event, '_queue_bytes': size})
+        except queue.Full:
+            _counter_add(dropped)
+            return False
+        _counter_add(queued_bytes, size)
+        _counter_add(accepted)
+        return True
 
 
 def _get_msg_def(msg_type: str) -> bytes:
@@ -137,6 +163,14 @@ def _get_msg_def(msg_type: str) -> bytes:
         return b""
 
 
+def _matches_recording_topics(event, topics):
+    """Page-configured recordings accept only their selected ROS messages."""
+    return topics is None or (
+        isinstance(event.get('_raw'), bytes)
+        and (event.get('topic'), event.get('msg_type')) in topics
+    )
+
+
 def _mcap_writer_process(
     path: str,
     event_queue: Any,
@@ -144,9 +178,16 @@ def _mcap_writer_process(
     error_queue: Any,
     ready_event: Any,
     metadata: dict[str, str],
+    finish_event: Any,
+    accepted: Any,
+    queued_bytes: Any,
+    ingress_lock: Any,
+    recording_topics: tuple[tuple[str, str], ...] | None = None,
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
     _lower_recording_priority()
+    record_only_topics = set()
+    x1_capture = ordinary_x1_capture(metadata)
     schemas: dict[str, int] = {}
     channels: dict[tuple[str, str], int] = {}
     try:
@@ -155,23 +196,42 @@ def _mcap_writer_process(
             writer.start(profile="ros2")
             if metadata:
                 writer.add_metadata(RECORDING_METADATA_NAME, metadata)
+            # Declare selected channels even when no publisher sends a sample.
+            # Channel/schema records do not create ROS messages or timestamps.
+            for topic, msg_type in recording_topics or ():
+                if msg_type not in schemas:
+                    schemas[msg_type] = writer.register_schema(
+                        name=msg_type, encoding=SchemaEncoding.ROS2, data=_get_msg_def(msg_type))
+                channels[(topic, msg_type)] = writer.register_channel(
+                    topic=topic, message_encoding=MessageEncoding.CDR, schema_id=schemas[msg_type])
             # Do not report a recording as active until the destination file
             # has actually been opened and the MCAP header has been written.
             ready_event.set()
             try:
                 while True:
-                    event = event_queue.get()
-                    if event is None:
+                    if finish_event.is_set() and _counter_get(messages) >= _counter_get(accepted):
                         break
+                    try:
+                        event = event_queue.get(timeout=.1)
+                    except queue.Empty:
+                        continue
 
                     topic = str(event.get("topic") or "/events")
                     msg_type = str(
                         event.get("msg_type") or "std_msgs/msg/String"
                     )
                     raw_data = event.get("_raw")
+                    if not _matches_recording_topics(event, recording_topics):
+                        with ingress_lock:
+                            _counter_add(messages)
+                            _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
+                        continue
                     stamp_ns = int(event.get("stamp_ns") or time.time_ns())
 
                     if isinstance(raw_data, bytes):
+                        if not x1_capture and event.get('record_only') and topic not in record_only_topics:
+                            writer.add_metadata('hc_teleop.record_only', {'topic': topic})
+                            record_only_topics.add(topic)
                         if msg_type not in schemas:
                             schemas[msg_type] = writer.register_schema(
                                 name=msg_type,
@@ -195,7 +255,7 @@ def _mcap_writer_process(
                     else:
                         payload = event.get("payload")
                         if payload is None:
-                            payload = event
+                            payload = {k:v for k,v in event.items() if not k.startswith('_')}
                         json_bytes = json.dumps(
                             payload,
                             ensure_ascii=False,
@@ -221,7 +281,17 @@ def _mcap_writer_process(
                             data=json_bytes,
                             publish_time=stamp_ns,
                         )
-                    _counter_add(messages)
+                    provenance = event.get('_provenance')
+                    if provenance and not x1_capture and recording_topics is None:
+                        key = ('/events/recording/sample_provenance', 'teleop_event')
+                        if key not in channels:
+                            channels[key] = writer.register_channel(topic=key[0], message_encoding=MessageEncoding.JSON,
+                                schema_id=writer.register_schema(name='hc-sample-provenance/v1', encoding=SchemaEncoding.JSONSchema, data=b''))
+                        writer.add_message(channel_id=channels[key], log_time=stamp_ns, publish_time=stamp_ns,
+                                           data=json.dumps(provenance, allow_nan=False).encode())
+                    with ingress_lock:
+                        _counter_add(messages)
+                        _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
             finally:
                 writer.finish()
     except Exception as exc:
@@ -230,6 +300,19 @@ def _mcap_writer_process(
             error_queue.put_nowait(f"{type(exc).__name__}: {exc}")
         except queue.Full:
             pass
+
+
+def _reusable_writer_process(control, event_queue, messages, errors, ready, finish,
+                             accepted, queued_bytes, ingress_lock, finished):
+    """Prepared correction slots reuse a warm writer process between files."""
+    while True:
+        request = control.get()
+        if request is None:
+            return
+        path, metadata, recording_topics = request
+        _mcap_writer_process(path, event_queue, messages, errors, ready, metadata,
+                             finish, accepted, queued_bytes, ingress_lock, recording_topics)
+        finished.set()
 
 
 def read_recording_metadata(path: Path) -> dict[str, str]:
@@ -292,10 +375,8 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
             msg_count = s.statistics.message_count
             schemas = {s_id: sch.name for s_id, sch in s.schemas.items()}
             channels = []
-            for chan_id, count in sorted(s.statistics.channel_message_counts.items()):
-                chan = s.channels.get(chan_id)
-                if not chan:
-                    continue
+            for chan_id, chan in sorted(s.channels.items()):
+                count = s.statistics.channel_message_counts.get(chan_id, 0)
                 channels.append({
                     "topic": chan.topic,
                     "type": schemas.get(chan.schema_id, "unknown"),
@@ -324,10 +405,51 @@ def _inspect_mcap_file(path: Path) -> dict[str, Any]:
         }
 
 
-class TopicRecorder:
+def _inspection_cache_path(recording_path: Path) -> Path:
+    return recording_path.parent / f".{recording_path.name}.inspection.json"
+
+
+def _write_inspection_cache(
+    recording_path: Path,
+    signature: tuple[int, int],
+    value: dict[str, Any],
+) -> None:
+    destination = _inspection_cache_path(recording_path)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {"signature": list(signature), "value": value},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+
+
+def _index_mcap_files(paths: list[str]) -> None:
+    """Build compact-list summaries away from WebRTC and control threads."""
+    _lower_recording_priority()
+    for value in paths:
+        path = Path(value)
+        try:
+            stat = path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+            _write_inspection_cache(path, signature, _inspect_mcap_file(path))
+        except (OSError, ValueError, TypeError):
+            continue
+
+
+from .correction_support import CorrectionSupport
+
+
+class TopicRecorder(CorrectionSupport):
     """Process-isolated MCAP recorder for ROS 2 CDR messages and telemetry."""
 
-    def __init__(self, config: dict[str, Any], config_dir: Path):
+    def __init__(self, config: dict[str, Any], config_dir: Path, *, topics=None):
+        self.config, self.config_dir = dict(config), config_dir
+        self._recording_topics = (None if topics is None else tuple(dict.fromkeys(
+            (str(item['topic']), str(item['type'])) for item in topics)))
         directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
         if not directory.is_absolute():
             directory = config_dir / directory
@@ -342,8 +464,17 @@ class TopicRecorder:
         self._export_log = None
         self._lerobot_path = ""
         self.path: Path | None = None
+        self.takeovers = None
         self._mp = mp.get_context("spawn")
-        self._queue = self._mp.Queue(maxsize=8192)
+        self._queue = self._mp.Queue(maxsize=int(config.get('queue_capacity', 8192)))
+        self._ingress_lock = self._mp.RLock()
+        self._accepted = self._mp.Value('Q', 0)
+        self._queued_bytes = self._mp.Value('Q', 0)
+        self._byte_budget = int(config.get('queue_bytes', 128*1024**2))
+        self._finish_event = self._mp.Event()
+        self._reusable = bool(config.get('reuse_writer_process', False))
+        self._writer_control = self._mp.Queue(maxsize=1)
+        self._finished_event = self._mp.Event()
         self._accepting_event = self._mp.Event()
         self._messages = self._mp.Value("Q", 0)
         self._dropped = self._mp.Value("Q", 0)
@@ -353,10 +484,86 @@ class TopicRecorder:
         self._lock = threading.Lock()
         self._last_error: str | None = None
         self._active_metadata: dict[str, str] = {}
+        from .recording_artifacts import RecordingArtifacts
+        self._artifacts = RecordingArtifacts(config, config_dir, self.directory)
+        self.artifact_state_dir = self._artifacts.state_dir
+        self.binding_snapshot = None
+        self.upload_service = None
+        self._capture_identity = None
+        self.task_managed = False
+        self._inspection_cache: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+        self._inspection_process: Any = None
 
-    def ipc_resources(self) -> tuple[Any, Any, Any]:
+    def ipc_resources(self) -> tuple:
         """Resources inherited by the raw ROS subscription process."""
-        return self._queue, self._accepting_event, self._dropped
+        return (self._queue, self._accepting_event, self._dropped, self._ingress_lock,
+                self._accepted, self._queued_bytes, self._byte_budget)
+
+    def convert_recordings_to_lerobot(self, identifiers):
+        """Validate and enqueue a sequential, detached historical conversion batch."""
+        from .export_progress import progress_path, read_progress
+        from .lerobot_export import ensure_export_available
+        from .recording_datasets import resolve_dataset
+
+        if not isinstance(identifiers, list) or not identifiers or len(identifiers) > 100:
+            raise ValueError('请选择 1–100 个数据集')
+        ensure_export_available()
+        accepted, skipped, items = [], [], []
+        active_path = self.path.resolve() if self.is_recording() and self.path else None
+        for identifier in dict.fromkeys(str(value) for value in identifiers):
+            try:
+                target = resolve_dataset(self.directory, identifier)
+                if target.suffix != '.mcap' or not target.is_file():
+                    raise ValueError('仅 MCAP 文件可以转换为 LeRobot')
+                if active_path and target.resolve() == active_path:
+                    raise ValueError('文件仍在录制中')
+                destination = self.directory / 'lerobot' / target.stem
+                if (destination / 'meta/info.json').is_file():
+                    skipped.append({'id': identifier, 'reason': 'LeRobot 数据集已存在'})
+                    continue
+                progress = read_progress(progress_path(destination))
+                if progress.get('state') == 'exporting' and progress.get('pid'):
+                    try:
+                        os.kill(int(progress['pid']), 0)
+                        skipped.append({'id': identifier, 'reason': '正在转换或排队中'})
+                        continue
+                    except (OSError, ValueError):
+                        pass
+                if destination.exists():
+                    raise ValueError('存在未完成的同名 LeRobot 目录，请先检查或删除')
+                metadata = read_recording_metadata(target)
+                task = self.lerobot_task
+                if metadata.get('platform_task'):
+                    try:
+                        task = json.loads(metadata['platform_task'])['task']['name']
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                robot_type = metadata.get('profile_id') or metadata.get('robot_name') or 'x1'
+                items.append({'source': str(target.resolve()), 'destination': str(destination.resolve()),
+                              'fps': self.lerobot_fps, 'task': str(task),
+                              'robot_type': str(robot_type),
+                              'action_sources': deepcopy(self.action_sources)})
+                accepted.append(identifier)
+            except (ValueError, FileNotFoundError) as error:
+                skipped.append({'id': identifier, 'reason': str(error)})
+        if not items:
+            return {'ok': True, 'accepted': accepted, 'skipped': skipped, 'pid': None}
+        batch_dir = self.directory / '.batch_jobs'
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        spec_path = batch_dir / f'lerobot-{uuid4().hex}.json'
+        temporary = spec_path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps({'items': items}, ensure_ascii=False), encoding='utf-8')
+        temporary.replace(spec_path)
+        root = Path(__file__).resolve().parents[2]
+        log_path = spec_path.with_suffix('.log')
+        with log_path.open('ab') as log:
+            command = [sys.executable, '-m', 'middleware.core.batch_lerobot_export', str(spec_path)]
+            if sys.platform.startswith('linux'):
+                command = ['nice', '-n', '10', *command]
+            process = subprocess.Popen(command, cwd=root, env=background_environment(),
+                                       stdout=log, stderr=subprocess.STDOUT,
+                                       start_new_session=(os.name == 'posix'))
+        return {'ok': True, 'accepted': accepted, 'skipped': skipped, 'pid': process.pid}
 
     def _drain_queue(self, target: Any) -> None:
         while True:
@@ -370,12 +577,17 @@ class TopicRecorder:
         filename: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> str:
+        if self.corrections:
+            raise ValueError('correction capture owns recording; exit the intervention session first')
         self.stop()
         if self.status()["export_state"] == "exporting":
-            raise RuntimeError("LeRobot 数据正在保存，请等待完成后再开始下一次录制")
-        if self.save_format != "mcap":
+            self._detach_export()
+        if self.save_format in ("lerobot", "both"):
             from .lerobot_export import ensure_export_available
             ensure_export_available()
+        if self.save_format == "mcap_mp4":
+            from .video_bundle import ensure_available
+            ensure_available()
         self._export_state, self._export_error, self._lerobot_path = "idle", None, ""
         self.directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -383,12 +595,18 @@ class TopicRecorder:
         if not fname.endswith(".mcap"):
             fname += ".mcap"
         # Keep the complete source, including /vrdata, for recovery and audit.
-        source_dir = self.directory / ".lerobot_sources" if self.save_format == "lerobot" else self.directory
+        source_dir = self.directory / ".lerobot_sources" if self.save_format == "lerobot" else self.directory / ".bundle_sources" if self.save_format == "mcap_mp4" else self.directory
         source_dir.mkdir(parents=True, exist_ok=True)
         fname = Path(fname).name
         self.path = source_dir / fname
         if self.path.exists():
             raise FileExistsError(f"录制文件已存在: {self.path}")
+        if takeover_path(self.path).exists():
+            raise FileExistsError(f"接管标注文件已存在: {takeover_path(self.path)}")
+        # Freeze the platform task at capture start, never at conversion/upload time.
+        binding = self.binding_snapshot() if self.binding_snapshot else None
+        self._capture_identity = (None if self.task_managed else
+            self._artifacts.begin(self.path, self.save_format, metadata or {}, binding))
         self._active_metadata = {
             str(key): str(value)
             for key, value in (metadata or {}).items()
@@ -398,10 +616,23 @@ class TopicRecorder:
             self._drain_queue(self._queue)
             self._drain_queue(self._error_queue)
             self._ready_event.clear()
+            self._finish_event.clear()
+            self._finished_event.clear()
+            _counter_set(self._accepted, 0)
+            _counter_set(self._queued_bytes, 0)
             self._last_error = None
             _counter_set(self._messages, 0)
             _counter_set(self._dropped, 0)
-            self._process = self._mp.Process(
+            if self._reusable:
+                if self._process is None or not self._process.is_alive():
+                    self._process = self._mp.Process(target=_reusable_writer_process,
+                        args=(self._writer_control, self._queue, self._messages, self._error_queue,
+                              self._ready_event, self._finish_event, self._accepted, self._queued_bytes,
+                              self._ingress_lock, self._finished_event), name='correction-writer', daemon=True)
+                    self._process.start()
+                self._writer_control.put_nowait((str(self.path), self._active_metadata, self._recording_topics))
+            else:
+                self._process = self._mp.Process(
                 target=_mcap_writer_process,
                 args=(
                     str(self.path),
@@ -410,11 +641,16 @@ class TopicRecorder:
                     self._error_queue,
                     self._ready_event,
                     self._active_metadata,
+                    self._finish_event,
+                    self._accepted,
+                    self._queued_bytes,
+                    self._ingress_lock,
+                    self._recording_topics,
                 ),
                 name="mcap-writer",
                 daemon=True,
-            )
-            self._process.start()
+                )
+                self._process.start()
             if not self._ready_event.wait(timeout=5.0):
                 self._process.terminate()
                 self._process.join(timeout=2.0)
@@ -427,6 +663,9 @@ class TopicRecorder:
                     self._last_error = "MCAP writer exited during startup"
                 self._process = None
                 raise RuntimeError(self._last_error)
+            self._artifacts.mark_started(self._capture_identity)
+            if self.takeovers and not self._reusable:
+                self.takeovers.begin(self.path)
             self._accepting_event.set()
         return str(self.path)
 
@@ -434,27 +673,84 @@ class TopicRecorder:
         process = self._process
         if process is None:
             return self.status()
-        self._accepting_event.clear()
-        while True:
-            try:
-                self._queue.put_nowait(None)
-                break
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    continue
-                _counter_add(self._dropped)
-        process.join(timeout=30.0)
-        if process.is_alive():
-            raise TimeoutError("MCAP writer did not finish within 30 seconds")
-        self._process = None
-        if process.exitcode != 0:
+        if self._reusable and self._finished_event.is_set():
+            return self.status()
+        capture_ended_at = datetime.now(timezone.utc).isoformat()
+        # Separate end signal; accepted counts include packets still in a
+        # multiprocessing feeder. A full queue never loses data to make room
+        # for a sentinel, nor can Queue.empty() finish before a feeder flushes.
+        with self._ingress_lock:
+            self._accepting_event.clear()
+            takeover_write = self.takeovers.finish(self.path) if self.takeovers else None
+            self._finish_event.set()
+        if self._reusable:
+            while not self._finished_event.wait(timeout=.1):
+                if not process.is_alive():
+                    raise RuntimeError('MCAP slot exited before completing accepted data')
+        else:
+            process.join()
+            self._process = None
+        if process.exitcode not in (None, 0):
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self.status()  # Drain writer errors before exporting a closed source.
-        if self.save_format != "mcap" and not self._last_error:
+        if takeover_write is not None:
+            try:
+                takeover_write.result()
+            except OSError as exc:
+                self._last_error = f"Failed to save takeover times: {exc}"
+        if process.exitcode not in (None, 0) and not self._last_error:
+            self._last_error = f"MCAP writer exited with code {process.exitcode}"
+        self._artifacts.close(self._capture_identity, self._last_error, capture_ended_at)
+        self._capture_identity = None
+        # The dataset page deliberately uses a compact listing so hundreds of
+        # historical MCAP files do not get opened on every refresh. Cache the
+        # one file that just closed, including its embedded robot metadata, so
+        # the compact row is complete immediately and after a server restart.
+        if self.path is not None and not self._last_error and self.path.is_file():
+            try:
+                stat = self.path.stat()
+                cache_key = "file:" + str(self.path.resolve())
+                self._cached_inspection(
+                    cache_key,
+                    (stat.st_size, stat.st_mtime_ns),
+                    lambda: _inspect_mcap_file(self.path),
+                    self._inspection_cache_path(self.path),
+                )
+            except OSError:
+                pass
+        if self.save_format in ("lerobot", "both") and not self._last_error:
             self._start_lerobot_export()
         return self.status()
+
+    def _detach_export(self) -> None:
+        """Keep a closed capture converting while the next capture uses the IPC."""
+        process, log, destination = self._export_process, self._export_log, Path(self._lerobot_path)
+        self._export_process, self._export_log = None, None
+        if process is None:
+            return  # An independently resumed converter owns its progress file.
+
+        def finish():
+            from .export_progress import ExportProgress, progress_path
+            try:
+                code = process.wait()
+                success = code == 0 and (destination / 'meta/info.json').is_file()
+                ExportProgress(progress_path(destination)).update(
+                    '转换完成' if success else '转换失败', 100 if success else 0,
+                    state='completed' if success else 'error',
+                    error='' if success else 'LeRobot 保存失败，原始 MCAP 已保留', force=True)
+            finally:
+                if log is not None: log.close()
+
+        threading.Thread(target=finish, name='lerobot-finalize', daemon=True).start()
+
+    def close_writer(self):
+        self.stop()
+        if self._reusable and self._process:
+            self._writer_control.put(None, timeout=1.)
+            self._process.join(timeout=5.)
+            if self._process.is_alive():
+                raise TimeoutError('prepared MCAP writer did not exit')
+            self._process = None
 
     def _start_lerobot_export(self) -> None:
         assert self.path is not None
@@ -466,9 +762,16 @@ class TopicRecorder:
         from .export_progress import ExportProgress, progress_path
         ExportProgress(progress_path(destination)).update('等待转换', 0, force=True, reset=True)
         self._export_log = log_path.open("w", encoding="utf-8")
+        fps, task = self.lerobot_fps, self.lerobot_task
+        from .capture_formats import lerobot_snapshot
+        snapshot = lerobot_snapshot(self._active_metadata)
+        if snapshot:
+            from humanoid_upload.capture_plan import validate_snapshot
+            snapshot = validate_snapshot(snapshot, source_format='LEROBOT_V3')
+            task = json.loads(self._active_metadata['platform_task'])['task']['name']
         command = [sys.executable, "-m", "middleware.core.lerobot_export",
-                   str(self.path), str(destination), "--fps", str(self.lerobot_fps),
-                   "--task", self.lerobot_task, "--robot-type",
+                   str(self.path), str(destination), "--fps", str(fps),
+                   "--task", task, "--robot-type",
                    self._active_metadata.get("profile_id", "robot"), "--action-sources", json.dumps(self.action_sources)]
         try:
             # Export runs outside the ROS and video workers at lower priority.
@@ -477,6 +780,7 @@ class TopicRecorder:
             self._export_process = subprocess.Popen(
                 command, cwd=Path(__file__).resolve().parents[2],
                 stdout=self._export_log, stderr=subprocess.STDOUT,
+                env=background_environment(),
             )
         except Exception as exc:
             self._export_log.close()
@@ -525,14 +829,9 @@ class TopicRecorder:
         )
 
     def record(self, event: dict[str, Any]) -> bool:
-        if not self._accepting_event.is_set():
+        if not _matches_recording_topics(event, self._recording_topics):
             return False
-        try:
-            self._queue.put_nowait(event)
-            return True
-        except queue.Full:
-            _counter_add(self._dropped)
-            return False
+        return enqueue_record(self.ipc_resources(), event)
 
     def status(self) -> dict[str, Any]:
         self._poll_export()
@@ -548,10 +847,15 @@ class TopicRecorder:
                 "recording": active,
                 "path": str(self.path) if self.path else "",
                 "active_file": self.path.name if self.path and active else "",
+                "corrections": self.corrections.status() if self.corrections else None,
                 "messages": _counter_get(self._messages),
+                "accepted": _counter_get(self._accepted),
+                "queued_bytes": _counter_get(self._queued_bytes),
+                "queue_byte_budget": self._byte_budget,
                 "dropped": _counter_get(self._dropped),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",
+                "upload_handoff_errors": dict(self._artifacts.recovery_errors),
                 "format": self.save_format,
                 "export_state": self._export_state,
                 "export_progress": self.export_progress(),
@@ -614,20 +918,118 @@ class TopicRecorder:
             )
         return result
 
-    def list_recordings(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _inspection_cache_path(recording_path: Path) -> Path:
+        return _inspection_cache_path(recording_path)
+
+    def _load_persistent_inspection(
+        self,
+        key: str,
+        signature: tuple[int, int],
+        persistent_path: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            stored = json.loads(persistent_path.read_text(encoding="utf-8"))
+            stored_signature = tuple(stored.get("signature", ()))
+            stored_value = stored.get("value")
+            if stored_signature == signature and isinstance(stored_value, dict):
+                self._inspection_cache[key] = (signature, stored_value)
+                return stored_value
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return None
+
+    def _schedule_compact_index(self, paths: list[Path]) -> None:
+        process = self._inspection_process
+        if process is not None and process.is_alive():
+            return
+        if process is not None:
+            process.join(timeout=0)
+        unique = sorted(
+            {path.resolve() for path in paths if path.is_file()},
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if not unique:
+            self._inspection_process = None
+            return
+        self._inspection_process = self._mp.Process(
+            target=_index_mcap_files,
+            args=([str(path) for path in unique],),
+            name="mcap-indexer",
+            daemon=True,
+        )
+        self._inspection_process.start()
+
+    def _cached_inspection(
+        self,
+        key: str,
+        signature: tuple[int, int],
+        inspect,
+        persistent_path: Path | None = None,
+    ) -> dict[str, Any]:
+        cached = self._inspection_cache.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+        if persistent_path is not None:
+            stored_value = self._load_persistent_inspection(
+                key, signature, persistent_path
+            )
+            if stored_value is not None:
+                return stored_value
+        value = inspect()
+        self._inspection_cache[key] = (signature, value)
+        if persistent_path is not None:
+            try:
+                _write_inspection_cache(Path(key.removeprefix("file:")), signature, value)
+            except OSError:
+                pass
+        return value
+
+    def recording_format_counts(self) -> dict[str, int]:
+        """Count top-level artifacts without parsing their contents."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        counts = {'mcap': 0, 'lerobot': 0, 'bundle': 0}
+        counts['mcap'] = sum(1 for path in self.directory.iterdir()
+                              if path.is_file() and not path.name.startswith('.')
+                              and path.suffix in {'.mcap', '.jsonl'})
+        for key, folder, marker in (
+            ('lerobot', self.directory / 'lerobot', Path('meta/info.json')),
+            ('bundle', self.directory / 'bundles', Path('session.json')),
+        ):
+            if folder.is_dir() and not folder.is_symlink():
+                counts[key] = sum(1 for path in folder.iterdir()
+                                  if path.is_dir() and not path.is_symlink()
+                                  and not path.name.startswith('.') and (path / marker).is_file())
+        progress_dir = self.directory / 'lerobot'
+        if progress_dir.is_dir() and not progress_dir.is_symlink():
+            from .export_progress import read_progress
+            ready = {path.name for path in progress_dir.iterdir()
+                     if path.is_dir() and (path / 'meta/info.json').is_file()}
+            counts['lerobot'] += sum(1 for path in progress_dir.glob('.*.progress.json')
+                                     if path.name[1:-len('.progress.json')] not in ready
+                                     and read_progress(path).get('state') in {'exporting', 'error'})
+        return counts
+
+    def list_recordings(self, format_filter: str = 'all', identifier: str = '', compact: bool = False) -> list[dict[str, Any]]:
         self._poll_export()
         self.directory.mkdir(parents=True, exist_ok=True)
+        if format_filter not in {'all', 'mcap', 'lerobot', 'bundle'}:
+            raise ValueError('invalid recording format filter')
         files = []
+        compact_index_queue: list[Path] = []
         active_path = (
             self.path.resolve()
             if (self.path and self.is_recording())
             else None
         )
 
-        for p in self.directory.iterdir():
+        for p in self.directory.iterdir() if format_filter in {'all', 'mcap'} else ():
             if not p.is_file() or p.name.startswith("."):
                 continue
             if not (p.suffix in {".mcap", ".jsonl"}):
+                continue
+            if identifier and identifier != p.name:
                 continue
             try:
                 stat = p.stat()
@@ -648,7 +1050,25 @@ class TopicRecorder:
             created_iso = datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
             modified_iso = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-            meta = _inspect_mcap_file(p) if (p.suffix == ".mcap" and not is_cur) else {
+            cache_key = 'file:' + str(p.resolve())
+            cached = self._inspection_cache.get(cache_key)
+            persistent_cache = self._inspection_cache_path(p)
+            if compact and not cached and persistent_cache.is_file():
+                self._load_persistent_inspection(
+                    cache_key, (stat.st_size, stat.st_mtime_ns), persistent_cache
+                )
+                cached = self._inspection_cache.get(cache_key)
+            inspection_pending = bool(
+                compact and p.suffix == ".mcap" and not is_cur
+                and not (cached and cached[0] == (stat.st_size, stat.st_mtime_ns))
+            )
+            if inspection_pending:
+                compact_index_queue.append(p)
+            meta = (cached[1] if compact and cached and cached[0] == (stat.st_size, stat.st_mtime_ns)
+                    else self._cached_inspection(cache_key, (stat.st_size, stat.st_mtime_ns),
+                                                 lambda: _inspect_mcap_file(p),
+                                                 persistent_cache)) \
+                if (p.suffix == ".mcap" and not is_cur and (not compact or cached)) else {
                 "duration_sec": 0.0,
                 "duration_human": "正在写入…" if is_cur else "--",
                 "message_count": _counter_get(self._messages) if is_cur else 0,
@@ -680,29 +1100,82 @@ class TopicRecorder:
                 "robot_name": meta["robot_name"],
                 "controller_config": meta["controller_config"],
                 "free_joints": meta["free_joints"],
+                "details_available": p.suffix == '.mcap' and not is_cur,
+                "inspection_pending": inspection_pending,
                 "marked": bool(mark.get("marked", False)),
                 "marked_at": str(mark.get("marked_at", "")),
                 "mark_source": str(mark.get("mark_source", "")),
             })
         from .recording_datasets import inspect_dataset
         datasets_dir = self.directory / "lerobot"
-        if datasets_dir.is_dir() and not datasets_dir.is_symlink():
+        if format_filter in {'all', 'lerobot'} and datasets_dir.is_dir() and not datasets_dir.is_symlink():
             for dataset in datasets_dir.iterdir():
                 if dataset.is_dir() and not dataset.is_symlink() and not dataset.name.startswith("."):
+                    if identifier and identifier != 'lerobot:' + dataset.name:
+                        continue
                     try:
-                        files.append(inspect_dataset(dataset))
+                        marker = dataset / 'meta/info.json'
+                        stat = marker.stat()
+                        files.append(self._cached_inspection(
+                            'lerobot:' + str(dataset.resolve()), (stat.st_size, stat.st_mtime_ns),
+                            lambda dataset=dataset: inspect_dataset(dataset),
+                        ))
                     except (OSError, ValueError, KeyError, TypeError):
                         continue  # Incomplete/invalid exports are not ready datasets.
             from .recording_datasets import pending_datasets
-            files.extend(pending_datasets(datasets_dir, {item.get('id') for item in files}))
+            pending = pending_datasets(datasets_dir, {item.get('id') for item in files})
+            files.extend(item for item in pending if not identifier or item.get('id') == identifier)
+        from .recording_datasets import inspect_bundle
+        bundles_dir = self.directory / "bundles"
+        if format_filter in {'all', 'bundle'} and bundles_dir.is_dir() and not bundles_dir.is_symlink():
+            for bundle in bundles_dir.iterdir():
+                if bundle.is_dir() and not bundle.is_symlink() and not bundle.name.startswith('.'):
+                    if identifier and identifier != 'bundle:' + bundle.name:
+                        continue
+                    try:
+                        marker = bundle / 'session.json'
+                        stat = marker.stat()
+                        files.append(self._cached_inspection(
+                            'bundle:' + str(bundle.resolve()), (stat.st_size, stat.st_mtime_ns),
+                            lambda bundle=bundle: inspect_bundle(bundle),
+                        ))
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue
+        if compact_index_queue:
+            self._schedule_compact_index(compact_index_queue)
         files.sort(key=lambda x: x["timestamp"], reverse=True)
-        return files
+        return self._artifacts.annotate(files)
+
+    def shutdown(self):
+        if self.corrections: self.stop_corrections()
+        try:
+            return self.stop()
+        finally:
+            if self._inspection_process is not None:
+                self._inspection_process.terminate()
+                self._inspection_process.join(timeout=2)
+                self._inspection_process = None
+            self._artifacts.shutdown()
+            if self.takeovers and not self._reusable:
+                self.takeovers.shutdown()
 
     def delete_recording(self, filename: str) -> None:
         from .recording_datasets import resolve_dataset
         target = resolve_dataset(self.directory, filename)
-        if filename.startswith("lerobot:"):
-            if self._export_state == "exporting" and target.resolve() == Path(self._lerobot_path).resolve():
+        if self.is_recording() and self.path and target == self.path.resolve():
+            raise ValueError("cannot delete actively recording file")
+        if self._export_state == "exporting" and (
+            target == Path(self._lerobot_path).resolve() or
+            (self.path and target == self.path.resolve())
+        ):
+            raise ValueError("cannot delete source or dataset while exporting")
+        with self._artifacts.deleting(target):
+            self._delete_recording(filename, target)
+
+    def _delete_recording(self, filename: str, target: Path) -> None:
+        if filename.startswith(("lerobot:", "bundle:")):
+            from .export_progress import read_progress, progress_path
+            if read_progress(progress_path(target)).get('state') == 'exporting':
                 raise ValueError("cannot delete dataset while exporting")
             from .recording_datasets import dataset_files
             dataset_files(target)  # Refuse symlink-containing trees.
@@ -717,6 +1190,13 @@ class TopicRecorder:
         if active_path is not None and target == active_path:
             raise ValueError(f"cannot delete actively recording file: {filename}")
         target.unlink()
+        if target.suffix == '.mcap':
+            takeover_path(target).unlink(missing_ok=True)
+        self._inspection_cache.pop("file:" + str(target.resolve()), None)
+        try:
+            self._inspection_cache_path(target).unlink()
+        except FileNotFoundError:
+            pass
         try:
             self._mark_path(target).unlink()
         except FileNotFoundError:

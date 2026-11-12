@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mcap.reader import make_reader
 from rclpy.serialization import deserialize_message, serialize_message
@@ -12,6 +13,43 @@ from middleware.core.topic_recorder import TopicRecorder
 
 
 class TopicRecorderTests(unittest.TestCase):
+    def test_unchanged_mcap_inspection_is_cached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings"}, Path(directory))
+            recorder.directory.mkdir(parents=True)
+            (recorder.directory / 'cached.mcap').write_bytes(b'cached')
+            metadata = {
+                'duration_sec': 1.0, 'duration_human': '1.0s', 'message_count': 2,
+                'topic_count': 1, 'channels': [], 'avg_rate_hz': 2.0,
+                'profile_id': '', 'profile_display_name': '', 'robot_name': '',
+                'controller_config': '', 'free_joints': [],
+            }
+            with patch('middleware.core.topic_recorder._inspect_mcap_file', return_value=metadata) as inspect:
+                recorder.list_recordings('mcap')
+                recorder.list_recordings('mcap')
+            inspect.assert_called_once()
+
+    def test_batch_lerobot_conversion_is_queued_in_one_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings", "lerobot_fps": 20}, Path(directory))
+            recorder.directory.mkdir(parents=True)
+            (recorder.directory / 'one.mcap').write_bytes(b'one')
+            (recorder.directory / 'two.mcap').write_bytes(b'two')
+
+            class Process:
+                pid = 31415
+
+            with patch('middleware.core.lerobot_export.ensure_export_available'), \
+                    patch('middleware.core.topic_recorder.subprocess.Popen', return_value=Process()) as spawn:
+                result = recorder.convert_recordings_to_lerobot(['one.mcap', 'two.mcap'])
+
+            self.assertEqual(result['accepted'], ['one.mcap', 'two.mcap'])
+            self.assertEqual(result['pid'], 31415)
+            spawn.assert_called_once()
+            spec_path = Path(spawn.call_args.args[0][-1])
+            spec = json.loads(spec_path.read_text())
+            self.assertEqual([Path(item['source']).name for item in spec['items']], ['one.mcap', 'two.mcap'])
+            self.assertEqual([item['fps'] for item in spec['items']], [20, 20])
     def test_records_16bit_png_depth_as_ros2_cdr(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = TopicRecorder({"directory": "recordings"}, Path(directory))
@@ -91,6 +129,29 @@ class TopicRecorderTests(unittest.TestCase):
             self.assertEqual(item["profile_display_name"], "OpenArmX Bimanual")
             self.assertEqual(item["robot_name"], "openarmx")
             self.assertEqual(item["free_joints"], ["openarmx_right_joint1"])
+
+            compact = recorder.list_recordings("mcap", compact=True)[0]
+            self.assertEqual(compact["profile_id"], "openarmx")
+            reloaded = TopicRecorder({"directory": "recordings"}, Path(directory))
+            with patch(
+                "middleware.core.topic_recorder._inspect_mcap_file",
+                side_effect=AssertionError("persistent compact cache was not used"),
+            ):
+                compact_after_restart = reloaded.list_recordings(
+                    "mcap", compact=True
+                )[0]
+            self.assertEqual(compact_after_restart["profile_id"], "openarmx")
+
+            reloaded._inspection_cache_path(recorder.path).unlink()
+            reloaded._inspection_cache.clear()
+            pending = reloaded.list_recordings("mcap", compact=True)[0]
+            self.assertTrue(pending["inspection_pending"])
+            reloaded._inspection_process.join(timeout=5)
+            self.assertFalse(reloaded._inspection_process.is_alive())
+            reloaded._inspection_cache.clear()
+            indexed = reloaded.list_recordings("mcap", compact=True)[0]
+            self.assertFalse(indexed["inspection_pending"])
+            self.assertEqual(indexed["profile_id"], "openarmx")
 
             with recorder.path.open("rb") as stream:
                 metadata = list(make_reader(stream).iter_metadata())

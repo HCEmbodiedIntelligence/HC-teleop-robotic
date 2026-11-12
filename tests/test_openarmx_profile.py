@@ -31,7 +31,7 @@ class OpenArmXProfileTests(unittest.TestCase):
             "/observation/joint_states",
         )
         self.assertEqual(
-            teleop["control"]["command_topic"], "/internal/vr/aux_joint_targets"
+            teleop["control"]["command_topic"], "/control/vr/joint_states"
         )
 
     def test_urdf_meshes_are_self_contained(self):

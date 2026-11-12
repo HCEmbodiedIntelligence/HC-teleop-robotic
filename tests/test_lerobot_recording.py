@@ -8,6 +8,38 @@ from middleware.core.topic_recorder import TopicRecorder
 
 
 class LeRobotRecordingTests(unittest.TestCase):
+    def test_next_capture_does_not_wait_for_previous_export(self):
+        import threading
+        import time
+        from middleware.core.export_progress import progress_path, read_progress
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recorder = TopicRecorder({'directory': directory, 'format': 'mcap'}, root)
+            recorder.path = root / 'previous.mcap'
+            process = Mock()
+            process.poll.return_value = None
+            done = threading.Event()
+            process.wait.side_effect = lambda: (done.wait(5), 0)[1]
+            with patch('middleware.core.topic_recorder.subprocess.Popen', return_value=process):
+                recorder._start_lerobot_export()
+            destination = Path(recorder._lerobot_path)
+            try:
+                path = recorder.start('next.mcap')
+                self.assertTrue(recorder.is_recording())
+                self.assertEqual(Path(path).name, 'next.mcap')
+                self.assertEqual(read_progress(progress_path(destination))['state'], 'exporting')
+                (destination/'meta').mkdir(parents=True)
+                (destination/'meta/info.json').write_text('{}')
+                done.set()
+                deadline = time.monotonic()+5
+                while read_progress(progress_path(destination))['state'] != 'completed':
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+            finally:
+                done.set()
+                recorder.stop()
+
     def test_missing_environment_does_not_start_partial_recording(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = TopicRecorder({'directory': directory, 'format': 'lerobot'}, Path(directory))

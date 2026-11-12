@@ -356,6 +356,36 @@
       "minLength": 1,
       "title": "Source Format Version",
       "type": "string"
+    },
+    "capture_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_revision",
+        "plan_sha256",
+        "snapshot_sha256",
+        "recording_id"
+      ],
+      "properties": {
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "recording_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        }
+      }
     }
   },
   "required": [

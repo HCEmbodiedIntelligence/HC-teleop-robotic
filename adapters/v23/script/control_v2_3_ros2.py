@@ -13,9 +13,9 @@ from geometry_msgs.msg import PoseArray
 from rclpy.executors import ExternalShutdownException
 from rclpy._rclpy_pybind11 import RCLError
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Header
+from std_msgs.msg import Bool, Header, String
 from tf2_msgs.msg import TFMessage
 
 HERE = Path(__file__).resolve()
@@ -99,32 +99,87 @@ class ControllerNode(Node):
         self.failure_count = 0
         self.last_failure_log = 0.0
         self.reset_pending = False
+        self.reset_cutoff_ns = 0
+        self.control_source = "vr"
+        self.source_target_pending = False
+        self.source_target_cutoff_ns = 0
+        self.create_subscription(
+            String, subscriptions.get("control_source", "/control/source"),
+            self._control_source_callback,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        self.intervention = None
+        import yaml
+        teleop_file = Path(config_path).resolve().parent / 'arm_teleop.yaml'
+        teleop_config = (yaml.safe_load(teleop_file.read_text()) or {}) if teleop_file.is_file() else {}
+        if teleop_config.get('control', {}).get('legacy_intervention', False):
+            from adapters.core.v23_intervention import V23Intervention
+            self.intervention = V23Intervention(self, teleop_config.get('grippers'))
         self.get_logger().info(
             "reconstructed controller_v2_3 started: "
             f"{len(self.controller.free_joint_names)} free joints, "
             f"{len(self.controller.tasks)} tasks"
         )
 
+    def _control_source_callback(self, message: String) -> None:
+        source = message.data.strip().lower()
+        if source not in {"vr", "motion", "exoskeleton"} or source == self.control_source:
+            return
+        self.control_source = source
+        if self.intervention and self.intervention.active:
+            return
+        self._reset_references()
+
+    def _reset_references(self) -> None:
+        self.reset_pending = True
+        self.reset_cutoff_ns = int(self.get_clock().now().nanoseconds)
+        self.source_target_pending = True
+        self.controller.targets.transforms.clear()
+
     def _joint_callback(self, message: JointState) -> None:
         try:
             self.controller.update_joint_state(message.name, message.position)
-            if self.reset_pending:
+            if self.reset_pending and not (self.intervention and self.intervention.active):
+                stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+                now_ns = int(self.get_clock().now().nanoseconds)
+                if (stamp_ns <= self.reset_cutoff_ns
+                        or not -50_000_000 <= now_ns-stamp_ns <= 250_000_000
+                        or len(message.name) != len(message.position)
+                        or len(set(message.name)) != len(message.name)
+                        or not set(self.controller.free_joint_names) <= set(message.name)
+                        or not all(np.isfinite(value) for value in message.position)):
+                    return
                 self.controller.reset_to_feedback()
                 self.reset_pending = False
+                if self.source_target_pending:
+                    self.source_target_cutoff_ns = now_ns
                 acknowledgement = Header()
                 acknowledgement.stamp = self.get_clock().now().to_msg()
                 self.reset_ack_pub.publish(acknowledgement)
                 self.get_logger().warning(
                     "retarget integrator reset to fresh joint feedback"
                 )
+            if self.intervention:
+                self.intervention.feedback(message)
         except ValueError as exception:
             self.get_logger().warning(f"ignoring invalid joint feedback: {exception}")
 
     def _reset_callback(self, message: Bool) -> None:
+        if self.intervention and self.intervention.active:
+            return  # Ownership permits exclusively manage resets during a session.
         if message.data:
-            self.reset_pending = True
+            self._reset_references()
 
     def _tf_callback(self, message: TFMessage) -> None:
+        if self.intervention and self.intervention.active:
+            return
+        if self.control_source != "vr" or self.reset_pending:
+            return
+        if self.source_target_pending and (not message.transforms or any(
+                transform.header.stamp.sec * 1_000_000_000 + transform.header.stamp.nanosec
+                <= self.source_target_cutoff_ns for transform in message.transforms)):
+            return
         targets = {}
         try:
             for transform in message.transforms:
@@ -144,8 +199,19 @@ class ControllerNode(Node):
             self.get_logger().warning(f"ignoring invalid TF target: {exception}")
             return
         self.controller.update_tf_targets(targets)
+        if all(self.controller.targets.relative_target(task.root, task.frame) is not None
+               for task in self.controller.pose_tasks):
+            self.source_target_pending = False
 
-    def _ee_callback(self, message: PoseArray) -> None:
+    def _ee_callback(self, message: PoseArray, *, owned=False):
+        if self.intervention and self.intervention.active and not owned:
+            return False
+        if not owned:
+            if self.control_source != "vr" or self.reset_pending:
+                return False
+            stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+            if self.source_target_pending and stamp_ns <= self.source_target_cutoff_ns:
+                return False
         if len(message.poses) != len(self.ee_pose_order):
             self.get_logger().warning(
                 f"ignoring {len(message.poses)} EE targets; "
@@ -166,9 +232,22 @@ class ControllerNode(Node):
             self.get_logger().warning(f"ignoring invalid EE target: {exception}")
             return
         self.controller.update_tf_targets(targets)
+        self.source_target_pending = False
+        return True
 
     def _tick(self) -> None:
+        owned = self.intervention if self.intervention and self.intervention.active else None
+        if owned and not owned.authorized():
+            return
+        if not owned and (self.control_source != "vr" or self.source_target_pending):
+            return
         if self.reset_pending:
+            return
+        if owned and owned.homing:
+            # Serialize home and IK in this executor; never let both publish.
+            if owned.home_command is not None:
+                message, owned.home_command = owned.home_command, None
+                owned.output.publish(message)
             return
         try:
             names, positions = self.controller.step()
@@ -188,7 +267,13 @@ class ControllerNode(Node):
         message.header.stamp = self.get_clock().now().to_msg()
         message.name = list(names)
         message.position = [float(position) for position in positions]
-        self.command_pub.publish(message)
+        if owned:
+            owned.publish(message)
+            if owned.record_joint_target.get_subscription_count():
+                owned.record_joint_target.publish(JointState(
+                    header=Header(stamp=message.header.stamp), name=message.name, position=message.position))
+        else:
+            self.command_pub.publish(message)
         if self.solver_pub is not None:
             self.solver_pub.publish(message)
 

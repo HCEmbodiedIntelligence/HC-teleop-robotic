@@ -773,6 +773,11 @@ td code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font
 .recording-readiness-banner { border: 0; border-left: 3px solid #bd9657; border-radius: 3px; padding: 10px 12px; }
 .readiness-icon { display: none; }
 .recording-actions, .dataset-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dataset-format-tabs { display: flex; gap: 4px; margin: 16px 0; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.dataset-format-tabs button { min-height: 32px; padding: 5px 13px; border-color: transparent; background: transparent; color: var(--muted); }
+.dataset-format-tabs button:hover { background: #f5f7fa; color: var(--text); }
+.dataset-format-tabs button.active { border-color: #91caff; background: #e6f4ff; color: #0958d9; }
+.dataset-format-tabs button span { margin-left: 5px; font: 11px ui-monospace, Consolas, monospace; }
 .recording-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-right: 4px; white-space: nowrap; }
 .recording-badge i { width: 6px; height: 6px; border-radius: 50%; background: #bfbfbf; }
 .recording-badge.active { color: var(--red); }
@@ -893,6 +898,59 @@ tbody tr:hover { background: #fafafa; }
   *, *::before, *::after { transition: none !important; }
 }
 
+/* Operational overview: compact control path with actionable fault location. */
+.control-pipeline-panel { margin-bottom: 24px; }
+.pipeline-diagnosis { display:flex; align-items:center; gap:9px; min-height:38px; padding:9px 12px; margin-bottom:16px; border:1px solid #d9f7be; border-radius:6px; background:#f6ffed; color:#237804; font-size:12px; }
+.pipeline-diagnosis i { width:8px; height:8px; border-radius:50%; background:#52c41a; flex:0 0 auto; }
+.pipeline-diagnosis.warn { color:#ad6800; border-color:#ffe58f; background:#fffbe6; }
+.pipeline-diagnosis.warn i { background:#faad14; }
+.pipeline-diagnosis.bad { color:#a8071a; border-color:#ffccc7; background:#fff2f0; }
+.pipeline-diagnosis.bad i { background:#ff4d4f; }
+.pipeline-diagnosis.idle { color:#595959; border-color:#d9d9d9; background:#fafafa; }
+.pipeline-diagnosis.idle i { background:#8c8c8c; }
+.pipeline-badge.good { color:#237804; border-color:#b7eb8f; background:#f6ffed; }
+.pipeline-badge.warn { color:#ad6800; border-color:#ffe58f; background:#fffbe6; }
+.pipeline-badge.bad { color:#a8071a; border-color:#ffccc7; background:#fff2f0; }
+.pipeline-badge.idle { color:#595959; }
+.control-pipeline { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
+.pipeline-stage { position:relative; display:flex; align-items:flex-start; gap:10px; min-width:0; padding:14px; border:1px solid #f0f0f0; border-radius:7px; background:#fafafa; }
+.pipeline-stage:not(:last-child)::after { content:""; position:absolute; top:50%; right:-11px; width:10px; border-top:1px solid #d9d9d9; z-index:1; }
+.pipeline-index { display:grid; place-items:center; width:22px; height:22px; flex:0 0 22px; border-radius:50%; background:#e6f4ff; color:#1677ff; font:600 11px/1 var(--ui-font); }
+.pipeline-stage > div { min-width:0; }
+.pipeline-stage label { margin:0 0 5px; color:#595959; font-size:11px; }
+.pipeline-stage strong { display:block; color:#389e0d; font:600 18px/1.35 ui-monospace,Consolas,monospace; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.pipeline-stage small { display:block; margin-top:5px; color:#8c8c8c; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pipeline-stage.warn strong { color:#ad6800; }
+.pipeline-stage.bad strong { color:#cf1322; }
+.pipeline-stage.idle strong { color:#8c8c8c; }
+.pipeline-stage.neutral strong { color:#595959; font-size:14px; }
+.pipeline-stage.warn .pipeline-index { color:#ad6800; background:#fff7e6; }
+.pipeline-stage.bad .pipeline-index { color:#cf1322; background:#fff1f0; }
+.pipeline-stage.idle .pipeline-index { color:#8c8c8c; background:#f0f0f0; }
+.pipeline-stage.neutral .pipeline-index { color:#595959; background:#f0f0f0; }
+.pipeline-footnote { margin:12px 0 0; color:#8c8c8c; font-size:11px; }
+.source-panel { order:1; }
+.system-panel { order:2; }
+.intervention-panel { order:3; grid-column:1/-1; }
+.joint-monitor-panel { order:4; }
+
+@media (max-width:1200px) {
+  .control-pipeline { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .pipeline-stage::after { display:none; }
+}
+@media (max-width:900px) and (min-width:521px) {
+  .source-switch { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .monitor-stats,.health-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width:680px) {
+  .control-pipeline { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .pipeline-stage:last-child { grid-column:1/-1; }
+}
+@media (max-width:520px) {
+  .control-pipeline { grid-template-columns:minmax(0,1fr); }
+  .pipeline-stage:last-child { grid-column:auto; }
+}
+
 /* Topic tables: manual column sizing, independent of incoming live values. */
 [data-resizable-columns] th { position: relative; padding-right: 16px; }
 [data-resizable-columns] th .column-resize-handle {
@@ -916,11 +974,106 @@ tbody tr:hover { background: #fafafa; }
 .dataset-export-progress progress { display: block; width: 100%; height: 6px; margin-top: 6px; accent-color: #1677ff; }
 .dataset-export-progress.failed { color: var(--red, #cf1322); }
 
-#simulationView[hidden] { display: none; }
+/* Keep HTML hidden authoritative over component display rules (inputs, grids). */
+[hidden] { display: none !important; }
 #simulationView { margin: 16px 0; border: 1px solid #d4dee9; border-radius: 12px; overflow: hidden; }
 #simulationViewCanvas { width: 100%; height: clamp(320px, 55vh, 680px); touch-action: none; }
 #simulationViewCanvas canvas { display: block; width: 100%; height: 100%; }
-.data-workbench { margin: 1rem 0; padding: 1rem; border: 1px solid var(--border, #ccd); border-radius: 8px; }
-.data-workbench textarea { width: 100%; min-height: 90px; }
-.data-workbench pre { max-height: 260px; overflow: auto; white-space: pre-wrap; }
-.data-workbench button { margin: 4px; }
+
+/* Upload management shares the dashboard's form and card components. */
+#uploads .platform-page-link { color: #1677ff; text-decoration: none; font-size: 13px; white-space: nowrap; }
+#uploads .platform-page-link:hover { text-decoration: underline; }
+#uploads .platform-connection-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 16px 0 8px; }
+#uploads .platform-connection-status { background: #fafafa; border: 1px solid #f0f0f0; border-radius: 4px; padding: 12px 16px; color: #595959; }
+#uploads .platform-connection-row .platform-connection-status { flex: 1 1 240px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+#uploads .platform-master-control { display:flex; align-items:center; justify-content:space-between; gap:20px; margin:12px 0 18px; padding:14px 16px; border:1px solid #d9d9d9; border-radius:7px; background:#fafafa; }
+#uploads .platform-master-control strong { display:block; font-size:13px; }
+#uploads .platform-master-control small { display:block; margin-top:3px; color:#8c8c8c; font-size:11px; }
+#uploads .platform-master-control .toggle { flex:0 0 auto; margin:0; color:#262626; }
+#uploads .platform-master-control .toggle b { font-weight:500; }
+#platformReconnect { flex: 0 0 auto; }
+#platformPanel > details { margin: 16px 0; padding-bottom: 16px; border-bottom: 1px solid #f0f0f0; }
+#platformPanel > details summary { color: #1677ff; cursor: pointer; }
+#platformPanel > details label { max-width: 900px; margin-bottom: 12px; }
+#platformPanel .form-grid { gap: 16px 24px; margin: 16px 0; }
+#platformPanel .recording-actions { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+#platformPanel .toggle { margin: 0 0 8px; }
+#platformPanel .form-help { border: 0; padding-left: 0; margin: 6px 0; line-height: 1.6; }
+.platform-format-row { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 24px; align-items: end; border-top: 1px solid #f0f0f0; padding-top: 16px; margin: 16px 0; }
+.platform-format-row p { color: #8c8c8c; font-size: 12px; line-height: 1.6; margin: 0 0 6px; }
+#platformMessage:empty, #platformActive:empty, #platformDescription:empty { display: none; }
+#platformMessage { color: #595959; line-height: 1.6; }
+#uploads table { width: 100%; min-width: 1080px; }
+#uploads td, #uploads th { vertical-align: middle; }
+#uploads td:last-child { white-space: nowrap; }
+@media (max-width: 760px) { .platform-format-row { grid-template-columns: 1fr; gap: 8px; } }
+
+/* 数据集表格鼠标框选样式与选中高亮 */
+.marquee-selection-box {
+  position: fixed;
+  display: none;
+  border: 1.5px solid #1677ff;
+  background-color: rgba(22, 119, 255, 0.14);
+  pointer-events: none;
+  z-index: 10000;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.marquee-selection-box .marquee-count-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: #1677ff;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-family: var(--ui-font, sans-serif);
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+body.marquee-selecting {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: crosshair !important;
+}
+
+body.marquee-selecting * {
+  cursor: crosshair !important;
+}
+
+#datasets .table-wrap,
+#datasets table,
+#datasetRows tr,
+#datasetRows td,
+#datasetRows th {
+  position: relative;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+}
+
+#datasets ::selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+
+#datasets *::-moz-selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+
+
+#datasetRows tr:has(input[type="checkbox"]:checked) {
+  background-color: #f0f7ff;
+}
+
+#datasetRows tr:has(input[type="checkbox"]:checked):hover {
+  background-color: #e6f4ff;
+}
+

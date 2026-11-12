@@ -8,19 +8,22 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from .takeover_log import takeover_file
+
 
 def resolve_dataset(directory: Path, identifier: str) -> Path:
     """Keep file IDs distinct from dataset IDs, rejecting traversal and symlinks."""
-    is_dataset = identifier.startswith('lerobot:')
-    name = identifier[len('lerobot:'):] if is_dataset else identifier
+    prefix = next((p for p in ('lerobot:', 'bundle:') if identifier.startswith(p)), '')
+    is_dataset = bool(prefix)
+    name = identifier[len(prefix):] if prefix else identifier
     if not name or name in ('.', '..') or '/' in name or '\\' in name or name.startswith('.'):
         raise ValueError('invalid recording identifier')
-    parent = directory / 'lerobot' if is_dataset else directory
+    parent = directory / ('bundles' if prefix == 'bundle:' else 'lerobot') if is_dataset else directory
     target = parent / name
     if parent.is_symlink() or target.is_symlink() or target.resolve().parent != parent.resolve():
         raise ValueError('recording path escapes storage directory')
     if is_dataset:
-        if not target.is_dir() or not (target / 'meta/info.json').is_file():
+        if not target.is_dir() or not (target / ('session.json' if prefix == 'bundle:' else 'meta/info.json')).is_file():
             raise FileNotFoundError(f'dataset not found: {name}')
     elif not target.is_file() or target.suffix not in ('.mcap', '.jsonl'):
         raise FileNotFoundError(f'recording not found: {name}')
@@ -95,6 +98,38 @@ def archive_dataset(target: Path) -> Path:
         raise
 
 
+def archive_datasets(directory: Path, identifiers: list[str]) -> Path:
+    """Create one collision-free ZIP for a validated mixed dataset selection."""
+    if (not isinstance(identifiers, list) or not identifiers or len(identifiers) > 200
+            or not all(isinstance(value, str) for value in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        raise ValueError('invalid dataset selection')
+    targets = [(identifier, resolve_dataset(directory, identifier)) for identifier in identifiers]
+    with tempfile.NamedTemporaryFile(prefix='hc-datasets-', suffix='.zip', delete=False) as handle:
+        archive = Path(handle.name)
+    try:
+        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as output:
+            for identifier, target in targets:
+                if identifier.startswith('lerobot:'):
+                    prefix = Path('lerobot') / target.name
+                elif identifier.startswith('bundle:'):
+                    prefix = Path('capture_bundle') / target.name
+                else:
+                    prefix = Path('mcap')
+                if target.is_file():
+                    output.write(target, prefix / target.name)
+                    takeovers = takeover_file(target)
+                    if takeovers:
+                        output.write(takeovers, prefix / takeovers.name)
+                else:
+                    for path in dataset_files(target):
+                        output.write(path, prefix / path.relative_to(target))
+        return archive
+    except BaseException:
+        archive.unlink(missing_ok=True)
+        raise
+
+
 def dataset_video(target: Path, relative: str) -> Path:
     candidate = target / relative
     if candidate.suffix != '.mp4' or candidate not in dataset_files(target) or not candidate.resolve().is_relative_to((target / 'videos').resolve()):
@@ -131,3 +166,19 @@ def pending_datasets(directory: Path, existing_ids: set) -> list[dict]:
                         'timestamp': path.stat().st_mtime, 'channels': [], 'videos': [],
                         'message_count': 0, 'topic_count': 0})
     return entries
+
+
+def inspect_bundle(target: Path) -> dict:
+    from .topic_recorder import _inspect_mcap_file
+    session = json.loads((target / 'session.json').read_text())
+    files = dataset_files(target)
+    stamp = max(p.stat().st_mtime for p in files)
+    size = sum(p.stat().st_size for p in files)
+    identifier = 'bundle:' + target.name
+    return {**_inspect_mcap_file(target / 'raw.mcap'), 'id': identifier, 'filename': target.name,
+            'format': 'CAPTURE_BUNDLE', 'timestamp': stamp, 'is_current': False,
+            'size_bytes': size, 'size_human': human_size(size),
+            'created_at': session['capture_started_at'], 'modified_at': session['capture_ended_at'],
+            'videos': [{'feature': video.get('topic', video['path']), 'path': video['path'],
+                        'url': f'/api/recordings/{quote(identifier, safe="")}/video?path={quote(video["path"], safe="")}'}
+                       for video in session['videos']]}
