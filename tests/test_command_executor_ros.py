@@ -249,7 +249,10 @@ def test_commands_keep_draining_when_dataset_executor_is_busy(monkeypatch):
         for value in [*metrics.values(),*dataset_metrics.values()]:
             assert value['ratio']>=.95,metrics
             assert value['p95_ms']<25,metrics
-        assert all(nodes==['isolated_command_queue_commands'] for nodes in callback_nodes.values()),callback_nodes
+        hand_topics = {'/control/vr/right_hand/joint_states', '/hc_teleop/joint_cmd_finger_left'}
+        assert all(nodes == ['isolated_command_queue_hands' if topic in hand_topics
+                             else 'isolated_command_queue_commands']
+                   for topic, nodes in callback_nodes.items()), callback_nodes
     finally:
         busy.clear()
         dataset_pid=bridge.status().get('dataset_process',{}).get('pid')

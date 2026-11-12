@@ -110,6 +110,12 @@ def register_profile_routes(
             f"robot profile applied: {profile_id}; restart teleop"
         )
         await runtime.restart(saved)
+        control = getattr(runtime, "control_runtime", None)
+        control_status = control.status() if control else {"state": "unmanaged"}
+        if control_status["state"] == "failed":
+            return web.json_response({"ok": False, "active": profile_id, "config": saved,
+                "error": "配置已保存，但控制进程启动失败；输出保持停止",
+                "control_runtime": control_status}, status=503)
         return web.json_response(
             {
                 "ok": True,
@@ -117,11 +123,16 @@ def register_profile_routes(
                 "profile": profile,
                 "config": saved,
                 "restart_simulation_required": True,
+                "control_runtime": control_status,
             }
         )
 
     async def delete_robot_profile(request: web.Request) -> web.Response:
         profile_id = request.match_info["profile_id"]
+        control = getattr(runtime, "control_runtime", None)
+        if (control is not None and control.enabled
+                and profile_id == store.value["robot_profiles"].get("active")):
+            raise web.HTTPConflict(text="请先切换到其他机器人配置，再删除当前控制配置")
         try:
             await asyncio.to_thread(profiles.delete_profile, profile_id)
             active = str(store.value["robot_profiles"].get("active", ""))

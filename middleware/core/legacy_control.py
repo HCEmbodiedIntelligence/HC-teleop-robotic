@@ -15,7 +15,7 @@ import yaml
 
 
 class LegacyTopicControl:
-    def __init__(self, node, bridge, output, *, feedback_node=None):
+    def __init__(self, node, bridge, output, *, feedback_node=None, hand_node=None):
         from sensor_msgs.msg import JointState
         from rclpy.qos import qos_profile_sensor_data
         from adapters.core.collision_safety import ModelCollisionGuard
@@ -74,12 +74,16 @@ class LegacyTopicControl:
         if self.teleop['control'].get('collision_avoidance_enabled', True):
             self.collision = ModelCollisionGuard(SimpleNamespace(urdf_path=urdf, teleop=self.teleop,
                 groups={'arms': self.arms, 'waist': self.waist}))
-        self.hand_pubs = {s: node.create_publisher(JointState, self.teleop['grippers'][s]['finger_topic'], 10)
+        hand_receiver = hand_node if hand_node is not None else node
+        hand_group = (bridge._hand_command_callback_group if hand_node is not None
+                      else bridge._command_callback_group)
+        self.hand_pubs = {s: hand_receiver.create_publisher(JointState, self.teleop['grippers'][s]['finger_topic'], 10)
                           for s in self.hands}
         self.subscriptions = []
-        def subscribe(kind, topic, callback, qos=qos_profile_sensor_data):
-            self.subscriptions.append(node.create_subscription(kind, topic, callback, qos,
-                callback_group=bridge._command_callback_group))
+        def subscribe(kind, topic, callback, qos=qos_profile_sensor_data, *, hand=False):
+            receiver = hand_receiver if hand else node
+            self.subscriptions.append(receiver.create_subscription(kind, topic, callback, qos,
+                callback_group=hand_group if hand else bridge._command_callback_group))
         # Feedback and authority must keep draining while command preparation
         # runs. Their existing bridge lock still serializes state and final send.
         receiver = feedback_node or node
@@ -93,10 +97,10 @@ class LegacyTopicControl:
         subscribe(JointState, '/hc_teleop/joint_cmd', lambda msg: self.program(msg, 'arms'))
         for side in self.hands:
             subscribe(JointState, '/hc_teleop/joint_cmd_finger_'+side,
-                      lambda msg, side=side: self.program(msg, side))
+                      lambda msg, side=side: self.program(msg, side), hand=True)
             subscribe(JointState, f'/control/vr/{side}_hand/joint_states',
                       lambda msg, side=side: self.bridge.forward_live_command(
-                          'vr', self.select(msg, self.hand_fields(side)), self.publish_selected))
+                          'vr', self.select(msg, self.hand_fields(side)), self.publish_selected), hand=True)
 
     def hand_fields(self, side):
         marker = self.teleop['grippers'][side].get('binary_state_joint')
@@ -115,8 +119,12 @@ class LegacyTopicControl:
             raise ValueError('invalid joint names or positions')
         return dict(zip(message.name, message.position))
 
-    def fresh(self, names):
-        now, wall = time.monotonic(), self.node.get_clock().now().nanoseconds
+    def fresh(self, names, *, now=None, wall_ns=None):
+        # Empty hand-only feedback requirements need no ROS clock lookup.
+        if not names:
+            return True
+        now = time.monotonic() if now is None else now
+        wall = self.node.get_clock().now().nanoseconds if wall_ns is None else wall_ns
         return all(n in self.positions and now-self.received[n] <= self.max_age
                    and -.05 <= (wall-self.sample_ns[n])*1e-9 <= self.max_age for n in names)
 
@@ -257,11 +265,13 @@ class LegacyTopicControl:
             stamp = self.stamp(message)
             now = time.monotonic()
             with self.bridge._lock:
+                wall_ns = self.node.get_clock().now().nanoseconds
                 # Hands retain the existing open-loop command path. Physical
                 # feedback is mandatory for arms/body, not for finger targets.
-                if not set(values) <= self.limits.keys() or not self.fresh(set(values)-self.hand_names):
+                if not set(values) <= self.limits.keys() or not self.fresh(
+                        set(values)-self.hand_names, now=now, wall_ns=wall_ns):
                     raise ValueError('required feedback missing/stale or unknown joints')
-                if not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age:
+                if not -.05 <= (wall_ns-stamp)*1e-9 <= self.max_age:
                     raise ValueError('stale command')
                 if any(stamp <= self.last_command_stamp.get(n, 0) for n in values):
                     raise ValueError('reordered command')
@@ -294,7 +304,7 @@ class LegacyTopicControl:
                             self.diagnostics['arm_velocity_clipped' if name in self.arms else 'hand_velocity_clipped'] += 1
                             self.last_clip = dict(joint=name, requested=value, sent=values[name],
                                 delta_rad=value-values[name], limit_rad_s=speed, dt_s=dt,
-                                stamp_ns=self.node.get_clock().now().nanoseconds)
+                                stamp_ns=wall_ns)
                 measured = dict(self.positions)
             if self.collision and set(values) & set(self.arms):
                 if not self.feedback_fresh():
@@ -316,8 +326,12 @@ class LegacyTopicControl:
     def commit(self, prepared, *, intervention=False):
         target, stamp, generation = prepared
         physical = {n for n,v in zip(target.name, target.position) if math.isfinite(v)} - self.sim_joints - self.model_only_joints
-        if (not self.fresh(physical-self.hand_names) or generation != self.bridge.ownership.token
-                or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age
+        # Final validation still samples the real ROS clock afresh; never
+        # reuse the preparation timestamp across collision/authority work.
+        now, wall_ns = time.monotonic(), self.node.get_clock().now().nanoseconds
+        if (not self.fresh(physical-self.hand_names, now=now, wall_ns=wall_ns)
+                or generation != self.bridge.ownership.token
+                or not -.05 <= (wall_ns-stamp)*1e-9 <= self.max_age
                 or any(stamp <= self.last_command_stamp.get(n, 0) for n in physical)):
             self.reject('commit freshness or authority changed')
             return False
@@ -347,8 +361,9 @@ class LegacyTopicControl:
         self.last_arm_publish_time = now
         self.diagnostics['published_arms'] += 1
 
-    def status(self):
-        now, wall = time.monotonic(), self.node.get_clock().now().nanoseconds
+    def status(self, *, wall_ns=None):
+        now = time.monotonic()
+        wall = self.node.get_clock().now().nanoseconds if wall_ns is None else wall_ns
         timing = {}
         for name in self.feedback_order:
             if name not in self.positions:

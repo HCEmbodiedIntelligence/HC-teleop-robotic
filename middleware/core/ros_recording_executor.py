@@ -286,6 +286,9 @@ def _raw_recording_process(
                 counters["received"] += 1
                 message_counts[topic] += 1
                 timestamps[topic].append(now)
+                if (topic == "/action/joint_states"
+                        and config.get("record_action_at_publication", False)):
+                    return  # Health only; the exact publication owns capture.
                 if not accepting_event.is_set():
                     return
                 if not gate.allow(topic, max_hz, now):

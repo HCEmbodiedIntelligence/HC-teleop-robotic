@@ -236,6 +236,12 @@ class RosBridge:
 
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
+        # ROS clock reads may release the GIL and wait in C. Never perform
+        # them while holding the lock used by the final actuator send.
+        ownership = self.ownership.snapshot()
+        boundary = self._boundary if self._legacy_enabled else None
+        boundary_wall_ns = (boundary.node.get_clock().now().nanoseconds
+                            if boundary is not None else None)
         with self._lock:
             def recent_rate(samples: deque[float]) -> float:
                 recent = [stamp for stamp in samples if now - stamp <= 2.0]
@@ -248,12 +254,10 @@ class RosBridge:
                 result['callback_timings'] = {name:dict(value) for name,value in self._callback_timings.items()}
                 result['slow_callbacks'] = list(self._slow_callbacks)
                 result['control_contention_samples'] = list(self._control_contention)
-            result['ownership'] = self.ownership.snapshot()
+            result['ownership'] = ownership
             if self._legacy_enabled and self._boundary:
-                result['legacy_control'] = self._boundary.status()
-            result["topic_health"] = {
-                topic: tracker.status(now) for topic, tracker in self._trackers.items()
-            }
+                result['legacy_control'] = self._boundary.status(wall_ns=boundary_wall_ns)
+            trackers = list(self._trackers.items())
             mux_config = self.config.get("command_mux", {})
             ready = self._ready_locked(now)
             result["command_mux"] = {
@@ -288,7 +292,10 @@ class RosBridge:
                 "rejected": self._mux_rejected,
                 "rejection_reasons": dict(self._mux_rejection_reasons),
             }
-            return result
+        result["topic_health"] = {
+            topic: tracker.status(now) for topic, tracker in trackers
+        }
+        return result
 
     def get_topic_health(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -548,7 +555,8 @@ class RosBridge:
                      and math.isfinite(stamp) and stamp > 0
                      and -.05 <= self._ros_now() - stamp <= .3)
             if valid and self._public_api is not None:
-                self._public_api.convert_message(message, to_model=True)
+                self._public_api.convert(message.name, message.position,
+                                         message.velocity, message.effort, to_model=True)
         except (AttributeError, TypeError, ValueError):
             valid, stamp = False, 0.0
         with self._lock:
@@ -586,6 +594,17 @@ class RosBridge:
             if self._legacy_enabled and self._boundary:
                 message = prepared[0]
             publish(message)
+            # Capture the exact accepted arm publication for both ordinary VR
+            # mux output and owned/program targets. Hands have separate topics.
+            sink = getattr(self, '_published_action_sink', None)
+            if (sink is not None and self._legacy_enabled and self._boundary
+                    and set(message.name).intersection(self._boundary.arms)):
+                try:
+                    if sink(message):
+                        self._boundary.diagnostics['action_recorded_at_publication'] += 1
+                except Exception as exc:
+                    self._boundary.diagnostics['action_recording_errors'] += 1
+                    self._boundary.node.get_logger().error('Action recording failed: '+str(exc))
             if self.ownership.active:
                 evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9))
                 if evidence is not None:
@@ -627,6 +646,9 @@ class RosBridge:
         command_node = None
         command_executor = None
         command_executor_thread = None
+        hand_node = None
+        hand_executor = None
+        hand_executor_thread = None
         context = None
         robot_api_boundary = None
         dataset_process = None
@@ -664,6 +686,7 @@ class RosBridge:
             # actuator commands out of that group so status/recording traffic
             # cannot reduce a 100 Hz control stream to a sporadic output.
             self._command_callback_group = MutuallyExclusiveCallbackGroup()
+            self._hand_command_callback_group = MutuallyExclusiveCallbackGroup()
             from rclpy.callback_groups import ReentrantCallbackGroup
             self._telemetry_callback_group = ReentrantCallbackGroup()
             executor.add_node(node)
@@ -693,6 +716,14 @@ class RosBridge:
                 )
                 command_executor = SingleThreadedExecutor(context=context)
                 command_executor.add_node(command_node)
+                # Finger targets are independent overwriteable streams. Keep
+                # their callbacks from consuming the arm's depth-one reader.
+                hand_node = rclpy.create_node(
+                    self.config.get("node_name", "hc_teleop_middleware") + "_hands",
+                    context=context,
+                )
+                hand_executor = SingleThreadedExecutor(context=context)
+                hand_executor.add_node(hand_node)
             if self.camera_topics:
                 # BEST_EFFORT camera frames must not wait behind 100 Hz control,
                 # status and command callbacks.  A separate node/wait-set keeps
@@ -799,7 +830,8 @@ class RosBridge:
                 if self._legacy_enabled:
                     from .legacy_control import LegacyTopicControl
                     robot_api_boundary = LegacyTopicControl(
-                        command_node, self, output_publisher, feedback_node=control_node)
+                        command_node, self, output_publisher, feedback_node=control_node,
+                        hand_node=hand_node)
                     self._boundary = robot_api_boundary
                 self._setup_ownership_ros(control_node, publishers, permit_pub, output_publisher,
                                           subscriptions, command_node=command_node, status_node=telemetry_node)
@@ -970,6 +1002,11 @@ class RosBridge:
                     target=command_executor.spin, name="ros-command-executor", daemon=True,
                 )
                 command_executor_thread.start()
+            if hand_executor is not None:
+                hand_executor_thread = threading.Thread(
+                    target=hand_executor.spin, name="ros-hand-command-executor", daemon=True,
+                )
+                hand_executor_thread.start()
             if camera_executor is not None:
                 camera_executor_thread = threading.Thread(
                     target=camera_executor.spin,
@@ -1017,6 +1054,10 @@ class RosBridge:
                 command_executor.shutdown(timeout_sec=5.0)
             if command_executor_thread is not None:
                 command_executor_thread.join(timeout=5.0)
+            if hand_executor is not None:
+                hand_executor.shutdown(timeout_sec=5.0)
+            if hand_executor_thread is not None:
+                hand_executor_thread.join(timeout=5.0)
             if camera_executor is not None:
                 camera_executor.shutdown(timeout_sec=5.0)
             if camera_executor_thread is not None:
@@ -1038,6 +1079,10 @@ class RosBridge:
                 command_executor.remove_node(command_node)
             if command_node is not None:
                 command_node.destroy_node()
+            if hand_executor is not None and hand_node is not None:
+                hand_executor.remove_node(hand_node)
+            if hand_node is not None:
+                hand_node.destroy_node()
             if control_executor is not None and control_node is not None:
                 control_executor.remove_node(control_node)
             if control_node is not None:

@@ -238,6 +238,7 @@
           <button class="primary" id="activateProfile">应用配置</button>
         </div>
         <div id="profileDetail" class="profile-detail">正在读取机器人配置…</div>
+        <p id="controlRuntimeStatus" role="status">正在读取控制进程状态…</p>
         <details class="standard-interface"><summary>HC 标准 ROS 2 接口定义</summary>
           <div class="table-wrap"><table><thead><tr><th>用途</th><th>Topic</th><th>默认消息类型</th></tr></thead><tbody id="configInterfaceRows"></tbody></table></div>
         </details>
@@ -259,7 +260,7 @@
         <p id="simulationViewStatus" class="muted" role="status">三维视图已关闭</p>
         <details><summary>仿真日志</summary><pre id="simulationLogs" class="simulation-logs">暂无日志</pre></details>
       </article>
-      <div class="config-actions"><p>保存后 ROS、VR 和相机网关会自动重载。</p><button class="primary" id="saveConfig">保存并应用</button></div>
+      <div class="config-actions"><p>保存或切换机器人后，网关自动重载，托管的遥操与 IK 控制进程同步重启。完成后需重新使能并松开、重新按下 Grip 接管。</p><button class="primary" id="saveConfig">保存并应用</button></div>
       <article class="panel"><h2>服务、ROS 2 与 VR 网关</h2>
         <div class="form-grid">
           <label>HTTP Host<input data-path="server.host"></label>

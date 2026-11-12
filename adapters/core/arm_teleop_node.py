@@ -113,6 +113,9 @@ class RobotArmTeleopNode(Node):
                 self.control.setdefault(k, v)
         self._validate_config()
         self.enabled = bool(self.control.get("enabled_on_start", True))
+        if os.environ.get("HC_CONTROL_START_DISABLED") == "1":
+            self.enabled = False
+            self.control["home_on_start"] = False
         self.stop_reason = ""
         self.control_source = "vr"
         self.source_feedback_pending = False

@@ -123,8 +123,43 @@ async function api(url, options={}) {
     request.headers = {'Content-Type':'application/json', ...(request.headers||{})};
   }
   const response = await fetch(url, request);
-  if (!response.ok) throw new Error((await response.text()) || `${response.status}`);
+  if (!response.ok) {
+    const body=await response.text();
+    let payload;
+    try {payload=JSON.parse(body);} catch(_) {}
+    if(payload?.control_runtime)renderControlRuntime(payload.control_runtime);
+    throw new Error(payload?.control_runtime?.error||payload?.error||payload?.detail||body||`${response.status}`);
+  }
   return response.json();
+}
+
+function renderControlRuntime(runtime) {
+  const el=$('#controlRuntimeStatus');
+  if(!el)return;
+  const labels={running:'运行中',failed:'启动失败',stopped:'已停止',unmanaged:'未托管，需手动重启遥操入口'};
+  el.textContent=runtime
+    ?`控制进程：${labels[runtime.state]||runtime.state}；模型：${runtime.profile_id||'未选择'}${runtime.error?`；${runtime.error}`:''}`
+    :'控制进程状态未知，尚未确认配置生效';
+}
+
+function notifyConfigApplied(result,message) {
+  renderControlRuntime(result.control_runtime);
+  const runtime=result.control_runtime;
+  if(runtime?.state==='running') {
+    toast(`${message}；控制进程已同步重启。请重新使能，并松开再按 Grip 接管。${result.server_restart_required?'服务地址或配置目录变更仍需重启入口。':''}`);
+  } else {
+    toast(`${message}；${runtime?.state==='unmanaged'?'控制进程未托管，需手动重启遥操入口':runtime?.state==='stopped'?'控制进程未运行':'尚未确认控制进程生效'}`,true);
+  }
+}
+
+async function configAction(action) {
+  const buttons=['activateProfile','saveConfig','saveCameras','saveRecording'].map(id=>$('#'+id)).filter(Boolean);
+  const disabled=buttons.map(button=>button.disabled);
+  buttons.forEach(button=>button.disabled=true);
+  setText('#controlRuntimeStatus','正在应用配置并等待控制进程重启…');
+  try {await action();}
+  catch(error){toast(`配置应用未完成：${error.message}`,true);}
+  finally {buttons.forEach((button,index)=>button.disabled=disabled[index]);}
 }
 
 function updateUploadPanel(page) {
@@ -461,6 +496,7 @@ async function toggleSafety() {
 }
 
 function renderStatus(data) {
+  renderControlRuntime(data.control_runtime);
   const ros=data.ros||{}, vr=data.vr||{}, cam=data.camera||{};
   const domain = ros.domain_id ?? config?.ros?.domain_id ?? 0;
   setState('#rosState',ros.state);
@@ -2211,7 +2247,7 @@ async function init() {
       await loadProfiles();
     } catch(error){toast(`删除失败：${error.message}`,true);}
   };
-  $('#activateProfile').onclick=async()=>{
+  $('#activateProfile').onclick=()=>configAction(async()=>{
     const profileId=$('#robotProfileSelect').value;
     if(!profileId)return;
     try {
@@ -2220,32 +2256,32 @@ async function init() {
       config=result.config;
       renderConfig();
       await loadProfiles(result.active);
-      toast(result.restart_simulation_required?'配置已应用；可在下方启动当前机器人仿真':'配置已经是活动配置');
+      notifyConfigApplied(result,'机器人配置已保存');
     } catch(error){toast(`应用失败：${error.message}`,true);}
-  };
-  $('#saveConfig').onclick=async()=>{
+  });
+  $('#saveConfig').onclick=()=>configAction(async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
       config=result.config;
       renderConfig();
-      toast(result.server_restart_required?'已保存；服务地址或配置目录变更需重启进程':'配置已保存并应用');
+      notifyConfigApplied(result,'配置已保存');
     }catch(error){toast(error.message,true);}
-  };
   $('#cameraStreamCards')?.addEventListener('change',renderCameraCompatibilityHint);
   $('[data-path="camera.fec.enabled"]')?.addEventListener('change',renderCameraCompatibilityHint);
-  $('#saveCameras').onclick=async()=>{
+  });
+  $('#saveCameras').onclick=()=>configAction(async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
-      config=result.config;renderConfig();toast('四路相机话题绑定已保存并应用');
+      config=result.config;renderConfig();notifyConfigApplied(result,'四路相机话题绑定已保存');
     }catch(error){toast(error.message,true);}
-  };
-  $('#saveRecording').onclick=async()=>{
+  });
+  $('#saveRecording').onclick=()=>configAction(async()=>{
     try {
       const result=await api('/api/config',{method:'PUT',body:JSON.stringify(collectConfig())});
       config=result.config; renderConfig();
-      toast('录制配置已写入 middleware/config.yaml 并应用');
+      notifyConfigApplied(result,'录制配置已保存');
     }catch(error){toast(error.message,true);}
-  };
+  });
   if($('#topicRecordingFormat')) $('#topicRecordingFormat').onchange=updateRecordingFormatFields;
   async function triggerStartRecording(force = false) {
     try {

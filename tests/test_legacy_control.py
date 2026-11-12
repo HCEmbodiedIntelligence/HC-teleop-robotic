@@ -487,3 +487,41 @@ def test_normal_vr_reaches_action_topic_without_dagger_session():
     r.bridge.set_command_output_enabled(False)
     assert not r.bridge.forward_live_command('vr', message(values), b.output.publish)
     assert len(r.wire) == before + 1
+
+
+def test_empty_feedback_requirement_does_not_read_ros_clock():
+    b = Rig().boundary
+    clock = b.node.get_clock.return_value.now
+    clock.reset_mock()
+    assert b.fresh(set())
+    assert clock.call_count == 0
+
+
+def test_each_boundary_phase_reads_one_fresh_ros_clock():
+    r = Rig(); b = r.boundary
+    r.control.disable()
+    b.collision = None
+    r.feed()
+    msg = message({n: b.positions[n] for n in b.arms})
+    clock = b.node.get_clock.return_value.now
+    clock.reset_mock()
+    prepared = b.prepare(msg)
+    assert prepared is not None, b.last_rejection
+    assert clock.call_count == 1
+    clock.reset_mock()
+    assert b.commit(prepared)
+    assert clock.call_count == 1
+
+
+def test_final_commit_uses_new_clock_and_rejects_elapsed_command():
+    r = Rig(); b = r.boundary
+    r.control.disable()
+    b.collision = None
+    r.feed()
+    msg = message({n: b.positions[n] for n in b.arms})
+    prepared = b.prepare(msg)
+    assert prepared is not None
+    b.node.get_clock.return_value.now.side_effect = lambda: SimpleNamespace(
+        nanoseconds=b.stamp(msg)+300_000_000)
+    assert not b.commit(prepared)
+    assert b.last_rejection == 'commit freshness or authority changed'

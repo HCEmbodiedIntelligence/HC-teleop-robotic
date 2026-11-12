@@ -147,7 +147,7 @@ export HC_RUNTIME_MODE=simulation
 
 if [[ "${MODE}" == middleware ]]; then
   [[ "${HEADLESS}" == false ]] || { echo "Configure headless mode in Dashboard." >&2; exit 2; }
-  unset HC_EXTERNAL_STACK HC_TELEOP_MODE
+  unset HC_EXTERNAL_STACK HC_TELEOP_MODE HC_MANAGED_CONTROL HC_CONTROL_LOG_DIR
   ARGS=(--config "${MIDDLEWARE_CONFIG}")
   [[ -z "${LOG_DIR}" ]] || ARGS+=(--log-dir "${LOG_DIR}")
   [[ "${MONITOR}" == true ]] || ARGS+=(--no-monitor)
@@ -314,11 +314,18 @@ trap cleanup HUP INT TERM EXIT
 
 # Start discovery first so the headset can pair while IK and simulation load.
 export HC_TELEOP_MODE="${MODE}"
+if [[ "${MODE}" == teleop ]]; then
+  export HC_MANAGED_CONTROL="${HC_MANAGED_CONTROL:-1}" HC_CONTROL_LOG_DIR="${LOG_DIR}/control"
+else
+  unset HC_MANAGED_CONTROL HC_CONTROL_LOG_DIR
+fi
 setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${PROJECT_ROOT}/middleware/start.sh" "${MIDDLEWARE_ARGS[@]}" &
 MIDDLEWARE_PID=$!
+if [[ "${MODE}" != teleop || "${HC_MANAGED_CONTROL:-0}" != 1 ]]; then
 setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${PROJECT_ROOT}/adapters/start.sh" \
   --config "${MIDDLEWARE_CONFIG}" --log-dir "${LOG_DIR}/control" &
 CONTROL_PID=$!
+fi
 
 if [[ "${MODE}" == sim ]]; then
   setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 "${SIM_ENTRY}" "${SIM_ARGS[@]}" "${SIM_ROS_ARGS[@]}" &
@@ -338,7 +345,8 @@ if [[ "${MODE}" == teleop ]]; then
   echo "[HC] Start the HC_X1 hardware project separately with ROS_DOMAIN_ID=${ROS_DOMAIN_ID}."
 fi
 
-REQUIRED_PIDS=("${MIDDLEWARE_PID}" "${CONTROL_PID}")
+REQUIRED_PIDS=("${MIDDLEWARE_PID}")
+[[ -z "${CONTROL_PID}" ]] || REQUIRED_PIDS+=("${CONTROL_PID}")
 [[ -z "${SIM_PID}" ]] || REQUIRED_PIDS+=("${SIM_PID}")
 set +e
 wait -n "${REQUIRED_PIDS[@]}"

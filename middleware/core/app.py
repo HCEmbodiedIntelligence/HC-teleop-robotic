@@ -91,6 +91,8 @@ class MiddlewareRuntime:
         self._last_both_sticks_held = False
         self._last_replay_status_sent_at = 0.0
         self.session_profile_metadata: dict[str, str] = {}
+        self.control_runtime = None
+        self._control_watch_task = None
 
     def _load_session_profile_metadata(self) -> dict[str, str]:
         """Describe the Profile actually selected when this runtime starts."""
@@ -258,6 +260,14 @@ class MiddlewareRuntime:
             return bool(capture and capture.status()['ready'])
         self.ros.ownership.capture_ready = capture_ready
         self.ros._action_sink = self.recorder.correction_action
+        # Ordinary MCAP action capture uses the same accepted publication,
+        # without a second, lossy DDS hop. Keep the subscriber for health only.
+        action_max_hz = next((float(item.get("max_hz", 0))
+            for item in self.config["ros"].get("subscriptions", [])
+            if item.get("topic") == "/action/joint_states"), 0.)
+        self.config["ros"]["record_action_at_publication"] = bool(
+            self.config["ros"].get("legacy_control_profile") and action_max_hz <= 0)
+        self.ros._published_action_sink = self._record_published_action
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.recorder.prepare_recording = self.recording_ros.prepare_recording
         if self.platform is not None:
@@ -274,6 +284,19 @@ class MiddlewareRuntime:
         if self.config["safety"].get("stop_on_startup", True):
             self._on_safety_event("middleware startup")
         self._safety_sync_task = asyncio.create_task(self._sync_safety_state())
+        if self.control_runtime is not None and self.control_runtime.enabled:
+            self._on_safety_event("loading control configuration; explicit resume required", force=True)
+            await self.control_runtime.start(self.config)
+            if self.control_runtime.status()["state"] != "running":
+                self._on_safety_event(self.control_runtime.error, force=True)
+            else:
+                self._control_watch_task = asyncio.create_task(self._watch_control())
+
+    async def _watch_control(self) -> None:
+        process = self.control_runtime.process
+        await process.wait()
+        self.control_runtime.status()
+        self._on_safety_event("control process exited; see control runtime status", force=True)
 
     async def _start_uploads(self) -> None:
         """Optional uploader; unavailable dependencies must not prevent local recording."""
@@ -304,6 +327,13 @@ class MiddlewareRuntime:
             self._log("error", "upload unavailable: " + str(exc))
 
     async def stop(self) -> None:
+        if self.control_runtime is not None and self.control_runtime.enabled:
+            self._on_safety_event("control configuration reload; explicit resume required", force=True)
+            if self._control_watch_task is not None:
+                self._control_watch_task.cancel()
+                await asyncio.gather(self._control_watch_task, return_exceptions=True)
+                self._control_watch_task = None
+            await self.control_runtime.stop()
         if self._broadcast_drain_task is not None:
             self._broadcast_drain_task.cancel()
             try:
@@ -360,7 +390,20 @@ class MiddlewareRuntime:
         async with self._restart_lock:
             await self.stop()
             self.config = copy.deepcopy(config)
+            if self.control_runtime is not None and self.control_runtime.enabled:
+                os.environ["ROS_DOMAIN_ID"] = str(config["ros"]["domain_id"])
             await self.start()
+
+    def _record_published_action(self, message) -> bool:
+        """Queue exactly the published action, respecting recording selection."""
+        if (not self.config["ros"].get("record_action_at_publication", False)
+                or not self.recorder.is_recording()):
+            return False
+        from rclpy.serialization import serialize_message
+        return self.recorder.record(dict(
+            kind="ros_message", topic="/action/joint_states",
+            msg_type="sensor_msgs/msg/JointState", record_only=True,
+            stamp_ns=time.time_ns(), _raw=serialize_message(message)))
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
@@ -757,13 +800,17 @@ class MiddlewareRuntime:
                 self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
             self.emit(envelope("vr_timeout", "middleware", {"reason": reason}), ["websocket", "udp"])
 
-    def _on_safety_event(self, reason: str) -> None:
+    def _on_safety_event(self, reason: str, *, force: bool = False) -> None:
         self._safety_reason = reason
-        if self.ros is not None and self.config["safety"].get("enabled", True):
+        if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
         self.emit(envelope("safety_stop", "middleware", {"reason": reason}), ["websocket", "udp"])
 
     def _on_safety_resume(self, reason: str) -> None:
+        if (self.control_runtime is not None and self.control_runtime.enabled
+                and self.control_runtime.status()["state"] != "running"):
+            self._on_safety_event("control configuration is not ready; resume rejected", force=True)
+            return
         if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
             try:
                 self.ros.recover_intervention()
@@ -846,6 +893,7 @@ class MiddlewareRuntime:
             "status": "ok",
             "version": 1,
             "runtime_profile": self.session_profile_metadata,
+            "control_runtime": self.control_runtime.status() if self.control_runtime else {"state": "unmanaged"},
             "control_backend": os.environ.get("HC_CONTROL_BACKEND") or None,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
@@ -873,6 +921,8 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
 def create_app(store: ConfigStore) -> web.Application:
     config = store.load()
     runtime = MiddlewareRuntime(config, store.path.parent)
+    from .control_runtime import ControlRuntime
+    runtime.control_runtime = ControlRuntime(store.path)
     profile_root = selected_profile_root(config, store.path.parent)
     profiles = RobotProfileManager(profile_root)
     app = web.Application(
@@ -887,6 +937,8 @@ def create_app(store: ConfigStore) -> web.Application:
         if request.method in {"POST", "PUT", "DELETE"} and (
             request.path.startswith("/api/robot-profiles") or request.path == "/api/config"
         ):
+            if runtime.recorder is not None and runtime.recorder.is_recording():
+                raise web.HTTPConflict(text="请先停止录制，再修改配置或机器人型号")
             if runtime.ros and getattr(runtime.ros, 'ownership', None) and runtime.ros.ownership.active:
                 raise web.HTTPConflict(text='请先退出人工干预会话，再修改配置或机器人型号')
             async with simulation.lock:
@@ -936,12 +988,18 @@ def create_app(store: ConfigStore) -> web.Application:
             old_profile_root = store.value["robot_profiles"]["root"]
             saved = store.save(proposed)
             await runtime.restart(saved)
+            control_status = runtime.control_runtime.status()
+            if control_status["state"] == "failed":
+                return web.json_response({"ok": False, "config": saved,
+                    "error": "配置已保存，但控制进程启动失败；输出保持停止",
+                    "control_runtime": control_status}, status=503)
             restart_required = (
                 saved["server"] != old_server
                 or saved["robot_profiles"]["root"] != old_profile_root
             )
             return web.json_response(
-                {"ok": True, "config": saved, "server_restart_required": restart_required}
+                {"ok": True, "config": saved, "server_restart_required": restart_required,
+                 "control_runtime": control_status}
             )
         except (ConfigError, json.JSONDecodeError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
@@ -966,6 +1024,10 @@ def create_app(store: ConfigStore) -> web.Application:
         return web.json_response({"accepted": True}, status=202)
 
     async def safety_resume(request: web.Request) -> web.Response:
+        if (runtime.control_runtime.enabled
+                and runtime.control_runtime.status()["state"] != "running"):
+            return web.json_response({"accepted": False, "error": "控制进程尚未就绪，不能恢复输出",
+                "control_runtime": runtime.control_runtime.status()}, status=409)
         data = await request.json() if request.can_read_body else {}
         runtime._on_safety_resume(str(data.get("reason", "dashboard safety resume")))
         return web.json_response({"accepted": True}, status=202)
