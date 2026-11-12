@@ -889,6 +889,12 @@ def create_app(store: ConfigStore) -> web.Application:
                         continue
                     if data.get("kind") == "ping":
                         await ws.send_json(envelope("pong", "middleware", {}))
+                    elif data.get("type") == "simulation_viewer":
+                        if data.get("data", {}).get("enabled", True):
+                            simulation.set_viewer(ws, True, data.get("data", {}).get("render_mode", "native"))
+                        else:
+                            simulation.set_viewer(ws, False)
+                        await ws.send_json({"type": "simulation_viewer_ack", "data": {"registered": ws in simulation.viewers}})
                     elif data.get("kind") == "ros_publish":
                         accepted = bool(
                             runtime.ros
@@ -903,6 +909,7 @@ def create_app(store: ConfigStore) -> web.Application:
                     break
         finally:
             runtime.websockets.discard(ws)
+            simulation.set_viewer(ws, False)
         return ws
 
     def camera_for_request(request: web.Request) -> tuple[str, CameraService | None]:
@@ -1262,10 +1269,38 @@ def create_app(store: ConfigStore) -> web.Application:
             raise web.HTTPBadRequest(text="no file uploaded")
         return web.json_response({"ok": True, "filename": uploaded_name}, status=201)
 
+    async def stream_simulation_frames():
+        last_frame = None
+        while True:
+            await asyncio.sleep(1.0 / 30.0)
+            frame = simulation.latest_frame
+            if frame is last_frame or frame is None or simulation.state != 'running':
+                continue
+            last_frame = frame
+            event = {'type': 'simulation_frame', 'data': {**frame, 'profile_id': simulation.profile_id}}
+            for viewer in tuple(simulation.viewers):
+                try:
+                    await asyncio.wait_for(viewer.send_json(event), timeout=0.5)
+                except (ConnectionError, RuntimeError, asyncio.TimeoutError):
+                    simulation.set_viewer(viewer, False)
+                    try:
+                        await asyncio.wait_for(viewer.close(), timeout=0.2)
+                    except (ConnectionError, RuntimeError, asyncio.TimeoutError):
+                        pass
+
+    viewer_sender = None
+
     async def startup(_app: web.Application) -> None:
+        nonlocal viewer_sender
         await runtime.start()
+        viewer_sender = asyncio.create_task(stream_simulation_frames())
 
     async def shutdown(_app: web.Application) -> None:
+        nonlocal viewer_sender
+        if viewer_sender is not None:
+            viewer_sender.cancel()
+            await asyncio.gather(viewer_sender, return_exceptions=True)
+            viewer_sender = None
         for ws in tuple(runtime.websockets):
             await ws.close(code=1001, message=b"server shutdown")
         async with simulation.lock:

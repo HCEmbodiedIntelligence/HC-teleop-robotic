@@ -13,9 +13,6 @@ ros:
   domain_id: 14
   node_name: hc_teleop_middleware
   command_mux:
-    motion_topic: /control/motion/joint_targets
-    motion_permit_topic: /control/motion/permit
-    hardware_ready_timeout_sec: 0.5
     enabled: true
     source: vr
     vr_topic: /control/vr/joint_states
@@ -23,9 +20,14 @@ ros:
     output_topic: /action/joint_states
     control_source_topic: /control/source
     hardware_enable_topic: /control/hardware/enabled
+    motion_topic: /control/motion/joint_targets
+    motion_permit_topic: /control/motion/permit
+    hardware_ready_timeout_sec: 0.5
     hardware_ready_topic: /status/hardware/ready
   subscriptions:
   - topic: /observation/cameras/wrist_left/color
+    recording_mode: continuous
+    required: true
     description: 左腕部相机彩色图像，随第 7 关节运动
     type: sensor_msgs/msg/Image
     enabled: false
@@ -35,6 +37,8 @@ ros:
     event_max_hz: 0.0
     qos_reliability: reliable
   - topic: /observation/cameras/wrist_left/color/compressed
+    recording_mode: continuous
+    required: true
     description: 左腕部相机彩色图像，随第 7 关节运动（仿真进程内 JPEG 压缩，保留采集时间）
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -44,6 +48,8 @@ ros:
     event_max_hz: 0.0
     qos_reliability: best_effort
   - topic: /observation/cameras/wrist_left/camera_info
+    recording_mode: continuous
+    required: true
     description: 左腕部相机内参与光学坐标系
     type: sensor_msgs/msg/CameraInfo
     enabled: true
@@ -52,6 +58,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/cameras/wrist_right/color
+    recording_mode: continuous
+    required: true
     description: 右腕部相机彩色图像，随第 7 关节运动
     type: sensor_msgs/msg/Image
     enabled: false
@@ -61,6 +69,8 @@ ros:
     event_max_hz: 0.0
     qos_reliability: reliable
   - topic: /observation/cameras/wrist_right/color/compressed
+    recording_mode: continuous
+    required: true
     description: 右腕部相机彩色图像，随第 7 关节运动（仿真进程内 JPEG 压缩，保留采集时间）
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -70,6 +80,8 @@ ros:
     event_max_hz: 0.0
     qos_reliability: best_effort
   - topic: /observation/cameras/wrist_right/camera_info
+    recording_mode: continuous
+    required: true
     description: 右腕部相机内参与光学坐标系
     type: sensor_msgs/msg/CameraInfo
     enabled: true
@@ -78,6 +90,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/left_arm/joint_states
+    recording_mode: continuous
+    required: true
     description: 左机械臂实际关节反馈，按关节名称排列
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -86,6 +100,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/right_arm/joint_states
+    recording_mode: continuous
+    required: true
     description: 右机械臂实际关节反馈，按关节名称排列
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -94,6 +110,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/waist/joint_states
+    recording_mode: continuous
+    required: true
     description: 腰部实际关节反馈，X1 对应 leg_1、leg_2、zhi
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -102,6 +120,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/head/joint_states
+    recording_mode: continuous
+    required: true
     description: 头部实际关节反馈，使用在线能力描述中的公共关节名称
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -110,6 +130,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/left_arm/ee_pose
+    recording_mode: continuous
+    required: true
     description: 左臂末端反馈位姿，由控制节点本地模型计算
     type: geometry_msgs/msg/PoseStamped
     enabled: true
@@ -118,6 +140,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/right_arm/ee_pose
+    recording_mode: continuous
+    required: true
     description: 右臂末端反馈位姿，由控制节点本地模型计算
     type: geometry_msgs/msg/PoseStamped
     enabled: true
@@ -126,6 +150,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/left_arm/joint_states
+    recording_mode: event
+    required: true
     description: 左机械臂最终下发的关节目标，按关节名称排列
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -134,6 +160,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/right_arm/joint_states
+    recording_mode: event
+    required: true
     description: 右机械臂最终下发的关节目标，按关节名称排列
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -142,6 +170,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/waist/joint_states
+    recording_mode: event
+    required: true
     description: 腰部最终关节控制目标，X1 对应 leg_1、leg_2、zhi
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -150,6 +180,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/head/joint_states
+    recording_mode: event
+    required: true
     description: 头部最终关节控制目标，使用在线能力描述中的公共关节名称
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -158,6 +190,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/left_arm/ee_pose
+    recording_mode: event
+    required: true
     description: 左臂末端目标位姿，与末端反馈使用相同参考坐标系
     type: geometry_msgs/msg/PoseStamped
     enabled: true
@@ -166,6 +200,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/right_arm/ee_pose
+    recording_mode: event
+    required: true
     description: 右臂末端目标位姿，与末端反馈使用相同参考坐标系
     type: geometry_msgs/msg/PoseStamped
     enabled: true
@@ -174,6 +210,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/base/pose
+    recording_mode: continuous
+    required: true
     description: 底盘实际位置与朝向，用于轨迹和移动距离分析
     type: geometry_msgs/msg/PoseStamped
     enabled: true
@@ -182,6 +220,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/base/velocity
+    recording_mode: event
+    required: true
     description: 底盘命令的结构化速度：前向、横向及偏航角速度
     type: geometry_msgs/msg/TwistStamped
     enabled: true
@@ -190,6 +230,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/headset/pose
+    recording_mode: continuous
+    required: true
     description: 头显在 VR 跟踪坐标系中的位姿，不是机器人头部反馈
     type: geometry_msgs/msg/PoseStamped
     enabled: true
@@ -198,6 +240,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /vrdata
+    recording_mode: continuous
+    required: true
     description: 原始头显和双手位姿、按键、跟踪状态及 VR 时间戳
     type: std_msgs/msg/String
     enabled: true
@@ -206,6 +250,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /clock
+    recording_mode: continuous
+    required: true
     description: 仿真时钟，用于区分仿真时间与实际录制时间
     type: rosgraph_msgs/msg/Clock
     enabled: true
@@ -214,6 +260,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /status/hardware/ready
+    recording_mode: event
+    required: true
     description: 硬件就绪信号，供控制器判断是否允许下发命令
     type: std_msgs/msg/Bool
     enabled: true
@@ -223,6 +271,8 @@ ros:
     max_hz: 100.0
     event_max_hz: 20.0
   - topic: /status/teleop
+    recording_mode: event
+    required: true
     description: 遥操作状态，包括离合、反馈有效性及控制状态
     type: std_msgs/msg/String
     enabled: true
@@ -232,25 +282,28 @@ ros:
     max_hz: 10.0
     event_max_hz: 0.0
   - topic: /tf
+    recording_mode: continuous
+    required: false
     description: 各坐标系之间的动态变换，用于位姿转换与回放
     type: tf2_msgs/msg/TFMessage
     enabled: true
-    required: false
     outputs:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /tf_static
+    recording_mode: event
+    required: false
     description: 相机安装及固定坐标变换，每段录制接收已发布的静态树
     type: tf2_msgs/msg/TFMessage
     enabled: true
-    required: false
-    recording_mode: event
     outputs:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/joint_states
+    recording_mode: continuous
+    required: true
     description: 机器人整机关节反馈
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -260,6 +313,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 20.0
   - topic: /control/solver/joint_targets
+    recording_mode: event
+    required: true
     description: 逆解控制器输出的关节目标，尚未经过最终命令仲裁
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -268,6 +323,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/joint_states
+    recording_mode: event
+    required: true
     description: 最终下发给机器人的整机关节目标
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -277,6 +334,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 20.0
   - topic: /control/solver/ee_targets
+    recording_mode: event
+    required: true
     description: 发送到求解器任务坐标系的末端目标位姿
     type: geometry_msgs/msg/PoseArray
     enabled: true
@@ -285,6 +344,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/ee_poses
+    recording_mode: event
+    required: true
     description: 双臂末端目标位姿，顺序为右臂、左臂
     type: geometry_msgs/msg/PoseArray
     enabled: true
@@ -293,6 +354,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/ee_poses
+    recording_mode: continuous
+    required: true
     description: 本地模型计算的双臂末端反馈位姿，顺序为右臂、左臂
     type: geometry_msgs/msg/PoseArray
     enabled: true
@@ -301,6 +364,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/base/command
+    recording_mode: event
+    required: true
     description: 最终底盘速度命令，顺序为偏航、前向、横向
     type: std_msgs/msg/Float64MultiArray
     enabled: true
@@ -309,6 +374,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/left_hand/joint_states
+    recording_mode: event
+    required: true
     description: 左手夹爪或灵巧手的关节控制目标
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -317,6 +384,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /action/right_hand/joint_states
+    recording_mode: event
+    required: true
     description: 右手夹爪或灵巧手的关节控制目标
     type: sensor_msgs/msg/JointState
     enabled: true
@@ -325,6 +394,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/cameras/head/color/compressed
+    recording_mode: continuous
+    required: true
     description: 头部相机彩色图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -333,6 +404,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/cameras/head/depth/compressed
+    recording_mode: continuous
+    required: true
     description: 头部相机深度图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -341,6 +414,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /cameras/eye/color
+    recording_mode: continuous
+    required: true
     description: Isaac 头部相机原始彩色图像，用于头显投射与录制
     type: sensor_msgs/msg/Image
     enabled: false
@@ -351,6 +426,8 @@ ros:
     event_max_hz: 0.0
     qos_reliability: reliable
   - topic: /cameras/eye/color/compressed
+    recording_mode: continuous
+    required: true
     description: Isaac 头部相机原始彩色图像，用于头显投射与录制（仿真进程内 JPEG 压缩，保留采集时间）
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -361,6 +438,8 @@ ros:
     event_max_hz: 0.0
     qos_reliability: best_effort
   - topic: /observation/cameras/overhead/color/compressed
+    recording_mode: continuous
+    required: true
     description: 俯视相机彩色图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -369,6 +448,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /cameras/Bfront/color
+    recording_mode: continuous
+    required: true
     description: Bfront 相机原始彩色图像
     type: sensor_msgs/msg/Image
     enabled: false
@@ -377,6 +458,8 @@ ros:
     max_hz: 30.0
     event_max_hz: 0.0
   - topic: /observation/cameras/d405_left/color/compressed
+    recording_mode: continuous
+    required: true
     description: 左侧 D405相机彩色图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -385,6 +468,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/cameras/d405_right/color/compressed
+    recording_mode: continuous
+    required: true
     description: 右侧 D405相机彩色图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -393,6 +478,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/cameras/d405_left/depth/compressed
+    recording_mode: continuous
+    required: true
     description: 左侧 D405相机深度图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -401,6 +488,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /observation/cameras/d405_right/depth/compressed
+    recording_mode: continuous
+    required: true
     description: 右侧 D405相机深度图像压缩流，用于观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -409,6 +498,8 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   - topic: /cameras/stereo/color/compressed
+    recording_mode: continuous
+    required: true
     description: 双目相机拼接彩色压缩图像，用于双目观察与录制
     type: sensor_msgs/msg/CompressedImage
     enabled: true
@@ -418,17 +509,20 @@ ros:
     max_hz: 0.0
     event_max_hz: 0.0
   recording:
-    workflow: hc
-    capture_config_file: ""
-    job_state_dir: ../runtime/recording_jobs
-    artifact_state_dir: ../runtime/artifact_ready
-    max_pending_jobs: 8
-    min_free_bytes: 268435456
     directory: ../runtime/topic_recordings
     format: both
     lerobot_fps: 15
     lerobot_task: 遥操作
+    workflow: hc
+    capture_config_file: ''
+    job_state_dir: ../runtime/recording_jobs
+    artifact_state_dir: ../runtime/artifact_ready
+    max_pending_jobs: 8
+    min_free_bytes: 268435456
     enabled: false
+    derive_action_from_next_state: false
+    gap_rules: []
+    action_sources: []
   dataset_topics:
     enabled: true
 vr:
@@ -496,13 +590,12 @@ camera:
   height: 400
   fps: 30
   codec: H264
-
 uploads:
   enabled: false
   auto_enqueue: false
   queue_directory: ../runtime/upload_queue
-  platform_base_url: ""
-  credential_ref: ""
-  robot_id: ""
-  local_robot_id: ""
-  task_id: ""
+  platform_base_url: ''
+  credential_ref: ''
+  robot_id: ''
+  local_robot_id: ''
+  task_id: ''

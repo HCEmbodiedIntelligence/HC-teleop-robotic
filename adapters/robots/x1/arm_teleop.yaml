@@ -363,3 +363,13 @@ control:
   collision_latch_until_release: true
   # 已经处于禁区时，允许安全间隙每帧至少增加 0.01 mm 的退出指令。
   collision_escape_epsilon: 0.00001
+simulation:
+  sim_camera:
+    distance: 2.2
+    yaw: 180
+    pitch: -25
+    target_position: [0.0, 0.25, 0.85]
+  sim_opengl2: true
+  ground:
+    enabled: false
+

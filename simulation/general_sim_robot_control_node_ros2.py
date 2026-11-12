@@ -29,11 +29,21 @@ from robot_utils.utils import (
 
 
 class SimRobotController(Node, AssembledRobot):
-    def __init__(self, config_path, init_debug=True, headless=False):
+    def __init__(self, config_path, init_debug=True, headless=False, stream_viewer=False,
+                 viewer_demand_file=None):
         # Initialize ROS2 node
         Node.__init__(self, "sim_robot_controller_node")
 
         config_file = os.path.abspath(os.path.expanduser(config_path))
+        if os.path.isdir(config_file):
+            arm_teleop_candidate = os.path.join(config_file, "arm_teleop.yaml")
+            vr_configs_candidate = os.path.join(config_file, "vr_configs.yml")
+            if os.path.isfile(arm_teleop_candidate):
+                config_file = arm_teleop_candidate
+            elif os.path.isfile(vr_configs_candidate):
+                config_file = vr_configs_candidate
+            else:
+                config_file = arm_teleop_candidate
         if not os.path.isfile(config_file):
             raise FileNotFoundError(f"simulation profile does not exist: {config_file}")
         self.robot_description_path = os.path.dirname(config_file)
@@ -62,6 +72,10 @@ class SimRobotController(Node, AssembledRobot):
         )
 
         self.wo_controller = False
+        self.target_ee_poses = None
+        self.stream_viewer = stream_viewer
+        self.viewer_demand_file = viewer_demand_file
+        self.next_viewer_frame = 0.0
         urdf_rel = self.configs.get("urdf_path")
         if not urdf_rel and isinstance(self.configs.get("robot"), dict):
             urdf_rel = self.configs["robot"].get("urdf_path")
@@ -116,14 +130,27 @@ class SimRobotController(Node, AssembledRobot):
             from middleware.core.robot_api import RobotApiProfile
             RobotApiProfile(self.robot_description_path)
         self.joint_state_pub = self.create_publisher(
-            JointState, "/internal/robot/joint_states" if unified else "/io_teleop/joint_states", 1
+            JointState, "/io_teleop/joint_states", 1
+        )
+        self.internal_joint_state_pub = (
+            self.create_publisher(JointState, "/internal/robot/joint_states", 1)
+            if unified else None
         )
         self.base_pose_pub = self.create_publisher(PoseStamped, "/observation/base/pose", 10)
         self.joint_cmd_sub = self.create_subscription(
             JointState,
-            "/internal/robot/joint_commands" if unified else "/io_teleop/joint_cmd",
+            "/io_teleop/joint_cmd",
             self.joint_cmd_callback,
             1,
+        )
+        self.internal_joint_cmd_sub = (
+            self.create_subscription(
+                JointState,
+                "/internal/robot/joint_commands",
+                self.joint_cmd_callback,
+                1,
+            )
+            if unified else None
         )
         self.target_finger_joint_sub = self.create_subscription(
             JointState,
@@ -177,6 +204,10 @@ class SimRobotController(Node, AssembledRobot):
         self.head_error_id = -1
         self.head_tracking_sub = self.create_subscription(
             PoseArray, "/status/head/tracking_poses",
+            self.head_tracking_callback, 1,
+        )
+        self.head_tracking_sub_compat = self.create_subscription(
+            PoseArray, "/hc_teleop/head_tracking_poses",
             self.head_tracking_callback, 1,
         )
         self.hardware_ready_pub.publish(Bool(data=True))
@@ -268,7 +299,20 @@ class SimRobotController(Node, AssembledRobot):
             joint_state.velocity.append(measured[1])
             joint_state.effort.append(measured[3])
         self.joint_state_pub.publish(joint_state)
+        if self.internal_joint_state_pub is not None:
+            self.internal_joint_state_pub.publish(joint_state)
         self.hardware_ready_pub.publish(Bool(data=self.hardware_ready))
+        demand_file = getattr(self, 'viewer_demand_file', None)
+        viewer_enabled = getattr(self, 'stream_viewer', False) or (
+            demand_file is not None and os.path.isfile(demand_file))
+        if viewer_enabled and time.monotonic() >= self.next_viewer_frame:
+            with self.bullet_lock:
+                root_pose = p.getBasePositionAndOrientation(self.robot_id, physicsClientId=self.physics_clent_id)
+                markers = self._viewer_markers(root_pose)
+            frame = {'positions': dict(zip(joint_state.name, joint_state.position)),
+                     'base_pose': root_pose, 'markers': markers}
+            print('HC_SIMULATION_FRAME ' + json.dumps(frame, separators=(',', ':'), allow_nan=False), flush=True)
+            self.next_viewer_frame = time.monotonic() + 1.0 / 30.0
         self.base_frame_ids = debug_draw_pose(
             self.base.pose,
             self.base_frame_ids,
@@ -284,6 +328,59 @@ class SimRobotController(Node, AssembledRobot):
                 line_length=0.18,
                 physics_client_id=self.physics_clent_id,
             )
+
+    def _viewer_markers(self, root_pose):
+        """Read world-space marker poses only when a viewer requests a frame.
+
+        This method runs under ``bullet_lock`` and uses no GUI/debug RPCs.
+        Head tracking messages use the root COM frame, while arm targets use
+        their configured controller base link frames.
+        """
+        def serializable(pose):
+            return [[float(value) for value in component] for component in pose]
+
+        markers = {'base': serializable(self.base.pose)}
+        targets = self.target_ee_poses
+        controller_indices = self.configs.get('controller_indices', {})
+        bases = controller_indices.get('base', []) if isinstance(controller_indices, dict) else []
+        for index, arm in enumerate(self.arms):
+            side = ('right', 'left')[index] if index < 2 else str(index)
+            markers['ee_actual_' + side] = serializable(arm.abs_ee_pose)
+            if targets is not None and index < len(targets) and index < len(bases):
+                base_index = bases[index]
+                base_pose = (p.getLinkState(
+                    self.robot_id, base_index, computeForwardKinematics=True,
+                    physicsClientId=self.physics_clent_id)[4:6]
+                    if base_index != -1 else self.base.pose)
+                markers['ee_target_' + side] = serializable(multiply_transforms(
+                    base_pose, pose_msg_to_list(targets[index])))
+
+        teleop = self.teleop_config
+        body = teleop.get('body', {}) if isinstance(teleop, dict) else {}
+        if not isinstance(body, dict):
+            body = {}
+        neck = teleop.get('neck', {}) if isinstance(teleop, dict) else {}
+        if not isinstance(neck, dict):
+            neck = {}
+        camera_name = (body.get('visualization_head_link') or body.get('camera_link')
+                       or neck.get('camera_link') or 'camera_head')
+        camera_index = self.link_name2id_dict.get(camera_name)
+        if camera_index is not None:
+            camera_pose = (p.getLinkState(
+                self.robot_id, camera_index, computeForwardKinematics=True,
+                physicsClientId=self.physics_clent_id)[4:6]
+                if camera_index != -1 else root_pose)
+            markers['camera_actual'] = serializable(camera_pose)
+        if self.head_tracking_poses is not None:
+            if time.monotonic() - self.head_tracking_stamp <= 0.5:
+                if 'camera_actual' not in markers:
+                    markers['camera_actual'] = serializable(multiply_transforms(
+                        root_pose, self.head_tracking_poses[0]))
+                markers['camera_target'] = serializable(multiply_transforms(
+                    root_pose, self.head_tracking_poses[1]))
+            else:
+                self.head_tracking_poses = None
+        return markers
 
     def target_finger_joints_callback(self, msg):
         joint_pos = msg.position
@@ -315,10 +412,14 @@ class SimRobotController(Node, AssembledRobot):
             gripper.reset(gripper_status[i])
 
     def target_ee_callback(self, msg):
-        if "controller_indices" in self.configs:
-            for i in range(len(self.arms)):
+        self.target_ee_poses = list(msg.poses)
+        controller_indices = self.configs.get("controller_indices", {})
+        bases = controller_indices.get("base", []) if isinstance(controller_indices, dict) else []
+        if bases:
+            count = min(len(self.arms), len(msg.poses), len(bases))
+            for i in range(count):
                 pose = msg.poses[i]
-                id = self.configs["controller_indices"]["base"][i]
+                id = bases[i]
                 pose_list = pose_msg_to_list(pose)
                 cmd_base_pose = (
                     p.getLinkState(self.robot_id, id)[4:6]
@@ -450,7 +551,7 @@ class SimRobotController(Node, AssembledRobot):
         ground_cfg = sim_cfg.get("ground", {}) if isinstance(sim_cfg, dict) else {}
         if not isinstance(ground_cfg, dict):
             ground_cfg = {}
-        enable_ground = ground_cfg.get("enabled", True)
+        enable_ground = ground_cfg.get("enabled", False)
         if not enable_ground:
             self.plane_id = None
             return
@@ -535,6 +636,8 @@ def main(args=None):
         help="Whether to use debug mode or not.",
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--stream-viewer", action="store_true")
+    parser.add_argument("--viewer-demand-file", help="Stream frames only while this file exists")
 
     arguments, ros_arguments = parser.parse_known_args(args)
     # One PyBullet ROS publisher per user/domain, including CLI launches.
@@ -564,6 +667,8 @@ def main(args=None):
             config_path,
             init_debug=arguments.init_debug,
             headless=arguments.headless,
+            stream_viewer=arguments.stream_viewer,
+            viewer_demand_file=arguments.viewer_demand_file,
         )
         print("HC_SIMULATION_READY", flush=True)
         rclpy.spin(robot)

@@ -169,3 +169,13 @@ control:
   collision_check_arm_body: true
   collision_latch_until_release: true
   collision_escape_epsilon: 0.00001
+simulation:
+  sim_camera:
+    distance: 2.0
+    yaw: 180
+    pitch: -25
+    target_position: [0.0, 0.0, 0.75]
+  sim_opengl2: true
+  ground:
+    enabled: false
+

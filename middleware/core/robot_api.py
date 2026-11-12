@@ -442,14 +442,13 @@ class RobotApiProfile:
         channels = copy.deepcopy(self.channels)
         move_priority = max(c["priority"] for c in channels) + 1
         for channel in channels:
-            channel["source"] = "motion"
             if channel["kind"].startswith("move_"):
                 channel["priority"] = move_priority
         for channel in list(channels):
             if channel["kind"] not in {"servo_p", "move_j"}:
                 continue
             vr = copy.deepcopy(channel)
-            vr.update(name="vr_" + vr["name"], source="vr",
+            vr.update(name="vr_" + vr["name"],
                       endpoint=f'/internal/vr/{vr["group"]}/{vr["kind"]}')
             vr.pop("fk_pose_topic", None)
             channels.append(vr)

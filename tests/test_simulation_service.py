@@ -44,7 +44,7 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             # a bounded child, without requiring ROS or a graphics server.
             prefix = args[:args.index('--') + 1]
             return await real_spawn(*prefix, sys.executable, '-u', '-c',
-                'import time; print("HC_SIMULATION_READY", flush=True); time.sleep(60)', **kwargs)
+                'import time; print("HC_SIMULATION_READY", flush=True); print(\'HC_SIMULATION_FRAME {"positions":{"a":0.1},"base_pose":[[0,0,0],[0,0,0,1]]}\', flush=True); time.sleep(60)', **kwargs)
         self.spawn_patch = patch('middleware.core.simulation.asyncio.create_subprocess_exec', side_effect=spawn)
         self.spawn_patch.start()
 
@@ -144,6 +144,59 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             response = await client.get('/api/status')
             self.assertEqual(response.status, 200)
+        finally:
+            await client.close()
+
+    async def test_web_view_toggle_changes_demand_without_restarting_simulation(self):
+        self.store.value['simulation']['headless'] = False
+        self.store.save(self.store.value)
+        os.environ.pop('DISPLAY', None)
+        with patch('middleware.core.app.SimulationService', return_value=self.service):
+            client = TestClient(TestServer(create_app(self.store)))
+        await client.start_server()
+        ws = None
+        try:
+            response = await client.post('/api/simulation/start')
+            self.assertEqual(response.status, 200, await response.text())
+            self.assertIn('--headless', self.commands[0][0])
+            self.assertFalse(self.service.demand_file.exists())
+            pids = (await response.json())['pids']
+            ws = await client.ws_connect('/ws')
+            await ws.send_json({'type': 'simulation_viewer', 'data': {'enabled': True, 'render_mode': 'web'}})
+            while (await ws.receive_json()).get('type') != 'simulation_viewer_ack':
+                pass
+            self.assertTrue(self.service.demand_file.exists())
+            await ws.close()
+            await asyncio.sleep(.02)
+            self.assertFalse(self.service.demand_file.exists())
+            self.assertIsNone(self.service.latest_frame)
+            self.assertEqual(self.service.status()['pids'], pids)
+            self.assertEqual(self.service.status()['viewer_clients'], 0)
+        finally:
+            if ws is not None:
+                await ws.close()
+            await client.close()
+
+    async def test_model_assets_are_scoped_to_selected_profile(self):
+        folder = self.profiles.root / 'test_bot'
+        (folder / 'meshes').mkdir(exist_ok=True)
+        (folder / 'meshes' / 'part.stl').write_bytes(b'solid mesh')
+        outside = Path(self.temp.name) / 'outside.stl'
+        outside.write_bytes(b'secret')
+        (folder / 'meshes' / 'escape.stl').symlink_to(outside)
+        client = TestClient(TestServer(create_app(self.store)))
+        await client.start_server()
+        try:
+            response = await client.get('/api/simulation/model')
+            self.assertEqual(response.status, 200, await response.text())
+            model = await response.json()
+            self.assertEqual(model['profile_id'], 'test_bot')
+            self.assertEqual(model['base_inertial_pose'], [[0., 0., 0.], [0., 0., 0., 1.]])
+            self.assertEqual((await client.get(model['urdf_url'])).status, 200)
+            response = await client.get(model['asset_base_url'] + 'meshes/part.stl')
+            self.assertEqual(await response.read(), b'solid mesh')
+            self.assertEqual((await client.get(model['asset_base_url'] + 'meshes/escape.stl')).status, 403)
+            self.assertEqual((await client.get(model['asset_base_url'] + 'arm_teleop.yaml')).status, 404)
         finally:
             await client.close()
 

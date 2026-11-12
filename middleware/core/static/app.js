@@ -1385,14 +1385,37 @@ function configureProfileDialog() {
   };
 }
 
+let simulationView=null;
+let simulationViewAbort=null;
+let simulationViewGeneration=0;
+let simulationLastState=null;
+async function toggleSimulationView() {
+  const enabled=$('#simulationViewEnabled').checked;
+  const generation=++simulationViewGeneration;
+  simulationViewAbort?.abort();simulationViewAbort=null;
+  simulationView?.dispose();simulationView=null;
+  $('#simulationView').hidden=!enabled;
+  if(!enabled){$('#simulationViewStatus').textContent='三维视图已关闭';return;}
+  $('#simulationViewStatus').textContent='正在加载三维视图…';
+  const controller=new AbortController();simulationViewAbort=controller;
+  try {
+    const module=await import('/static/simulation_viewer.js?v=1');
+    if(controller.signal.aborted||generation!==simulationViewGeneration)return;
+    simulationView=module.mountSimulationViewer({container:$('#simulationViewCanvas'),status:$('#simulationViewStatus'),signal:controller.signal});
+    if(simulationLastState)simulationView.updateState(simulationLastState);
+  } catch(error) {
+    if(!controller.signal.aborted)$('#simulationViewStatus').textContent=`无法打开三维视图：${error.message}`;
+  }
+}
 let simulationBusy=false;
 let simulationActionError='';
 async function loadSimulation() {
   try {
     const value=await api('/api/simulation');
+    simulationLastState=value;simulationView?.updateState(value);
     const states={stopped:'已停止',starting:'启动中',running:'运行中',stopping:'停止中',failed:'启动失败 / 已退出'};
     if(!simulationBusy)$('#simulationState').textContent=states[value.state]||value.state;
-    $('#simulationProfile').textContent=`当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
+    $('#simulationProfile').textContent=`运行模式：${value.runtime_mode==='teleop'?'真机遥操':'隔离仿真'} · 显示：${$('#simulationViewEnabled')?.checked?'网页三维已开启':'网页三维已关闭'} · ROS 域：${value.ros_domain_id??'—'} · 当前配置：${value.active_profile||'未选择'}${value.profile_id&&value.state!=='stopped'?` · 仿真模型：${value.profile_id}`:''}`;
     $('#simulationError').textContent=simulationActionError||value.error||value.unavailable_reason||'';
     $('#simulationLogs').textContent=value.logs.join('\n')||'暂无日志';
     const active=['starting','running','stopping'].includes(value.state);
@@ -1417,6 +1440,7 @@ async function simulationAction(action) {
     if(action!=='stop') {
       const options={};
       $$('[data-path^="simulation."]').forEach(input=>{options[input.dataset.path.split('.')[1]]=input.checked;});
+      options.headless=true;
       await api('/api/simulation/options',{method:'PUT',body:JSON.stringify(options),signal:controller.signal});
       if(config)config.simulation=options;
     }
@@ -1431,6 +1455,17 @@ async function simulationAction(action) {
 }
 
 function bindSimulationControls() {
+  const resetSimulationView=()=>{
+    $('#simulationViewEnabled').checked=false;
+    toggleSimulationView();
+  };
+  $('#simulationViewEnabled').onchange=toggleSimulationView;
+  resetSimulationView();
+  if(typeof window!=='undefined') {
+    window.addEventListener('pagehide',resetSimulationView);
+    // Browsers can restore checkbox state after initialization or from BFCache.
+    window.addEventListener('pageshow',resetSimulationView);
+  }
   for(const [id,action] of [['startSimulation','start'],['restartSimulation','restart'],['stopSimulation','stop']]) {
     $('#'+id).onclick=()=>simulationAction(action);
   }
