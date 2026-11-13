@@ -356,6 +356,7 @@ control:
   home_joint_acceleration: 1.4
   home_feedback_timeout: 2.0
   # 当前硬件启动只开放右臂控制；只读左臂和腰部不参与回零或到位判断。
+  # home_joint_names: [Joint1_L, Joint2_L, Joint3_L, Joint4_L, Joint5_L, Joint6_L, Joint7_L, Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
   home_joint_names: [Joint1_R, Joint2_R, Joint3_R, Joint4_R, Joint5_R, Joint6_R, Joint7_R]
   home_tolerance: 0.05
   pose_timeout: 0.5

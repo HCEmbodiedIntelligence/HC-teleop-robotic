@@ -61,6 +61,50 @@ def test_actual_mcap_retains_all_64_successful_publications(tmp_path):
         recorder.shutdown()
 
 
+def test_runtime_installs_capture_on_base_under_task_recorder_proxy(tmp_path):
+    from mcap.reader import make_reader
+    from middleware.core.app import MiddlewareRuntime
+    from middleware.core.task_recording import TaskRecorder
+    topic = {'topic': '/action/joint_states', 'type': 'sensor_msgs/msg/JointState'}
+    base = TopicRecorder({'directory': str(tmp_path), 'format': 'mcap'}, tmp_path,
+                         topics=[topic])
+    wrapper = TaskRecorder.__new__(TaskRecorder)
+    wrapper.recorder = base
+    base.task_managed = True
+    wrapper.lock = threading.RLock()
+    wrapper.jobs, wrapper.active = {}, None
+    wrapper.platform = SimpleNamespace(recording_selection=lambda: {'mode': 'local'})
+    runtime = MiddlewareRuntime.__new__(MiddlewareRuntime)
+    runtime.config = {'ros': {'legacy_control_profile': 'profile',
+                              'subscriptions': [dict(topic, max_hz=0)]}}
+    runtime.recorder = wrapper
+    runtime.ros = bridge_with(None)
+    runtime._configure_publication_capture(base)
+    assert base.publication_capture is runtime.ros._publication_capture
+    assert 'publication_capture' not in vars(wrapper)
+    assert wrapper.publication_capture is base.publication_capture
+    assert wrapper.status()['publication_capture']['active'] is False
+    path = base.start()
+    expected = []
+    try:
+        assert wrapper.status()['publication_capture']['active'] is True
+        for index in range(64):
+            msg = message(index*.001)
+            assert runtime.ros.forward_live_command('vr', msg, Mock())
+            expected.append(msg)
+        base.stop()
+        status = wrapper.status()['publication_capture']
+        assert status['active'] is False
+        assert status['enqueued'] == 64
+        with open(path, 'rb') as stream:
+            actual = [deserialize_message(m.data, JointState)
+                      for _, channel, m in make_reader(stream).iter_messages()
+                      if channel.topic == '/action/joint_states']
+        assert actual == expected
+    finally:
+        base.shutdown()
+
+
 def test_blocked_capture_ipc_never_holds_send_or_revocation_lock():
     entered, release = threading.Event(), threading.Event()
     def record(event):
