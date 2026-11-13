@@ -117,6 +117,12 @@ while (($#)); do
   esac
 done
 
+if [[ "${MODE}" == teleop ]]; then
+  /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/verify_checkout.py" --root "${PROJECT_ROOT}"
+  # Real hardware starts without automatic homing or command publication.
+  export HC_CONTROL_START_DISABLED="${HC_CONTROL_START_DISABLED:-1}"
+fi
+
 [[ -f "${MIDDLEWARE_CONFIG}" ]] || {
   echo "Middleware config not found: ${MIDDLEWARE_CONFIG}" >&2
   exit 2

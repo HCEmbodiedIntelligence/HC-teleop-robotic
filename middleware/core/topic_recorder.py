@@ -62,13 +62,14 @@ def _counter_add(counter: Any, value: int = 1) -> None:
         counter.value += int(value)
 
 
-def enqueue_record(resources, event):
+def enqueue_record(resources, event, *, allow_closed=False, finished=None):
     """Bound both message count and payload bytes under the ingress barrier."""
     target, accepting, dropped, lock, accepted, queued_bytes, budget = resources
     raw = event.get('_raw')
     size = len(raw)+1024 if isinstance(raw, bytes) else len(json.dumps(event, ensure_ascii=False).encode())+1024
     with lock:
-        if not accepting.is_set():
+        if ((not accepting.is_set() and not allow_closed)
+                or (allow_closed and (finished is None or finished.is_set()))):
             return False
         if _counter_get(queued_bytes)+size > budget:
             _counter_add(dropped)
@@ -448,6 +449,7 @@ class TopicRecorder(CorrectionSupport):
 
     def __init__(self, config: dict[str, Any], config_dir: Path, *, topics=None):
         self.config, self.config_dir = dict(config), config_dir
+        self.publication_capture = None
         self._recording_topics = (None if topics is None else tuple(dict.fromkeys(
             (str(item['topic']), str(item['type'])) for item in topics)))
         directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
@@ -667,15 +669,35 @@ class TopicRecorder(CorrectionSupport):
             if self.takeovers and not self._reusable:
                 self.takeovers.begin(self.path)
             self._accepting_event.set()
+        capture = self.publication_capture
+        if capture is not None:
+            try:
+                capture.begin_generation()
+            except Exception:
+                self.stop()
+                raise
         return str(self.path)
 
     def stop(self) -> dict[str, Any]:
+        capture = self.publication_capture
+        if capture is not None:
+            capture.close_admission()
         process = self._process
         if process is None:
             return self.status()
         if self._reusable and self._finished_event.is_set():
             return self.status()
         capture_ended_at = datetime.now(timezone.utc).isoformat()
+        # Stop ordinary DDS ingress immediately. Reserved action publications
+        # have a separate admission path so a delayed writer cannot extend the
+        # video/state tail after action admission has already stopped.
+        with self._ingress_lock:
+            self._accepting_event.clear()
+        if capture is not None:
+            capture.end_generation()
+            capture_error = capture.status().get('error')
+            if capture_error:
+                self._last_error = self._last_error or capture_error
         # Separate end signal; accepted counts include packets still in a
         # multiprocessing feeder. A full queue never loses data to make room
         # for a sentinel, nor can Queue.empty() finish before a feeder flushes.
@@ -828,12 +850,33 @@ class TopicRecorder(CorrectionSupport):
             process is None or process.is_alive()
         )
 
+    def records_topic(self, topic: str, msg_type: str) -> bool:
+        """Whether the page-selected recording accepts this exact ROS channel."""
+        return self._recording_topics is None or (topic, msg_type) in self._recording_topics
+
     def record(self, event: dict[str, Any]) -> bool:
         if not _matches_recording_topics(event, self._recording_topics):
             return False
         return enqueue_record(self.ipc_resources(), event)
 
+    def record_publication(self, event: dict[str, Any]) -> bool:
+        """Admit only the capture worker's already-reserved action messages.
+
+        Normal ingress may be closed during stop, but finish cannot be signaled
+        until the publication generation drains. Selection and byte/count queue
+        bounds remain identical to ordinary recording.
+        """
+        if (event.get('topic') != '/action/joint_states'
+                or event.get('msg_type') != 'sensor_msgs/msg/JointState'
+                or not _matches_recording_topics(event, self._recording_topics)
+                or self._process is None or not self._process.is_alive()):
+            return False
+        return enqueue_record(self.ipc_resources(), event, allow_closed=True,
+                              finished=self._finish_event)
+
     def status(self) -> dict[str, Any]:
+        capture_status = (self.publication_capture.status()
+                          if self.publication_capture is not None else None)
         self._poll_export()
         while True:
             try:
@@ -852,7 +895,7 @@ class TopicRecorder(CorrectionSupport):
                 "accepted": _counter_get(self._accepted),
                 "queued_bytes": _counter_get(self._queued_bytes),
                 "queue_byte_budget": self._byte_budget,
-                "dropped": _counter_get(self._dropped),
+                "dropped": _counter_get(self._dropped) + (capture_status or {}).get('dropped', 0),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",
                 "upload_handoff_errors": dict(self._artifacts.recovery_errors),
@@ -861,7 +904,8 @@ class TopicRecorder(CorrectionSupport):
                 "export_progress": self.export_progress(),
                 "export_error": self._export_error,
                 "lerobot_path": self._lerobot_path,
-                "error": self._last_error,
+                "publication_capture": capture_status,
+                "error": self._last_error or (capture_status or {}).get('error') or None,
             }
 
     def export_progress(self) -> dict:
@@ -1149,7 +1193,10 @@ class TopicRecorder(CorrectionSupport):
     def shutdown(self):
         if self.corrections: self.stop_corrections()
         try:
-            return self.stop()
+            result = self.stop()
+            if self.publication_capture is not None:
+                self.publication_capture.close()
+            return result
         finally:
             if self._inspection_process is not None:
                 self._inspection_process.terminate()

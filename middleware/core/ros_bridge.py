@@ -555,6 +555,8 @@ class RosBridge:
                      and math.isfinite(stamp) and stamp > 0
                      and -.05 <= self._ros_now() - stamp <= .3)
             if valid and self._public_api is not None:
+                # Only validation is needed here; copying an entire ROS message
+                # just to discard the converted result adds control latency.
                 self._public_api.convert(message.name, message.position,
                                          message.velocity, message.effort, to_model=True)
         except (AttributeError, TypeError, ValueError):
@@ -577,45 +579,47 @@ class RosBridge:
                 return False
             epoch = self._output_epoch
         prepared = self._boundary.prepare(message) if self._boundary else message
-        with self._lock:
-            if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
-                    or not self._ready_locked(time.monotonic()) or self._command_source != source
-                    or self._replay_active or stamp <= self._source_stamps.get(stream, 0)
-                    or (self.ownership.active and not self.ownership.allows(token))):
-                self._mux_rejected += 1
-                self._mux_rejection_reasons[source+(':boundary_rejected' if prepared is None else ':authority_changed_during_prepare')] += 1
-                return False
-            if self._boundary and not (self._boundary.commit(prepared, intervention=True)
-                    if self.ownership.active else self._boundary.commit(prepared)):
-                self._mux_rejected += 1
-                self._mux_rejection_reasons[source+':commit_rejected'] += 1
-                return False
-            self._source_stamps[stream] = stamp
-            if self._legacy_enabled and self._boundary:
-                message = prepared[0]
-            publish(message)
-            # Capture the exact accepted arm publication for both ordinary VR
-            # mux output and owned/program targets. Hands have separate topics.
-            sink = getattr(self, '_published_action_sink', None)
-            if (sink is not None and self._legacy_enabled and self._boundary
-                    and set(message.name).intersection(self._boundary.arms)):
-                try:
-                    if sink(message):
-                        self._boundary.diagnostics['action_recorded_at_publication'] += 1
-                except Exception as exc:
-                    self._boundary.diagnostics['action_recording_errors'] += 1
-                    self._boundary.node.get_logger().error('Action recording failed: '+str(exc))
-            if self.ownership.active:
-                evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9))
-                if evidence is not None:
-                    # Keep both times: stamp_ns is final publication, while
-                    # this exact integer stamp links evidence to the original
-                    # action in a continuous recording without guessing by age.
-                    evidence['command_stamp_ns'] = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
-                    self._action_sink(evidence)
-            self._mux_forwarded += 1
-            self._mux_forwarded_times.append(time.monotonic())
-            return True
+        capture = getattr(self, '_publication_capture', None)
+        arm_target = (self._legacy_enabled and self._boundary and prepared is not None
+                      and set(prepared[0].name).intersection(self._boundary.arms))
+        ticket = capture.reserve() if capture is not None and arm_target else None
+        published, publication_ns, publication_monotonic = None, None, None
+        try:
+            with self._lock:
+                if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
+                        or not self._ready_locked(time.monotonic()) or self._command_source != source
+                        or self._replay_active or stamp <= self._source_stamps.get(stream, 0)
+                        or (self.ownership.active and not self.ownership.allows(token))):
+                    self._mux_rejected += 1
+                    self._mux_rejection_reasons[source+(':boundary_rejected' if prepared is None else ':authority_changed_during_prepare')] += 1
+                    return False
+                if self._boundary and not (self._boundary.commit(prepared, intervention=True)
+                        if self.ownership.active else self._boundary.commit(prepared)):
+                    self._mux_rejected += 1
+                    self._mux_rejection_reasons[source+':commit_rejected'] += 1
+                    return False
+                self._source_stamps[stream] = stamp
+                if self._legacy_enabled and self._boundary:
+                    message = prepared[0]
+                publish(message)
+                published, publication_ns = message, time.time_ns()
+                publication_monotonic = time.monotonic()
+                if self.ownership.active:
+                    evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9))
+                    if evidence is not None:
+                        # This exact integer stamp links evidence to the original
+                        # action in a continuous recording without guessing age.
+                        evidence['command_stamp_ns'] = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
+                        self._action_sink(evidence)
+                self._mux_forwarded += 1
+                self._mux_forwarded_times.append(time.monotonic())
+                return True
+        finally:
+            # No snapshot copy, serialization, queue IPC or capture bookkeeping
+            # executes while holding the final send/authority lock.
+            if ticket is not None:
+                capture.complete(ticket, published, publication_ns=publication_ns,
+                                 publication_monotonic=publication_monotonic)
 
     def _enqueue(self, command: str, data: Any) -> bool:
         try:

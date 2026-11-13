@@ -260,14 +260,7 @@ class MiddlewareRuntime:
             return bool(capture and capture.status()['ready'])
         self.ros.ownership.capture_ready = capture_ready
         self.ros._action_sink = self.recorder.correction_action
-        # Ordinary MCAP action capture uses the same accepted publication,
-        # without a second, lossy DDS hop. Keep the subscriber for health only.
-        action_max_hz = next((float(item.get("max_hz", 0))
-            for item in self.config["ros"].get("subscriptions", [])
-            if item.get("topic") == "/action/joint_states"), 0.)
-        self.config["ros"]["record_action_at_publication"] = bool(
-            self.config["ros"].get("legacy_control_profile") and action_max_hz <= 0)
-        self.ros._published_action_sink = self._record_published_action
+        self._configure_publication_capture(recorder)
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.recorder.prepare_recording = self.recording_ros.prepare_recording
         if self.platform is not None:
@@ -394,16 +387,24 @@ class MiddlewareRuntime:
                 os.environ["ROS_DOMAIN_ID"] = str(config["ros"]["domain_id"])
             await self.start()
 
-    def _record_published_action(self, message) -> bool:
-        """Queue exactly the published action, respecting recording selection."""
-        if (not self.config["ros"].get("record_action_at_publication", False)
-                or not self.recorder.is_recording()):
-            return False
-        from rclpy.serialization import serialize_message
-        return self.recorder.record(dict(
-            kind="ros_message", topic="/action/joint_states",
-            msg_type="sensor_msgs/msg/JointState", record_only=True,
-            stamp_ns=time.time_ns(), _raw=serialize_message(message)))
+    def _configure_publication_capture(self, recorder) -> None:
+        """Attach lifecycle hooks to the base writer, not its TaskRecorder proxy.
+
+        TaskRecorder delegates reads through __getattr__, but assignments remain
+        on the proxy. The base start/stop/status methods must own this object.
+        """
+        action_max_hz = next((float(item.get('max_hz', 0))
+            for item in self.config['ros'].get('subscriptions', [])
+            if item.get('topic') == '/action/joint_states'), 0.)
+        action_capture = bool(self.config['ros'].get('legacy_control_profile')
+                              and action_max_hz <= 0)
+        self.config['ros']['record_action_at_publication'] = action_capture
+        if action_capture:
+            from .publication_capture import PublicationCapture
+            recorder.publication_capture = PublicationCapture(recorder,
+                selected=lambda: recorder.records_topic(
+                    '/action/joint_states', 'sensor_msgs/msg/JointState'))
+            self.ros._publication_capture = recorder.publication_capture
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
