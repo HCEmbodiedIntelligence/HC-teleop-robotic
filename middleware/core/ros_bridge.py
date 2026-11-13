@@ -300,9 +300,10 @@ class RosBridge:
     def get_topic_health(self) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
-            return {
-                topic: tracker.status(now) for topic, tracker in self._trackers.items()
-            }
+            trackers = list(self._trackers.items())
+        # Each tracker protects its own history. A slow health snapshot must
+        # not hold the actuator authority/publication lock while waiting for it.
+        return {topic: tracker.status(now) for topic, tracker in trackers}
 
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
         if self.ownership.active and self._ownership_control_topic(topic):

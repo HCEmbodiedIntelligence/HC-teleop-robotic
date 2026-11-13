@@ -377,9 +377,15 @@ class LegacyTopicControl:
                     diagnostics=dict(self.diagnostics), last_clip=dict(self.last_clip),
                     limits=dict(arm_velocity_rad_s=self.arm_velocity, target_error_rad=self.max_error,
                         feedback_command_max_age_s=self.max_age, hand_velocity_rad_s=self.teleop['grippers']['max_velocity']),
-                    feedback_ready=self.feedback_fresh(),
+                    # This is an observational snapshot under bridge._lock.
+                    # Reuse the clock sampled before that final-send lock;
+                    # feedback_fresh()/fresh() defaults would read ROS clocks
+                    # again while holding it. Actuator commit still samples a
+                    # new clock and independently enforces the same limits.
+                    feedback_ready=self.fresh(self.feedback_order, now=now, wall_ns=wall),
                     feedback_timing_ms=timing,
-                    hands_ready={side:self.fresh(names) for side,names in self.hands.items()})
+                    hands_ready={side:self.fresh(names, now=now, wall_ns=wall)
+                                 for side,names in self.hands.items()})
 
     def close(self):
         if self.collision:
