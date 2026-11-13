@@ -36,22 +36,64 @@ def recording_inputs(topic: str, config: dict[str, Any]) -> tuple[str, ...]:
 
 
 _IDLE_MONITOR_TOPICS = {
-    # RosBridge already measures camera input, VR input, final joint commands
-    # and hardware feedback.  The dashboard additionally needs this one stage
-    # to show the complete live control pipeline while no capture is active.
+    # The dashboard needs the solver stage while capture is inactive.
     "/control/solver/joint_targets",
+    # Camera frames arriving at capture start were exposed tens of ms earlier.
+    # Keep only the two small proprioception streams warm for true pre-roll.
+    "/observation/joint_states",
+    "/observation/hands/joint_states",
 }
+
+_STATE_PREROLL_TOPICS = {
+    "/observation/joint_states", "/observation/hands/joint_states",
+}
+
+
+class StatePreroll:
+    """Bounded real raw-CDR state history; never interpolate or modify stamps.
+
+    The raw recording process owns this object on its single executor thread.
+    Snapshots may overlap consecutive recordings by design: those are actual
+    samples from the 250 ms immediately preceding each capture.
+    """
+
+    def __init__(self, seconds: float = .25, byte_budget: int = 1_048_576):
+        self.seconds = seconds
+        self.byte_budget = byte_budget
+        self.samples: deque[tuple[float, dict[str, Any]]] = deque()
+        self.buffered_bytes = 0
+
+    def _trim(self, now: float) -> None:
+        while self.samples and (
+            now - self.samples[0][0] > self.seconds
+            or self.buffered_bytes > self.byte_budget
+            or len(self.samples) > 128
+        ):
+            _, old = self.samples.popleft()
+            self.buffered_bytes -= len(old['_raw'])
+
+    def remember(self, now: float, event: dict[str, Any]) -> None:
+        if event['topic'] not in _STATE_PREROLL_TOPICS:
+            return
+        self.samples.append((now, event))
+        self.buffered_bytes += len(event['_raw'])
+        self._trim(now)
+
+    def snapshot(self, now: float) -> list[tuple[float, dict[str, Any]]]:
+        self._trim(now)
+        return list(self.samples)
 
 
 def idle_monitoring_subscriptions(
     subscriptions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return the one recorder-only stage needed by the idle dashboard.
+    """Keep the dashboard stage and bounded proprioception history warm.
 
-    Keeping all small recording topics subscribed while idle used almost one
+    Keeping every small recording topic subscribed while idle used almost one
     CPU core on X1.  More importantly, their reliable depth-64 queues could
     back-pressure publishers whenever this low-priority process was delayed.
-    RosBridge already measures the other live pipeline stages.
+    Keep only the solver and two small proprioception streams, using the
+    non-blocking idle QoS. RosBridge measures the other live pipeline stages.
     """
     return [
         item
@@ -207,10 +249,38 @@ def _raw_recording_process(
         "throttled": 0,
         "rejected": 0,
         "serialization_errors": 0,
+        "preroll_recorded": 0,
     }
     timestamps = {str(item["topic"]): deque(maxlen=120) for item in subscriptions}
     message_counts = {str(item["topic"]): 0 for item in subscriptions}
     gate = RateGate()
+    preroll = StatePreroll()
+    capture_active = False
+    max_rates = {str(item['topic']): float(item.get('max_hz', 0.))
+                 for item in subscriptions}
+
+    def record_event(event, received_at, *, historical=False):
+        if not gate.allow(event['topic'], max_rates[event['topic']], received_at):
+            counters['throttled'] += 1
+            return
+        try:
+            if enqueue(event):
+                counters['recorded'] += 1
+                if historical:
+                    counters['preroll_recorded'] += 1
+        except queue.Full:
+            counters['rejected'] += 1
+            _counter_add(dropped_counter)
+
+    def begin_capture():
+        nonlocal capture_active
+        if capture_active:
+            return
+        capture_active = True
+        # Historical receive times also drive configured limits. Applying one
+        # current time to the whole batch would incorrectly discard all but one.
+        for received_at, event in preroll.snapshot(time.monotonic()):
+            record_event(event, received_at, historical=True)
 
     def enqueue(event):
         from .topic_recorder import enqueue_record
@@ -246,6 +316,8 @@ def _raw_recording_process(
                 ),
                 "pid": __import__("os").getpid(),
                 "priority": "low",
+                "state_preroll_ms": preroll.seconds * 1000,
+                "preroll_buffered_messages": len(preroll.samples),
                 "error": error,
                 **counters,
             },
@@ -282,34 +354,34 @@ def _raw_recording_process(
                 msg_type: str = msg_type,
                 max_hz: float = max_hz,
             ) -> None:
+                nonlocal capture_active
                 now = time.monotonic()
                 counters["received"] += 1
                 message_counts[topic] += 1
                 timestamps[topic].append(now)
-                if not accepting_event.is_set():
-                    return
-                if not gate.allow(topic, max_hz, now):
-                    counters["throttled"] += 1
-                    return
+                if (topic == '/action/joint_states'
+                        and config.get('record_action_at_publication', False)):
+                    return  # Publication capture owns data; retain DDS health.
                 if not isinstance(raw_data, bytes):
                     counters["serialization_errors"] += 1
                     return
-                try:
-                    if not enqueue(
-                        {
-                            "kind": "ros_message",
-                            "topic": topic,
-                            "msg_type": msg_type,
-                            "_raw": raw_data,
-                            "record_only": source != topic,
-                            "stamp_ns": time.time_ns(),
-                        }
-                    ):
-                        return
-                    counters["recorded"] += 1
-                except queue.Full:
-                    counters["rejected"] += 1
-                    _counter_add(dropped_counter)
+                event = {
+                    "kind": "ros_message",
+                    "topic": topic,
+                    "msg_type": msg_type,
+                    "_raw": raw_data,
+                    "record_only": source != topic,
+                    "stamp_ns": time.time_ns(),
+                }
+                if accepting_event.is_set():
+                    begin_capture()
+                    # Append after taking the start snapshot, so this live
+                    # packet cannot be emitted twice in the current capture.
+                    preroll.remember(now, event)
+                    record_event(event, now)
+                else:
+                    capture_active = False
+                    preroll.remember(now, event)
 
             ros_subscriptions[source] = node.create_subscription(
                 message_type,
@@ -327,10 +399,11 @@ def _raw_recording_process(
             ros_subscriptions.clear()
 
         def activate_subscriptions() -> None:
-            nonlocal prepared_until, capture_seen
+            nonlocal prepared_until, capture_seen, capture_active
             prepared_until = time.monotonic() + 30.0
             capture_seen = accepting_event.is_set()
             gate.reset()
+            capture_active = False
             for topic in timestamps:
                 timestamps[topic].clear()
                 message_counts[topic] = 0
@@ -367,6 +440,7 @@ def _raw_recording_process(
             accepting = accepting_event.is_set()
             if accepting:
                 capture_seen = True
+                begin_capture()
             elif _should_release_subscriptions(
                 has_subscriptions=bool(set(ros_subscriptions).difference(idle_topics)),
                 capture_seen=capture_seen,
@@ -375,6 +449,8 @@ def _raw_recording_process(
                 prepared_until=prepared_until,
             ):
                 deactivate_capture_subscriptions()
+            if not accepting:
+                capture_active = False
             if ros_subscriptions:
                 executor.spin_once(timeout_sec=0.02)
             else:
@@ -443,6 +519,8 @@ class RosRecordingExecutor:
             "throttled": 0,
             "rejected": 0,
             "serialization_errors": 0,
+            "preroll_recorded": 0,
+            "state_preroll_ms": 250.0,
             "topic_health": {},
             "priority": "low",
             "error": None,
@@ -535,6 +613,7 @@ class RosRecordingExecutor:
                 throttled=0,
                 rejected=0,
                 serialization_errors=0,
+                preroll_recorded=0,
             )
         if not self._subscriptions_ready_event.wait(timeout=5.0):
             self._refresh_status()
@@ -552,7 +631,7 @@ class RosRecordingExecutor:
         msg_type: str,
         max_hz: float,
     ) -> None:
-        """Testable in-process equivalent of the raw CDR callback."""
+        """Exercise immediate live CDR ingress; pre-roll runs in the child."""
         if not self.recorder.is_recording():
             return
         now = time.monotonic()

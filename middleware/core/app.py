@@ -258,6 +258,20 @@ class MiddlewareRuntime:
             return bool(capture and capture.status()['ready'])
         self.ros.ownership.capture_ready = capture_ready
         self.ros._action_sink = self.recorder.correction_action
+        action_max_hz = next((float(item.get('max_hz', 0))
+            for item in self.config['ros'].get('subscriptions', [])
+            if item.get('topic') == '/action/joint_states'), 0.)
+        # Keep explicitly configured throttling on its existing DDS capture
+        # path. Unthrottled legacy actions are captured at successful publication.
+        action_capture = bool(self.config['ros'].get('legacy_control_profile')
+                              and action_max_hz <= 0)
+        self.config['ros']['record_action_at_publication'] = action_capture
+        if action_capture:
+            from .publication_capture import PublicationCapture
+            self.recorder.publication_capture = PublicationCapture(self.recorder,
+                selected=lambda: self.recorder.records_topic(
+                    '/action/joint_states', 'sensor_msgs/msg/JointState'))
+            self.ros._publication_capture = self.recorder.publication_capture
         self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
         self.recorder.prepare_recording = self.recording_ros.prepare_recording
         if self.platform is not None:
