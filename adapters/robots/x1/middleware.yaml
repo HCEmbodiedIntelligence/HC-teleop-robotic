@@ -51,7 +51,7 @@ camera:
   fps: 30
   codec: H264
   encoder_backend: x264
-  dscp: null
+  dscp: 34
   fec:
     enabled: false
     group_size: 5
