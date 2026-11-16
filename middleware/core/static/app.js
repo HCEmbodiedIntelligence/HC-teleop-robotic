@@ -48,7 +48,7 @@ let vrPoseFramePending = false;
 let interventionPending = false;
 let interventionStatus = null;
 let interventionCapture = null;
-const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', uploads:'上传管理', config:'系统配置'};
+const titles = {overview:'状态监控', topics:'话题录制', datasets:'数据集管理', uploads:'上传管理', logs:'运行日志', config:'系统配置'};
 let discoveredTopics = [];
 let latestTopicHealth = {};
 const jointMonitor = {command:new Map(), feedback:new Map()};
@@ -176,6 +176,7 @@ function route() {
   updateDatasetPolling(page);
   updateUploadPanel(page);
   if (page === 'config') loadProfiles($('#robotProfileSelect')?.value);
+  if (page === 'logs') window.TeleopDiagnosticLogs?.panel?.refresh();
 }
 
 function setState(id, state) {

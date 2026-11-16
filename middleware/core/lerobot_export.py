@@ -62,6 +62,39 @@ def latest_sample(samples: list[tuple[int, Any]], stamp: int, max_age_ns: int | 
     return samples[index]
 
 
+# A header stamp may trail its MCAP receive time by queueing/transport delay,
+# but must not lead it by more than clock jitter.
+HEADER_CLOCK_MAX_LAG_NS = 2_000_000_000
+HEADER_CLOCK_MAX_LEAD_NS = 20_000_000
+
+
+def header_stamp_ns(message: Any) -> int | None:
+    stamp = getattr(getattr(message, 'header', None), 'stamp', None)
+    if stamp is None:
+        return None
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec) or None
+
+
+def apply_source_clock(samples: list[tuple[int, Any]], headers: list[int | None]):
+    """Re-time one stream on its sensor header clock, or keep MCAP log_time.
+
+    Receive time carries each subscriber's queueing jitter (tens of ms on X1),
+    which misaligns color frames with joint states. The header clock is used for
+    a whole stream only if every message has a stamp consistent with its receive
+    time, so one stream never mixes clocks.
+    """
+    if not samples or len(headers) != len(samples) or any(
+            header is None or not -HEADER_CLOCK_MAX_LEAD_NS <= log_time - header <= HEADER_CLOCK_MAX_LAG_NS
+            for (log_time, _), header in zip(samples, headers)):
+        return 'log_time', samples
+    retimed = [(header, value) for (_, value), header in zip(samples, headers)]
+    retimed.sort(key=lambda sample: sample[0])
+    if any(b[0] <= a[0] for a, b in zip(retimed, retimed[1:])):
+        # Repeated stamps are republished/merged messages, not distinct samples.
+        return 'log_time', samples
+    return 'header', retimed
+
+
 def required_stream(key: str) -> bool:
     return key in ('observation.state', 'action') or key.startswith('observation.images.')
 
@@ -205,6 +238,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     if sidecar.is_file():
         correction = json.loads(sidecar.read_text())
     first_observations = {}
+    header_stamps: dict[str, list[int | None]] = {}
+    source_clocks: dict[str, str] = {}
     recording_start = recording_end = None
     with source.open('rb') as handle:
         reader = make_reader(handle)
@@ -241,6 +276,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 message_classes[kind] = get_message(kind)
             decoded = deserialize_message(message.data, message_classes[kind])
             header = getattr(decoded, 'header', None)
+            header_ns = header_stamp_ns(decoded)
             if header is not None:
                 frame_id = str(header.frame_id)
                 previous_frame = source_frame_ids.get(topic)
@@ -261,6 +297,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 if not all(math.isfinite(value) for value in values):
                     raise ValueError(f'Non-finite numeric observation: {topic}')
                 streams.setdefault(numeric_key, []).append((message.log_time, values))
+                header_stamps.setdefault(numeric_key, []).append(header_ns)
                 source_topics[numeric_key] = topic
             elif joint_key:
                 if kind != 'sensor_msgs/msg/JointState':
@@ -270,6 +307,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                     if not names:
                         raise ValueError('Feedback has no joint names')
                 raw_cameras.setdefault(joint_key, []).append((message.log_time, decoded))
+                header_stamps.setdefault(joint_key, []).append(header_ns)
                 source_topics[joint_key] = topic
             else:
                 key = 'observation.images.' + re.sub(r'[^a-zA-Z0-9_]', '_', topic.strip('/').removesuffix('/compressed'))
@@ -286,7 +324,14 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 if not cv2.imwrite(str(filename), cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
                     raise RuntimeError(f'Cannot save staging image {filename}')
                 streams.setdefault(key, []).append((message.log_time, str(filename)))
+                header_stamps.setdefault(key, []).append(header_ns)
                 source_topics[key] = topic
+    # Re-time before aggregating partial actions: held values must follow
+    # source order on the clock that is used for alignment.
+    # A correction's range and actions are defined on HC send time (log_time).
+    for collection in (() if correction else (streams, raw_cameras)):
+        for key in list(collection):
+            source_clocks[key], collection[key] = apply_source_clock(collection[key], header_stamps.get(key, []))
     if snapshot:
         # Preserve required auxiliary numeric columns even when their device
         # source is entirely absent. The schema's presence_and_validity policy
@@ -386,8 +431,13 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     for key in streams:
         if key not in placeholders:
             placeholders[key] = [0.0] * (len(names) if key == 'observation.state' else len(action_names) if key == 'action' else len(numeric_names[key]))
+    for key in streams:
+        source_clocks.setdefault(key, 'log_time')
+    audit['source_clocks'] = source_clocks
     aligned = (preserved_episode(streams, fps, audit) if snapshot else
                synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages))
+    if snapshot and source_clocks.get('observation.state') == 'header':
+        audit['timeline'] = 'original_state_header_stamp'
     if snapshot and audit.get('source_frequency_hz'):
         # LeRobot uses an integer nominal rate; original timestamps remain in rows.
         fps = max(1, round(audit['source_frequency_hz']))
@@ -596,7 +646,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     synchronization['sync_audit'] = manifest.get('sync_audit', {})
     synchronization['missing_policy'] = 'all sources: hold last observed value when stale, source_valid=0; before first sample use zero numeric/black image placeholders with source_available=0, source_valid=0 and source_time/source_age=-1; no future samples used'
     synchronization['auxiliary_policy'] = 'causal last observed value; never gates row selection; source_available=0 and value=0/source_time=-1/source_age=-1 before first sample; source_valid=0 when missing or stale; stale velocity is not asserted to remain active'
-    synchronization.update({'clock': 'MCAP log_time (wall receive time), not ROS header time', 'selection': 'one recording is one episode, full MCAP log_time span on fixed FPS grid; causal last sample, no rows deleted for missing/stale values', 'state_action_max_age_seconds': 0.2, 'camera_max_age_seconds': 0.25, 'source_mcap_preserved': True, 'images': 'H.264 MP4 with no B frames, CRF 23; short episodes stream-concatenated without padding or dropping frames', 'joint_position_units': 'source ROS JointState units (revolute radians, prismatic meters)' })
+    synchronization.update({'clock': 'per stream: ROS header stamp when every message has a unique stamp within -20 ms..+2 s of its MCAP log_time, otherwise MCAP log_time (wall receive time); see sync_audit.source_clocks', 'selection': 'one recording is one episode, full MCAP log_time span on fixed FPS grid; causal last sample, no rows deleted for missing/stale values', 'state_action_max_age_seconds': 0.2, 'camera_max_age_seconds': 0.25, 'source_mcap_preserved': True, 'images': 'H.264 MP4 with no B frames, CRF 23; short episodes stream-concatenated without padding or dropping frames', 'joint_position_units': 'source ROS JointState units (revolute radians, prismatic meters)' })
     if manifest.get('capture_snapshot'):
         synchronization.update(selection='original state log_time samples, original frame count and frequency',
             missing_policy='absent optional streams remain absent; unsupported per-frame gaps stop export',

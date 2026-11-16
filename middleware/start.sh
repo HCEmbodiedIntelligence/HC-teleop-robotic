@@ -68,6 +68,7 @@ if [[ -z "${LOG_DIR}" ]]; then
 fi
 mkdir -p "${LOG_DIR}"
 chmod 700 "${LOG_DIR}"
+export HC_MIDDLEWARE_LOG_DIR="${LOG_DIR}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   err "中间件配置不存在: ${CONFIG_PATH}"

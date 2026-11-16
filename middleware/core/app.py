@@ -8,6 +8,7 @@ import logging
 import os
 import socket
 import time
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from .topic_player import TopicPlayer
 from .topic_recorder import TopicRecorder
 from .takeover_log import TakeoverLog
 from .vr_gateway import VrGateway
+from .diagnostic_logs import DiagnosticLogs, DiagnosticLogHandler, register_log_routes
 from .runtime_mode import configure_environment
 
 
@@ -408,6 +410,9 @@ class MiddlewareRuntime:
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
+        diagnostics = getattr(self, 'diagnostics', None)
+        if diagnostics is not None:
+            diagnostics.emit(event)
         if "record" in outputs and self.recorder is not None:
             self.recorder.record(event)
         if "udp" in outputs and self.vr is not None:
@@ -785,6 +790,11 @@ class MiddlewareRuntime:
             await asyncio.sleep(0.5)
 
     def _on_vr_timeout(self, reason: str) -> None:
+        # Preserve the detector's original reason even if a later watchdog or
+        # output-close notification reports a different final stop message.
+        diagnostics = getattr(self, 'diagnostics', None)
+        if diagnostics is not None:
+            diagnostics.emit(envelope('vr_input_fault', 'vr_gateway', {'reason': reason}))
         if self.ros and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
             # Headset availability gates manual takeover, not model inference
             # or already-authorized program output. Manual loss still faults.
@@ -805,7 +815,12 @@ class MiddlewareRuntime:
         self._safety_reason = reason
         if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
-        self.emit(envelope("safety_stop", "middleware", {"reason": reason}), ["websocket", "udp"])
+        cause = envelope('safety_trigger', 'middleware', {'reason': reason})
+        cause['event_id'] = uuid.uuid4().hex
+        self.emit(cause, [])
+        self.emit(envelope("safety_stop", "middleware", {
+            "reason": reason, "cause_event_id": cause['event_id'],
+        }), ["websocket", "udp"])
 
     def _on_safety_resume(self, reason: str) -> None:
         if (self.control_runtime is not None and self.control_runtime.enabled
@@ -854,9 +869,8 @@ class MiddlewareRuntime:
         self.emit(envelope(event_type, "middleware", payload), ["websocket", "udp"])
 
     def _log(self, level: str, message: str) -> None:
-        self.events.append(
-            envelope("log", "middleware", {"level": level, "message": message})
-        )
+        self.emit(envelope("log", "middleware", {"level": level, "message": message}),
+                  ["websocket"])
 
     def topic_health(self) -> dict[str, Any]:
         recording_health = (
@@ -922,6 +936,15 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
 def create_app(store: ConfigStore) -> web.Application:
     config = store.load()
     runtime = MiddlewareRuntime(config, store.path.parent)
+    # The HC_X1 hardware stack (arm bridge, smoother, cameras, hands, chassis)
+    # is started separately and writes runtime/session_*/ logs of its own.
+    hardware_logs = Path(os.environ.get('HC_X1_LOG_ROOT', str(Path.home() / 'HC_X1' / 'runtime')))
+    diagnostics = DiagnosticLogs(
+        Path(__file__).resolve().parents[2], os.environ.get('HC_MIDDLEWARE_LOG_DIR'),
+        external_roots=[('hardware', hardware_logs)])
+    runtime.diagnostics = diagnostics
+    diagnostic_handler = DiagnosticLogHandler(diagnostics)
+    diagnostic_handler.setLevel(logging.WARNING)
     from .control_runtime import ControlRuntime
     runtime.control_runtime = ControlRuntime(store.path)
     profile_root = selected_profile_root(config, store.path.parent)
@@ -929,6 +952,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app = web.Application(
         client_max_size=100 * 1024 * 1024, middlewares=[cors_middleware]
     )
+    register_log_routes(app, diagnostics)
     simulation = SimulationService(store, profiles)
 
     @web.middleware
@@ -1701,6 +1725,8 @@ def create_app(store: ConfigStore) -> web.Application:
 
     async def startup(_app: web.Application) -> None:
         nonlocal viewer_sender
+        await asyncio.to_thread(diagnostics.start)
+        logging.getLogger().addHandler(diagnostic_handler)
         await runtime.start()
         viewer_sender = asyncio.create_task(stream_simulation_frames())
 
@@ -1713,6 +1739,10 @@ def create_app(store: ConfigStore) -> web.Application:
         async with simulation.lock:
             await simulation.stop()
         await runtime.stop()
+
+    async def close_diagnostics(_app: web.Application) -> None:
+        logging.getLogger().removeHandler(diagnostic_handler)
+        await asyncio.to_thread(diagnostics.close)
 
     async def options(_request: web.Request) -> web.Response:
         return web.Response(status=204)
@@ -1852,4 +1882,5 @@ def create_app(store: ConfigStore) -> web.Application:
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
     app.on_cleanup.append(shutdown)
+    app.on_cleanup.append(close_diagnostics)
     return app

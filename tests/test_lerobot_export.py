@@ -494,3 +494,76 @@ def test_explicit_gripper_sources_keep_independent_age_masks(tmp_path):
     assert rows[-1]['source_valid'][index]==0
     assert all(row['source_available'][missing]==0 for row in rows)
     assert manifest['action_semantics']=='upstream_command_not_execution'
+
+
+def test_source_clock_uses_header_when_every_stamp_is_consistent():
+    from middleware.core.lerobot_export import apply_source_clock
+    samples = [(1_050_000_000, 'a'), (1_080_000_000, 'b')]
+    assert apply_source_clock(samples, [1_000_000_000, 1_033_000_000]) == (
+        'header', [(1_000_000_000, 'a'), (1_033_000_000, 'b')])
+
+
+@pytest.mark.parametrize('headers', [
+    [1_000_000_000, None],                    # one message without a stamp
+    [1_000_000_000, 1_200_000_000],           # stamp 120 ms ahead of receive
+    [1_000_000_000, 1_000_000_000],           # duplicate stamps
+    [1_000_000_000, -1_920_000_000],          # stamp 3 s behind receive: another clock
+])
+def test_source_clock_keeps_log_time_for_whole_stream_when_any_stamp_is_unusable(headers):
+    from middleware.core.lerobot_export import apply_source_clock
+    samples = [(1_050_000_000, 'a'), (1_080_000_000, 'b')]
+    assert apply_source_clock(samples, headers) == ('log_time', samples)
+
+
+def test_prepare_mcap_aligns_camera_and_state_on_header_stamps(tmp_path):
+    import json
+    import cv2
+    pytest.importorskip('rclpy')
+    from rclpy.serialization import serialize_message
+    from mcap.writer import Writer
+    from sensor_msgs.msg import Image, JointState
+    from middleware.core.lerobot_export import prepare_mcap
+
+    source = tmp_path / 'source.mcap'
+    staging = tmp_path / 'staging'
+    staging.mkdir()
+    origin = 1_000_000_000
+
+    def stamped(message, ms):
+        message.header.stamp.sec, message.header.stamp.nanosec = divmod(origin + ms * 1_000_000, 1_000_000_000)
+        return message
+
+    with source.open('wb') as handle:
+        writer = Writer(handle)
+        writer.start(profile='ros2')
+        channels = {}
+        for topic, kind in [('/observation/joint_states', 'sensor_msgs/msg/JointState'),
+                            ('/action/joint_states', 'sensor_msgs/msg/JointState'),
+                            ('/cameras/eye/color', 'sensor_msgs/msg/Image')]:
+            channels[topic] = writer.register_channel(topic, 'cdr', writer.register_schema(kind, 'ros2msg', b''))
+        events = []
+        for ms in range(0, 1001, 100):
+            # Joint states arrive 5 ms after capture.
+            events.append((ms + 5, '/observation/joint_states', stamped(JointState(name=['a'], position=[ms / 1000]), ms)))
+            events.append((ms + 5, '/action/joint_states', stamped(JointState(name=['a'], position=[ms / 1000]), ms)))
+            # Frames are captured on the grid but received 60 ms late: by
+            # receive time, grid point ms+50 would still see the previous frame.
+            shade = ms // 100 * 20
+            image = Image(height=4, width=4, encoding='rgb8', step=12, data=bytes([shade, 0, 0] * 16))
+            events.append((ms + 60, '/cameras/eye/color', stamped(image, ms)))
+        for ms, topic, message in sorted(events, key=lambda event: event[0]):
+            stamp = origin + ms * 1_000_000
+            writer.add_message(channels[topic], stamp, bytes(serialize_message(message)), stamp)
+        writer.finish()
+
+    manifest = json.loads(prepare_mcap(source, staging, 20, 'header clock', 'x1').read_text())
+    assert manifest['sync_audit']['source_clocks'] == {
+        'observation.state': 'header', 'action': 'header', 'observation.images.cameras_eye_color': 'header'}
+    rows = manifest['episodes'][0]
+    camera = 'observation.images.cameras_eye_color'
+    # Grid starts at the first receive time (5 ms); row 1 is t=55 ms.
+    for row in rows[1:-1]:
+        t_ms = round(row['grid_time'] * 1000) + 5
+        expected = t_ms // 100 * 100
+        assert row['values']['observation.state'] == [expected / 1000]
+        assert cv2.imread(row['values'][camera])[0, 0, 2] == expected // 100 * 20
