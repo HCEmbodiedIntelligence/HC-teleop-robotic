@@ -792,30 +792,35 @@ class MiddlewareRuntime:
     def _on_vr_timeout(self, reason: str) -> None:
         # Preserve the detector's original reason even if a later watchdog or
         # output-close notification reports a different final stop message.
+        cause = envelope('vr_input_fault', 'vr_gateway', {'reason': reason})
+        cause['event_id'] = uuid.uuid4().hex
         diagnostics = getattr(self, 'diagnostics', None)
         if diagnostics is not None:
-            diagnostics.emit(envelope('vr_input_fault', 'vr_gateway', {'reason': reason}))
+            diagnostics.emit(cause)
         if self.ros and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
             # Headset availability gates manual takeover, not model inference
             # or already-authorized program output. Manual loss still faults.
-            self.ros.ownership.input_lost(reason)
+            self.ros.ownership.input_lost(reason, cause_event_id=cause['event_id'])
             return
         source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
         if source is None:
             source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
         if source == "vr":
-            self._on_safety_event(reason)
+            self._on_safety_event(reason, cause_event_id=cause['event_id'])
         else:
             # VR link health cannot revoke another explicitly selected source.
             if self.ros:
                 self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
             self.emit(envelope("vr_timeout", "middleware", {"reason": reason}), ["websocket", "udp"])
 
-    def _on_safety_event(self, reason: str, *, force: bool = False) -> None:
+    def _on_safety_event(self, reason: str, *, force: bool = False,
+                         cause_event_id: str | None = None) -> None:
         self._safety_reason = reason
         if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
             self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
         cause = envelope('safety_trigger', 'middleware', {'reason': reason})
+        if cause_event_id:
+            cause['payload']['cause_event_id'] = cause_event_id
         cause['event_id'] = uuid.uuid4().hex
         self.emit(cause, [])
         self.emit(envelope("safety_stop", "middleware", {
@@ -1727,8 +1732,17 @@ def create_app(store: ConfigStore) -> web.Application:
         nonlocal viewer_sender
         await asyncio.to_thread(diagnostics.start)
         logging.getLogger().addHandler(diagnostic_handler)
-        await runtime.start()
-        viewer_sender = asyncio.create_task(stream_simulation_frames())
+        try:
+            await runtime.start()
+            viewer_sender = asyncio.create_task(stream_simulation_frames())
+        except BaseException:
+            # aiohttp does not complete normal startup/cleanup if a startup
+            # signal raises. Do not leave a handler/worker attached to a failed
+            # application (or duplicate them on the next launch).
+            logging.getLogger(__name__).exception('middleware startup failed')
+            logging.getLogger().removeHandler(diagnostic_handler)
+            await asyncio.to_thread(diagnostics.close)
+            raise
 
     async def shutdown(_app: web.Application) -> None:
         if viewer_sender is not None:

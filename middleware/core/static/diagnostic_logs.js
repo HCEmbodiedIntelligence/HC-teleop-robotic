@@ -15,6 +15,15 @@
     // Bound retention by chronology, never let old errors crowd out new evidence.
     return Array.from(byId.values()).sort((a, b) => Number(b.id) - Number(a.id)).slice(0, MAX_ENTRIES);
   }
+  function visibleEntries(entries, priorityEntries, priority) {
+    const byId = new Map(entries.map(entry => [Number(entry.id), entry]));
+    if (priority) (priorityEntries || []).forEach(entry => {
+      if (entry && Number.isSafeInteger(Number(entry.id)) && Number(entry.id) > 0) byId.set(Number(entry.id), entry);
+    });
+    // Priority previews are independent of the chronological cursor. An error
+    // at the end of the retained window must be visible on its first page.
+    return sortEntries(Array.from(byId.values()), priority).slice(0, MAX_ENTRIES);
+  }
   function formatTime(value) {
     const timestamp = typeof value === 'number' ? value * (value < 1e12 ? 1000 : 1) : value;
     const date = new Date(timestamp);
@@ -41,10 +50,11 @@
   // browser that ignores AbortController cannot commit an old response.
   class LogModel {
     constructor() { this.generation = 0; this.reset(''); }
-    reset(session) { this.generation += 1; this.session = session; this.cursor = 0; this.entries = []; this.incidents = []; this.summary = []; }
+    reset(session) { this.generation += 1; this.session = session; this.cursor = 0; this.entries = []; this.priorityEntries = []; this.incidents = []; this.summary = []; }
     accept(generation, session, response) {
       if (generation !== this.generation || session !== this.session || (response.session_id && response.session_id !== session)) return false;
       this.entries = mergeEntries(this.entries, Array.isArray(response.entries) ? response.entries : []);
+      if (Array.isArray(response.priority_entries)) this.priorityEntries = response.priority_entries.slice(0, 50);
       this.cursor = Math.max(this.cursor, Number(response.cursor) || 0);
       if (Array.isArray(response.incidents)) this.incidents = response.incidents.slice(0, 30);
       if (Array.isArray(response.summary)) this.summary = response.summary.slice(0, 32);
@@ -61,7 +71,7 @@
     const setTimer = options.setTimeout || global.setTimeout.bind(global);
     const clearTimer = options.clearTimeout || global.clearTimeout.bind(global);
     const model = new LogModel();
-    let timer = null, requestController = null, busy = false, disposed = false, sessionsLoaded = false, lastSessionsAt = 0, filterTimer = null;
+    let timer = null, requestController = null, busy = false, refreshQueued = false, disposed = false, sessionsLoaded = false, lastSessionsAt = 0, filterTimer = null;
     function element(tag, className, text) {
       const node = doc.createElement(tag);
       if (className) node.className = className;
@@ -112,7 +122,7 @@
         download.removeAttribute('aria-disabled');
       } else { download.removeAttribute('href'); download.setAttribute('aria-disabled', 'true'); }
     }
-    function makeEntry(entry) {
+    function makeEntry(entry, scope = 'list') {
       const severity = levelOf(entry);
       const row = element('li', 'diagnostic-log-entry diagnostic-log-level-' + (Object.hasOwn(LEVELS, severity) ? severity : 'info'));
       row.dataset.logId = String(entry.id);
@@ -123,6 +133,7 @@
       if (entry.file) row.append(element('div', 'diagnostic-log-file', clip(entry.file, 300) + (entry.line ? ':' + entry.line : '')));
       if (entry.details && Object.keys(entry.details).length) {
         const detail = element('details'); detail.append(element('summary', '', '查看诊断字段'), element('pre', 'diagnostic-log-details', clip(entry.details)));
+        detail.dataset.diagnosticKey = model.session + ':' + scope + ':' + entry.id + ':fields';
         row.append(detail);
       }
       return row;
@@ -170,12 +181,21 @@
       }
     }
     function render() {
+      // Preserve the evidence the user is reading. Scope keys to the session
+      // and view: a duplicated entry in a chain need not be expanded in the list.
+      const openDetails = new Set(Array.from(root.querySelectorAll('details[data-diagnostic-key]'))
+        .filter(node => node.open).map(node => node.dataset.diagnosticKey));
+      const scrolls = new Map(Array.from(root.querySelectorAll('[data-diagnostic-scroll-key]'))
+        .map(node => [node.dataset.diagnosticScrollKey, node.scrollTop]));
       renderOverview();
-      list.replaceChildren(...sortEntries(model.entries, priority.checked).map(makeEntry));
-      empty.hidden = model.entries.length !== 0;
+      list.dataset.diagnosticScrollKey = model.session + ':list';
+      const shown = visibleEntries(model.entries, model.priorityEntries, priority.checked);
+      list.replaceChildren(...shown.map(entry => makeEntry(entry)));
+      empty.hidden = shown.length !== 0;
       incidents.replaceChildren();
       model.incidents.forEach(incident => {
         const card = element('details', 'diagnostic-log-incident');
+        card.dataset.diagnosticKey = model.session + ':incident:' + incident.id;
         const summary = element('summary');
         summary.append(element('strong', '', incident.title || '停机或异常事件'), element('span', 'diagnostic-log-relation', incident.relation === 'explicit' ? '明确关联' : '原因待确认'));
         card.append(summary, element('p', 'diagnostic-log-explanation', incidentExplanation(incident)));
@@ -185,16 +205,24 @@
         if (first) card.append(element('p', 'diagnostic-log-first', '最早记录的异常（不等同于底层根因）：' + formatTime(first.time) + ' · ' + clip(first.message, 1200)));
         if (chain.length) {
           const timeline = element('ol', 'diagnostic-log-chain');
-          chain.forEach(entry => timeline.append(makeEntry(entry)));
+          timeline.dataset.diagnosticScrollKey = model.session + ':incident:' + incident.id + ':chain';
+          chain.forEach(entry => timeline.append(makeEntry(entry, 'incident:' + incident.id)));
           card.append(timeline);
         } else card.append(element('p', '', '尚未保存可核对的事件链，不能据此判断底层原因。'));
         incidents.append(card);
+      });
+      root.querySelectorAll('details[data-diagnostic-key]').forEach(node => {
+        node.open = openDetails.has(node.dataset.diagnosticKey);
+      });
+      root.querySelectorAll('[data-diagnostic-scroll-key]').forEach(node => {
+        node.scrollTop = scrolls.get(node.dataset.diagnosticScrollKey) || 0;
       });
     }
     function cancelRequest() { if (requestController) requestController.abort(); }
     function resetView() {
       cancelRequest(); model.reset(session.value); more.hidden = true; updateDownload(); render();
-      if (!busy) void refreshLogs(true);
+      if (busy) refreshQueued = true;
+      else void refreshLogs(true);
     }
     async function getJSON(url, signal) {
       const response = await fetcher(url, {signal, headers: {'Accept': 'application/json'}});
@@ -202,11 +230,13 @@
       return response.json();
     }
     async function refreshLogs(force = false) {
-      if (disposed || busy || (!force && !visible())) return;
+      if (disposed) return;
+      if (busy) { if (force) refreshQueued = true; return; }
+      if (!force && !visible()) return;
       busy = true; refresh.disabled = true; more.disabled = true;
       const controller = new AbortController(); requestController = controller;
       const deadline = setTimer(() => controller.abort(), 8000);
-      const generation = model.generation;
+      let generation = model.generation;
       try {
         if (!sessionsLoaded || Date.now() - lastSessionsAt > 15000) {
           const result = await getJSON('/api/logs/sessions', controller.signal);
@@ -219,6 +249,7 @@
           if (Array.from(session.options).some(item => item.value === saved)) session.value = saved;
           else if (result.current_session_id) session.value = result.current_session_id;
           if (model.session !== session.value) model.reset(session.value);
+          generation = model.generation;
           sessionsLoaded = true; lastSessionsAt = Date.now(); updateDownload();
         }
         if (!session.value) { status.textContent = '尚无保存的日志会话。'; empty.hidden = false; return; }
@@ -233,7 +264,7 @@
         if (result.persistence_error) warnings.push('日志持久化异常：' + clip(result.persistence_error, 1000));
         warning.textContent = warnings.join(' '); warning.hidden = !warnings.length;
         more.hidden = !result.has_more;
-        status.textContent = '已显示 ' + model.entries.length + ' 条（最多保留最近 ' + MAX_ENTRIES + ' 条） · ' + (priority.checked ? '错误优先' : '时间倒序') + ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
+        status.textContent = '已显示 ' + visibleEntries(model.entries, model.priorityEntries, priority.checked).length + ' 条（最多 ' + MAX_ENTRIES + ' 条） · ' + (priority.checked ? '错误优先，包含保留范围内的最新错误' : '时间倒序') + ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
         render();
       } catch (failure) {
         if (!disposed && !controller.signal.aborted && generation === model.generation) {
@@ -245,7 +276,9 @@
         clearTimer(deadline); busy = false; refresh.disabled = false; more.disabled = false;
         if (requestController === controller) requestController = null;
         if (timer) clearTimer(timer);
-        if (!disposed && automatic.checked) timer = setTimer(() => { timer = null; void refreshLogs(); }, 2000);
+        const queued = refreshQueued; refreshQueued = false;
+        if (!disposed && queued) void refreshLogs(true);
+        else if (!disposed && automatic.checked) timer = setTimer(() => { timer = null; void refreshLogs(); }, 2000);
       }
     }
     session.addEventListener('change', resetView);
@@ -261,7 +294,7 @@
     void refreshLogs();
     return {
       refresh: () => refreshLogs(true), model,
-      dispose() { disposed = true; cancelRequest(); if (timer) clearTimer(timer); if (filterTimer) clearTimer(filterTimer); doc.removeEventListener('visibilitychange', onVisibility); }
+      dispose() { disposed = true; refreshQueued = false; cancelRequest(); if (timer) clearTimer(timer); if (filterTimer) clearTimer(filterTimer); doc.removeEventListener('visibilitychange', onVisibility); }
     };
   }
   // Sidebar badge: polls only the error summary so errors are visible from
@@ -291,7 +324,7 @@
     void poll();
     return {badge, dispose() { if (timer) global.clearTimeout(timer); }};
   }
-  const api = {mount, watchBadge, recentErrors, subsystemLabel, LogModel, sortEntries, mergeEntries, incidentExplanation, formatTime, clip};
+  const api = {mount, watchBadge, recentErrors, subsystemLabel, LogModel, sortEntries, mergeEntries, visibleEntries, incidentExplanation, formatTime, clip};
   global.TeleopDiagnosticLogs = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (global.document) {

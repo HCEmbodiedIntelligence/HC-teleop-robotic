@@ -567,3 +567,58 @@ def test_prepare_mcap_aligns_camera_and_state_on_header_stamps(tmp_path):
         expected = t_ms // 100 * 100
         assert row['values']['observation.state'] == [expected / 1000]
         assert cv2.imread(row['values'][camera])[0, 0, 2] == expected // 100 * 20
+
+
+def test_preserved_snapshot_keeps_log_clock_when_first_headers_differ(tmp_path):
+    """A frozen task keeps its first complete row, count and receive timeline.
+
+    State and action arrive together, while their valid headers bracket capture
+    by 10 ms. Retiming this task on state headers would incorrectly reject its
+    first row because no action existed yet on that different timeline.
+    """
+    import json
+    pytest.importorskip('rclpy')
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import JointState
+    from mcap.writer import Writer
+    from capture_contract_support import snapshot_document, task_document
+    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.topic_recorder import RECORDING_METADATA_NAME
+
+    task = task_document(source_format='LEROBOT_V3')
+    snapshot = snapshot_document(task, dict(recording_id='preserved-clock',
+        expected_plan_revision=1, source_format='LEROBOT_V3'))
+    source = tmp_path / 'preserved-clock.mcap'
+    staging = tmp_path / 'stage'
+    staging.mkdir()
+    origin = 1_000_000_000
+    times = [origin + 40_000_000 + round(i * 1e9 / 15) for i in range(6)]
+    with source.open('wb') as stream:
+        writer = Writer(stream)
+        writer.start(profile='ros2')
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        state = writer.register_channel('/observation/joint_states', 'cdr', schema)
+        action = writer.register_channel('/action/joint_states', 'cdr', schema)
+        writer.add_metadata(RECORDING_METADATA_NAME, {
+            'recording_id': 'preserved-clock', 'capture_snapshot': json.dumps(snapshot)})
+        for index, receive_ns in enumerate(times):
+            for channel, offset_ns, value in ((state, -50_000_000, index),
+                                              (action, -30_000_000, index + 10)):
+                message = JointState(name=['joint'], position=[float(value)])
+                message.header.stamp.sec, message.header.stamp.nanosec = divmod(
+                    receive_ns + offset_ns, 1_000_000_000)
+                writer.add_message(channel, receive_ns, bytes(serialize_message(message)), receive_ns)
+        writer.finish()
+
+    manifest = json.loads(prepare_mcap(source, staging, 15, task['name'], 'x1').read_text())
+    assert manifest['capture_snapshot'] == snapshot
+    assert manifest['sync_audit']['source_clocks'] == {
+        'observation.state': 'log_time', 'action': 'log_time'}
+    assert manifest['sync_audit']['timeline'] == 'original_state_log_time'
+    rows = manifest['episodes'][0]
+    assert len(rows) == len(times)
+    assert [row['grid_time'] for row in rows] == [(stamp - times[0]) / 1e9 for stamp in times]
+    assert [row['values']['observation.state'] for row in rows] == [[float(i)] for i in range(6)]
+    assert [row['values']['action'] for row in rows] == [[float(i + 10)] for i in range(6)]
+    assert all(row['source_available'] == row['source_valid'] == [1., 1.] for row in rows)
+    assert all(row['source_age'] == [0., 0.] for row in rows)

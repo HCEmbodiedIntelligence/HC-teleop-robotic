@@ -95,8 +95,10 @@ class ControlOwnership:
                      monotonic_ns=self.clock(), stamp_ns=self.ros_clock(), kind=kind,
                      state=self.state, phase=self.phase, reason=self.reason,
                      **asdict(self.token), **fields)
+        event['event_id'] = f'control:{self.instance}:{self.session}:{self.event_seq}'
         self.events.append(event)
         self.emit(event)
+        return event['event_id']
 
     def _close(self, reason):
         if self.segment_open:
@@ -107,7 +109,7 @@ class ControlOwnership:
                 self.recording_error = str(exc)
             self._event('manual_close', last_command_seq=self.command_seq, end_reason=reason)
 
-    def _invalidate(self, state, source='', reason=''):
+    def _invalidate(self, state, source='', reason='', *, cause_event_id=None):
         # This hook closes the final gate before any capture or peer work.
         self.revoke()
         if self.state == 'MANUAL':
@@ -121,7 +123,7 @@ class ControlOwnership:
         self.command_seq = 0
         self.acks.clear()
         self.deadline_ns = self.clock() + self.transition_timeout_ns
-        self._event('revoked')
+        self._event('revoked', **({'cause_event_id': cause_event_id} if cause_event_id else {}))
         self.permit(self.token, 'revoke', self.cutoff_ns, self.active)
 
     def _set_dagger_enabled(self, enabled):
@@ -237,12 +239,13 @@ class ControlOwnership:
             self.resume_auto = False
             self._invalidate('HOLD', reason=reason)
 
-    def fault(self, reason, *, estop=False):
+    def fault(self, reason, *, estop=False, cause_event_id=None):
         with self.lock:
             if not self.active or self.state == 'ESTOP' or (self.state == 'FAULT' and not estop):
                 return
             self.resume_auto = self.input_armed = False
-            self._invalidate('ESTOP' if estop else 'FAULT', reason=reason)
+            self._invalidate('ESTOP' if estop else 'FAULT', reason=reason,
+                             cause_event_id=cause_event_id)
 
     def recover(self, *, control_ready):
         with self.lock:
@@ -258,7 +261,7 @@ class ControlOwnership:
     def _input_fresh(self):
         return self.input_valid and self.clock()-self.input_time_ns <= self.input_timeout_ns
 
-    def input_lost(self, reason):
+    def input_lost(self, reason, *, cause_event_id=None):
         """Disarm manual input; only an active manual handover/output must stop."""
         with self.lock:
             self.input_valid = self.input_armed = self.gripped = False
@@ -266,7 +269,7 @@ class ControlOwnership:
             self.input_diagnostics.update(last_loss_reason=reason,
                                           last_loss_stamp_ns=self.input_ready_stamp_ns)
             if self.state in {'TAKEOVER', 'MANUAL'}:
-                self.fault(reason)
+                self.fault(reason, cause_event_id=cause_event_id)
                 if reason == 'teleop input timeout':
                     self._event('manual_input_timeout',
                         input_gap_ms=(self.clock()-self.input_time_ns)/1e6,
@@ -425,10 +428,13 @@ class ControlOwnership:
             if self.state in {'AUTO', 'MANUAL'}:
                 for peer in self.required_peers:
                     if self.clock()-self.peer_times.get(peer, 0) > self.input_timeout_ns:
-                        self._event('heartbeat_timeout', participant=peer,
+                        cause = self._event('heartbeat_timeout', participant=peer,
                                     gap_ms=(self.clock()-self.peer_times.get(peer, 0))/1e6,
                                     limit_ms=self.input_timeout_ns/1e6)
-                        self.fault(peer+' acknowledgement heartbeat lost')
+                        # Fault revokes the old epoch. Preserve the detector's
+                        # identity across that boundary, rather than infer its
+                        # cause later from adjacent log timestamps/reasons.
+                        self.fault(peer+' acknowledgement heartbeat lost', cause_event_id=cause)
                         break
 
     def allows(self, token):

@@ -25,8 +25,8 @@ from aiohttp import web
 
 _SECRET = re.compile(r'(?:^|[_-])(token|password|passwd|secret|authorization|credential|api[_-]?key)(?:$|[_-])', re.I)
 _TEXT_SECRET = re.compile(r'''(?ix)
- ((?:["']?(?:[\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key))["']?\s*[:=]\s*)
- (?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+))
+ (?P<prefix>["']?[\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key)["']?\s*[:=]\s*)
+ (?:"[^"\n]*"|'[^'\n]*'|(?:Bearer|Basic)\s+[^\s,;}]+|[^\s,;}]+)
  ''')
 _CLI_SECRET = re.compile(r'(?i)(--[\w-]*(?:token|password|secret|api-key)\s+)(\S+)')
 _AUTH = re.compile(r'(?i)(\b(?:Bearer|Basic)\s+)\S+')
@@ -53,7 +53,7 @@ def _entry_epoch(entry):
 
 def _text(value, limit=16384):
     text = str(value)[:limit]
-    text = _TEXT_SECRET.sub(lambda m: m.group(2) + '[REDACTED]', text)
+    text = _TEXT_SECRET.sub(lambda m: m.group('prefix') + '[REDACTED]', text)
     text = _CLI_SECRET.sub(r'\1[REDACTED]', text)
     text = _AUTH.sub(r'\1[REDACTED]', text)
     return _URL_AUTH.sub(r'\1[REDACTED]@', text)
@@ -131,6 +131,11 @@ class DiagnosticLogs:
         self._dropped = 0
         self._reported_dropped = 0
         self.persistence_error = ''
+        # Keep parsing/processing failures separate from a recoverable disk
+        # write error. A later successful write must not erase evidence that
+        # a source log or queued event was lost.
+        self.processing_error = ''
+        self.processing_failures = 0
         self._next_id = 1
         self._seen = set()
         self._tails = {}
@@ -162,7 +167,13 @@ class DiagnosticLogs:
     def start(self):
         if self._thread is not None:
             return self
-        self.log_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        try:
+            self.log_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            # Diagnostics must not prevent the control runtime from starting.
+            # Keep serving the bounded in-memory log; subsequent writes retry
+            # persistence and expose their failure through the same API field.
+            self.persistence_error = _text(f'{type(exc).__name__}: {exc}', 512)
         # Recovery is startup-only; the control threads are not running yet.
         recovered = self._read_journal(self.current_root)
         with self._lock:
@@ -309,7 +320,8 @@ class DiagnosticLogs:
             event = payload
             kind = str(event.get('kind', 'control_event'))
             payload = event
-        level = str(payload.get('level', 'info')).lower().replace('warn', 'warning')
+        level = str(payload.get('level', 'info')).lower()
+        level = {'warn': 'warning', 'fatal': 'critical'}.get(level, level)
         if level not in _LEVELS:
             level = 'info'
         if kind in {'safety_stop', 'vr_input_fault'} or event.get('state') in {'FAULT', 'ESTOP'} or kind in _CONTROL_DIAGNOSTICS:
@@ -318,6 +330,12 @@ class DiagnosticLogs:
         if kind == 'manual_input_timeout' and 'input_gap_ms' in payload:
             message = (f"{payload.get('reason', 'teleop input timeout')}: "
                        f"{payload['input_gap_ms']} ms > {payload.get('limit_ms', '?')} ms")
+        elif kind == 'heartbeat_timeout':
+            # A watchdog reports this before changing state/epoch. Its reason
+            # still describes the preceding grant (e.g. 'manual request'), not
+            # the failure observed here, so display the actual typed evidence.
+            message = (f"{payload.get('participant', 'unknown')} heartbeat timeout: "
+                       f"{payload.get('gap_ms', '?')} ms > {payload.get('limit_ms', '?')} ms")
         owner = [event.get(k) for k in ('controller_instance_id', 'session_id', 'epoch')]
         control = all(v is not None and v != '' for v in owner)
         event_key = event.get('event_id') or wrapper.get('event_id')
@@ -392,6 +410,14 @@ class DiagnosticLogs:
         except OSError as exc:
             self.persistence_error = _text(f'{type(exc).__name__}: {exc}', 512)
 
+    def _processing_failed(self, exc, source):
+        self.processing_failures += 1
+        try:
+            message = _text(str(exc), 320)
+        except Exception:
+            message = '异常信息无法格式化'
+        self.processing_error = f'{source}: {type(exc).__name__}: {message}'
+
     def _tail(self):
         now = time.monotonic()
         if now >= self._next_catalog:
@@ -432,6 +458,10 @@ class DiagnosticLogs:
                         self._flush_raw(path, state, root, label)
             except OSError:
                 continue
+            except Exception as exc:
+                # One malformed or unformattable source must not terminate
+                # collection for all the other sources and future events.
+                self._processing_failed(exc, 'saved log processing failed')
 
     def _flush_raw(self, path, state, root=None, label=None):
         text = '\n'.join(state['pending'])
@@ -467,20 +497,29 @@ class DiagnosticLogs:
                 pass
             except Exception as exc:
                 # Never log recursively through DiagnosticLogHandler.
-                self.persistence_error = _text(f'diagnostic processing failed: {exc}', 512)
+                self._processing_failed(exc, 'diagnostic processing failed')
             if self._dropped != self._reported_dropped:
                 self._reported_dropped = self._dropped
-                self._append(self._normalize({'kind': 'log_gap', 'source': 'diagnostics',
-                    'payload': {'level': 'warning', 'message': f'日志队列已丢弃 {self._dropped} 条，溯源可能不完整',
-                                'dropped': self._dropped}}))
+                try:
+                    self._append(self._normalize({'kind': 'log_gap', 'source': 'diagnostics',
+                        'payload': {'level': 'warning', 'message': f'日志队列已丢弃 {self._dropped} 条，溯源可能不完整',
+                                    'dropped': self._dropped}}))
+                except Exception as exc:
+                    self._processing_failed(exc, 'log gap processing failed')
             if not self._stop.is_set():
-                self._tail()
+                try:
+                    self._tail()
+                except Exception as exc:
+                    self._processing_failed(exc, 'saved log collection failed')
         origins = {path: (root, label) for path, root, label in self._tail_paths}
         for path, state in self._tails.items():
             if state['partial']:
                 state['pending'].append(state['partial'].decode('utf-8', 'replace'))
             if state['pending'] and path in origins:
-                self._flush_raw(path, state, *origins[path])
+                try:
+                    self._flush_raw(path, state, *origins[path])
+                except Exception as exc:
+                    self._processing_failed(exc, 'final saved log processing failed')
 
     @staticmethod
     def _causes(entries, session):
@@ -507,7 +546,10 @@ class DiagnosticLogs:
                 root = parent
             is_fault = entry['kind'] == 'safety_stop' or (
                 entry['kind'] == 'revoked' and entry.get('details', {}).get('state') in {'FAULT', 'ESTOP'})
-            if entry.get('owner_key'):
+            # Explicit event identity wins, even when its parent has fallen
+            # outside retention. Only legacy records without a cause pointer
+            # may use the narrowly scoped same-owner typed diagnostic fallback.
+            if entry.get('owner_key') and not entry.get('cause_key'):
                 evidence = incident_roots.get(entry['owner_key'])
                 if evidence and evidence.get('details', {}).get('reason') == entry.get('details', {}).get('reason'):
                     root = evidence
@@ -565,6 +607,7 @@ class DiagnosticLogs:
         else:
             entries = self._read_journal(root)
             if not entries:
+                next_id = 1
                 for file in self._raw_files(root):
                     try:
                         fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
@@ -577,7 +620,11 @@ class DiagnosticLogs:
                         for number, line in enumerate(text.splitlines(), 1):
                             for entry in self._raw_entry(line, str(file.relative_to(root)), number):
                                 if entry:
-                                    entry['id'] = len(entries) + 1
+                                    # Retention shrinks the list, not the
+                                    # session's sequence. Resetting IDs to its
+                                    # length makes later files overwrite pages.
+                                    entry['id'] = next_id
+                                    next_id += 1
                                     entries.append(entry)
                         entries = entries[-self.max_entries:]
                     except OSError:
@@ -586,25 +633,39 @@ class DiagnosticLogs:
         summary = self._summary(entries)
         subsystem = str(subsystem or '')[:64]
         q = str(q).lower()[:256]
+        def matches(entry):
+            return ((level == 'all' or _LEVELS.get(entry['level'], 20) >= _LEVELS[level])
+                    and (not subsystem or (entry.get('subsystem') or 'middleware') == subsystem)
+                    and (not q or q in (entry['message'] + ' ' + entry['source']).lower()))
+
+        # An error at the end of a long session must be visible immediately,
+        # even while chronological pages are still loading. This preview never
+        # moves the chronological cursor and obeys all the same view filters.
+        priority_entries = sorted(
+            (entry for entry in entries if matches(entry)
+             and _LEVELS.get(entry['level'], 20) >= _LEVELS['error']),
+            key=lambda entry: entry['id'], reverse=True)[:50]
         # Advance over nonmatching rows as well; cursor always follows ingest
         # order, never severity order, so priority cannot skip unseen records.
         remaining = [e for e in entries if e['id'] > after]
         scanned, selected = [], []
         for entry in remaining:
             scanned.append(entry)
-            if (level == 'all' or _LEVELS.get(entry['level'], 20) >= _LEVELS[level]) and (
-                    not subsystem or (entry.get('subsystem') or 'middleware') == subsystem) and (
-                    not q or q in (entry['message'] + ' ' + entry['source']).lower()):
+            if matches(entry):
                 selected.append(entry)
             if len(selected) >= limit:
                 break
         cursor = scanned[-1]['id'] if scanned else after
         if priority:
             selected.sort(key=lambda e: (-_LEVELS.get(e['level'], 20), -e['id']))
-        return {'session_id': session, 'entries': selected, 'incidents': incidents, 'summary': summary,
+        return {'session_id': session, 'entries': selected, 'priority_entries': priority_entries,
+                'incidents': incidents, 'summary': summary,
                 'cursor': cursor, 'has_more': bool(remaining and cursor < remaining[-1]['id']),
                 'dropped': self._dropped if session == self.current_session_id else 0,
-                'persistence_error': self.persistence_error if session == self.current_session_id else ''}
+                'persistence_error': (self.persistence_error or self.processing_error)
+                                     if session == self.current_session_id else '',
+                'processing_error': self.processing_error if session == self.current_session_id else '',
+                'processing_failures': self.processing_failures if session == self.current_session_id else 0}
 
     def export(self, session=None):
         result = self.snapshot(session, limit=500, priority=False)

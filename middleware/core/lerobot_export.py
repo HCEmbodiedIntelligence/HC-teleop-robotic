@@ -328,8 +328,10 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 source_topics[key] = topic
     # Re-time before aggregating partial actions: held values must follow
     # source order on the clock that is used for alignment.
-    # A correction's range and actions are defined on HC send time (log_time).
-    for collection in (() if correction else (streams, raw_cameras)):
+    # A correction's range/actions use HC send time (log_time). Task snapshots
+    # also freeze a PRESERVE contract: keep the original state log_time samples
+    # and causal lookup clock instead of moving the first state before action.
+    for collection in (() if correction or snapshot else (streams, raw_cameras)):
         for key in list(collection):
             source_clocks[key], collection[key] = apply_source_clock(collection[key], header_stamps.get(key, []))
     if snapshot:
@@ -436,8 +438,6 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     audit['source_clocks'] = source_clocks
     aligned = (preserved_episode(streams, fps, audit) if snapshot else
                synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages))
-    if snapshot and source_clocks.get('observation.state') == 'header':
-        audit['timeline'] = 'original_state_header_stamp'
     if snapshot and audit.get('source_frequency_hz'):
         # LeRobot uses an integer nominal rate; original timestamps remain in rows.
         fps = max(1, round(audit['source_frequency_hz']))
@@ -648,7 +648,8 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     synchronization['auxiliary_policy'] = 'causal last observed value; never gates row selection; source_available=0 and value=0/source_time=-1/source_age=-1 before first sample; source_valid=0 when missing or stale; stale velocity is not asserted to remain active'
     synchronization.update({'clock': 'per stream: ROS header stamp when every message has a unique stamp within -20 ms..+2 s of its MCAP log_time, otherwise MCAP log_time (wall receive time); see sync_audit.source_clocks', 'selection': 'one recording is one episode, full MCAP log_time span on fixed FPS grid; causal last sample, no rows deleted for missing/stale values', 'state_action_max_age_seconds': 0.2, 'camera_max_age_seconds': 0.25, 'source_mcap_preserved': True, 'images': 'H.264 MP4 with no B frames, CRF 23; short episodes stream-concatenated without padding or dropping frames', 'joint_position_units': 'source ROS JointState units (revolute radians, prismatic meters)' })
     if manifest.get('capture_snapshot'):
-        synchronization.update(selection='original state log_time samples, original frame count and frequency',
+        synchronization.update(clock='MCAP log_time (wall receive time), preserved for all snapshot streams',
+            selection='original state log_time samples, original frame count and frequency',
             missing_policy='absent optional streams remain absent; unsupported per-frame gaps stop export',
             auxiliary_policy='actual causal samples only; no numeric or image placeholders')
     if manifest.get('correction'):
