@@ -1023,8 +1023,8 @@ class RosBridge:
             executor_thread.start()
             last_discovery = 0.0
             while not self._stop.is_set():
-                time.sleep(0.01)
-                self._drain_commands(node, publishers, get_message, set_message_fields)
+                # Wake on enqueue: a fixed sleep added up to 10 ms to every /vrdata frame.
+                self._drain_commands(node, publishers, get_message, set_message_fields, wait=0.01)
                 now = time.monotonic()
                 if now - last_discovery >= 2.0:
                     if dataset_process is not None:
@@ -1318,10 +1318,14 @@ class RosBridge:
         publishers: dict[tuple[str, str], Any],
         get_message: Callable[[str], Any],
         set_message_fields: Callable[[Any, dict[str, Any]], None],
+        wait: float = 0.0,
     ) -> None:
-        for _ in range(100):
+        for index in range(100):
             try:
-                command, args = self._commands.get_nowait()
+                if index == 0 and wait > 0:
+                    command, args = self._commands.get(timeout=wait)
+                else:
+                    command, args = self._commands.get_nowait()
             except queue.Empty:
                 break
             try:
