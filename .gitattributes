@@ -2,3 +2,5 @@
 *.py text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+# Deployment patches preserve literal whitespace in their old/context lines.
+tools/deploy/hc_x1_camera_dds/*.patch -whitespace

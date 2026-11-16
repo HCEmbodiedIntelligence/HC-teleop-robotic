@@ -168,6 +168,8 @@ class RosBridge:
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._callback_timing_lock = threading.Lock()
+        self._telemetry_count_lock = threading.Lock()
+        self._telemetry_messages = 0
         self._callback_timings = {}
         self._slow_callbacks = deque(maxlen=32)
         self._command_timing_sequence = 0
@@ -241,6 +243,8 @@ class RosBridge:
 
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
+        with self._telemetry_count_lock:
+            telemetry_messages = self._telemetry_messages
         # ROS clock reads may release the GIL and wait in C. Never perform
         # them while holding the lock used by the final actuator send.
         ownership = self.ownership.snapshot()
@@ -258,6 +262,7 @@ class RosBridge:
                 return round((len(recent) - 1) / (recent[-1] - recent[0]), 1)
 
             result = dict(self._status)
+            result['messages'] = telemetry_messages
             with self._callback_timing_lock:
                 result['callback_timings'] = {name:dict(value) for name,value in self._callback_timings.items()}
                 result['slow_callbacks'] = list(self._slow_callbacks)
@@ -618,6 +623,12 @@ class RosBridge:
             timing[stage] = dict(wall_ms=(after[0]-before[0])/1e6,
                                  cpu_ms=(after[1]-before[1])/1e6)
 
+    def _count_telemetry_message(self):
+        # This statistic has no authority meaning. A dashboard callback must
+        # never wait for or occupy the final actuator gate just to count it.
+        with self._telemetry_count_lock:
+            self._telemetry_messages += 1
+
     def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
         """Keep authority across slow conversion and recheck at actuator send."""
         now = time.monotonic()
@@ -661,6 +672,15 @@ class RosBridge:
         self._command_checkpoint(timing, 'initial_gate')
         prepared = self._boundary.prepare(message) if self._boundary else message
         self._command_checkpoint(timing, 'prepare')
+        send, wire_cdr = publish, None
+        prepare_publication = getattr(self._boundary, 'prepare_publication', None)
+        if self._legacy_enabled and prepared is not None and callable(prepare_publication):
+            try:
+                send, wire_cdr = prepare_publication(prepared[0], publish)
+            except Exception as exc:
+                self._boundary.reject('command serialization failed: '+str(exc))
+                prepared = None
+        self._command_checkpoint(timing, 'prepare_publication')
         capture = getattr(self, '_publication_capture', None)
         arm_target = (self._legacy_enabled and self._boundary and prepared is not None
                       and set(prepared[0].name).intersection(self._boundary.arms))
@@ -688,7 +708,7 @@ class RosBridge:
                 if self._legacy_enabled and self._boundary:
                     message = prepared[0]
                 commit_done = self._command_instant(timing)
-                publish(message)
+                send(message)
                 publish_done = self._command_instant(timing)
                 published, publication_ns = message, time.time_ns()
                 publication_monotonic = time.monotonic()
@@ -712,8 +732,12 @@ class RosBridge:
             self._command_interval(timing, 'send_accounting', publish_done, released)
             self._command_checkpoint(timing, 'commit_publish')
             if ticket is not None:
-                capture.complete(ticket, published, publication_ns=publication_ns,
-                                 publication_monotonic=publication_monotonic)
+                if published is not None and wire_cdr is not None:
+                    capture.complete(ticket, serialized_cdr=wire_cdr,
+                        publication_ns=publication_ns, publication_monotonic=publication_monotonic)
+                else:
+                    capture.complete(ticket, published, publication_ns=publication_ns,
+                                     publication_monotonic=publication_monotonic)
             self._command_checkpoint(timing, 'capture_complete')
 
     def _enqueue(self, command: str, data: Any) -> bool:
@@ -1028,8 +1052,7 @@ class RosBridge:
                     # it out of this callback prevents image serialization from
                     # starving dashboard health and WebRTC work.
                     if not event_outputs:
-                        with self._lock:
-                            self._status["messages"] += 1
+                        self._count_telemetry_message()
                         return
                     if max_hz and now - last_emit.get(topic, 0.0) < 1.0 / max_hz:
                         return
@@ -1060,8 +1083,7 @@ class RosBridge:
                         stamp_ns=time.time_ns(),
                     )
                     self.on_event(event, event_outputs)
-                    with self._lock:
-                        self._status["messages"] += 1
+                    self._count_telemetry_message()
 
                 subscriptions.append(
                     (camera_node if is_webrtc_color and camera_node is not None else telemetry_node).create_subscription(

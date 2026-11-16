@@ -23,6 +23,9 @@ class LegacyTopicControl:
         self.node, self.bridge, self.output = node, bridge, output
         from .control_clock import ControlClock
         self._clock = ControlClock(node.get_clock())
+        from rclpy.publisher import Publisher
+        from rclpy.serialization import serialize_message
+        self._publisher_type, self._serialize_message = Publisher, serialize_message
         profile = Path(bridge.config['legacy_control_profile'])
         self.teleop = yaml.safe_load((profile/'arm_teleop.yaml').read_text())
         self.settings = bridge.config.get('intervention', {})
@@ -141,36 +144,41 @@ class LegacyTopicControl:
         return self.feedback_fresh() and all(n in self.speeds and abs(self.speeds[n]) <= .02 for n in self.arms)
 
     def update_state(self, message, allowed):
+        # Generated-message traversal and validation must not hold the same
+        # authority lock as the final actuator publication.
         values = self.values(message)
-        stamp, now = self.stamp(message), time.monotonic()
-        if not stamp or not -.05 <= (self.clock_now_ns()-stamp)*1e-9 <= self.max_age:
-            raise ValueError('stale measured feedback')
+        stamp = self.stamp(message)
         measured_velocity = dict(zip(message.name, message.velocity)) if len(message.velocity) == len(message.name) else {}
-        for name, value in values.items():
-            if name not in allowed or stamp <= self.sample_ns.get(name, 0):
-                continue
-            dt = (stamp-self.sample_ns.get(name, 0))*1e-9
-            speed = measured_velocity.get(name)
-            if speed is None and name in self.positions and .001 <= dt <= self.max_age:
-                speed = (value-self.positions[name])/dt
-            if speed is not None and math.isfinite(speed):
-                self.speeds[name] = speed
-            else:
-                self.speeds.pop(name, None)
-            self.positions[name], self.sample_ns[name], self.received[name] = value, stamp, now
+        selected = [(name, value, measured_velocity.get(name))
+                    for name, value in values.items() if name in allowed]
+        with self.bridge._lock:
+            # Re-read the real clock after obtaining the lock. Work prepared
+            # before a scheduling pause must never make stale feedback fresh.
+            now = time.monotonic()
+            if not stamp or not -.05 <= (self.clock_now_ns()-stamp)*1e-9 <= self.max_age:
+                raise ValueError('stale measured feedback')
+            for name, value, speed in selected:
+                if stamp <= self.sample_ns.get(name, 0):
+                    continue
+                dt = (stamp-self.sample_ns.get(name, 0))*1e-9
+                if speed is None and name in self.positions and .001 <= dt <= self.max_age:
+                    speed = (value-self.positions[name])/dt
+                if speed is not None and math.isfinite(speed):
+                    self.speeds[name] = speed
+                else:
+                    self.speeds.pop(name, None)
+                self.positions[name], self.sample_ns[name], self.received[name] = value, stamp, now
         return values
 
     def state(self, message):
         try:
-            with self.bridge._lock:
-                self.update_state(message, self.limits.keys()-self.hand_names)
+            self.update_state(message, self.limits.keys()-self.hand_names)
         except (ValueError, TypeError):
             return
 
     def hand_state(self, message):
         try:
-            with self.bridge._lock:
-                self.update_state(message, self.hand_names)
+            self.update_state(message, self.hand_names)
         except (ValueError, TypeError):
             return
 
@@ -366,13 +374,44 @@ class LegacyTopicControl:
         self.diagnostics['accepted_'+channel] += 1
         return True
 
-    def publish_selected(self, message):
+    def prepare_publication(self, message, publish):
+        """Freeze CDR outside the gate; the original DDS send stays inside it.
+
+        Only native publishers owned by this router are optimized. A caller's
+        custom publication callback retains its existing message contract.
+        ``commit`` validates state but does not alter the prepared target.
+        """
+        track_arm = False
+        if publish == self.output.publish:
+            publisher = self.output
+        elif publish == self.publish_selected:
+            publisher, track_arm = self._select_publisher(message)
+        else:
+            return publish, None
+        if (not isinstance(publisher, self._publisher_type) or
+                not isinstance(message, publisher.msg_type)):
+            return publish, None
+        raw = self._serialize_message(message)
+        def send(_message):
+            publisher.publish(raw)
+            if track_arm:
+                self._arm_published()
+        return send, raw
+
+    def _select_publisher(self, message):
         names = {n for n,v in zip(message.name, message.position) if math.isfinite(v)} - self.sim_joints - self.model_only_joints
         for side, group in self.hands.items():
             if names <= set(group):
-                self.hand_pubs[side].publish(message)
-                return
-        self.output.publish(message)
+                return self.hand_pubs[side], False
+        return self.output, True
+
+    def publish_selected(self, message):
+        publisher, track_arm = self._select_publisher(message)
+        publisher.publish(message)
+        if track_arm:
+            self._arm_published()
+
+    def _arm_published(self):
         now = time.monotonic()
         if self.last_arm_publish_time is not None:
             self.arm_publish_gap_max_ms = max(self.arm_publish_gap_max_ms,

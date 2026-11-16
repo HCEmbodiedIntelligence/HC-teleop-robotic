@@ -2,7 +2,8 @@
 
 Reserve immediately before the final send lock and complete in a finally block
 after that lock is released. Start capture after opening the recorder ingress;
-end capture before closing ingress. Only this worker serializes or writes CDR.
+end capture before closing ingress. Already-published immutable CDR passes through
+unchanged; the worker serializes only the legacy message-snapshot fallback.
 """
 from collections import deque
 from dataclasses import dataclass
@@ -29,6 +30,13 @@ class JointSnapshot:
                    tuple(message.effort), publication_ns)
 
 
+@dataclass(frozen=True)
+class SerializedSnapshot:
+    """The immutable bytes actually sent by the successful ROS publisher."""
+    raw: bytes
+    publication_ns: int
+
+
 @dataclass
 class CaptureTicket:
     generation: int | None
@@ -37,6 +45,8 @@ class CaptureTicket:
 
 
 def serialize_snapshot(snapshot):
+    if isinstance(snapshot, SerializedSnapshot):
+        return snapshot.raw
     from rclpy.serialization import serialize_message
     from sensor_msgs.msg import JointState
     message = JointState(name=list(snapshot.name), position=list(snapshot.position),
@@ -91,18 +101,25 @@ class PublicationCapture:
             self._tickets[id(ticket)] = ticket
             return ticket
 
-    def complete(self, ticket, message=None, *, publication_ns=None,
+    def complete(self, ticket, message=None, *, serialized_cdr=None, publication_ns=None,
                  publication_monotonic=None):
         """Release one reservation; rejected/failed sends supply ``None``.
 
-        Copies JointState fields before entering the short bookkeeping lock.
-        The worker exclusively owns serialization and recorder admission.
+        Successful raw sends supply the very same immutable ``serialized_cdr``
+        bytes passed to Publisher.publish. No message fields are read or copied
+        in that path. The legacy message fallback copies JointState fields;
+        only the worker serializes that fallback and performs recorder IPC.
         """
         if ticket is None:
             return
         snapshot, error = None, None
         try:
-            if message is not None:
+            if serialized_cdr is not None:
+                if not isinstance(serialized_cdr, bytes):
+                    raise TypeError('serialized_cdr must be immutable bytes from the successful publication')
+                snapshot = SerializedSnapshot(serialized_cdr,
+                    time.time_ns() if publication_ns is None else publication_ns)
+            elif message is not None:
                 snapshot = JointSnapshot.copy(message,
                     time.time_ns() if publication_ns is None else publication_ns)
         except Exception as exc:

@@ -1,0 +1,115 @@
+--- a/include/config.h
++++ b/include/config.h
+@@ -52,6 +52,7 @@
+     InExtrinsics param;
+     uint32_t expos_us;
+     uint32_t expos_gain;
++    bool color_auto_exposure = true;
+     bool use_param_from_file = true;
+     bool send_chassis_depth = false;
+ };
+--- a/src/camera_driver.cpp
++++ b/src/camera_driver.cpp
+@@ -202,6 +202,7 @@
+                 cfg.pointcloud_type = node["pointcloud_type"].as<int>();
+                 cfg.expos_us   = node["expos_us"].as<uint32_t>();
+                 cfg.expos_gain = node["expos_gain"].as<uint32_t>();
++                cfg.color_auto_exposure = getYamlValue(node, "color_auto_exposure", true);
+                 cfg.use_param_from_file = node["param_in_file"].as<bool>();
+                 cfg.send_chassis_depth  = node["send_chassis_depth"].as<bool>();
+                 g_logger->info("[{}] Point cloud type: {}, expos: {} us, gain: {}, "
+--- a/src/camera_berxel.cpp
++++ b/src/camera_berxel.cpp
+@@ -76,10 +76,60 @@
+ 	device_->setSystemClock();
+ 	device_->setRegistrationEnable(true);
+ 	device_->setTemperatureCompensationEnable(false);
+-    device_->enableColorAutoExposure();
+-    // device_->setColorExposureGain(config_.expos_us, config_.expos_gain);
+-    // g_logger->info("[{}] Set exposure time to {} us, gain: {}.", 
+-    //     config_.name, config_.expos_us, config_.expos_gain);
++    // Keep legacy AE by default. Manual exposure is explicit and validated
++    // against this SDK's documented modes, never silently clamped.
++    if (!config_.color_auto_exposure &&
++        ((config_.expos_us != 10000 && config_.expos_us != 20000 &&
++          config_.expos_us != 30000) || config_.expos_gain < 100 ||
++         config_.expos_gain > 300))
++    {
++        g_logger->error("[{}] Invalid Berxel manual color exposure: {} us, gain {} "
++            "(supported: 10000/20000/30000 us, gain 100..300).",
++            config_.name, config_.expos_us, config_.expos_gain);
++        return false;
++    }
++    const int exposure_ret = config_.color_auto_exposure
++        ? device_->enableColorAutoExposure()
++        : device_->setColorExposureGain(config_.expos_us, config_.expos_gain);
++    if (exposure_ret != 0)
++    {
++        if (!config_.color_auto_exposure)
++        {
++            g_logger->error("[{}] Set manual color exposure failed: ret={}.",
++                config_.name, exposure_ret);
++            return false;
++        }
++        // Preserve legacy startup if firmware does not acknowledge AE.
++        g_logger->warn("[{}] Enable color AE returned {}; keeping legacy startup.",
++            config_.name, exposure_ret);
++    }
++    uint32_t color_exposure_us = 0, color_gain = 0;
++    uint8_t color_ae = 0;
++    const int exposure_read_ret = device_->getColorExposureGain(
++        &color_exposure_us, &color_gain, &color_ae);
++    // Some NetDriver versions return success after a failed firmware GET.
++    // Zero exposure/gain and an invalid AE flag are not hardware readback.
++    const bool exposure_read_valid = exposure_read_ret == 0 &&
++        color_exposure_us > 0 && color_gain > 0 && color_ae <= 1;
++    if (!config_.color_auto_exposure && (!exposure_read_valid ||
++        color_ae != 0 || color_exposure_us != config_.expos_us ||
++        color_gain != config_.expos_gain))
++    {
++        g_logger->error("[{}] Color exposure readback mismatch: ret={}, "
++            "requested_auto={}, requested_us={}, requested_gain={}, "
++            "actual_auto={}, actual_us={}, actual_gain={}.",
++            config_.name, exposure_read_ret, config_.color_auto_exposure,
++            config_.expos_us, config_.expos_gain, static_cast<int>(color_ae),
++            color_exposure_us, color_gain);
++        return false;
++    }
++    if (!exposure_read_valid)
++        g_logger->warn("[{}] Color exposure readback unavailable: ret={}, "
++            "invalid_payload={}; keeping legacy AE startup.",
++            config_.name, exposure_read_ret, exposure_read_ret == 0);
++    else
++        g_logger->info("[{}] Color exposure readback: auto={}, exposure_us={}, gain={}.",
++            config_.name, static_cast<int>(color_ae), color_exposure_us, color_gain);
+ 
+ 	createPublishers();
+ 	getParameter();
+@@ -605,8 +655,25 @@
+     // 定期发布参数
+     param_timer_ = parent_->create_wall_timer(
+         std::chrono::seconds(2),  // 每2秒发布一次
+-        [this]()
+-        {
++        [this, exposure_reported_after_start = std::make_shared<bool>(false)]()
++        {
++            // Query again after streams are active: some firmware cannot
++            // report exposure during the early device-open sequence.
++            if (!*exposure_reported_after_start)
++            {
++                uint32_t exposure_us = 0, gain = 0;
++                uint8_t ae = 0;
++                const int ret = device_->getColorExposureGain(&exposure_us, &gain, &ae);
++                if (ret == 0 && exposure_us > 0 && gain > 0 && ae <= 1)
++                    g_logger->info("[{}] Active-stream color exposure readback: "
++                        "auto={}, exposure_us={}, gain={}.",
++                        config_.name, static_cast<int>(ae), exposure_us, gain);
++                else
++                    g_logger->warn("[{}] Active-stream color exposure readback "
++                        "unavailable: ret={}, invalid_payload={}.",
++                        config_.name, ret, ret == 0);
++                *exposure_reported_after_start = true;
++            }
+             size_t sub_count = param_pub_->get_subscription_count();
+             if (sub_count > 0 && sub_count != last_sub_count_ && param_ready_)
+             {
