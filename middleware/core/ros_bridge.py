@@ -402,7 +402,8 @@ class RosBridge:
     def _replay_allowed_locked(self, epoch: int) -> bool:
         return (not (self._control_actor_mode and self._stop.is_set())
                 and epoch == self._output_epoch and self._replay_active and not self.ownership.active
-                and self._command_output_enabled and self._ready_locked(time.monotonic()))
+                and self._command_output_enabled and not self._actor_output_blocked()
+                and self._ready_locked(time.monotonic()))
 
     def begin_replay(self) -> bool:
         """Exclusively arm replay while retaining the normal safety gates."""
@@ -412,7 +413,8 @@ class RosBridge:
             if not self.config.get("enabled", True):
                 self._replay_active = True
                 return True
-            if not self._command_output_enabled or not self._ready_locked(time.monotonic()):
+            if (not self._command_output_enabled or self._actor_output_blocked()
+                    or not self._ready_locked(time.monotonic())):
                 return False
             self._actor_targets.clear()
             self._replay_active = True
@@ -604,9 +606,9 @@ class RosBridge:
                     callback_lock_wait_ms=(acquired_ns-before_lock_ns)/1e6,
                     callback_input_work_ms=(time.monotonic_ns()-acquired_ns)/1e6)
             if accepted and resume and not pause and control.active:
-                if control.state == 'HOLD':
+                if control.state == 'HOLD' and not self._actor_output_blocked():
                     control.start_auto(recording_ready=control.capture_ready(), control_ready=self.control_ready())
-                elif control.state in {'FAULT', 'ESTOP'}:
+                elif control.state in {'FAULT', 'ESTOP'} and not self._actor_output_blocked():
                     # Hardware recovery only returns to HOLD. A subsequent
                     # released-then-pressed A is needed to start AUTO.
                     self.recover_intervention()
@@ -649,6 +651,24 @@ class RosBridge:
         finally:
             self._actor_pumping = False
 
+    def _actor_output_blocked(self):
+        hook = getattr(self, '_actor_authority_blocked', None)
+        return self._control_actor_mode and callable(hook) and hook()
+
+    def _spin_actor_callbacks(self, executor):
+        # Callbacks only admit latest targets. Check urgent negative intent
+        # between callbacks, then run the original complete safety checkpoint
+        # before any queued DDS output or target is drained.
+        urgent = getattr(self, '_actor_urgent_check', None)
+        for index in range(32):
+            before = self._actor_callback_count
+            executor.spin_once(timeout_sec=.001 if index == 0 else 0.)
+            if callable(urgent):
+                urgent()
+            if self._stop.is_set() or self._actor_callback_count == before:
+                break
+        self._actor_checkpoint()
+
     def _count_live_input_locked(self, source, channel, now):
         self._mux_received[source] += 1
         self._mux_last_received[source] = now
@@ -682,7 +702,7 @@ class RosBridge:
             self._actor_counts['offered'] += 1
             pending = self._actor_targets.get(key)
             if (not valid or self._stop.is_set() or not self._ready_locked(time.monotonic())
-                    or not self._command_output_enabled or self._replay_active
+                    or not self._command_output_enabled or self._actor_output_blocked() or self._replay_active
                     or self._command_source != source
                     or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
                     or (pending is not None and stamp <= pending[0])
@@ -703,7 +723,6 @@ class RosBridge:
                 with self._lock:
                     if (source, channel) not in self._actor_targets:
                         continue
-                self._actor_checkpoint()
                 with self._lock:
                     pending = self._actor_targets.pop((source, channel), None)
                     if pending is None or pending[1] != self._output_epoch or self._stop.is_set():
@@ -843,7 +862,7 @@ class RosBridge:
                 and self._actor_dispatch_epoch != self._output_epoch)
             if (not valid or receipt_epoch_changed
                     or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
-                    or not ready or not self._command_output_enabled
+                    or not ready or not self._command_output_enabled or self._actor_output_blocked()
                     or self._replay_active or self._command_source != source
                     or (self.ownership.active and not self.ownership.allows(token))):
                 self._mux_rejected += 1
@@ -884,6 +903,7 @@ class RosBridge:
             with self._lock:
                 send_acquired = self._command_instant(timing)
                 if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
+                        or self._actor_output_blocked()
                         or (self._control_actor_mode and (self._stop.is_set() or
                             self._actor_targets.get((source, channel), (0,))[0] > stamp))
                         or not self._ready_locked(time.monotonic()) or self._command_source != source
@@ -1162,6 +1182,7 @@ class RosBridge:
                                                    self.ownership.cutoff_ns, True)
                             return
                         if (self._ready_locked(time.monotonic()) and self._command_output_enabled
+                                and not self._actor_output_blocked()
                                 and not self._replay_active and self._command_source in {'vr', 'motion'}):
                             header = Header()
                             header.stamp = node.get_clock().now().to_msg()
@@ -1342,12 +1363,7 @@ class RosBridge:
                     self._actor_flush_commands()
                     # Drain a bounded batch of ready callbacks before sending
                     # latest channel targets. No nested spin inside preparation.
-                    for index in range(32):
-                        before = self._actor_callback_count
-                        executor.spin_once(timeout_sec=.001 if index == 0 else 0.)
-                        self._actor_checkpoint()
-                        if self._stop.is_set() or self._actor_callback_count == before:
-                            break
+                    self._spin_actor_callbacks(executor)
                     if self._stop.is_set():
                         break
                     self._actor_flush_commands()
@@ -1505,10 +1521,24 @@ class RosBridge:
         from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
         from .control_ownership import ControlToken
 
-        state_pub = node.create_publisher(String, '/status/control/ownership', QoSProfile(
-            depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        events_pub = node.create_publisher(String, '/events/control/intervention', 100)
-        action_pub = node.create_publisher(String, '/internal/control/action_evidence', 100)
+        observer_hook = (getattr(self, '_observer_ros_publish', None)
+                         if self._control_actor_mode else None)
+        observer_hook = observer_hook if callable(observer_hook) else None
+        state_pub = events_pub = action_pub = None
+        if observer_hook is None:
+            state_pub = node.create_publisher(String, '/status/control/ownership', QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            events_pub = node.create_publisher(String, '/events/control/intervention', 100)
+            action_pub = node.create_publisher(String, '/internal/control/action_evidence', 100)
+
+        def publish_observer(topic, payload, publisher):
+            if observer_hook is not None:
+                # The host supplies a bounded nonblocking outbox. It owns JSON
+                # encoding and these read-only DDS projections in the parent.
+                if observer_hook(topic, payload) is False:
+                    self._actor_counts['observer_ros_dropped'] += 1
+            else:
+                publisher.publish(String(data=json.dumps(payload, allow_nan=False)))
         previous_sink = self._action_sink
         actor_evidence = deque(maxlen=128)
         def evidence_sink(evidence):
@@ -1519,7 +1549,7 @@ class RosBridge:
                 actor_evidence.append(evidence)
             else:
                 previous_sink(evidence)
-                action_pub.publish(String(data=json.dumps(evidence, allow_nan=False)))
+                publish_observer('/internal/control/action_evidence', evidence, action_pub)
         self._action_sink = evidence_sink
 
         def send(token, phase, cutoff_ns, active):
@@ -1528,6 +1558,8 @@ class RosBridge:
             # the transaction until both receivers confirm it.
             if self._control_actor_mode and self._actor_thread_ident != threading.get_ident():
                 self._enqueue('_actor_permit', (token, phase, cutoff_ns, active))
+                return
+            if active and phase == 'grant' and self._actor_output_blocked():
                 return
             peers = self.ownership.peers
             key = '#'.join((token.key(), phase if active else 'off',
@@ -1614,7 +1646,8 @@ class RosBridge:
                     ownership.fault('necessary robot feedback lost')
                 ownership.advance(control_ready=self.control_ready(),
                                   manual_ready=ownership.input_valid and ownership.gripped)
-                if ownership.state in {'AUTO', 'MANUAL'} and not self._command_output_enabled:
+                if (ownership.state in {'AUTO', 'MANUAL'} and not self._command_output_enabled
+                        and not self._actor_output_blocked()):
                     self._command_source = ownership.token.source
                     self._source_cutoff = ownership.cutoff_ns * 1e-9
                     self._command_output_enabled = True
@@ -1674,14 +1707,14 @@ class RosBridge:
                         self._boundary.arm_publish_gap_max_ms = 0.0
             while actor_evidence:
                 evidence = actor_evidence.popleft()
-                action_pub.publish(String(data=json.dumps(evidence, allow_nan=False)))
+                publish_observer('/internal/control/action_evidence', evidence, action_pub)
             errors = []
             for event in events:
                 # This loop is outside the actuator/authority lock. Persist
                 # every transition, including the precursor ACKs and handover,
                 # instead of retaining only the final FAULT log line.
                 self.on_event(envelope('control_event', 'ros_bridge', event), [])
-                events_pub.publish(String(data=json.dumps(event, allow_nan=False)))
+                publish_observer('/events/control/intervention', event, events_pub)
                 if (event['kind'] in {'recording_failed', 'heartbeat_timeout', 'manual_input_timeout'} or
                         (event['kind'] == 'revoked' and event['state'] in {'FAULT', 'ESTOP'})):
                     errors.append(event)
@@ -1693,7 +1726,7 @@ class RosBridge:
                 if not self._control_actor_mode:
                     node.get_logger().error('[control-diag] '+json.dumps(diagnostic, allow_nan=False))
             if state is not None:
-                state_pub.publish(String(data=json.dumps(state, allow_nan=False)))
+                publish_observer('/status/control/ownership', state, state_pub)
                 state_last = now
                 state_sequence = sequence
 
@@ -1718,10 +1751,24 @@ class RosBridge:
         ])
         node.create_timer(.005, self._timed_callback('ownership_tick', tick), callback_group=self._ownership_callback_group)
 
+    def _actor_negative_command(self, command, args):
+        if (command == 'stop' or command == 'command_output' and not args[0] or
+                command == '_actor_permit' and (not args[3] or args[1] == 'revoke')):
+            return True
+        if command != 'publish':
+            return False
+        topic, kind, data = args
+        return (kind == 'std_msgs/msg/Bool' and
+            ((topic == self.config.get('stop_topic', '/control/emergency_stop') and data.get('data') is True) or
+             (topic in {'/control/teleop/enabled', self.config.get('command_mux', {}).get(
+                 'hardware_enable_topic', '/control/hardware/enabled')} and data.get('data') is False)))
+
     def _actor_queue_item_allowed(self, item):
         if not self._control_actor_mode:
             return True
         if self._stop.is_set() and item[0] != 'stop':
+            return False
+        if self._actor_output_blocked() and not self._actor_negative_command(*item[:2]):
             return False
         if len(item) != 3:
             return False  # An unfenced pre-actor command cannot acquire authority.
@@ -1889,6 +1936,8 @@ class RosBridge:
                 self._publish_hardware_enable_locked(node, publishers, False)
 
     def _publish_hardware_enable_locked(self, node, publishers, enabled):
+        if enabled and self._actor_output_blocked():
+            return
         now = time.monotonic()
         if self._hardware_enable_sent_epoch == self._output_epoch and (
                 enabled or now-getattr(self, '_hardware_enable_last_sent', float('-inf')) < .1):
@@ -1914,5 +1963,13 @@ class RosBridge:
     ) -> Any:
         key = (topic, msg_type_name)
         if key not in publishers:
-            publishers[key] = node.create_publisher(message_type, topic, 10)
+            qos = 10
+            if topic in {'/status/control/ownership', '/events/control/intervention',
+                         '/internal/control/action_evidence'}:
+                from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+                qos = QoSProfile(depth=1 if topic == '/status/control/ownership' else 100,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=(DurabilityPolicy.TRANSIENT_LOCAL if topic == '/status/control/ownership'
+                                else DurabilityPolicy.VOLATILE))
+            publishers[key] = node.create_publisher(message_type, topic, qos)
         return publishers[key]

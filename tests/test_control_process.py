@@ -1,5 +1,6 @@
 """Process-boundary faults use the real ownership FSM, without robot ROS."""
 import os
+import json
 import queue
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import pytest
 
 from middleware.core.control_ownership import ControlOwnership
 from middleware.core.control_process import CoreProcessClient, RemoteOwnership, RemotePublicationCapture
+from middleware.core.control_process import IsolatedRosBridge, publish_readonly_observation
 
 
 class FakeBridge:
@@ -40,7 +42,9 @@ class FakeBridge:
         return dict(state='running', ownership=self.ownership.snapshot(),
             command_mux=dict(output_enabled=self._command_output_enabled,
                 source=self._command_source, replay_active=self._replay_active),
-            pumps=self.pumps, wire=list(self.wire[-40:]), child_flag=self.config.get('record_action_at_publication'))
+            pumps=self.pumps, wire=list(self.wire[-40:]), child_flag=self.config.get('record_action_at_publication'),
+            tick_sends=getattr(self, 'tick_sends', 0),
+            authority_blocked=getattr(self, '_actor_authority_blocked', lambda:False)())
 
     def control_ready(self):
         return True
@@ -126,10 +130,25 @@ class FakeBridge:
             self._actor_pump()
             if self._stop.is_set():
                 break
+            if self.config.get('model_tick'):
+                self.ownership.advance(control_ready=True, manual_ready=True)
+                if self.ownership.state == 'AUTO':
+                    # Model the original ROS tick's attempt to re-open output.
+                    # Host latch and final gate must remain negative even
+                    # before multiprocessing delivers the negative RPC bytes.
+                    self._command_output_enabled = True
+                    if not self._actor_authority_blocked():
+                        self.tick_sends = getattr(self, 'tick_sends', 0)+1
+                self._actor_urgent_check()
             self._flush()
             self.pumps += 1
             if self.config.get('observer_flood'):
                 self.emit({'kind': 'test'}, [])
+            if self.config.get('observer_ros_flood'):
+                hook = getattr(self, '_observer_ros_publish', None)
+                if hook:
+                    for topic in ('/status/control/ownership', '/events/control/intervention', '/internal/control/action_evidence'):
+                        hook(topic, {'sequence':self.pumps})
             time.sleep(.001)
 
 
@@ -157,6 +176,7 @@ def test_start_closed_and_preserve_config_changes_before_spawn():
     try:
         client.start()
         assert client.snapshot()['child_flag'] is True
+        assert client.snapshot()['control_process']['python_switch_interval_ms'] > 0
         assert client.snapshot()['command_mux']['output_enabled'] is False
         result = client.call('resume_output', '/control/emergency_stop')
         assert tuple(result['authorization_fence']) == client.authorization_fence()
@@ -169,6 +189,7 @@ def test_stale_authorization_replay_and_internal_fault_epoch(client):
     client.revoke_intent()
     with pytest.raises(ValueError, match='revoked'):
         client.call('resume_output', '/control/emergency_stop', expected_fence=fence)
+    client.call('emergency_stop', '/control/emergency_stop', 'deliver delayed negative intent', urgent=True)
     client.call('resume_output', '/control/emergency_stop')
     assert client.call('begin_replay')
     replay_fence = client.authorization_fence()
@@ -295,6 +316,170 @@ if __name__ == '__main__':
     assert process.wait(timeout=5.) == 0
     wait_until(lambda: os.path.exists(stop_log))
     assert 'host or IPC failed' in open(stop_log).read()
+
+
+def test_pending_negative_generation_blocks_ros_auto_tick_and_only_exact_negative_ack_clears_it():
+    client = CoreProcessClient({'model_tick':True}, bridge_factory=FakeBridge)
+    try:
+        client.start()
+        client.call('owner.start_model', recording_ready=False)
+        wait_until(lambda: client.snapshot()['ownership']['state'] == 'AUTO')
+        generation = client.revoke_intent()
+        wait_until(lambda: client.snapshot()['control_process']['pending_negative_generation'] == generation)
+        before = client.snapshot()['tick_sends']
+        time.sleep(.15)  # Deliberately withhold the negative RPC feeder.
+        assert client.snapshot()['tick_sends'] == before
+        assert client.snapshot()['command_mux']['output_enabled'] is False
+        assert client.snapshot()['ownership']['state'] == 'AUTO'  # No copied FSM/forced HOLD.
+        client.call('set_command_output_enabled', False, urgent=True, negative_generation=generation-1)
+        client.call('clock')
+        client.call('owner.input_lost', 'input packet missing')  # AUTO input loss cannot acknowledge a global stop.
+        with pytest.raises(ValueError, match='negative safety request is pending'):
+            client.call('resume_output', '/control/emergency_stop')
+        client.call('owner.disable', urgent=True, negative_generation=generation)
+        client.call('resume_output', '/control/emergency_stop')  # Fresh explicit operator recovery.
+        wait_until(lambda: client.snapshot()['command_mux']['output_enabled'] is True)
+        assert client.snapshot()['control_process']['pending_negative_generation'] is None
+    finally:
+        client.stop()
+
+
+def test_readonly_parent_handler_preserves_original_json_and_rejects_all_actuator_topics():
+    calls = []
+    telemetry = SimpleNamespace(publish=lambda *args: calls.append(args) or True)
+    payload = {'state':'MANUAL', 'names':['右臂'], 'active':True, 'epoch':4}
+    assert publish_readonly_observation(telemetry, '/status/control/ownership', payload)
+    topic, kind, fields = calls[0]
+    assert topic == '/status/control/ownership' and kind == 'std_msgs/msg/String'
+    assert json.loads(fields['data']) == payload
+    for forbidden in ('/action/joint_states', '/control/emergency_stop', '/control/hardware/enabled', '/control/motion/permit'):
+        with pytest.raises(ValueError, match='read-only'):
+            publish_readonly_observation(telemetry, forbidden, payload)
+    with pytest.raises(ValueError):
+        publish_readonly_observation(telemetry, '/status/control/ownership', {'invalid':float('nan')})
+    assert len(calls) == 1
+
+
+def test_readonly_telemetry_queue_rejection_is_visible_without_revoking_authority():
+    client = CoreProcessClient({}, on_observer_ros=lambda *_args:False)
+    worker = threading.Thread(target=client._observer_ros, daemon=True)
+    worker.start()
+    try:
+        client.channels['observer_ros'].put(('/status/control/ownership', {'state':'AUTO'}))
+        wait_until(lambda:client.snapshot()['control_process']['observer_ros_errors'] == 1)
+        assert 'telemetry queue' in client.snapshot()['control_process']['observer_ros_last_error']
+        assert not client.channels['failure_stop'].is_set()
+    finally:
+        client._stopped.set()
+        worker.join(1.)
+
+
+def hold_shared_lock(channels, kind, ready):
+    # Test-only fault injection: terminate the process without releasing the
+    # same primitive used by normal ownership/fence/Event access.
+    lock = channels['failure_stop']._cond if kind == 'failure_stop' else channels[kind].get_lock()
+    lock.acquire()
+    ready.set()
+    time.sleep(60.)
+
+
+@pytest.mark.parametrize('kind,entry', [
+    ('parent_generation', 'authorization_fence'),
+    ('parent_generation', 'revoke_intent'),
+    ('core_epoch', 'authorization_fence'),
+    ('ownership_active', 'active'),
+    ('failure_stop', 'failed'),
+])
+def test_killed_owner_holding_shared_lock_cannot_block_fallback_or_parent_cleanup(kind, entry):
+    stops = []
+    client = CoreProcessClient({}, fallback_stop=stops.append)
+    ready = client.context.Event()
+    process = client.context.Process(target=hold_shared_lock, args=(client.channels, kind, ready), daemon=True)
+    client.process = process
+    process.start()
+    assert ready.wait(3.)
+    entered, done = threading.Event(), threading.Event()
+    results = []
+    def invoke():
+        entered.set()
+        if entry == 'active':
+            results.append(RemoteOwnership(client).active)
+        elif entry == 'failed':
+            client._failed('held Event fault injection')
+        else:
+            results.append(getattr(client, entry)())
+        done.set()
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    assert entered.wait(1.)
+    time.sleep(.001)
+    process.kill()
+    process.join(1.)
+    try:
+        assert done.wait(.5), 'parent caller remained on the killed owner lock'
+        assert client._fallback_completed.wait(.5)
+        assert len(stops) == 1
+        started = time.monotonic()
+        assert client.authorization_fence() == (client.boot, -1, -1)
+        assert RemoteOwnership(client).active is False
+        assert client.revoke_intent() == -1
+        capture = RemotePublicationCapture(client, lambda:True)
+        capture.close()
+        assert 'incomplete' in capture.status()['error']
+        client.stop()
+        assert time.monotonic()-started < .5
+        assert client.snapshot()['command_mux']['output_enabled'] is False
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(1.)
+        client.stop()
+        worker.join(.5)
+
+
+def test_slow_readonly_dds_and_ui_observers_cannot_hold_actor_admin_or_record_fifo(monkeypatch):
+    from middleware.core import ros_bridge
+    entered_ros, entered_ui, release = threading.Event(), threading.Event(), threading.Event()
+    published, manual = [], []
+    class Telemetry:
+        def __init__(self, *_args, **_kwargs): pass
+        def start(self): pass
+        def stop(self): pass
+        def publish(self, topic, kind, payload):
+            published.append((topic, kind, payload))
+            entered_ros.set()
+            release.wait(2.)
+            return True
+    monkeypatch.setattr(ros_bridge, 'RosBridge', Telemetry)
+    def ui(*_args):
+        entered_ui.set()
+        release.wait(2.)
+    facade = IsolatedRosBridge({'observer_flood':True, 'observer_ros_flood':True}, ui, bridge_factory=FakeBridge)
+    facade.ownership.manual_changed = lambda token,*_args: manual.append(token)
+    try:
+        facade.start()
+        assert entered_ros.wait(1.) and entered_ui.wait(1.)
+        before = facade._client.snapshot()['pumps']
+        time.sleep(.4)
+        started = time.monotonic()
+        assert facade._client.call('clock') > 0
+        assert time.monotonic()-started < .2
+        wait_until(lambda: facade._client.snapshot()['pumps'] > before+100)
+        assert facade._client.snapshot()['control_process']['observer_ros_dropped'] > 0
+        facade._client.call('publish', '/control/test_manual', 'test', {})
+        facade._client.call('owner.hold', urgent=True)
+        facade.flush_recording_events()
+        assert len(manual) == 2 and manual[0] is not None and manual[1] is None
+        # Defense in depth in the parent consumer, even if a malformed event
+        # somehow reached the observer transport.
+        release.set()
+        facade._client.channels['observer_ros'].put(('/control/hardware/enabled', {'data':True}))
+        wait_until(lambda: facade._client.snapshot()['control_process']['observer_ros_errors'] > 0)
+        assert {topic for topic,_kind,_payload in published} <= {
+            '/status/control/ownership', '/events/control/intervention', '/internal/control/action_evidence'}
+    finally:
+        release.set()
+        facade.stop()
 
 
 def test_priority_stop_invalidates_a_resume_queued_before_stop(client):
