@@ -528,7 +528,8 @@ def test_dagger_targets_in_recording_and_replay(rig, tmp_path):
         assert {c.topic for c in summary.channels.values()} == set(types)
         waist_channel = next(c.id for c in summary.channels.values() if c.topic == waist)
         assert summary.statistics.channel_message_counts.get(waist_channel, 0) == 0
-        assert [m.name for m in reader.iter_metadata()] == ['hc_teleop.session']
+        assert [m.name for m in reader.iter_metadata()] == [
+            'hc_teleop.session', 'hc_teleop.capture_window', 'hc_teleop.capture_audit']
         samples = [(c.topic, deserialize_message(m.data, get_message(s.name)))
                    for s,c,m in reader.iter_messages()]
     assert len(samples) == 12

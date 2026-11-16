@@ -33,6 +33,7 @@ class JointSnapshot:
 class CaptureTicket:
     generation: int | None
     completed: bool = False
+    promoted_window_start_ns: int | None = None
 
 
 def serialize_snapshot(snapshot):
@@ -73,6 +74,8 @@ class PublicationCapture:
         self._generation, self._active, self._closed = 0, False, False
         self._captured = self._enqueued = self._dropped = self._failed = 0
         self._last_error = ''
+        self._admission_closed_at = None
+        self._outside_preroll = 0
         self._thread = threading.Thread(target=self._run,
                                         name='published-action-recorder', daemon=True)
         self._thread.start()
@@ -121,7 +124,11 @@ class PublicationCapture:
                 self._history.append((published_at, snapshot))
                 self._prune_history(now)
                 if generation is not None:
-                    self._enqueue(generation, snapshot)
+                    if (ticket.promoted_window_start_ns is not None
+                            and snapshot.publication_ns < ticket.promoted_window_start_ns):
+                        self._outside_preroll += 1
+                    else:
+                        self._enqueue(generation, snapshot)
             self._condition.notify_all()
 
     def _prune_history(self, now):
@@ -139,7 +146,7 @@ class PublicationCapture:
         self._captured += 1
         self._condition.notify_all()
 
-    def begin_generation(self):
+    def begin_generation(self, *, window_start_ns=None):
         """Open after recorder ingress; prior generation must already be drained."""
         selected = bool(self.selected())
         with self._condition:
@@ -148,6 +155,8 @@ class PublicationCapture:
             self._generation += 1
             self._captured = self._enqueued = self._dropped = self._failed = 0
             self._last_error = ''
+            self._outside_preroll = 0
+            self._admission_closed_at = None
             self._active = selected
             if selected:
                 # A send may already be between reserve and complete when a
@@ -157,10 +166,14 @@ class PublicationCapture:
                 for ticket in self._tickets.values():
                     if ticket.generation is None:
                         ticket.generation = self._generation
+                        ticket.promoted_window_start_ns = window_start_ns
                         self._inflight[self._generation] = self._inflight.get(self._generation, 0)+1
                 self._prune_history(time.monotonic())
                 for _, snapshot in sorted(self._history, key=lambda item: item[0]):
-                    self._enqueue(self._generation, snapshot)
+                    if window_start_ns is None or snapshot.publication_ns >= window_start_ns:
+                        self._enqueue(self._generation, snapshot)
+                    else:
+                        self._outside_preroll += 1
             return self._generation
 
     def end_generation(self, timeout=10.):
@@ -171,7 +184,7 @@ class PublicationCapture:
         """
         deadline = time.monotonic()+timeout
         with self._condition:
-            self._active = False
+            self._close_admission_locked()
             generation = self._generation
             while self._inflight.get(generation, 0) or self._pending.get(generation, 0):
                 remaining = deadline-time.monotonic()
@@ -181,15 +194,22 @@ class PublicationCapture:
                 self._condition.wait(remaining)
 
     def close_admission(self):
-        """Fence new action tickets without waiting for serialization or IPC."""
+        """Fence new tickets and timestamp that fence under the same lock."""
         with self._condition:
-            self._active = False
+            return self._close_admission_locked()
+
+    def _close_admission_locked(self):
+        self._active = False
+        if self._admission_closed_at is None:
+            self._admission_closed_at = (time.time_ns(), time.monotonic_ns())
+        return self._admission_closed_at
 
     def status(self):
         with self._condition:
             return dict(generation=self._generation, active=self._active,
                         captured=self._captured, enqueued=self._enqueued,
                         dropped=self._dropped, failed=self._failed,
+                        outside_preroll=self._outside_preroll,
                         queued=len(self._queue), inflight=sum(self._inflight.values()),
                         pending_ingress=sum(self._pending.values()),
                         error=self._last_error)

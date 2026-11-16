@@ -10,6 +10,7 @@ from typing import Any
 
 from .topic_recorder import TopicRecorder, _counter_add, _lower_recording_priority
 from .x1_recording import is_x1
+from .capture_window import SensorPreroll, buffered_sensor
 
 
 def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -86,19 +87,22 @@ class StatePreroll:
 
 def idle_monitoring_subscriptions(
     subscriptions: list[dict[str, Any]],
+    *, buffer_sensors: bool = False,
 ) -> list[dict[str, Any]]:
-    """Keep the dashboard stage and bounded proprioception history warm.
+    """Keep the dashboard stage and selected bounded sensor history warm.
 
     Keeping every small recording topic subscribed while idle used almost one
     CPU core on X1.  More importantly, their reliable depth-64 queues could
     back-pressure publishers whenever this low-priority process was delayed.
-    Keep only the solver and two small proprioception streams, using the
-    non-blocking idle QoS. RosBridge measures the other live pipeline stages.
+    Ordinary X1 also keeps selected cameras and four small evidence streams
+    warm in this isolated process. These use explicitly non-blocking QoS and
+    bounded raw-byte history. Other modes retain the configured capture QoS.
     """
     return [
         item
         for item in subscriptions
         if str(item.get("topic", "")) in _IDLE_MONITOR_TOPICS
+        or buffer_sensors and buffered_sensor(item)
     ]
 
 
@@ -237,6 +241,7 @@ def _raw_recording_process(
     subscriptions_ready_event: Any,
     status_queue: Any,
     ingress_resources: Any,
+    capture_window: Any = None,
 ) -> None:
     """Receive serialized ROS messages without deserializing them."""
     _lower_recording_priority()
@@ -250,16 +255,27 @@ def _raw_recording_process(
         "rejected": 0,
         "serialization_errors": 0,
         "preroll_recorded": 0,
+        "outside_capture_window": 0,
+        "invalid_header_fallbacks": 0,
     }
     timestamps = {str(item["topic"]): deque(maxlen=120) for item in subscriptions}
     message_counts = {str(item["topic"]): 0 for item in subscriptions}
     gate = RateGate()
-    preroll = StatePreroll()
+    sensor_window = is_x1(config) and capture_window is not None
+    preroll = (SensorPreroll([str(item['topic']) for item in subscriptions if buffered_sensor(item)])
+               if sensor_window else StatePreroll())
     capture_active = False
     max_rates = {str(item['topic']): float(item.get('max_hz', 0.))
                  for item in subscriptions}
 
     def record_event(event, received_at, *, historical=False):
+        if sensor_window and capture_window.enabled():
+            allowed, clock = capture_window.allows(event)
+            if not allowed:
+                counters['outside_capture_window'] += 1
+                return
+            if clock == 'invalid_header':
+                counters['invalid_header_fallbacks'] += 1
         if not gate.allow(event['topic'], max_rates[event['topic']], received_at):
             counters['throttled'] += 1
             return
@@ -280,15 +296,22 @@ def _raw_recording_process(
         # Historical receive times also drive configured limits. Applying one
         # current time to the whole batch would incorrectly discard all but one.
         for received_at, event in preroll.snapshot(time.monotonic()):
+            if (sensor_window and not capture_window.enabled()
+                    and (event['topic'] not in _STATE_PREROLL_TOPICS
+                         or time.monotonic()-received_at > .25)):
+                continue
             record_event(event, received_at, historical=True)
 
     def enqueue(event):
         from .topic_recorder import enqueue_record
+        if sensor_window:
+            return enqueue_record(ingress_resources, event, capture_window=capture_window)
         return enqueue_record(ingress_resources, event)
 
-    idle_subscriptions = idle_monitoring_subscriptions(subscriptions)
+    idle_subscriptions = idle_monitoring_subscriptions(subscriptions, buffer_sensors=sensor_window)
     idle_topics = {str(item["topic"]) for item in idle_subscriptions}
     ros_subscriptions: dict[str, Any] = {}
+    subscription_modes: dict[str, str] = {}
     prepared_until = 0.0
     capture_seen = False
 
@@ -316,7 +339,16 @@ def _raw_recording_process(
                 ),
                 "pid": __import__("os").getpid(),
                 "priority": "low",
-                "state_preroll_ms": preroll.seconds * 1000,
+                "state_preroll_ms": 250. if sensor_window else preroll.seconds * 1000,
+                "history_retention_ms": preroll.seconds * 1000,
+                "capture_window": capture_window.snapshot() if sensor_window else {},
+                "preroll_byte_budget": preroll.byte_budget,
+                "preroll_budget_evicted_bytes": getattr(preroll, 'evicted_bytes', 0),
+                "warm_qos_override": {
+                    'reliability': 'BEST_EFFORT',
+                    'topics': sorted(source for source, mode in subscription_modes.items() if mode == 'warm'),
+                    'scope': 'ordinary X1 warm readers only; other recording readers use configured QoS',
+                } if sensor_window else None,
                 "preroll_buffered_messages": len(preroll.samples),
                 "error": error,
                 **counters,
@@ -329,6 +361,8 @@ def _raw_recording_process(
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.qos import qos_profile_sensor_data
         from .ros_qos import recording_subscription_qos
+        if sensor_window:
+            from .ros_qos import warm_recording_subscription_qos
         from rosidl_runtime_py.utilities import get_message
 
         domain_id = int(config.get("domain_id", 14))
@@ -339,10 +373,15 @@ def _raw_recording_process(
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
 
-        def create_subscription(item: dict[str, Any], source: str, *, recording: bool) -> None:
+        def create_subscription(item: dict[str, Any], source: str, *, recording: bool,
+                                warm: bool = False) -> None:
             topic = str(item["topic"])
+            mode = 'warm' if warm else 'recording' if recording else 'idle'
             if source in ros_subscriptions:
-                return
+                if subscription_modes[source] == mode:
+                    return
+                node.destroy_subscription(ros_subscriptions.pop(source))
+                subscription_modes.pop(source, None)
             msg_type = str(item["type"])
             max_hz = float(item.get("max_hz", 0.0))
             message_type = get_message(msg_type)
@@ -387,16 +426,18 @@ def _raw_recording_process(
                 message_type,
                 source,
                 callback,
-                recording_subscription_qos(item)
+                warm_recording_subscription_qos(item) if warm else recording_subscription_qos(item)
                 if recording
                 else qos_profile_sensor_data,
                 raw=True,
             )
+            subscription_modes[source] = mode
 
         def destroy_subscriptions() -> None:
             for subscription in ros_subscriptions.values():
                 node.destroy_subscription(subscription)
             ros_subscriptions.clear()
+            subscription_modes.clear()
 
         def activate_subscriptions() -> None:
             nonlocal prepared_until, capture_seen, capture_active
@@ -409,28 +450,33 @@ def _raw_recording_process(
                 message_counts[topic] = 0
             for key in counters:
                 counters[key] = 0
-            # Idle monitoring uses best-effort latest-sample QoS so it can
-            # never stall a producer. Recording recreates every subscription
-            # with the configured reliable/history policy before becoming
-            # ready, preserving capture completeness.
-            destroy_subscriptions()
+            # Ordinary X1 reuses its persistent best-effort warm readers with
+            # unchanged DDS identity across capture boundaries. Other streams
+            # and snapshot/correction modes use configured recording QoS.
+            ordinary = sensor_window and capture_window.enabled()
             for item in subscriptions:
                 for source in recording_inputs(str(item["topic"]), config):
-                    create_subscription(item, source, recording=True)
+                    create_subscription(item, source, recording=True,
+                                        warm=ordinary and buffered_sensor(item))
             subscriptions_ready_event.set()
             publish_status("ready")
 
         def deactivate_capture_subscriptions() -> None:
             nonlocal capture_seen
-            destroy_subscriptions()
+            for source in list(ros_subscriptions):
+                if source not in idle_topics:
+                    node.destroy_subscription(ros_subscriptions.pop(source))
+                    subscription_modes.pop(source, None)
             for item in idle_subscriptions:
-                create_subscription(item, str(item["topic"]), recording=False)
+                create_subscription(item, str(item["topic"]), recording=False,
+                                    warm=sensor_window and buffered_sensor(item))
             capture_seen = False
             subscriptions_ready_event.clear()
             publish_status("monitoring")
 
         for item in idle_subscriptions:
-            create_subscription(item, str(item["topic"]), recording=False)
+            create_subscription(item, str(item["topic"]), recording=False,
+                                warm=sensor_window and buffered_sensor(item))
         publish_status("monitoring" if ros_subscriptions else "standby")
         last_status = time.monotonic()
         while not stop_event.is_set():
@@ -499,6 +545,17 @@ class RosRecordingExecutor:
     def __init__(self, config: dict[str, Any], recorder: TopicRecorder):
         self.config = config
         self.recorder = recorder
+        # The mode is known only after TaskRecorder freezes its capture plan.
+        # Reconcile readers before opening ingress, never at the first frame.
+        base = getattr(recorder, 'recorder', recorder)
+        base.prepare_capture_window = self.prepare_recording
+        window = getattr(base, '_capture_window', None)
+        if window is not None and is_x1(config) and not getattr(base, '_reusable', False):
+            # First ordinary preflight must not briefly replace the warm
+            # readers with configured ones and then recreate them again when
+            # the first writer freezes its ordinary-X1 metadata. Snapshot
+            # metadata explicitly changes the mode before its final preflight.
+            window.reset(True)
         self.domain_id = int(config.get("domain_id", 14))
         self.subscriptions = recording_subscriptions(config)
         self._mp = mp.get_context("spawn")
@@ -546,6 +603,7 @@ class RosRecordingExecutor:
                 self._subscriptions_ready_event,
                 self._status_queue,
                 resources,
+                getattr(self.recorder, '_capture_window', None),
             ),
             name="ros-cdr-recorder",
             daemon=True,
@@ -645,14 +703,20 @@ class RosRecordingExecutor:
             with self._lock:
                 self._status["serialization_errors"] += 1
             return
-        accepted = self.recorder.record(
-            {
+        event = {
                 "kind": "ros_message",
                 "topic": topic,
                 "msg_type": msg_type,
                 "_raw": raw_data,
                 "stamp_ns": time.time_ns(),
             }
-        )
+        window = getattr(self.recorder, '_capture_window', None)
+        if window is not None and window.enabled():
+            allowed, clock = window.allows(event)
+            if not allowed:
+                with self._lock:
+                    self._status['outside_capture_window'] = self._status.get('outside_capture_window', 0)+1
+                return
+        accepted = self.recorder.record(event)
         with self._lock:
             self._status["recorded" if accepted else "rejected"] += 1

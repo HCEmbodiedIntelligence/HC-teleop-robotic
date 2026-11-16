@@ -41,3 +41,16 @@ def recording_subscription_qos(item: dict[str, Any]):
     from rclpy.qos import QoSProfile
     return QoSProfile(depth=max(64, qos.depth), history=qos.history,
                       reliability=qos.reliability, durability=qos.durability)
+
+
+def warm_recording_subscription_qos(item: dict[str, Any]):
+    """Persistent ordinary-X1 evidence readers must never back-pressure control.
+
+    Keep the configured recording depth, but explicitly use BEST_EFFORT for
+    this limited set of warm sensor streams. Snapshot/correction readers keep
+    their configured policy through recording_subscription_qos.
+    """
+    from rclpy.qos import QoSProfile, ReliabilityPolicy
+    qos = recording_subscription_qos(item)
+    return QoSProfile(depth=qos.depth, history=qos.history,
+                      reliability=ReliabilityPolicy.BEST_EFFORT, durability=qos.durability)

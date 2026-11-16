@@ -183,3 +183,34 @@ def test_selection_off_and_recording_rejection_are_explicit():
     assert capture.status()['failed'] == 1
     assert 'rejected by recorder ingress' in capture.status()['error']
     capture.close()
+
+
+def test_promoted_idle_ticket_respects_real_publication_window_even_if_complete_is_late():
+    recorder = Recorder()
+    capture = PublicationCapture(recorder, serializer=serializer)
+    old, inside = capture.reserve(), capture.reserve()
+    capture.begin_generation(window_start_ns=1_000_000_000)
+    capture.complete(old, message(1), publication_ns=999_999_999,
+                     publication_monotonic=time.monotonic())
+    capture.complete(inside, message(2), publication_ns=1_000_000_000,
+                     publication_monotonic=time.monotonic())
+    capture.end_generation()
+    assert [event['stamp_ns'] for _, event in recorder.events] == [1_000_000_000]
+    assert capture.status()['outside_preroll'] == 1
+    assert capture.status()['failed'] == capture.status()['dropped'] == 0
+    capture.close()
+
+
+def test_admission_fence_has_one_idempotent_timestamp_and_stops_new_generation_tickets():
+    recorder = Recorder()
+    capture = PublicationCapture(recorder, serializer=serializer)
+    capture.begin_generation()
+    reserved = capture.reserve()
+    fence = capture.close_admission()
+    assert fence == capture.close_admission()
+    assert capture.reserve().generation is None
+    capture.complete(reserved, message(1), publication_ns=fence[0]+1)
+    capture.end_generation()
+    assert capture.close_admission() == fence
+    assert [event['stamp_ns'] for _, event in recorder.events] == [fence[0]+1]
+    capture.close()

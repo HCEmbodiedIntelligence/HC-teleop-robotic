@@ -158,6 +158,11 @@ class DiagnosticLogs:
             return False
 
     def emit(self, event):
+        # These high-rate payloads were already discarded by _normalize.
+        # Reject before waking the worker: queueing each ROS/camera sample
+        # used to trigger another saved-log scan and compete with control.
+        if isinstance(event, dict) and event.get('kind') in _SKIP:
+            return not self._closed
         return self._offer(('event', event))
 
     def log(self, level, message, source='middleware', **details):
@@ -477,6 +482,7 @@ class DiagnosticLogs:
             self._append(entry)
 
     def _run(self):
+        next_tail = 0.
         while not self._stop.is_set() or not self._queue.empty():
             try:
                 kind, value = self._queue.get(timeout=self.poll_interval)
@@ -506,7 +512,9 @@ class DiagnosticLogs:
                                     'dropped': self._dropped}}))
                 except Exception as exc:
                     self._processing_failed(exc, 'log gap processing failed')
-            if not self._stop.is_set():
+            now = time.monotonic()
+            if not self._stop.is_set() and now >= next_tail:
+                next_tail = now + self.poll_interval
                 try:
                     self._tail()
                 except Exception as exc:

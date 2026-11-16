@@ -170,6 +170,9 @@ class RosBridge:
         self._callback_timing_lock = threading.Lock()
         self._callback_timings = {}
         self._slow_callbacks = deque(maxlen=32)
+        self._command_timing_sequence = 0
+        self._command_stage_timings = {}
+        self._slow_command_stages = deque(maxlen=32)
         self._control_contention = deque(maxlen=64)
         self._contention_thread = None
         self._boundary = None
@@ -192,6 +195,7 @@ class RosBridge:
         if not math.isfinite(self._ready_timeout) or self._ready_timeout <= 0:
             raise ValueError('hardware_ready_timeout_sec must be positive and finite')
         self._ros_now = time.time
+        self._control_clock = None
         self._source_cutoff = -math.inf
         self._source_stamps = {}
         self._output_epoch = 0
@@ -240,8 +244,11 @@ class RosBridge:
         # them while holding the lock used by the final actuator send.
         ownership = self.ownership.snapshot()
         boundary = self._boundary if self._legacy_enabled else None
-        boundary_wall_ns = (boundary.node.get_clock().now().nanoseconds
-                            if boundary is not None else None)
+        boundary_wall_ns = None
+        if boundary is not None:
+            read_clock = getattr(boundary, 'clock_now_ns', None)
+            boundary_wall_ns = (read_clock() if callable(read_clock)
+                                else boundary.node.get_clock().now().nanoseconds)
         with self._lock:
             def recent_rate(samples: deque[float]) -> float:
                 recent = [stamp for stamp in samples if now - stamp <= 2.0]
@@ -253,6 +260,8 @@ class RosBridge:
             with self._callback_timing_lock:
                 result['callback_timings'] = {name:dict(value) for name,value in self._callback_timings.items()}
                 result['slow_callbacks'] = list(self._slow_callbacks)
+                result['command_stage_timings'] = {name:dict(value) for name,value in self._command_stage_timings.items()}
+                result['slow_command_stages'] = list(self._slow_command_stages)
                 result['control_contention_samples'] = list(self._control_contention)
             result['ownership'] = ownership
             if self._legacy_enabled and self._boundary:
@@ -543,6 +552,42 @@ class RosBridge:
             self._hardware_ready_last = current
 
     def forward_live_command(self, source: str, message: Any, publish: Callable, token=None) -> bool:
+        # Sample one in eight callbacks. Clock/serialization waits need wall
+        # and thread CPU time to distinguish native/GIL waiting from compute.
+        # Aggregation happens after all final-send locks have been released.
+        self._command_timing_sequence += 1
+        if self._command_timing_sequence % 8 != 1:
+            return self._forward_live_command(source, message, publish, token)
+        started = time.monotonic_ns(), time.thread_time_ns()
+        timing = {'_previous': started}
+        try:
+            return self._forward_live_command(source, message, publish, token, timing=timing)
+        finally:
+            finished = time.monotonic_ns(), time.thread_time_ns()
+            timing.pop('_previous', None)
+            timing['total'] = dict(wall_ms=(finished[0]-started[0])/1e6,
+                                   cpu_ms=(finished[1]-started[1])/1e6)
+            with self._callback_timing_lock:
+                for stage, elapsed in timing.items():
+                    key = source+':'+stage
+                    value = self._command_stage_timings.setdefault(key, dict(samples=0, max_ms=0., max_cpu_ms=0.))
+                    value.update(samples=value['samples']+1, last_ms=elapsed['wall_ms'],
+                                 last_cpu_ms=elapsed['cpu_ms'],
+                                 max_ms=max(value['max_ms'], elapsed['wall_ms']),
+                                 max_cpu_ms=max(value['max_cpu_ms'], elapsed['cpu_ms']))
+                if timing['total']['wall_ms'] >= 10.:
+                    self._slow_command_stages.append(dict(source=source, stamp_ns=time.time_ns(), stages=timing))
+
+    @staticmethod
+    def _command_checkpoint(timing, stage):
+        if timing is not None:
+            now = time.monotonic_ns(), time.thread_time_ns()
+            previous = timing['_previous']
+            timing[stage] = dict(wall_ms=(now[0]-previous[0])/1e6,
+                                 cpu_ms=(now[1]-previous[1])/1e6)
+            timing['_previous'] = now
+
+    def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
         """Keep authority across slow conversion and recheck at actuator send."""
         now = time.monotonic()
         stream = source
@@ -579,11 +624,14 @@ class RosBridge:
                 self._mux_rejection_reasons[source+':'+reason] += 1
                 return False
             epoch = self._output_epoch
+        self._command_checkpoint(timing, 'initial_gate')
         prepared = self._boundary.prepare(message) if self._boundary else message
+        self._command_checkpoint(timing, 'prepare')
         capture = getattr(self, '_publication_capture', None)
         arm_target = (self._legacy_enabled and self._boundary and prepared is not None
                       and set(prepared[0].name).intersection(self._boundary.arms))
         ticket = capture.reserve() if capture is not None and arm_target else None
+        self._command_checkpoint(timing, 'capture_reserve')
         published, publication_ns, publication_monotonic = None, None, None
         try:
             with self._lock:
@@ -618,9 +666,11 @@ class RosBridge:
         finally:
             # No snapshot copy, serialization, queue IPC or capture bookkeeping
             # executes while holding the final send/authority lock.
+            self._command_checkpoint(timing, 'commit_publish')
             if ticket is not None:
                 capture.complete(ticket, published, publication_ns=publication_ns,
                                  publication_monotonic=publication_monotonic)
+            self._command_checkpoint(timing, 'capture_complete')
 
     def _enqueue(self, command: str, data: Any) -> bool:
         try:
@@ -815,7 +865,9 @@ class RosBridge:
                     JointState,
                 )
 
-                self._ros_now = lambda: node.get_clock().now().nanoseconds * 1e-9
+                from .control_clock import ControlClock
+                self._control_clock = ControlClock(node.get_clock())
+                self._ros_now = lambda: self._control_clock.now_ns() * 1e-9
                 from std_msgs.msg import Header
                 permit_pub = node.create_publisher(Header,
                     str(mux_config.get('motion_permit_topic', '/control/motion/permit')), 1)
@@ -1080,6 +1132,8 @@ class RosBridge:
                 self._set_status(dataset_process=dict(state='stopped'))
             if robot_api_boundary is not None:
                 robot_api_boundary.close()
+            if self._control_clock is not None:
+                self._control_clock.close()
             if command_executor is not None and command_node is not None:
                 command_executor.remove_node(command_node)
             if command_node is not None:

@@ -19,6 +19,10 @@ from mcap.writer import Writer as McapWriter
 from .background_process import background_environment
 from .takeover_log import takeover_path
 from .x1_recording import ordinary_x1_capture
+from .capture_window import (
+    AUDIT_METADATA, WINDOW_METADATA, CaptureAudit, CaptureWindow,
+    buffered_sensor, read_capture_metadata,
+)
 
 
 _PRIMITIVE_TYPES = {
@@ -62,7 +66,7 @@ def _counter_add(counter: Any, value: int = 1) -> None:
         counter.value += int(value)
 
 
-def enqueue_record(resources, event, *, allow_closed=False, finished=None):
+def enqueue_record(resources, event, *, allow_closed=False, finished=None, capture_window=None):
     """Bound both message count and payload bytes under the ingress barrier."""
     target, accepting, dropped, lock, accepted, queued_bytes, budget = resources
     raw = event.get('_raw')
@@ -70,6 +74,8 @@ def enqueue_record(resources, event, *, allow_closed=False, finished=None):
     with lock:
         if ((not accepting.is_set() and not allow_closed)
                 or (allow_closed and (finished is None or finished.is_set()))):
+            return False
+        if capture_window is not None and capture_window.enabled() and not capture_window.allows(event)[0]:
             return False
         if _counter_get(queued_bytes)+size > budget:
             _counter_add(dropped)
@@ -184,6 +190,7 @@ def _mcap_writer_process(
     queued_bytes: Any,
     ingress_lock: Any,
     recording_topics: tuple[tuple[str, str], ...] | None = None,
+    capture_window: Any = None,
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
     _lower_recording_priority()
@@ -191,6 +198,8 @@ def _mcap_writer_process(
     x1_capture = ordinary_x1_capture(metadata)
     schemas: dict[str, int] = {}
     channels: dict[tuple[str, str], int] = {}
+    capture_audit = (CaptureAudit(capture_window=capture_window)
+                     if capture_window is not None and capture_window.enabled() else None)
     try:
         with Path(path).open("wb") as stream:
             writer = McapWriter(stream)
@@ -228,6 +237,8 @@ def _mcap_writer_process(
                             _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
                         continue
                     stamp_ns = int(event.get("stamp_ns") or time.time_ns())
+                    if capture_audit is not None and isinstance(raw_data, bytes):
+                        capture_audit.observe(event)
 
                     if isinstance(raw_data, bytes):
                         if not x1_capture and event.get('record_only') and topic not in record_only_topics:
@@ -294,6 +305,13 @@ def _mcap_writer_process(
                         _counter_add(messages)
                         _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
             finally:
+                window = capture_window.snapshot() if capture_window is not None else {}
+                if window:
+                    writer.add_metadata(WINDOW_METADATA, {
+                        key: json.dumps(value) if isinstance(value, (list, dict)) else str(value)
+                        for key, value in window.items()})
+                    writer.add_metadata(AUDIT_METADATA, {
+                        'json': json.dumps(capture_audit.snapshot(), separators=(',', ':'))})
                 writer.finish()
     except Exception as exc:
         ready_event.set()
@@ -304,7 +322,7 @@ def _mcap_writer_process(
 
 
 def _reusable_writer_process(control, event_queue, messages, errors, ready, finish,
-                             accepted, queued_bytes, ingress_lock, finished):
+                             accepted, queued_bytes, ingress_lock, finished, capture_window=None):
     """Prepared correction slots reuse a warm writer process between files."""
     while True:
         request = control.get()
@@ -312,7 +330,7 @@ def _reusable_writer_process(control, event_queue, messages, errors, ready, fini
             return
         path, metadata, recording_topics = request
         _mcap_writer_process(path, event_queue, messages, errors, ready, metadata,
-                             finish, accepted, queued_bytes, ingress_lock, recording_topics)
+                             finish, accepted, queued_bytes, ingress_lock, recording_topics, capture_window)
         finished.set()
 
 
@@ -474,6 +492,10 @@ class TopicRecorder(CorrectionSupport):
         self._queued_bytes = self._mp.Value('Q', 0)
         self._byte_budget = int(config.get('queue_bytes', 128*1024**2))
         self._finish_event = self._mp.Event()
+        self._capture_window = CaptureWindow(self._mp)
+        self._capture_window.buffered_topics = tuple(topic for topic, kind in (self._recording_topics or ())
+            if buffered_sensor({'topic': topic, 'type': kind}))
+        self._capture_evidence: dict[str, Any] = {}
         self._reusable = bool(config.get('reuse_writer_process', False))
         self._writer_control = self._mp.Queue(maxsize=1)
         self._finished_event = self._mp.Event()
@@ -614,6 +636,17 @@ class TopicRecorder(CorrectionSupport):
             for key, value in (metadata or {}).items()
             if value is not None
         }
+        # Snapshot/PRESERVE and intervention slots retain their existing capture
+        # contract. The shared sensor window is only for ordinary local X1 MCAP.
+        self._capture_window.reset(ordinary_x1_capture(self._active_metadata)
+            and not self._reusable and not self._active_metadata.get('capture_snapshot')
+            and not self._active_metadata.get('capture_snapshots'),
+            action_at_publication=self.publication_capture is not None
+                and self.records_topic('/action/joint_states', 'sensor_msgs/msg/JointState'))
+        self._capture_evidence = {}
+        prepare_window = getattr(self, 'prepare_capture_window', None)
+        if prepare_window is not None:
+            prepare_window()
         with self._lock:
             self._drain_queue(self._queue)
             self._drain_queue(self._error_queue)
@@ -630,7 +663,7 @@ class TopicRecorder(CorrectionSupport):
                     self._process = self._mp.Process(target=_reusable_writer_process,
                         args=(self._writer_control, self._queue, self._messages, self._error_queue,
                               self._ready_event, self._finish_event, self._accepted, self._queued_bytes,
-                              self._ingress_lock, self._finished_event), name='correction-writer', daemon=True)
+                              self._ingress_lock, self._finished_event, self._capture_window), name='correction-writer', daemon=True)
                     self._process.start()
                 self._writer_control.put_nowait((str(self.path), self._active_metadata, self._recording_topics))
             else:
@@ -648,6 +681,7 @@ class TopicRecorder(CorrectionSupport):
                     self._queued_bytes,
                     self._ingress_lock,
                     self._recording_topics,
+                    self._capture_window,
                 ),
                 name="mcap-writer",
                 daemon=True,
@@ -668,17 +702,35 @@ class TopicRecorder(CorrectionSupport):
             self._artifacts.mark_started(self._capture_identity)
             if self.takeovers and not self._reusable:
                 self.takeovers.begin(self.path)
-            self._accepting_event.set()
+            with self._ingress_lock:
+                self._capture_window.open()
+                self._accepting_event.set()
         capture = self.publication_capture
         if capture is not None:
             try:
-                capture.begin_generation()
+                window = self._capture_window.snapshot()
+                capture.begin_generation(**({'window_start_ns': window['window_start_ns']} if window else {}))
             except Exception:
                 self.stop()
                 raise
         return str(self.path)
 
+    def request_capture_stop(self):
+        """Fence recorder admission at intent time, before task-state fsync/drain."""
+        if self._process is not None:
+            # The raw producer rechecks its source-time window while holding
+            # this same ingress barrier. No sensor packet can pass using a
+            # stale pre-stop decision between the action fence and window write.
+            with self._ingress_lock:
+                if self.publication_capture is not None:
+                    wall, mono = self.publication_capture.close_admission()
+                    self._capture_window.request_stop(wall, now_monotonic_ns=mono)
+                else:
+                    self._capture_window.request_stop()
+        return self._capture_window.snapshot()
+
     def stop(self) -> dict[str, Any]:
+        self.request_capture_stop()
         capture = self.publication_capture
         if capture is not None:
             capture.close_admission()
@@ -687,11 +739,18 @@ class TopicRecorder(CorrectionSupport):
             return self.status()
         if self._reusable and self._finished_event.is_set():
             return self.status()
+        # This intent precedes draining and sealing. New actuator publications
+        # were fenced above; only the recorder's sensor ingress remains open.
         capture_ended_at = datetime.now(timezone.utc).isoformat()
+        if self._capture_window.enabled():
+            deadline = time.monotonic() + self._capture_window.late_remaining_seconds()
+            while process.is_alive() and time.monotonic() < deadline:
+                time.sleep(min(.01, max(0., deadline-time.monotonic())))
         # Stop ordinary DDS ingress immediately. Reserved action publications
         # have a separate admission path so a delayed writer cannot extend the
         # video/state tail after action admission has already stopped.
         with self._ingress_lock:
+            self._capture_window.close_raw()
             self._accepting_event.clear()
         if capture is not None:
             capture.end_generation()
@@ -715,6 +774,7 @@ class TopicRecorder(CorrectionSupport):
         if process.exitcode not in (None, 0):
             self._last_error = f"MCAP writer exited with code {process.exitcode}"
         self.status()  # Drain writer errors before exporting a closed source.
+        self._capture_evidence = read_capture_metadata(self.path)
         if takeover_write is not None:
             try:
                 takeover_write.result()
@@ -905,6 +965,8 @@ class TopicRecorder(CorrectionSupport):
                 "export_error": self._export_error,
                 "lerobot_path": self._lerobot_path,
                 "publication_capture": capture_status,
+                "capture_window": self._capture_window.snapshot(),
+                "capture_audit": self._capture_evidence.get('capture_audit'),
                 "error": self._last_error or (capture_status or {}).get('error') or None,
             }
 

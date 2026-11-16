@@ -21,6 +21,8 @@ class LegacyTopicControl:
         from adapters.core.collision_safety import ModelCollisionGuard
 
         self.node, self.bridge, self.output = node, bridge, output
+        from .control_clock import ControlClock
+        self._clock = ControlClock(node.get_clock())
         profile = Path(bridge.config['legacy_control_profile'])
         self.teleop = yaml.safe_load((profile/'arm_teleop.yaml').read_text())
         self.settings = bridge.config.get('intervention', {})
@@ -106,6 +108,10 @@ class LegacyTopicControl:
         marker = self.teleop['grippers'][side].get('binary_state_joint')
         return self.hands[side] + ((marker,) if marker else ())
 
+    def clock_now_ns(self):
+        reader = getattr(self, '_clock', None)
+        return reader.now_ns() if reader is not None else self.node.get_clock().now().nanoseconds
+
     @staticmethod
     def stamp(message):
         return message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
@@ -124,7 +130,7 @@ class LegacyTopicControl:
         if not names:
             return True
         now = time.monotonic() if now is None else now
-        wall = self.node.get_clock().now().nanoseconds if wall_ns is None else wall_ns
+        wall = self.clock_now_ns() if wall_ns is None else wall_ns
         return all(n in self.positions and now-self.received[n] <= self.max_age
                    and -.05 <= (wall-self.sample_ns[n])*1e-9 <= self.max_age for n in names)
 
@@ -137,7 +143,7 @@ class LegacyTopicControl:
     def update_state(self, message, allowed):
         values = self.values(message)
         stamp, now = self.stamp(message), time.monotonic()
-        if not stamp or not -.05 <= (self.node.get_clock().now().nanoseconds-stamp)*1e-9 <= self.max_age:
+        if not stamp or not -.05 <= (self.clock_now_ns()-stamp)*1e-9 <= self.max_age:
             raise ValueError('stale measured feedback')
         measured_velocity = dict(zip(message.name, message.velocity)) if len(message.velocity) == len(message.name) else {}
         for name, value in values.items():
@@ -214,7 +220,7 @@ class LegacyTopicControl:
         with self.bridge._lock:
             self.last_rejection = reason
             self.recent_rejection = reason
-            self.last_rejection_ns = self.node.get_clock().now().nanoseconds
+            self.last_rejection_ns = self.clock_now_ns()
             self.diagnostics['rejected:'+reason.split(':', 1)[0]] += 1
 
     def receive_owned(self, message, token, *, frame_id=None):
@@ -278,7 +284,7 @@ class LegacyTopicControl:
             stamp = self.stamp(message)
             now = time.monotonic()
             with self.bridge._lock:
-                wall_ns = self.node.get_clock().now().nanoseconds
+                wall_ns = self.clock_now_ns()
                 # Hands retain the existing open-loop command path. Physical
                 # feedback is mandatory for arms/body, not for finger targets.
                 if not set(values) <= self.limits.keys() or not self.fresh(
@@ -341,7 +347,7 @@ class LegacyTopicControl:
         physical = {n for n,v in zip(target.name, target.position) if math.isfinite(v)} - self.sim_joints - self.model_only_joints
         # Final validation still samples the real ROS clock afresh; never
         # reuse the preparation timestamp across collision/authority work.
-        now, wall_ns = time.monotonic(), self.node.get_clock().now().nanoseconds
+        now, wall_ns = time.monotonic(), self.clock_now_ns()
         if (not self.fresh(physical-self.hand_names, now=now, wall_ns=wall_ns)
                 or generation != self.bridge.ownership.token
                 or not -.05 <= (wall_ns-stamp)*1e-9 <= self.max_age
@@ -376,7 +382,7 @@ class LegacyTopicControl:
 
     def status(self, *, wall_ns=None):
         now = time.monotonic()
-        wall = self.node.get_clock().now().nanoseconds if wall_ns is None else wall_ns
+        wall = self.clock_now_ns() if wall_ns is None else wall_ns
         timing = {}
         for name in self.feedback_order:
             if name not in self.positions:
@@ -401,5 +407,6 @@ class LegacyTopicControl:
                                  for side,names in self.hands.items()})
 
     def close(self):
+        self._clock.close()
         if self.collision:
             self.collision.close()

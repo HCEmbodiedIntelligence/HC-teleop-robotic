@@ -220,6 +220,12 @@ class TaskRecorder(CorrectionSupport):
                     self.prepare_recording()
                 writer.lerobot_task = binding['task']['name'] if binding else self.default_lerobot_task
                 job['path'] = writer.start(job['chosen_filename'], capture_metadata)
+                window = getattr(writer, '_capture_window', None)
+                window = window.snapshot() if window is not None else {}
+                if window:
+                    job['capture_window'] = window
+                    job['started_at'] = datetime.fromtimestamp(
+                        window['admission_start_ns']/1e9, timezone.utc).isoformat()
                 job['state'] = 'armed' if _prepared_writer else 'recording'
                 if _prepared_writer:
                     job['started_at'] = None
@@ -238,9 +244,18 @@ class TaskRecorder(CorrectionSupport):
                 return self.status()
             job = self.jobs[self.active]
             job['state'] = 'stopping'
+            stop_capture = getattr(self.recorder, 'request_capture_stop', None)
+            window = stop_capture() if stop_capture is not None else {}
+            if window:
+                job['capture_window'] = window
+                job['stop_requested_at'] = datetime.fromtimestamp(
+                    window['stop_requested_ns']/1e9, timezone.utc).isoformat()
             self.save(job)
             result = self.recorder.stop()
-            job.update(ended_at=now(), state='finalizing')
+            job.update(ended_at=job.get('stop_requested_at') or now(), state='finalizing')
+            if result.get('capture_window'):
+                job.update(capture_window=result['capture_window'],
+                    capture_audit=result.get('capture_audit'), drained_at=now())
             if result.get('error'):
                 job.update(state='interrupted', error='录制未完整关闭，请检查原始文件')
             self.active = None

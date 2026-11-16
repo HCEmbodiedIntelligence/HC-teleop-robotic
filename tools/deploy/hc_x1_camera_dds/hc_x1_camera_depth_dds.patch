@@ -1,0 +1,12 @@
+--- a/src/hc_tj/hc_tj_camera_bridge/launch/camera_bridge.launch.py
++++ b/src/hc_tj/hc_tj_camera_bridge/launch/camera_bridge.launch.py
+@@ -46,5 +46,9 @@
+         additional_env={
+             "ROS_DOMAIN_ID": domain_id,
+             "ROS_LOCALHOST_ONLY": localhost_only,
++            # Depth carries full 16-bit frames; use the same isolated large-image
++            # transport as color instead of inheriting the legacy DDS defaults.
++            "FASTRTPS_DEFAULT_PROFILES_FILE": head_dds_profile,
++            "FASTDDS_DEFAULT_PROFILES_FILE": head_dds_profile,
+         },
+     )
