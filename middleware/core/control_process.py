@@ -66,6 +66,7 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
     bridge_factory = bridge_factory or RosBridge
     core_config = copy.deepcopy(config)
     core_config.update(_control_actor_mode=True, subscriptions=[])
+    core_config['node_name'] = config.get('node_name', 'hc_teleop_middleware')+'_control_owner'
     core_config['dataset_topics'] = {'enabled': False}
     counters = {'observer_dropped': 0, 'recording_events_dropped': 0,
                 'rpc_replies_dropped': 0, 'stale_queued_commands': 0}
@@ -824,7 +825,7 @@ class IsolatedRosBridge:
     def status(self):
         result = self._telemetry.status()
         core = self._client.snapshot()
-        for key in ('command_mux', 'ownership', 'legacy_control', 'control_actor', 'callback_timings',
+        for key in ('command_mux', 'ownership', 'legacy_control', 'control_actor', 'callback_timings', 'slow_callbacks',
                     'command_stage_timings', 'slow_command_stages', 'control_contention_samples',
                     'control_process', 'authorization_fence', 'snapshot_monotonic_ns'):
             if key in core:

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,51 @@ LEGACY_IK_DEFAULTS = {
 }
 
 
+def _timing_metric() -> dict[str, float | int]:
+    return dict(samples=0, last_wall_ms=0., last_cpu_ms=0., max_wall_ms=0., max_cpu_ms=0.)
+
+
+def _measure_clocks() -> tuple[int, int]:
+    return time.monotonic_ns(), time.thread_time_ns()
+
+
+def _record_elapsed(metric, wall_ns: int, cpu_ns: int) -> None:
+    wall_ms, cpu_ms = wall_ns / 1e6, cpu_ns / 1e6
+    metric.update(samples=metric['samples']+1, last_wall_ms=wall_ms, last_cpu_ms=cpu_ms,
+                  max_wall_ms=max(metric['max_wall_ms'], wall_ms),
+                  max_cpu_ms=max(metric['max_cpu_ms'], cpu_ms))
+
+
+def _generic_pipeline_metrics() -> dict[str, Any]:
+    return dict(received_total=0, published_total=0, publish_errors=0, callback_errors=0,
+                rejected={reason: 0 for reason in (
+                    'intervention_active', 'source_not_vr', 'source_feedback_pending',
+                    'motion_backend', 'length_mismatch', 'nonfinite_position', 'disabled',
+                    'hardware_not_ready', 'homing', 'stale_feedback', 'collision')},
+                last_received_source_stamp_ns=0, last_received_monotonic_ns=0, last_received_wall_ns=0,
+                receive_source_age_basis='wall_receive_minus_original_header_diagnostic_only',
+                last_receive_source_age_comparable=False, source_age_incomparable_total=0,
+                last_receive_source_age_ms=None, max_receive_source_age_ms=None,
+                last_published_source_stamp_ns=0, last_published_monotonic_ns=0,
+                last_publication_gap_ms=None, max_publication_gap_ms=0.,
+                publication_gap_basis='successful_publish_call_start_monotonic',
+                callback=_timing_metric(), publish=_timing_metric(),
+                _publication_gaps=deque(maxlen=256), _source_ages=deque(maxlen=256))
+
+
+def _generic_pipeline_snapshot(metrics):
+    if metrics is None:
+        return None
+    now = time.monotonic_ns()
+    result = {key: value for key, value in metrics.items() if not key.startswith('_')}
+    result['recent_window_seconds'] = 2.
+    result['max_publication_gap_ms_recent'] = max(
+        (value for stamp, value in metrics['_publication_gaps'] if now-stamp <= 2_000_000_000), default=None)
+    result['max_receive_source_age_ms_recent'] = max(
+        (value for stamp, value in metrics['_source_ages'] if now-stamp <= 2_000_000_000), default=None)
+    return result
+
+
 class RobotArmTeleopNode(Node):
     """Profile-driven bimanual teleop node with a two-clutch state machine."""
 
@@ -138,6 +184,10 @@ class RobotArmTeleopNode(Node):
         self.solver_message_count = 0
         self.generic_command_stamp = 0.0
         self.generic_command_count = 0
+        self.generic_command_pipeline = _generic_pipeline_metrics()
+        self.control_tick_metrics = dict(ticks=0, sampled_ticks=0, sample_every_ticks=16,
+            stages={name: _timing_metric() for name in ('sync_model', 'actual_head_fk', 'remainder', 'total')})
+        self._control_tick_sample = None
         self.generic_aux_command: dict[str, float] = {}
         self.waist_output_enabled = False
         self.waist_clutch_rearm_required = False
@@ -1046,26 +1096,65 @@ class RobotArmTeleopNode(Node):
                 self._check_initial_homing()
 
     def _generic_command_callback(self, message: JointState) -> None:
+        metrics = getattr(self, 'generic_command_pipeline', None)
+        if metrics is None:
+            RobotArmTeleopNode._forward_generic_command(self, message)
+            return
+        started = _measure_clocks()
+        metrics['received_total'] += 1
+        metrics['last_received_monotonic_ns'] = started[0]
+        source_ns = int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec)
+        metrics['last_received_source_stamp_ns'] = source_ns
+        received_wall_ns = time.time_ns()
+        metrics['last_received_wall_ns'] = received_wall_ns
+        # This is observation only. Avoid an additional native ROS Clock.now()
+        # read on the forwarding path. Simulated/foreign epoch headers cannot
+        # be compared to wall time and must not masquerade as control latency.
+        comparable = source_ns > 0 and abs(received_wall_ns-source_ns) <= 86_400_000_000_000
+        source_age = (received_wall_ns-source_ns)/1e6 if comparable else None
+        metrics['last_receive_source_age_comparable'] = comparable
+        metrics['source_age_incomparable_total'] += not comparable
+        metrics['last_receive_source_age_ms'] = source_age
+        previous_max = metrics['max_receive_source_age_ms']
+        if source_age is not None:
+            metrics['max_receive_source_age_ms'] = source_age if previous_max is None else max(previous_max, source_age)
+            metrics['_source_ages'].append((started[0], source_age))
+        try:
+            rejected = RobotArmTeleopNode._forward_generic_command(self, message)
+            if rejected is not None:
+                metrics['rejected'][rejected] += 1
+        except Exception:
+            metrics['callback_errors'] += 1
+            raise
+        finally:
+            finished = _measure_clocks()
+            _record_elapsed(metrics['callback'], finished[0]-started[0], finished[1]-started[1])
+
+    def _forward_generic_command(self, message: JointState) -> str | None:
         if getattr(self, "intervention", None) and self.intervention.active:
-            return
-        if self.control_source != "vr" or self.source_feedback_pending:
-            return
+            return 'intervention_active'
+        if self.control_source != "vr":
+            return 'source_not_vr'
+        if self.source_feedback_pending:
+            return 'source_feedback_pending'
         if self.backend == "motion":
-            return  # The shared RTC output goes directly to the selected boundary.
+            return 'motion_backend'  # Shared RTC output goes directly to the selected boundary.
         if len(message.name) != len(message.position):
-            return
+            return 'length_mismatch'
         if not all(math.isfinite(float(value)) for value in message.position):
-            return
+            return 'nonfinite_position'
         now = self._monotonic()
         previous_stamp = self.generic_command_stamp
         self.generic_command_stamp = now
         self.generic_command_count += 1
         if not self.enabled:
-            return
-        if not self.hardware_ready or self.homing:
-            return
+            return 'disabled'
+        if not self.hardware_ready:
+            return 'hardware_not_ready'
+        if self.homing:
+            return 'homing'
         if not self._ensure_vr_feedback():
-            return
+            return 'stale_feedback'
         if self.solver_rearm.blocked:
             stamp_ns = (
                 int(message.header.stamp.sec) * 1_000_000_000
@@ -1094,12 +1183,34 @@ class RobotArmTeleopNode(Node):
                 merged.pop(name, None)
         if arms_active or self.body.active:
             if not self._collision_command_allowed(merged, now):
-                return
+                return 'collision'
         output = JointState()
         output.header = message.header
         output.name = list(merged)
         output.position = [merged[name] for name in output.name]
-        self.command_pub.publish(output)
+        metrics = getattr(self, 'generic_command_pipeline', None)
+        if metrics is None:
+            self.command_pub.publish(output)
+        else:
+            started = _measure_clocks()
+            try:
+                self.command_pub.publish(output)
+            except Exception:
+                metrics['publish_errors'] += 1
+                raise
+            finally:
+                finished = _measure_clocks()
+                _record_elapsed(metrics['publish'], finished[0]-started[0], finished[1]-started[1])
+            previous = metrics['last_published_monotonic_ns']
+            if previous:
+                gap = (started[0]-previous)/1e6
+                metrics['last_publication_gap_ms'] = gap
+                metrics['max_publication_gap_ms'] = max(metrics['max_publication_gap_ms'], gap)
+                metrics['_publication_gaps'].append((started[0], gap))
+            metrics['published_total'] += 1
+            metrics['last_published_monotonic_ns'] = started[0]
+            metrics['last_published_source_stamp_ns'] = (
+                int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec))
         self.last_command.update(merged)
 
     def _stop_callback(self, message: Bool) -> None:
@@ -3482,14 +3593,49 @@ class RobotArmTeleopNode(Node):
         self._publish_status(now, feedback_fresh)
 
     def _control_tick(self) -> None:
+        metrics = getattr(self, 'control_tick_metrics', None)
+        if metrics is None:
+            RobotArmTeleopNode._control_tick_body(self)
+            return
+        metrics['ticks'] += 1
+        if metrics['ticks'] % metrics['sample_every_ticks']:
+            RobotArmTeleopNode._control_tick_body(self)
+            return
+        started = _measure_clocks()
+        sample = self._control_tick_sample = dict(sync_model=(0, 0), actual_head_fk=(0, 0))
+        try:
+            RobotArmTeleopNode._control_tick_body(self)
+        finally:
+            finished = _measure_clocks()
+            total = finished[0]-started[0], finished[1]-started[1]
+            sample['remainder'] = tuple(total[i]-sample['sync_model'][i]-sample['actual_head_fk'][i]
+                                        for i in (0, 1))
+            sample['total'] = total
+            for name, elapsed in sample.items():
+                _record_elapsed(metrics['stages'][name], *elapsed)
+            metrics['sampled_ticks'] += 1
+            self._control_tick_sample = None
+
+    def _control_tick_body(self) -> None:
         now = self._monotonic()
         feedback_fresh = now - self.joint_state_stamp <= float(
             self.control["joint_state_timeout"]
         )
         command = self._command_seed() if feedback_fresh else None
         if command is not None:
-            self._sync_model()
-            self._publish_actual_poses()
+            sample = getattr(self, '_control_tick_sample', None)
+            if sample is None:
+                self._sync_model()
+                self._publish_actual_poses()
+            else:
+                started = _measure_clocks()
+                self._sync_model()
+                finished = _measure_clocks()
+                sample['sync_model'] = finished[0]-started[0], finished[1]-started[1]
+                started = _measure_clocks()
+                self._publish_actual_poses()
+                finished = _measure_clocks()
+                sample['actual_head_fk'] = finished[0]-started[0], finished[1]-started[1]
         if self.solver_rearm.blocked and self._input_fresh(self.arms["right"], now):
             right_grip = self._clutch_pressed(self.arms["right"])
             if self.solver_rearm.observe_clutch(right_grip):
@@ -3820,9 +3966,13 @@ class RobotArmTeleopNode(Node):
                 or now - self.generic_command_stamp
                 <= float(self.control["joint_state_timeout"]),
                 "command_messages": self.generic_command_count,
+                # Bounded counters/timings; formatting stays in this existing
+                # low-rate status publication, outside the command callback.
+                "pipeline": _generic_pipeline_snapshot(getattr(self, 'generic_command_pipeline', None)),
                 "rearm_state": self.solver_rearm.state,
                 "hardware_ready": self.hardware_ready,
             },
+            "control_tick_timing": getattr(self, 'control_tick_metrics', None),
             "head_base_pose": {
                 "mode": getattr(self, "head_base_mode", "pose"),
                 "enabled": (getattr(self, "head_base_follower", None) is not None or

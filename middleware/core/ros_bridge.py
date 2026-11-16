@@ -1011,7 +1011,18 @@ class RosBridge:
 
             context = Context()
             rclpy.init(args=[], context=context, domain_id=domain_id)
-            node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"), context=context)
+            node_options = ({'enable_rosout': False, 'start_parameter_services': False}
+                            if self._control_actor_mode else {})
+            node = rclpy.create_node(self.config.get("node_name", "hc_teleop_middleware"),
+                                     context=context, **node_options)
+            def control_node_for(suffix):
+                # One actor has one wait-set owner. Extra nodes would add six
+                # unused parameter services and guard conditions on every spin.
+                if self._control_actor_mode:
+                    return node
+                return rclpy.create_node(
+                    self.config.get("node_name", "hc_teleop_middleware")+suffix,
+                    context=context)
             # These short callbacks ran on a single executor before DAgger.
             # Humble's shared thread pool adds wait-set/GIL contention here.
             # Keep authority/feedback on their own executor so a slow command
@@ -1028,38 +1039,30 @@ class RosBridge:
             executor.add_node(node)
             # Dashboard callbacks must not queue behind collision checking and
             # command preparation. Count actual received messages independently.
-            telemetry_node = rclpy.create_node(
-                self.config.get("node_name", "hc_teleop_middleware") + "_telemetry",
-                context=context,
-            )
+            telemetry_node = control_node_for("_telemetry")
             telemetry_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
-            telemetry_executor.add_node(telemetry_node)
+            if telemetry_node is not node:
+                telemetry_executor.add_node(telemetry_node)
             if self._mux_enabled:
-                control_node = rclpy.create_node(
-                    self.config.get("node_name", "hc_teleop_middleware") + "_control",
-                    context=context,
-                )
+                control_node = control_node_for("_control")
                 control_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
-                control_executor.add_node(control_node)
+                if control_node is not node:
+                    control_executor.add_node(control_node)
                 # MutuallyExclusiveCallbackGroup alone does not isolate work
                 # on a SingleThreadedExecutor. Drain actuator targets on their
                 # own wait-set, independently of dataset projection/metadata.
                 # Authority and feedback remain on the control executor; the
                 # existing final gate still rechecks them immediately at send.
-                command_node = rclpy.create_node(
-                    self.config.get("node_name", "hc_teleop_middleware") + "_commands",
-                    context=context,
-                )
+                command_node = control_node_for("_commands")
                 command_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
-                command_executor.add_node(command_node)
+                if command_node is not node:
+                    command_executor.add_node(command_node)
                 # Finger targets are independent overwriteable streams. Keep
                 # their callbacks from consuming the arm's depth-one reader.
-                hand_node = rclpy.create_node(
-                    self.config.get("node_name", "hc_teleop_middleware") + "_hands",
-                    context=context,
-                )
+                hand_node = control_node_for("_hands")
                 hand_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
-                hand_executor.add_node(hand_node)
+                if hand_node is not node:
+                    hand_executor.add_node(hand_node)
             if self.camera_topics and not self._control_actor_mode:
                 # BEST_EFFORT camera frames must not wait behind 100 Hz control,
                 # status and command callbacks.  A separate node/wait-set keeps
@@ -1410,9 +1413,17 @@ class RosBridge:
                 self._actor_flush_commands = None
                 if executor is not None:
                     executor.shutdown(timeout_sec=5.)
+                    seen_nodes = set()
                     for actor_node in (telemetry_node, control_node, command_node, hand_node, camera_node, node):
-                        if actor_node is not None:
+                        if actor_node is not None and id(actor_node) not in seen_nodes:
                             executor.remove_node(actor_node)
+                            seen_nodes.add(id(actor_node))
+                # Release shared clock/collision resources before destroying the
+                # single node in the normal main-node cleanup below.
+                telemetry_node = None if telemetry_node is node else telemetry_node
+                control_node = None if control_node is node else control_node
+                command_node = None if command_node is node else command_node
+                hand_node = None if hand_node is node else hand_node
                 # Old cleanup still owns each distinct node, but the shared
                 # executor must only be stopped and removed once.
                 executor = telemetry_executor = control_executor = command_executor = hand_executor = camera_executor = None

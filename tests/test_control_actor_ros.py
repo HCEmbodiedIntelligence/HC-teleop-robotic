@@ -46,6 +46,19 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
     source = node.create_publisher(JointState, target_topic, qos_profile_sensor_data)
     actual = []
     subscription = node.create_subscription(JointState, final_topic, actual.append, 10)
+    core_nodes, destroyed = [], []
+    original_create = rclpy.create_node
+    def create_node(name, **kwargs):
+        created = original_create(name, **kwargs)
+        if name.startswith('test_control_actor_core'):
+            core_nodes.append((created, kwargs))
+            original_destroy = created.destroy_node
+            def destroy():
+                destroyed.append(id(created))
+                return original_destroy()
+            created.destroy_node = destroy
+        return created
+    monkeypatch.setattr(rclpy, 'create_node', create_node)
     try:
         bridge.start()
         deadline = time.monotonic()+5.
@@ -58,6 +71,10 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
                 break
         assert source.get_subscription_count() == 1
         assert bridge._actor_thread_ident is not None
+        assert len(core_nodes) == 1
+        assert core_nodes[0][1]['enable_rosout'] is False
+        assert core_nodes[0][1]['start_parameter_services'] is False
+        assert not tuple(core_nodes[0][0].services)
         assert bridge._contention_thread is None
         assert bridge.status()['topic_health'] == {}
         assert not bridge.status().get('dataset_process')
@@ -89,6 +106,7 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
         bridge.stop()
         assert bridge.status()['state'] != 'error', bridge.status()
         assert bridge._thread is None or not bridge._thread.is_alive()
+        assert destroyed == [id(core_nodes[0][0])]
         node.destroy_subscription(subscription)
         executor.shutdown()
         node.destroy_node()

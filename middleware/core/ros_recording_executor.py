@@ -11,6 +11,7 @@ from typing import Any
 from .topic_recorder import TopicRecorder, _counter_add, _lower_recording_priority
 from .x1_recording import is_x1
 from .capture_window import SensorPreroll, buffered_sensor
+from .config import isolated_control_process_enabled
 
 
 def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -20,6 +21,24 @@ def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
         for item in config.get("subscriptions", [])
         if item.get("enabled", True) and "record" in item.get("outputs", [])
     ]
+
+
+def recording_reader_groups(config, subscriptions):
+    """Keep large payload wait-sets out of the ordinary X1 state reader.
+
+    This is part of the isolated control architecture. Other profiles and the
+    previous middleware mode retain their existing process/QoS contract.
+    """
+    if not (is_x1(config) and isolated_control_process_enabled(config)):
+        return [('all', subscriptions)]
+    images, small = [], []
+    for item in subscriptions:
+        target = images if item.get('type') in {
+            'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage',
+            'sensor_msgs/msg/PointCloud2',
+        } else small
+        target.append(item)
+    return [(name, items) for name, items in [('small', small), ('images', images)] if items] or [('small', [])]
 
 
 def recording_inputs(topic: str, config: dict[str, Any]) -> tuple[str, ...]:
@@ -244,7 +263,9 @@ def _raw_recording_process(
     capture_window: Any = None,
 ) -> None:
     """Receive serialized ROS messages without deserializing them."""
-    _lower_recording_priority()
+    normal_priority = bool(config.get('_isolated_recording_reader', False))
+    if not normal_priority:
+        _lower_recording_priority()
     context = None
     executor = None
     node = None
@@ -314,6 +335,7 @@ def _raw_recording_process(
     subscription_modes: dict[str, str] = {}
     prepared_until = 0.0
     capture_seen = False
+    has_capture_subscriptions = False
 
     def publish_status(state: str, error: str | None = None) -> None:
         now = time.monotonic()
@@ -338,7 +360,8 @@ def _raw_recording_process(
                     {source.removeprefix('/internal/recording') for source in ros_subscriptions},
                 ),
                 "pid": __import__("os").getpid(),
-                "priority": "low",
+                "priority": "normal" if normal_priority else "low",
+                "reader_group": config.get('_recording_reader_group', 'all'),
                 "state_preroll_ms": 250. if sensor_window else preroll.seconds * 1000,
                 "history_retention_ms": preroll.seconds * 1000,
                 "capture_window": capture_window.snapshot() if sensor_window else {},
@@ -440,7 +463,7 @@ def _raw_recording_process(
             subscription_modes.clear()
 
         def activate_subscriptions() -> None:
-            nonlocal prepared_until, capture_seen, capture_active
+            nonlocal prepared_until, capture_seen, capture_active, has_capture_subscriptions
             prepared_until = time.monotonic() + 30.0
             capture_seen = accepting_event.is_set()
             gate.reset()
@@ -458,11 +481,12 @@ def _raw_recording_process(
                 for source in recording_inputs(str(item["topic"]), config):
                     create_subscription(item, source, recording=True,
                                         warm=ordinary and buffered_sensor(item))
+            has_capture_subscriptions = any(source not in idle_topics for source in ros_subscriptions)
             subscriptions_ready_event.set()
             publish_status("ready")
 
         def deactivate_capture_subscriptions() -> None:
-            nonlocal capture_seen
+            nonlocal capture_seen, has_capture_subscriptions
             for source in list(ros_subscriptions):
                 if source not in idle_topics:
                     node.destroy_subscription(ros_subscriptions.pop(source))
@@ -471,6 +495,7 @@ def _raw_recording_process(
                 create_subscription(item, str(item["topic"]), recording=False,
                                     warm=sensor_window and buffered_sensor(item))
             capture_seen = False
+            has_capture_subscriptions = False
             subscriptions_ready_event.clear()
             publish_status("monitoring")
 
@@ -488,7 +513,7 @@ def _raw_recording_process(
                 capture_seen = True
                 begin_capture()
             elif _should_release_subscriptions(
-                has_subscriptions=bool(set(ros_subscriptions).difference(idle_topics)),
+                has_subscriptions=has_capture_subscriptions,
                 capture_seen=capture_seen,
                 accepting=accepting,
                 now=time.monotonic(),
@@ -507,7 +532,7 @@ def _raw_recording_process(
                     "recording"
                     if accepting
                     else "ready"
-                    if set(ros_subscriptions).difference(idle_topics)
+                    if has_capture_subscriptions
                     else "monitoring"
                     if ros_subscriptions
                     else "standby"
@@ -540,7 +565,7 @@ def _raw_recording_process(
 
 
 class RosRecordingExecutor:
-    """Low-priority process containing all raw ROS recording subscriptions."""
+    """Independent raw readers share one immutable recording window/ingress."""
 
     def __init__(self, config: dict[str, Any], recorder: TopicRecorder):
         self.config = config
@@ -564,6 +589,13 @@ class RosRecordingExecutor:
         self._subscriptions_ready_event = self._mp.Event()
         self._status_queue = self._mp.Queue(maxsize=4)
         self._process: Any = None
+        self._isolated_readers = bool(is_x1(config) and isolated_control_process_enabled(config))
+        self._workers = []
+        for index, (name, items) in enumerate(recording_reader_groups(config, self.subscriptions)):
+            self._workers.append(dict(name=name, subscriptions=items, process=None, status={},
+                reset=self._reset_event if index == 0 else self._mp.Event(),
+                ready=self._subscriptions_ready_event if index == 0 else self._mp.Event(),
+                status_queue=self._status_queue if index == 0 else self._mp.Queue(maxsize=4)))
         self._gate = RateGate()
         self._lock = threading.Lock()
         self._status: dict[str, Any] = {
@@ -579,7 +611,7 @@ class RosRecordingExecutor:
             "preroll_recorded": 0,
             "state_preroll_ms": 250.0,
             "topic_health": {},
-            "priority": "low",
+            "priority": "normal" if self._isolated_readers else "low",
             "error": None,
         }
 
@@ -589,34 +621,33 @@ class RosRecordingExecutor:
         resources = self.recorder.ipc_resources()
         event_queue, accepting_event, dropped_counter = resources[:3]
         self._stop_event.clear()
-        self._subscriptions_ready_event.clear()
-        self._process = self._mp.Process(
-            target=_raw_recording_process,
-            args=(
-                self.config,
-                self.subscriptions,
-                event_queue,
-                accepting_event,
-                dropped_counter,
-                self._stop_event,
-                self._reset_event,
-                self._subscriptions_ready_event,
-                self._status_queue,
-                resources,
-                getattr(self.recorder, '_capture_window', None),
-            ),
-            name="ros-cdr-recorder",
-            daemon=True,
-        )
-        self._process.start()
+        for worker in self._workers:
+            worker['ready'].clear()
+            worker_config = self.config
+            if self._isolated_readers:
+                worker_config = {**self.config,
+                    'node_name': self.config.get('node_name', 'hc_teleop_middleware')+'_'+worker['name'],
+                    '_isolated_recording_reader': True, '_recording_reader_group': worker['name']}
+            worker['process'] = self._mp.Process(
+                target=_raw_recording_process,
+                args=(worker_config, worker['subscriptions'], event_queue, accepting_event,
+                    dropped_counter, self._stop_event, worker['reset'], worker['ready'],
+                    worker['status_queue'], resources, getattr(self.recorder, '_capture_window', None)),
+                name='ros-cdr-recorder-'+worker['name'] if self._isolated_readers else 'ros-cdr-recorder',
+                daemon=True)
+            worker['process'].start()
+            if self._process is None:
+                self._process = worker['process']  # Existing primary-reader diagnostics.
 
     def stop(self) -> None:
-        process = self._process
-        if process is None:
+        processes = [worker['process'] for worker in self._workers if worker['process'] is not None]
+        if not processes:
             return
         self._stop_event.set()
-        while process.is_alive():
-            process.join(timeout=.1)
+        while any(process.is_alive() for process in processes):
+            for process in processes:
+                process.join(timeout=.05)
+            self._refresh_status()
             # A multiprocessing feeder can still be flushing accepted image
             # bytes. Normal stop must not kill it and silently truncate them.
             with self._lock:
@@ -624,27 +655,61 @@ class RosRecordingExecutor:
             if self.recorder.status().get('error'):
                 raise RuntimeError('writer failed while ROS input was draining; source is incomplete')
         self._process = None
+        for worker in self._workers:
+            worker['process'] = None
         with self._lock:
             self._status.update(state="stopped", active=False)
 
     def _refresh_status(self) -> None:
-        latest = None
-        while True:
-            try:
-                latest = self._status_queue.get_nowait()
-            except queue.Empty:
-                break
-        if latest is not None:
-            with self._lock:
-                self._status.update(latest)
-        process = self._process
-        if process is not None and not process.is_alive():
-            with self._lock:
-                if self._status.get("state") not in {"error", "stopped"}:
-                    self._status.update(
-                        state="error",
-                        error=f"recording process exited with code {process.exitcode}",
-                    )
+        for worker in self._workers:
+            while True:
+                try:
+                    worker['status'] = worker['status_queue'].get_nowait()
+                except queue.Empty:
+                    break
+            process = worker['process']
+            if process is not None and not process.is_alive() and worker['status'].get('state') not in {'error', 'stopped'}:
+                if self._stop_event.is_set() and process.exitcode == 0:
+                    worker['status'].update(state='stopped', active=False)
+                else:
+                    worker['status'].update(state='error', error=(
+                        f"{worker['name']} recording process exited with code {process.exitcode}"))
+        states = [worker['status'] for worker in self._workers if worker['status']]
+        if not states:
+            return
+        if len(self._workers) == 1:
+            combined = dict(states[0])
+        else:
+            combined = dict(states[0])
+            for key in ('received', 'recorded', 'throttled', 'rejected', 'serialization_errors',
+                        'preroll_recorded', 'outside_capture_window', 'invalid_header_fallbacks',
+                        'active_subscriptions', 'idle_monitor_subscriptions', 'capture_subscriptions',
+                        'preroll_buffered_messages', 'preroll_budget_evicted_bytes'):
+                combined[key] = sum(state.get(key, 0) for state in states)
+            combined['topic_health'] = {topic: health for state in states for topic, health in state.get('topic_health', {}).items()}
+            combined['subscriptions'] = [item['topic'] for item in self.subscriptions]
+            errors = [state['error'] for state in states if state.get('error')]
+            combined['error'] = '; '.join(errors) or None
+            if errors:
+                combined['state'] = 'error'
+            elif all(state.get('state') == 'stopped' for state in states):
+                combined['state'] = 'stopped'
+            elif any(state.get('active') for state in states):
+                combined['state'] = 'recording'
+            elif len(states) != len(self._workers):
+                combined['state'] = 'starting'
+            elif all(state.get('state') == 'ready' for state in states):
+                combined['state'] = 'ready'
+            else:
+                combined['state'] = 'monitoring'
+            combined['active'] = any(state.get('active') for state in states)
+            combined['warm_qos_override'] = (dict(reliability='BEST_EFFORT',
+                topics=[topic for state in states for topic in (state.get('warm_qos_override') or {}).get('topics', [])],
+                scope='ordinary X1 independent raw readers; configured QoS retained outside warm sensor streams')
+                if any(state.get('warm_qos_override') is not None for state in states) else None)
+        combined['readers'] = [{**worker['status'], 'group': worker['name']} for worker in self._workers]
+        with self._lock:
+            self._status.update(combined)
 
     def status(self) -> dict[str, Any]:
         self._refresh_status()
@@ -661,9 +726,10 @@ class RosRecordingExecutor:
             return
         if self._process is None:
             self.start()
-        self._subscriptions_ready_event.clear()
         self._gate.reset()
-        self._reset_event.set()
+        for worker in self._workers:
+            worker['ready'].clear()
+            worker['reset'].set()
         with self._lock:
             self._status.update(
                 received=0,
@@ -673,13 +739,13 @@ class RosRecordingExecutor:
                 serialization_errors=0,
                 preroll_recorded=0,
             )
-        if not self._subscriptions_ready_event.wait(timeout=5.0):
-            self._refresh_status()
-            error = self._status.get("error")
-            raise TimeoutError(
-                "ROS recording subscriptions did not become ready within 5 seconds"
-                + (f": {error}" if error else "")
-            )
+        deadline = time.monotonic()+5.
+        for worker in self._workers:
+            if not worker['ready'].wait(timeout=max(0., deadline-time.monotonic())):
+                self._refresh_status()
+                error = self._status.get('error')
+                raise TimeoutError(f"ROS {worker['name']} recording subscriptions did not become ready within 5 seconds"
+                    + (f": {error}" if error else ''))
 
     def _handle_message(
         self,

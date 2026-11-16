@@ -70,9 +70,10 @@ def test_unknown_or_invalid_cdr_is_not_treated_as_a_capture_clock():
     assert window.allows(event(1_000_000_000, received=10_100_000_000)) == (True, 'invalid_header')
 
 
-def test_warm_stream_selection_is_bounded_to_cameras_and_four_small_evidence_streams():
+def test_warm_stream_selection_is_bounded_to_cameras_and_small_evidence_streams():
     assert buffered_sensor(dict(topic='/control/joint_cmd', type='sensor_msgs/msg/JointState'))
     assert buffered_sensor(dict(topic='/control/solver/joint_targets', type='sensor_msgs/msg/JointState'))
+    assert buffered_sensor(dict(topic='/control/vr/joint_states', type='sensor_msgs/msg/JointState'))
     assert buffered_sensor(dict(topic='/observation/cameras/head/depth/compressed', type='sensor_msgs/msg/CompressedImage'))
     assert not buffered_sensor(dict(topic='/action/joint_states', type='sensor_msgs/msg/JointState'))
     assert not buffered_sensor(dict(topic='/observation/ee_poses', type='geometry_msgs/msg/PoseArray'))

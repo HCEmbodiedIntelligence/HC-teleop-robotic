@@ -15,6 +15,7 @@ import struct
 from mcap.reader import make_reader
 
 ACTION = '/action/joint_states'
+VR_TARGET = '/control/vr/joint_states'
 COLOR = '/observation/cameras/head/color/compressed'
 DEPTH = '/observation/cameras/head/depth/compressed'
 TOPICS = (ACTION, '/control/solver/joint_targets', '/control/joint_cmd',
@@ -60,7 +61,7 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
         reader = make_reader(stream, validate_crcs=True)
         for record in reader.iter_metadata():
             metadata[record.name] = dict(record.metadata)
-        for schema, channel, message in reader.iter_messages(topics=TOPICS, log_time_order=False):
+        for schema, channel, message in reader.iter_messages(topics=TOPICS+(VR_TARGET,), log_time_order=False):
             row = rows[channel.topic]
             row['log'].append(message.log_time)
             stamp = header_stamp(message.data) if schema.name in HEADER_TYPES else None
@@ -70,6 +71,15 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
                 row['header'].append(stamp)
     report = dict(path=str(Path(path).resolve()), threshold_ms=threshold_ms,
                   metadata=metadata, topics={}, failures=[], unverified=[])
+    source, action = rows[VR_TARGET], rows[ACTION]
+    source_counts, action_counts = Counter(source['header']), Counter(action['header'])
+    report['control_pipeline'] = dict(
+        vr_target_available=bool(source['log']),
+        vr_target={clock:clock_summary(source[clock], threshold_ns) for clock in ('log', 'header')},
+        exact_vr_action_header_matches=sum((source_counts & action_counts).values()),
+        vr_headers_without_action=sum((source_counts-action_counts).values()),
+        action_headers_without_vr=sum((action_counts-source_counts).values()),
+        interpretation='Observed original-header correspondence only. Source selection, stop, home and latest-target coalescing can intentionally omit targets; unmatched counts alone are not proof of data loss.')
     for topic in TOPICS:
         row = rows[topic]
         result = {clock: clock_summary(row[clock], threshold_ns) for clock in ('log', 'header')}

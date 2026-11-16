@@ -3,12 +3,12 @@ import struct
 
 from mcap.writer import Writer
 
-from tools.diagnostics.audit_mcap_timing import ACTION, COLOR, DEPTH, TOPICS, audit
+from tools.diagnostics.audit_mcap_timing import ACTION, COLOR, DEPTH, TOPICS, VR_TARGET, audit
 
 BASE = 1_790_000_000_000_000_000
 
 
-def recording(path, *, delayed=False, missing_depth=False, action_gap=False, boundary=True):
+def recording(path, *, delayed=False, missing_depth=False, action_gap=False, boundary=True, vr_target=False):
     with path.open('wb') as stream:
         writer = Writer(stream)
         writer.start(profile='ros2')
@@ -20,7 +20,7 @@ def recording(path, *, delayed=False, missing_depth=False, action_gap=False, bou
                 'window_start_ns': str(BASE), 'admission_start_ns': str(BASE),
                 'stop_requested_ns': str(BASE+100_000_000),
                 'raw_ingress_closed_ns': str(BASE+350_000_000)})
-        for topic in TOPICS:
+        for topic in TOPICS+((VR_TARGET,) if vr_target else ()):
             kind = 'sensor_msgs/msg/CompressedImage' if topic in (COLOR, DEPTH) else 'sensor_msgs/msg/JointState'
             channel = writer.register_channel(topic, 'cdr', schemas[kind])
             for offset in (0, 33_000_000, 66_000_000, 99_000_000):
@@ -76,3 +76,22 @@ def test_missing_precise_boundary_never_claims_pass(tmp_path):
     assert result['result'] == 'UNVERIFIED'
     assert not result['failures']
     assert any('admission' in issue for issue in result['unverified'])
+
+
+def test_optional_vr_stage_preserves_original_header_correspondence(tmp_path):
+    path = tmp_path/'stages.mcap'
+    recording(path, vr_target=True)
+    result = audit(path)
+    assert result['result'] == 'PASS'
+    assert result['control_pipeline']['vr_target_available'] is True
+    assert result['control_pipeline']['exact_vr_action_header_matches'] == 4
+    assert result['control_pipeline']['vr_headers_without_action'] == 0
+    assert result['control_pipeline']['action_headers_without_vr'] == 0
+
+
+def test_older_recording_without_optional_vr_stage_is_explicitly_unavailable(tmp_path):
+    path = tmp_path/'older.mcap'
+    recording(path)
+    result = audit(path)
+    assert result['result'] == 'PASS'
+    assert result['control_pipeline']['vr_target_available'] is False

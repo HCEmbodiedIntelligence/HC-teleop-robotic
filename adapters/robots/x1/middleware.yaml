@@ -314,6 +314,14 @@ ros:
     - record
     max_hz: 0.0
     event_max_hz: 0.0
+  - topic: /control/vr/joint_states
+    description: VR 适配器到最终控制仲裁前的原始关节目标，用于逐帧定位接收和发布缺口
+    type: sensor_msgs/msg/JointState
+    enabled: true
+    outputs:
+    - record
+    max_hz: 0.0
+    event_max_hz: 0.0
   - topic: /control/solver/ee_targets
     description: 发送到求解器任务坐标系的末端目标位姿
     type: geometry_msgs/msg/PoseArray
