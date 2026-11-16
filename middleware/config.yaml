@@ -11,6 +11,7 @@ simulation:
   startup_timeout_sec: 120
 ros:
   enabled: true
+  isolated_control_process: true
   domain_id: 13
   node_name: hc_teleop_middleware
   recording:

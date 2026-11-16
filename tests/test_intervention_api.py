@@ -46,13 +46,17 @@ class InterventionApiTests(unittest.IsolatedAsyncioTestCase):
         self.control = ControlOwnership()
         self.recorder = SimpleNamespace(corrections=None, is_recording=Mock(return_value=False),
                                         prepare_corrections=Mock(), stop_corrections=Mock())
-        ros = SimpleNamespace(ownership=self.control, control_ready=lambda: True,
-                              recover_intervention=Mock(side_effect=lambda: self.control.recover(control_ready=True)))
+        ros = self.make_ros()
+        self.ros = ros
         runtime = SimpleNamespace(ros=ros, recorder=self.recorder, player=None, session_profile_metadata={})
         app = web.Application()
         register_intervention_routes(app, runtime)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
+
+    def make_ros(self):
+        return SimpleNamespace(ownership=self.control, control_ready=lambda: True,
+            recover_intervention=Mock(side_effect=lambda: self.control.recover(control_ready=True)))
 
     async def asyncTearDown(self):
         await self.client.close()
@@ -305,3 +309,64 @@ class InterventionApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 400)
                 self.assertEqual(self.control.state, 'OFF')
         self.recorder.prepare_corrections.assert_not_called()
+
+
+class StructuredInterventionFacade:
+    """Exercise the parent contract without ROS or transferring a closure."""
+    isolated_control_process = True
+
+    def __init__(self, control):
+        self.ownership = control
+        self.actual_ready = True
+        self.calls = []
+
+    def authorization_fence(self):
+        return ('core-boot', 0, self.ownership.epoch)
+
+    def control_ready(self):
+        raise AssertionError('a parent snapshot is not control authorization')
+
+    def recover_intervention(self, **_kwargs):
+        self.ownership.recover(control_ready=self.actual_ready)
+
+    def apply_intervention(self, name, data, *, recording_ready, preparing_capture, expected_fence):
+        assert isinstance(data, dict)
+        self.calls.append((name, dict(data), expected_fence))
+        control, applied = self.ownership, False
+
+        def operation():
+            nonlocal applied
+            if expected_fence != self.authorization_fence():
+                raise ValueError('authorization was revoked')
+            operations = {
+                'enable': lambda: control.enable(preparing_capture=preparing_capture),
+                'start_model': lambda: control.start_model(control_ready=self.actual_ready,
+                                                          recording_ready=recording_ready),
+                'enable_dagger': lambda: control.set_dagger(True, preparing_capture=preparing_capture),
+                'disable_dagger': lambda: control.set_dagger(False),
+                'takeover': control.takeover, 'hold': control.hold, 'disable': control.disable,
+                'recover': self.recover_intervention,
+                'return': lambda: control.start_auto(control_ready=self.actual_ready,
+                                                    recording_ready=recording_ready),
+            }
+            operations[name]()
+            applied = True
+
+        state = control.request(data.get('request_id'), data.get('session_id', ''),
+                                data.get('expected_epoch'), operation)
+        return {'ownership': state, 'applied': applied, 'request_id': data.get('request_id')}
+
+
+class IsolatedInterventionApiTests(InterventionApiTests):
+    # All existing stale request, capture failure, recovery and concurrency
+    # cases must also pass through the structured child-authority contract.
+    def make_ros(self):
+        return StructuredInterventionFacade(self.control)
+
+    async def test_child_actual_readiness_overrules_parent_display(self):
+        self.recording_lifecycle()
+        self.ros.actual_ready = False
+        response = await self.command('start_model')
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.control.state, 'OFF')
+        self.assertEqual(self.ros.calls[-1][0], 'start_model')

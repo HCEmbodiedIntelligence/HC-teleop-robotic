@@ -32,6 +32,7 @@ class TopicPlayer:
         self._get_active_api_metadata = active_api_metadata_provider or (lambda: {})
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
+        self._play_generation = 0
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
@@ -226,11 +227,15 @@ class TopicPlayer:
             if ros is not None and hasattr(ros, "publish"):
                 ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
 
-            self._stop_event.clear()
+            # A worker owns these events for its entire lifetime. A new play
+            # can never clear the cancellation token of an earlier producer.
+            self._stop_event = threading.Event()
+            self._pause_event = threading.Event()
             self._pause_event.set()
+            generation = self._play_generation
             self._thread = threading.Thread(
                 target=self._run,
-                args=(target,),
+                args=(target, self._stop_event, self._pause_event, generation),
                 name=f"TopicPlayer-{filename}",
                 daemon=True,
             )
@@ -296,8 +301,10 @@ class TopicPlayer:
     def _stop_locked(self) -> None:
         self._stop_event.set()
         self._pause_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread = None
+        self._play_generation += 1
+        # Keep the actual worker reference until it exits. play() refuses a
+        # second producer while an old reader/provider call is still blocked.
+        # Joining here would deadlock a worker waiting for this same lock.
 
     def _release_replay_interlock(self, *, require_reset: bool) -> None:
         if not self._replay_interlock_armed:
@@ -307,9 +314,13 @@ class TopicPlayer:
             ros.end_replay(require_reset=require_reset)
         self._replay_interlock_armed = False
 
-    def _run(self, target_path: Path) -> None:
+    def _replay_current(self, generation, stop_event):
+        with self._lock:
+            return generation == self._play_generation and not stop_event.is_set()
+
+    def _run(self, target_path: Path, stop_event, pause_event, generation) -> None:
         try:
-            while not self._stop_event.is_set():
+            while not stop_event.is_set():
                 with target_path.open("rb") as stream:
                     reader = make_reader(stream)
                     summary = reader.get_summary()
@@ -339,6 +350,8 @@ class TopicPlayer:
                     }
 
                     with self._lock:
+                        if not self._replay_current(generation, stop_event):
+                            return
                         self._total_messages = total_msgs
                         self._duration_sec = duration_sec
 
@@ -347,13 +360,13 @@ class TopicPlayer:
                     msg_idx = 0
 
                     for schema, channel, message in reader.iter_messages():
-                        if self._stop_event.is_set():
+                        if stop_event.is_set():
                             break
 
-                        if not self._pause_event.is_set():
+                        if not pause_event.is_set():
                             pause_start = time.monotonic()
-                            self._pause_event.wait()
-                            if self._stop_event.is_set():
+                            pause_event.wait()
+                            if stop_event.is_set():
                                 break
                             pause_duration = time.monotonic() - pause_start
                             t0_mono += pause_duration
@@ -370,12 +383,12 @@ class TopicPlayer:
                         now = time.monotonic()
                         if target_mono > now:
                             sleep_duration = target_mono - now
-                            while sleep_duration > 0 and not self._stop_event.is_set() and self._pause_event.is_set():
+                            while sleep_duration > 0 and not stop_event.is_set() and pause_event.is_set():
                                 chunk = min(sleep_duration, 0.02)
                                 time.sleep(chunk)
                                 sleep_duration -= chunk
 
-                        if self._stop_event.is_set():
+                        if stop_event.is_set():
                             break
 
                         chan_info = channels.get(channel.id)
@@ -388,6 +401,11 @@ class TopicPlayer:
                             target_topic = remap.get(orig_topic, orig_topic)
                             if not selected or (orig_topic in selected) or (target_topic in selected):
                                 ros = self._get_ros()
+                                # The provider may have waited while stop/reset
+                                # revoked this producer. Recheck its own lease,
+                                # never acquire a new replay's current fence.
+                                if not self._replay_current(generation, stop_event):
+                                    return
                                 if ros is not None and hasattr(ros, "publish_raw"):
                                     ros.publish_raw(target_topic, msg_type, message.data)
 
@@ -397,28 +415,32 @@ class TopicPlayer:
 
                         if msg_idx % 10 == 0 or msg_idx == total_msgs:
                             with self._lock:
+                                if not self._replay_current(generation, stop_event):
+                                    return
                                 self._current_message_index = msg_idx
                                 self._current_time_sec = cur_time
                                 self._progress = progress
 
                 with self._lock:
-                    if not self._loop or self._stop_event.is_set():
+                    if not self._loop or not self._replay_current(generation, stop_event):
                         break
                     self._current_message_index = 0
                     self._current_time_sec = 0.0
                     self._progress = 0.0
 
             with self._lock:
-                if not self._stop_event.is_set():
+                if self._replay_current(generation, stop_event):
                     self._state = "completed"
                     self._progress = 100.0
                     self._requires_reset = True
                     self._release_replay_interlock(require_reset=True)
-            if not self._stop_event.is_set():
+            if self._replay_current(generation, stop_event):
                 self._notify_state("replay_completed")
         except Exception as exc:
-            logger.exception("Playback failed: %s", exc)
             with self._lock:
+                if not self._replay_current(generation, stop_event):
+                    return
+                logger.exception("Playback failed: %s", exc)
                 self._state = "error"
                 self._error = str(exc)
                 self._requires_reset = True

@@ -16,7 +16,8 @@ import pytest
 pytestmark=pytest.mark.skipif(os.environ.get('HC_RUN_LEGACY_ROS_TESTS')!='1', reason='isolated ROS opt-in required')
 
 
-def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
+@pytest.mark.parametrize('bridge_kind', ['legacy_thread', 'isolated_process'])
+def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, bridge_kind):
     import rclpy
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
@@ -26,6 +27,7 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
     import yaml
     from adapters.core.arm_teleop_node import RobotArmTeleopNode
     from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control_process import IsolatedRosBridge
 
     domain=int(os.environ['ROS_DOMAIN_ID'])
     assert 200<=domain<=232 and os.environ.get('ROS_LOCALHOST_ONLY')=='1'
@@ -110,7 +112,8 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
         # Preserve production home policy; this fake rig already starts at home.
         executor.add_node(teleop)
         solver=module.ControllerNode(str(profile/'controller_v23.yml'));executor.add_node(solver)
-        bridge=RosBridge(dict(enabled=True,domain_id=domain,legacy_control_profile=str(profile),
+        bridge_class=IsolatedRosBridge if bridge_kind=='isolated_process' else RosBridge
+        bridge=bridge_class(dict(enabled=True,domain_id=domain,legacy_control_profile=str(profile),
             intervention=dict(automatic_recording=False),command_mux=dict(enabled=True,source='motion')),
             lambda *args:None)
         bridge.start()
@@ -145,7 +148,7 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
                 frame['inputs']['right']['trigger']=0.
                 until(lambda:at_pose('right','finger_open'))
                 assert control.token==token
-                assert not bridge._boundary.diagnostics['rejected:joint limit']
+                assert not bridge._boundary.status().get('diagnostics', {}).get('rejected:joint limit', 0)
             frame['poses']['right']['position'][2]-=.001
             frame['inputs']['right']['trigger']+=.01
             pump(.3)
@@ -155,7 +158,9 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
             frame['inputs']['right']['grip']=0.
             until(lambda:control.state=='AUTO')
             pump(.15)
-        assert not opened and not control.segment_open and not control.recording_error
+        assert not opened and not control.recording_error
+        if bridge_kind=='legacy_thread':
+            assert not control.segment_open
         assert len(control.metrics)==3
         # No Motion command endpoint or competing own publisher was introduced.
         assert len(probe.get_publishers_info_by_topic('/hc_teleop/joint_cmd'))==1
@@ -167,7 +172,7 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch):
         until(lambda:control.state=='FAULT')
         pump(.1);count=len(outputs);pump(.15)
         assert len(outputs)==count
-        print('legacy ROS: three AUTO/MANUAL/AUTO cycles, arms + hands, preserved depth, no recorder/Motion, fault gate passed')
+        print(f'{bridge_kind}: three AUTO/MANUAL/AUTO cycles, arms + hands, preserved depth, no recorder/Motion, fault gate passed')
     finally:
         if bridge:
             bridge.ownership.disable();bridge.stop()

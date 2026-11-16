@@ -16,6 +16,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "simulation": {"headless": False, "with_control": True, "debug_joints": False, "startup_timeout_sec": 120},
     "ros": {
         "enabled": True,
+        "isolated_control_process": False,
         "domain_id": 14,
         "node_name": "hc_teleop_middleware",
         "intervention": {
@@ -101,6 +102,22 @@ class ConfigError(ValueError):
     pass
 
 
+def isolated_control_process_enabled(ros_config: dict[str, Any]) -> bool:
+    """Select the opt-in architecture without persisting an environment override."""
+    configured = ros_config.get('isolated_control_process', False)
+    if type(configured) is not bool:
+        raise ConfigError('ros.isolated_control_process must be boolean')
+    override = os.environ.get('HC_ISOLATED_CONTROL_PROCESS')
+    if override is None:
+        return configured
+    normalized = override.strip().lower()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off'}:
+        return False
+    raise ConfigError('HC_ISOLATED_CONTROL_PROCESS must be a boolean value')
+
+
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in override.items():
@@ -165,6 +182,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if isinstance(domain_id, bool) or not isinstance(domain_id, int) or not (0 <= domain_id <= 232):
         raise ConfigError("ros.domain_id must be an integer between 0 and 232")
     value["ros"]["domain_id"] = domain_id
+    if type(value["ros"].get('isolated_control_process')) is not bool:
+        raise ConfigError('ros.isolated_control_process must be boolean')
 
     command_mux = value["ros"].get("command_mux")
     if not isinstance(command_mux, dict):

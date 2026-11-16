@@ -17,7 +17,7 @@ import yaml
 class LegacyTopicControl:
     def __init__(self, node, bridge, output, *, feedback_node=None, hand_node=None):
         from sensor_msgs.msg import JointState
-        from rclpy.qos import qos_profile_sensor_data
+        from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, qos_profile_sensor_data
         from adapters.core.collision_safety import ModelCollisionGuard
 
         self.node, self.bridge, self.output = node, bridge, output
@@ -85,8 +85,17 @@ class LegacyTopicControl:
         self.hand_pubs = {s: hand_receiver.create_publisher(JointState, self.teleop['grippers'][s]['finger_topic'], 10)
                           for s in self.hands}
         self.subscriptions = []
+        # Each of these private topics carries only one target channel. The
+        # shared owned-target topic intentionally retains its separate depth 10.
+        actor_target_qos = (QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                            reliability=ReliabilityPolicy.BEST_EFFORT)
+                            if bridge._control_actor_mode else None)
         def subscribe(kind, topic, callback, qos=qos_profile_sensor_data, *, hand=False):
             receiver = hand_receiver if hand else node
+            if bridge._control_actor_mode:
+                callback = bridge._timed_callback('legacy:'+topic, callback)
+                if qos is qos_profile_sensor_data:
+                    qos = actor_target_qos
             self.subscriptions.append(receiver.create_subscription(kind, topic, callback, qos,
                 callback_group=hand_group if hand else bridge._command_callback_group))
         # Feedback and authority must keep draining while command preparation
@@ -97,7 +106,8 @@ class LegacyTopicControl:
         for topic, callback in [('/observation/joint_states', self.state),
                                 ('/observation/hands/joint_states', self.hand_state)]:
             self.subscriptions.append(receiver.create_subscription(
-                JointState, topic, callback, qos_profile_sensor_data,
+                JointState, topic, (bridge._timed_callback('feedback:'+topic, callback)
+                                    if bridge._control_actor_mode else callback), qos_profile_sensor_data,
                 callback_group=feedback_group))
         subscribe(JointState, '/hc_teleop/joint_cmd', lambda msg: self.program(msg, 'arms'))
         for side in self.hands:

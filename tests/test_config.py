@@ -1,13 +1,33 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
-from middleware.core.config import ConfigError, ConfigStore, validate_config
+from middleware.core.config import ConfigError, ConfigStore, validate_config, isolated_control_process_enabled
 
 
 class ConfigTests(unittest.TestCase):
+    def test_isolated_control_is_explicit_and_environment_does_not_persist(self):
+        config = validate_config({})
+        self.assertIs(config['ros']['isolated_control_process'], False)
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertFalse(isolated_control_process_enabled(config['ros']))
+        with patch.dict('os.environ', {'HC_ISOLATED_CONTROL_PROCESS': '1'}):
+            self.assertTrue(isolated_control_process_enabled(config['ros']))
+            self.assertIs(config['ros']['isolated_control_process'], False)
+        with patch.dict('os.environ', {'HC_ISOLATED_CONTROL_PROCESS': 'false'}):
+            self.assertFalse(isolated_control_process_enabled({'isolated_control_process': True}))
+        with patch.dict('os.environ', {'HC_ISOLATED_CONTROL_PROCESS': 'maybe'}):
+            with self.assertRaisesRegex(ConfigError, 'HC_ISOLATED_CONTROL_PROCESS'):
+                isolated_control_process_enabled(config['ros'])
+
+    def test_isolated_control_flag_requires_boolean(self):
+        for value in (1, 'true', None, []):
+            with self.assertRaisesRegex(ConfigError, 'isolated_control_process'):
+                validate_config({'ros': {'isolated_control_process': value}})
+
     def test_default_config_loads_x1_package_interfaces(self):
         root = Path(__file__).resolve().parents[1]
         store = ConfigStore(root / "middleware" / "config.yaml")

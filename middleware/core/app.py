@@ -10,6 +10,7 @@ import socket
 import time
 import uuid
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ import yaml
 
 from .camera_process import CameraProcessService as CameraService
 from .simulation import SimulationService, register_simulation_routes
-from .config import ConfigError, ConfigStore, validate_config
+from .config import ConfigError, ConfigStore, validate_config, isolated_control_process_enabled
 from .profile_api import register_profile_routes
 from .protocol import envelope
 from .robot_profiles import RobotProfileManager
@@ -50,6 +51,13 @@ def _upload_failure_status(code: str) -> int:
     return 409 if code in {"ARTIFACT_BUSY", "WORKER_ALREADY_RUNNING", "BINDING_REQUIRED"} else 400
 
 
+def control_bridge_class(ros_config: dict[str, Any]):
+    if isolated_control_process_enabled(ros_config):
+        from .control_process import IsolatedRosBridge
+        return IsolatedRosBridge
+    return RosBridge
+
+
 def local_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -75,6 +83,9 @@ class MiddlewareRuntime:
         self.platform = None
         self._record_commands = None
         self._record_command_slots = threading.BoundedSemaphore(8)
+        self._control_commands = None
+        self._control_command_slots = threading.BoundedSemaphore(4)
+        self._stopping = False
         self.uploads = None
         self.upload_error = None
         self.player: TopicPlayer | None = None
@@ -85,8 +96,11 @@ class MiddlewareRuntime:
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
+        self._intervention_lifecycle_lock = asyncio.Lock()
         self._safety_sync_task = None
         self._safety_reason = ""
+        self._safety_event_lock = threading.RLock()
+        self._safety_event_generation = 0
         self._last_x_held = False
         self._last_y_held = False
         self._last_a_held = False
@@ -147,6 +161,7 @@ class MiddlewareRuntime:
         return metadata
 
     async def start(self) -> None:
+        self._stopping = False
         self.loop = asyncio.get_running_loop()
         configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 14))
         domain_id = configure_environment(configured_domain_id)
@@ -162,6 +177,7 @@ class MiddlewareRuntime:
 
         from concurrent.futures import ThreadPoolExecutor
         self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recording-command")
+        self._control_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="control-command")
         self.session_profile_metadata = self._load_session_profile_metadata()
         profile_dir = (selected_profile(self.config, self.config_dir)
                        if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
@@ -245,7 +261,7 @@ class MiddlewareRuntime:
             from .camera_metadata import load_camera_metadata
             dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
             dataset_config["camera_metadata"] = load_camera_metadata(self.config, self.config_dir)
-        self.ros = RosBridge(
+        self.ros = control_bridge_class(self.config['ros'])(
             self.config["ros"],
             self.emit,
             on_frame=self._handle_camera_ros_message,
@@ -322,6 +338,20 @@ class MiddlewareRuntime:
             self._log("error", "upload unavailable: " + str(exc))
 
     async def stop(self) -> None:
+        self._stopping = True
+        # Revoke before draining any queued positive authorizations. The core
+        # fence also rejects a resume already submitted by the headset.
+        if self.ros is not None and getattr(self.ros, 'isolated_control_process', False) is True:
+            self._on_safety_event("middleware stopping; explicit resume required", force=True)
+        elif self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+            self.ros.ownership.disable()
+        # An accepted API request may still be preparing a capture in a worker.
+        # Keep its core and writer alive until preparation/cleanup completes.
+        # Emergency-stop handling deliberately never acquires this lock.
+        async with self._intervention_lifecycle_lock:
+            await self._stop_after_intervention()
+
+    async def _stop_after_intervention(self) -> None:
         if self.control_runtime is not None and self.control_runtime.enabled:
             self._on_safety_event("control configuration reload; explicit resume required", force=True)
             if self._control_watch_task is not None:
@@ -338,7 +368,15 @@ class MiddlewareRuntime:
             self._broadcast_drain_task = None
         self._broadcast_pending.clear()
         if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
-            self.ros.ownership.disable()
+            if getattr(self.ros, 'isolated_control_process', False) is True:
+                try:
+                    await asyncio.to_thread(self.ros.ownership.disable)
+                except RuntimeError as exc:
+                    # A dead core is already fail-closed. Continue sealing the
+                    # writer and releasing workers instead of abandoning stop.
+                    self._log('warning', str(exc))
+            else:
+                self.ros.ownership.disable()
         if self._safety_sync_task is not None:
             self._safety_sync_task.cancel()
             try:
@@ -350,18 +388,34 @@ class MiddlewareRuntime:
             await asyncio.to_thread(self.player.stop, False)
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
+        if self._control_commands is not None:
+            await asyncio.to_thread(self._control_commands.shutdown, wait=True, cancel_futures=True)
+            self._control_commands = None
         for camera in self.cameras.values():
             await camera.stop()
         self.cameras.clear()
         self._cameras_by_topic.clear()
         self.camera = None
+        # No queued VR start/stop may reopen a writer after its ROS reader or
+        # control process has been stopped. Keep both alive while commands drain.
+        if self._record_commands is not None:
+            await asyncio.to_thread(self._record_commands.shutdown, wait=True)
+            self._record_commands = None
+        if (self.recorder is not None and self.ros is not None
+                and getattr(self.ros, 'isolated_control_process', False) is True):
+            # Seal the real admission window while raw late-frame readers and
+            # the capture proxy are alive. Corrections close through ownership
+            # hooks and the facade's ordered recording-event drain.
+            try:
+                await asyncio.to_thread(self.recorder.stop)
+            except (RuntimeError, OSError) as exc:
+                # The facade still closes capture admission and drains its
+                # ordered hook stream when the core or writer has failed.
+                self._log('warning', f'recording stop during shutdown: {exc}')
         if self.recording_ros is not None:
             await asyncio.to_thread(self.recording_ros.stop)
         if self.ros is not None:
             await asyncio.to_thread(self.ros.stop)
-        if self._record_commands is not None:
-            await asyncio.to_thread(self._record_commands.shutdown, wait=True)
-            self._record_commands = None
         if self.recorder is not None:
             await asyncio.to_thread(self.recorder.shutdown)
         if self.platform is not None:
@@ -402,11 +456,15 @@ class MiddlewareRuntime:
                               and action_max_hz <= 0)
         self.config['ros']['record_action_at_publication'] = action_capture
         if action_capture:
-            from .publication_capture import PublicationCapture
-            recorder.publication_capture = PublicationCapture(recorder,
-                selected=lambda: recorder.records_topic(
-                    '/action/joint_states', 'sensor_msgs/msg/JointState'))
-            self.ros._publication_capture = recorder.publication_capture
+            selected = lambda: recorder.records_topic(
+                '/action/joint_states', 'sensor_msgs/msg/JointState')
+            factory = getattr(self.ros, 'create_publication_capture', None)
+            if callable(factory):
+                recorder.publication_capture = factory(recorder, selected=selected)
+            else:
+                from .publication_capture import PublicationCapture
+                recorder.publication_capture = PublicationCapture(recorder, selected=selected)
+                self.ros._publication_capture = recorder.publication_capture
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
@@ -510,7 +568,7 @@ class MiddlewareRuntime:
             getattr(self.ros, 'ownership', None) and self.ros.ownership.active)
         # 若 A 键被按下且非介入模式，通知安全系统恢复遥操作输出
         if a_down and not intervention_active:
-            self._on_safety_resume("VR controller A button pressed")
+            self._dispatch_safety_resume("VR controller A button pressed")
 
         # --- 2. 双摇杆同时按下处理：录制数据打标 (Mark / Bookmark) ---
         # 左右摇杆下压键 (Thumbstick Click) 对应二进制第 5 位: 1 << 5 (即 32)
@@ -590,8 +648,8 @@ class MiddlewareRuntime:
             )
 
     def _dispatch_recording(self, operation):
-        if self._record_commands is None:
-            operation()
+        if self._record_commands is None or self._stopping:
+            # Never run writer setup or an IPC fence on the pose receive loop.
             return
         if not self._record_command_slots.acquire(blocking=False):
             self._log('error', 'recording command queue is full')
@@ -602,6 +660,23 @@ class MiddlewareRuntime:
             self._record_command_slots.release()
             raise
         future.add_done_callback(lambda _: self._record_command_slots.release())
+
+    def _dispatch_safety_resume(self, reason: str) -> None:
+        if getattr(self.ros, 'isolated_control_process', False) is not True:
+            self._on_safety_resume(reason)
+            return
+        fence = self.ros.authorization_fence()
+        if self._stopping or self._control_commands is None:
+            return
+        if not self._control_command_slots.acquire(blocking=False):
+            self._log('warning', 'control command queue is full; press A again to resume')
+            return
+        try:
+            future = self._control_commands.submit(self._on_safety_resume, reason, expected_fence=fence)
+        except RuntimeError:
+            self._control_command_slots.release()
+            return
+        future.add_done_callback(lambda _: self._control_command_slots.release())
 
     def _handle_vr_record_start(self) -> None:
         if self.recorder is None:
@@ -815,45 +890,78 @@ class MiddlewareRuntime:
 
     def _on_safety_event(self, reason: str, *, force: bool = False,
                          cause_event_id: str | None = None) -> None:
-        self._safety_reason = reason
-        if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
-            self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
-        cause = envelope('safety_trigger', 'middleware', {'reason': reason})
-        if cause_event_id:
-            cause['payload']['cause_event_id'] = cause_event_id
-        cause['event_id'] = uuid.uuid4().hex
-        self.emit(cause, [])
-        self.emit(envelope("safety_stop", "middleware", {
-            "reason": reason, "cause_event_id": cause['event_id'],
-        }), ["websocket", "udp"])
+        with getattr(self, '_safety_event_lock', nullcontext()):
+            self._safety_event_generation = getattr(self, '_safety_event_generation', 0) + 1
+            self._safety_reason = reason
+            if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
+                self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
+            cause = envelope('safety_trigger', 'middleware', {'reason': reason})
+            if cause_event_id:
+                cause['payload']['cause_event_id'] = cause_event_id
+            cause['event_id'] = uuid.uuid4().hex
+            self.emit(cause, [])
+            self.emit(envelope("safety_stop", "middleware", {
+                "reason": reason, "cause_event_id": cause['event_id'],
+            }), ["websocket", "udp"])
 
-    def _on_safety_resume(self, reason: str) -> None:
-        if (self.control_runtime is not None and self.control_runtime.enabled
-                and self.control_runtime.status()["state"] != "running"):
+    def _on_safety_resume(self, reason: str, *, expected_fence=None) -> bool:
+        if getattr(self, '_stopping', False) or self.ros is None:
+            return False
+        control_runtime = getattr(self, 'control_runtime', None)
+        if (control_runtime is not None and control_runtime.enabled
+                and control_runtime.status()["state"] != "running"):
             self._on_safety_event("control configuration is not ready; resume rejected", force=True)
-            return
+            return False
+        isolated = getattr(self.ros, 'isolated_control_process', False) is True
+        safety_generation = getattr(self, '_safety_event_generation', 0)
+        resumed_fence = None
+        if isolated and self.ros.status().get('state') != 'running':
+            self._log('warning', 'control core is not running; explicit resume rejected')
+            return False
+        if isolated and expected_fence is None:
+            expected_fence = self.ros.authorization_fence()
         if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
             try:
-                self.ros.recover_intervention()
-            except ValueError as exc:
+                if isolated:
+                    self.ros.recover_intervention(expected_fence=expected_fence)
+                else:
+                    self.ros.recover_intervention()
+            except (ValueError, RuntimeError) as exc:
                 self._log('warning', str(exc))
-            return
-        self._safety_reason = ""
+                return False
+            return True
         if self.ros is not None:
             stop_topic = self.config["safety"].get("stop_topic", "/control/emergency_stop")
-            self.ros.set_command_output_enabled(True)
-            self.ros.publish(stop_topic, "std_msgs/msg/Bool", {"data": False})
-            source = self.config.get("ros", {}).get("command_mux", {}).get(
-                "source", "vr"
-            )
-            self.ros.publish(
-                "/control/teleop/enabled",
-                "std_msgs/msg/Bool",
-                {"data": source == "vr"},
-            )
-        if self.player is not None:
-            self.player.acknowledge_reset()
-        self.emit(envelope("safety_resume", "middleware", {"reason": reason}), ["websocket", "udp"])
+            if isolated:
+                try:
+                    result = self.ros.resume_output(stop_topic, expected_fence=expected_fence)
+                    if isinstance(result, dict):
+                        resumed_fence = result.get('authorization_fence')
+                except (ValueError, RuntimeError) as exc:
+                    self._log('warning', str(exc))
+                    return False
+            else:
+                self.ros.set_command_output_enabled(True)
+                self.ros.publish(stop_topic, "std_msgs/msg/Bool", {"data": False})
+                source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
+                self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": source == "vr"})
+        def notify_resumed():
+            self._safety_reason = ""
+            if self.player is not None:
+                self.player.acknowledge_reset()
+            self.emit(envelope("safety_resume", "middleware", {"reason": reason}), ["websocket", "udp"])
+
+        if isolated:
+            # A slow successful RPC cannot overwrite the reason/UI event of a
+            # newer stop that arrived while the RPC response was in transit.
+            with self._safety_event_lock:
+                if (safety_generation != self._safety_event_generation or
+                        resumed_fence is not None and tuple(resumed_fence) != self.ros.authorization_fence()):
+                    return False
+                notify_resumed()
+        else:
+            notify_resumed()
+        return True
 
     def _on_replay_state(self, event_type: str, status: dict[str, Any]) -> None:
         state = str(status.get("state", "idle"))
@@ -1058,9 +1166,13 @@ def create_app(store: ConfigStore) -> web.Application:
                 and runtime.control_runtime.status()["state"] != "running"):
             return web.json_response({"accepted": False, "error": "控制进程尚未就绪，不能恢复输出",
                 "control_runtime": runtime.control_runtime.status()}, status=409)
+        isolated = getattr(runtime.ros, 'isolated_control_process', False) is True
+        fence = runtime.ros.authorization_fence() if isolated else None
         data = await request.json() if request.can_read_body else {}
-        runtime._on_safety_resume(str(data.get("reason", "dashboard safety resume")))
-        return web.json_response({"accepted": True}, status=202)
+        reason = str(data.get("reason", "dashboard safety resume"))
+        accepted = (await asyncio.to_thread(runtime._on_safety_resume, reason, expected_fence=fence)
+                    if isolated else runtime._on_safety_resume(reason))
+        return web.json_response({"accepted": accepted}, status=202 if accepted else 409)
 
     async def teleop_home(request: web.Request) -> web.Response:
         if runtime.ros and runtime.ros.ownership.active:

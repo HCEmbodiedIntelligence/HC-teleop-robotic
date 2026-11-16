@@ -3,8 +3,32 @@ import asyncio
 from aiohttp import web
 
 
+async def _capture_work(operation, *args, **kwargs):
+    """Do not release the lifecycle lease while a cancelled disk job still runs."""
+    job = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        # Cancelling to_thread only cancels the waiter. Its thread can still
+        # create capture processes, so shutdown must wait for actual completion.
+        while not job.done():
+            try:
+                await asyncio.shield(job)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        # Retrieve a failure so a cancelled HTTP request cannot leave an
+        # unobserved task error; the original cancellation still propagates.
+        if not job.cancelled():
+            job.exception()
+        raise
+
+
 def register_intervention_routes(app, runtime):
-    lock = asyncio.Lock()
+    lock = getattr(runtime, '_intervention_lifecycle_lock', None)
+    if lock is None:
+        lock = runtime._intervention_lifecycle_lock = asyncio.Lock()
     pending_capture = None
 
     def snapshot():
@@ -24,6 +48,12 @@ def register_intervention_routes(app, runtime):
         nonlocal pending_capture
         if runtime.ros is None:
             raise web.HTTPServiceUnavailable(text='control service is required')
+        if getattr(runtime, '_stopping', False):
+            raise web.HTTPServiceUnavailable(text='middleware is stopping')
+        isolated = getattr(runtime.ros, 'isolated_control_process', False) is True
+        # Capture at arrival, before body decoding or waiting on disk work. A
+        # later stop must invalidate this authorization, even while queued.
+        expected_fence = runtime.ros.authorization_fence() if isolated else None
         try:
             data = await request.json()
         except ValueError as exc:
@@ -35,6 +65,8 @@ def register_intervention_routes(app, runtime):
         if name in {'enable', 'enable_dagger'} and capture_mode not in ('corrections_only', 'full_session'):
             raise web.HTTPBadRequest(text='capture_mode must be corrections_only or full_session')
         async with lock:
+            if getattr(runtime, '_stopping', False):
+                raise web.HTTPServiceUnavailable(text='middleware is stopping')
             control = runtime.ros.ownership
             capture = runtime.recorder.corrections if runtime.recorder else None
             recording = control.recording_enabled
@@ -70,21 +102,37 @@ def register_intervention_routes(app, runtime):
                     operations[name]()
                     pending_capture = (name, data['request_id'], control.session, control.epoch, capture_mode)
 
-                control.request(data.get('request_id'), data.get('session_id', ''), data.get('expected_epoch'), apply)
+                if isolated:
+                    result = await asyncio.to_thread(runtime.ros.apply_intervention,
+                        name, data, recording_ready=bool(capture and capture.status().get('ready')),
+                        preparing_capture=recording, expected_fence=expected_fence)
+                    generation = result['ownership']
+                    session_id, epoch = generation['session_id'], generation['epoch']
+                    instance = generation['controller_instance_id']
+                    recording = generation['recording_enabled']
+                    if result['applied']:
+                        pending_capture = (name, data['request_id'], session_id, epoch, capture_mode)
+                else:
+                    generation = control.request(data.get('request_id'), data.get('session_id', ''),
+                                                 data.get('expected_epoch'), apply)
+                    session_id, epoch, instance = control.session, control.epoch, control.instance
                 # The authority transaction deduplicates request IDs. Its disk
                 # effect must also be deduplicated: a delayed old disable must
                 # never stop a newer capture. A failed disk operation may only
                 # retry while its original authority generation is current.
-                pending = pending_capture == (name, data.get('request_id'), control.session, control.epoch, capture_mode)
+                pending = pending_capture == (name, data.get('request_id'), session_id, epoch, capture_mode)
                 if pending and recording and name in {'enable', 'enable_dagger'} and runtime.recorder.corrections is None:
                     metadata = {**runtime.session_profile_metadata,
-                                'controller_instance_id': control.instance, 'session_id': control.session}
-                    await asyncio.to_thread(runtime.recorder.prepare_corrections, metadata, capture_mode=capture_mode)
+                                'controller_instance_id': instance, 'session_id': session_id}
+                    await _capture_work(runtime.recorder.prepare_corrections, metadata, capture_mode=capture_mode)
                     capture = runtime.recorder.corrections
                     if capture and capture.status()['ready']:
-                        control.finish_capture_preparation(metadata['session_id'])
+                        if isolated:
+                            await asyncio.to_thread(control.finish_capture_preparation, metadata['session_id'])
+                        else:
+                            control.finish_capture_preparation(metadata['session_id'])
                 elif pending and recording and name in {'disable', 'disable_dagger'} and runtime.recorder is not None:
-                    await asyncio.to_thread(runtime.recorder.stop_corrections)
+                    await _capture_work(runtime.recorder.stop_corrections)
                 if pending:
                     pending_capture = None
             except (ValueError, RuntimeError, OSError) as exc:

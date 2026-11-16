@@ -53,7 +53,6 @@ let discoveredTopics = [];
 let latestTopicHealth = {};
 const jointMonitor = {command:new Map(), feedback:new Map()};
 let jointMonitorRenderTimer = null;
-let pipelineCounterSample = null;
 let latestPipelineActionRate = null;
 const standardTopicStandards = {
   vr_frame: { target_hz: 60, min_hz: 30 },
@@ -391,33 +390,21 @@ function updateJointMonitor(event,kind) {
 
 function renderControlPipeline(ros) {
   const health=ros.topic_health||{}, mux=ros.command_mux||{};
-  const source=mux.source||'vr';
-  const now=performance.now();
-  const count=Number(mux.received?.[source]||0);
-  const forwarded=Number(mux.forwarded||0);
-  let muxHz=null;
-  let forwardedHz=null;
-  if(pipelineCounterSample&&count>=pipelineCounterSample.count&&forwarded>=pipelineCounterSample.forwarded) {
-    const seconds=(now-pipelineCounterSample.time)/1000;
-    if(seconds>=0.35&&seconds<=5) {
-      muxHz=(count-pipelineCounterSample.count)/seconds;
-      forwardedHz=(forwarded-pipelineCounterSample.forwarded)/seconds;
-    }
-  }
-  pipelineCounterSample={time:now,count,forwarded};
-  if(Number.isFinite(mux.received_hz?.[source]))muxHz=Number(mux.received_hz[source]);
-  if(Number.isFinite(mux.forwarded_hz))forwardedHz=Number(mux.forwarded_hz);
+  const arms=mux.channels?.arms;
 
   const topicRate=(topic,target)=>{
     const item=health[topic];
     return {hz:item?.has_data?Number(item.hz||0):0,target,hasData:Boolean(item?.has_data),
       gap:Number.isFinite(item?.max_gap_ms)?Number(item.max_gap_ms):null};
   };
+  const armRate=(direction)=>({hz:Number(arms[direction+'_hz']||0),target:100,
+    hasData:arms['last_'+direction+'_age']!==null&&Number(arms['last_'+direction+'_age'])<=1.8,
+    gap:direction==='forwarded'&&Number.isFinite(arms.max_publication_gap_ms)?arms.max_publication_gap_ms:null});
   const stages=[
     ['pipelineVr',topicRate('/vrdata',60)],
     ['pipelineSolver',topicRate('/control/solver/joint_targets',100)],
-    ['pipelineMux',{hz:muxHz??0,target:100,hasData:muxHz!==null||Number(mux.last_received_age?.[source])<=1.8,gap:null}],
-    ['pipelineAction',forwardedHz!==null?{hz:forwardedHz,target:100,hasData:Number(mux.last_received_age?.[source])<=1.8,gap:null}:topicRate('/action/joint_states',100)],
+    ['pipelineMux',arms?armRate('received'):{hz:0,target:100,hasData:false,gap:null}],
+    ['pipelineAction',arms?armRate('forwarded'):topicRate('/action/joint_states',100)],
     ['pipelineFeedback',topicRate('/observation/joint_states',100)],
   ];
   const paused=mux.output_enabled===false;
@@ -448,7 +435,7 @@ function renderControlPipeline(ros) {
   else if(!feedback.hasData||feedback.hz<80) {state='bad';label='硬件反馈掉速';diagnosis='命令下发正常，但硬件反馈频率偏低。';}
   const rejected=Number(mux.rejected||0), forwardedTotal=Number(mux.forwarded||0);
   const total=rejected+forwardedTotal;
-  const rejectText=total?`累计转发 ${forwardedTotal.toLocaleString()}，拒绝 ${rejected.toLocaleString()}。`:'';
+  const rejectText=total?`各关节通道累计转发合计 ${forwardedTotal.toLocaleString()}，拒绝 ${rejected.toLocaleString()}。`:'';
   const banner=$('#controlPipelineDiagnosis'), badge=$('#controlPipelineBadge');
   if(banner){banner.className=`pipeline-diagnosis ${state}`;banner.querySelector('span').textContent=`${diagnosis} ${rejectText}`.trim();}
   if(badge){badge.textContent=label;badge.className=`tag pipeline-badge ${state}`;}

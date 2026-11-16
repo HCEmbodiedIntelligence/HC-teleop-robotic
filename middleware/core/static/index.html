@@ -43,11 +43,11 @@
         <div class="control-pipeline" aria-label="实时控制链路频率">
           <div class="pipeline-stage" id="pipelineVr"><span class="pipeline-index">1</span><div><label>VR 姿态</label><strong id="pipelineVrRate">--</strong><small id="pipelineVrMeta">/vrdata · 目标 60 Hz</small></div></div>
           <div class="pipeline-stage" id="pipelineSolver"><span class="pipeline-index">2</span><div><label>逆解输出</label><strong id="pipelineSolverRate">--</strong><small id="pipelineSolverMeta">/control/solver/joint_targets</small></div></div>
-          <div class="pipeline-stage" id="pipelineMux"><span class="pipeline-index">3</span><div><label>命令仲裁</label><strong id="pipelineMuxRate">--</strong><small id="pipelineMuxMeta">VR 输入实时接收率</small></div></div>
-          <div class="pipeline-stage" id="pipelineAction"><span class="pipeline-index">4</span><div><label>仲裁输出</label><strong id="pipelineActionRate">--</strong><small id="pipelineActionMeta">/action/joint_states</small></div></div>
+          <div class="pipeline-stage" id="pipelineMux"><span class="pipeline-index">3</span><div><label>手臂命令接收</label><strong id="pipelineMuxRate">--</strong><small id="pipelineMuxMeta">手臂通道 · 各输入源合计</small></div></div>
+          <div class="pipeline-stage" id="pipelineAction"><span class="pipeline-index">4</span><div><label>手臂仲裁输出</label><strong id="pipelineActionRate">--</strong><small id="pipelineActionMeta">/action/joint_states</small></div></div>
           <div class="pipeline-stage" id="pipelineFeedback"><span class="pipeline-index">5</span><div><label>硬件反馈</label><strong id="pipelineFeedbackRate">--</strong><small id="pipelineFeedbackMeta">/observation/joint_states</small></div></div>
         </div>
-        <p class="pipeline-footnote">仲裁输出是中间件更新目标的频率；HC_X1 的关节平滑器会继续以 100 Hz 向底层驱动下发。</p>
+        <p class="pipeline-footnote">手臂仲裁输出单独统计 /action/joint_states，不包含左右手指通道。HC_X1 的关节平滑器以 100 Hz 向底层驱动下发；各通道频率合计不代表手臂下发频率。</p>
       </article>
       <div class="grid two">
         <article class="panel intervention-panel">
@@ -74,7 +74,7 @@
             <button id="sourceMotion" data-source="motion"><strong>Move / Servo</strong><small>模型/程序控制</small></button>
             <button id="sourceExoskeleton" data-source="exoskeleton"><strong>外骨骼</strong><small id="exoSourceStatus">未检测</small></button>
           </div>
-          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>硬件状态</dt><dd id="hardwareReadyState">未知</dd></div><div><dt>状态时效</dt><dd id="hardwareReadyAge">未知</dd></div><div><dt>累计拒绝</dt><dd id="muxRejected">0</dd></div><div><dt>累计转发</dt><dd id="muxForwarded">0</dd></div></dl>
+          <dl class="monitor-stats"><div><dt>VR 输入</dt><dd><code id="vrCommandTopic">/control/vr/joint_states</code></dd></div><div><dt>外骨骼输入</dt><dd><code id="exoCommandTopic">/control/exoskeleton/joint_states</code></dd></div><div><dt>机器人输出</dt><dd><code id="outputCommandTopic">/action/joint_states</code></dd></div><div><dt>硬件状态</dt><dd id="hardwareReadyState">未知</dd></div><div><dt>状态时效</dt><dd id="hardwareReadyAge">未知</dd></div><div><dt>累计拒绝</dt><dd id="muxRejected">0</dd></div><div><dt>累计转发（各通道合计）</dt><dd id="muxForwarded">0</dd></div></dl>
         </article>
         <article class="panel system-panel">
           <div class="panel-title"><div><h2>链路状态</h2><p>VR、控制器、相机和网页连接状态</p></div><span id="vrPeer" class="tag">VR 未连接</span></div>
