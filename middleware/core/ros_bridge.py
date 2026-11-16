@@ -174,6 +174,7 @@ class RosBridge:
         self._command_stage_timings = {}
         self._slow_command_stages = deque(maxlen=32)
         self._control_contention = deque(maxlen=64)
+        self._command_contention_last_ns = 0
         self._contention_thread = None
         self._boundary = None
         self._permit_sender = None
@@ -473,13 +474,24 @@ class RosBridge:
         """Inspect the current lock owner; never acquire or replace control locks."""
         diagnostic = self.ownership.input_diagnostics
         now = time.time_ns()
-        if (diagnostic.get('last_age_ms', 0) < 100. or
-                now-diagnostic.get('last_callback_ns', 0) > 2_000_000_000):
+        input_slow = (diagnostic.get('last_age_ms', 0) >= 100. and
+                      now-diagnostic.get('last_callback_ns', 0) <= 2_000_000_000)
+        recent_command = self._slow_command_stages[-1] if self._slow_command_stages else None
+        command_slow = bool(recent_command and now-recent_command['stamp_ns'] <= 2_000_000_000)
+        if not input_slow and not command_slow:
             return None
+        if not input_slow:
+            if now-self._command_contention_last_ns < 1_000_000_000:
+                return None
+            self._command_contention_last_ns = now
         # CPython's RLock repr exposes its owner without taking that lock.
         # This is diagnostic-only: an unavailable owner is never a control fact.
         match = re.search(r'owner=(\d+)', repr(self._lock))
         owner = int(match.group(1)) if match else 0
+        # A free lock cannot explain a slow command. Keep the bounded owner
+        # history useful instead of flushing it with idle samples every 10 ms.
+        if not owner and not input_slow:
+            return None
         frame = sys._current_frames().get(owner) if owner else None
         stack = []
         while frame is not None and len(stack) < 8:
@@ -490,6 +502,7 @@ class RosBridge:
         entity = getattr(group, '_active_entity', None)
         callback = getattr(entity, 'callback', None)
         return dict(stamp_ns=now, input_age_ms=diagnostic.get('last_age_ms'),
+            trigger='slow_command' if command_slow else 'input_age',
             owner_thread=next((t.name for t in threading.enumerate() if t.ident==owner), None),
             owner_stack=stack,
             active_ownership_callback=getattr(callback, '_hc_timing_name',
@@ -560,6 +573,9 @@ class RosBridge:
             return self._forward_live_command(source, message, publish, token)
         started = time.monotonic_ns(), time.thread_time_ns()
         timing = {'_previous': started}
+        boundary = self._boundary
+        channel = ('arms' if boundary is not None and
+                   set(getattr(message, 'name', ())).intersection(getattr(boundary, 'arms', ())) else 'hands')
         try:
             return self._forward_live_command(source, message, publish, token, timing=timing)
         finally:
@@ -569,14 +585,17 @@ class RosBridge:
                                    cpu_ms=(finished[1]-started[1])/1e6)
             with self._callback_timing_lock:
                 for stage, elapsed in timing.items():
-                    key = source+':'+stage
-                    value = self._command_stage_timings.setdefault(key, dict(samples=0, max_ms=0., max_cpu_ms=0.))
-                    value.update(samples=value['samples']+1, last_ms=elapsed['wall_ms'],
-                                 last_cpu_ms=elapsed['cpu_ms'],
-                                 max_ms=max(value['max_ms'], elapsed['wall_ms']),
-                                 max_cpu_ms=max(value['max_cpu_ms'], elapsed['cpu_ms']))
+                    # Preserve aggregate API keys and expose independent arm/
+                    # hand samples; their callbacks have different rates.
+                    for key in (source+':'+stage, source+':'+channel+':'+stage):
+                        value = self._command_stage_timings.setdefault(key, dict(samples=0, max_ms=0., max_cpu_ms=0.))
+                        value.update(samples=value['samples']+1, last_ms=elapsed['wall_ms'],
+                                     last_cpu_ms=elapsed['cpu_ms'],
+                                     max_ms=max(value['max_ms'], elapsed['wall_ms']),
+                                     max_cpu_ms=max(value['max_cpu_ms'], elapsed['cpu_ms']))
                 if timing['total']['wall_ms'] >= 10.:
-                    self._slow_command_stages.append(dict(source=source, stamp_ns=time.time_ns(), stages=timing))
+                    self._slow_command_stages.append(dict(source=source, channel=channel,
+                        stamp_ns=time.time_ns(), stages=timing))
 
     @staticmethod
     def _command_checkpoint(timing, stage):
@@ -586,6 +605,18 @@ class RosBridge:
             timing[stage] = dict(wall_ms=(now[0]-previous[0])/1e6,
                                  cpu_ms=(now[1]-previous[1])/1e6)
             timing['_previous'] = now
+
+    @staticmethod
+    def _command_instant(timing):
+        # Reading two integer clocks is the only diagnostic work performed
+        # inside the final gate. Formatting/aggregation remains outside it.
+        return (time.monotonic_ns(), time.thread_time_ns()) if timing is not None else None
+
+    @staticmethod
+    def _command_interval(timing, stage, before, after):
+        if timing is not None and before is not None and after is not None:
+            timing[stage] = dict(wall_ms=(after[0]-before[0])/1e6,
+                                 cpu_ms=(after[1]-before[1])/1e6)
 
     def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
         """Keep authority across slow conversion and recheck at actuator send."""
@@ -607,7 +638,9 @@ class RosBridge:
                                          message.velocity, message.effort, to_model=True)
         except (AttributeError, TypeError, ValueError):
             valid, stamp = False, 0.0
+        initial_attempt = self._command_instant(timing)
         with self._lock:
+            initial_acquired = self._command_instant(timing)
             self._mux_received[source] += 1
             self._mux_last_received[source] = now
             self._mux_received_times[source].append(now)
@@ -624,6 +657,7 @@ class RosBridge:
                 self._mux_rejection_reasons[source+':'+reason] += 1
                 return False
             epoch = self._output_epoch
+        self._command_interval(timing, 'initial_lock_wait', initial_attempt, initial_acquired)
         self._command_checkpoint(timing, 'initial_gate')
         prepared = self._boundary.prepare(message) if self._boundary else message
         self._command_checkpoint(timing, 'prepare')
@@ -633,8 +667,11 @@ class RosBridge:
         ticket = capture.reserve() if capture is not None and arm_target else None
         self._command_checkpoint(timing, 'capture_reserve')
         published, publication_ns, publication_monotonic = None, None, None
+        send_attempt = self._command_instant(timing)
+        send_acquired = commit_done = publish_done = None
         try:
             with self._lock:
+                send_acquired = self._command_instant(timing)
                 if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
                         or not self._ready_locked(time.monotonic()) or self._command_source != source
                         or self._replay_active or stamp <= self._source_stamps.get(stream, 0)
@@ -650,7 +687,9 @@ class RosBridge:
                 self._source_stamps[stream] = stamp
                 if self._legacy_enabled and self._boundary:
                     message = prepared[0]
+                commit_done = self._command_instant(timing)
                 publish(message)
+                publish_done = self._command_instant(timing)
                 published, publication_ns = message, time.time_ns()
                 publication_monotonic = time.monotonic()
                 if self.ownership.active:
@@ -666,6 +705,11 @@ class RosBridge:
         finally:
             # No snapshot copy, serialization, queue IPC or capture bookkeeping
             # executes while holding the final send/authority lock.
+            released = self._command_instant(timing)
+            self._command_interval(timing, 'send_lock_wait', send_attempt, send_acquired)
+            self._command_interval(timing, 'commit_validate', send_acquired, commit_done)
+            self._command_interval(timing, 'dds_publish', commit_done, publish_done)
+            self._command_interval(timing, 'send_accounting', publish_done, released)
             self._command_checkpoint(timing, 'commit_publish')
             if ticket is not None:
                 capture.complete(ticket, published, publication_ns=publication_ns,
