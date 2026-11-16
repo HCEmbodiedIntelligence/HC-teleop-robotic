@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# Single product entry point: complete simulation or real-robot teleoperation.
+set -euo pipefail
+
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MODE="middleware"
+MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${PROJECT_ROOT}/middleware/config.yaml}"
+HEADLESS=false
+MONITOR=true
+DIAGNOSTICS=true
+[[ "${TELEOP_DIAGNOSTICS:-1}" != "0" ]] || DIAGNOSTICS=false
+LOG_DIR=""
+SERVER_HOST=""
+SERVER_PORT=""
+
+usage() {
+  cat <<EOF
+Usage: $0 [middleware|sim|teleop] [options]
+
+  middleware Dashboard + VR transport; launch PyBullet from System Configuration
+  sim       VR discovery + Dashboard + IK/control + PyBullet
+  teleop    VR discovery + Dashboard + IK/control for an external real driver
+
+  With no mode, middleware is selected. Import/apply a robot ZIP and start
+  PyBullet independently from Dashboard System Configuration.
+
+Options:
+  --headless            Run simulation without the PyBullet GUI (sim only)
+  --config FILE         Middleware config (default: middleware/config.yaml)
+  --log-dir DIR         Session log directory
+  --no-monitor          Disable the operation event monitor
+  --no-diagnostics      Disable simulation CSV diagnostics
+  --no-wifi-preflight   Skip cached, read-only Wi-Fi startup report
+  --host HOST           Override Dashboard bind host
+  --port PORT           Override Dashboard port
+  -h, --help            Show this help
+
+Examples:
+  ./run.sh
+  ./run.sh sim --headless
+  ./run.sh teleop
+EOF
+}
+
+if (($#)); then
+  case "$1" in
+    middleware|sim|teleop)
+      MODE="$1"
+      shift
+      ;;
+    simulator)
+      echo "Mode '$1' was removed. Use 'sim' or 'teleop'." >&2
+      exit 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+fi
+
+while (($#)); do
+  case "$1" in
+    --headless)
+      HEADLESS=true
+      shift
+      ;;
+    --config)
+      [[ $# -ge 2 ]] || { echo "--config requires a file" >&2; exit 2; }
+      MIDDLEWARE_CONFIG="$2"
+      shift 2
+      ;;
+    --log-dir)
+      [[ $# -ge 2 ]] || { echo "--log-dir requires a directory" >&2; exit 2; }
+      LOG_DIR="$2"
+      shift 2
+      ;;
+    --no-wifi-preflight)
+      export HC_WIFI_PREFLIGHT=0
+      shift
+      ;;
+    --no-monitor)
+      MONITOR=false
+      shift
+      ;;
+    --no-diagnostics)
+      DIAGNOSTICS=false
+      shift
+      ;;
+    --host)
+      [[ $# -ge 2 ]] || { echo "--host requires a value" >&2; exit 2; }
+      SERVER_HOST="$2"
+      shift 2
+      ;;
+    --port)
+      [[ $# -ge 2 ]] || { echo "--port requires a value" >&2; exit 2; }
+      SERVER_PORT="$2"
+      shift 2
+      ;;
+    --robot)
+      echo "--robot was removed. Select the active profile in Dashboard/config.yaml." >&2
+      exit 2
+      ;;
+    --sim-only|--v23|--reconstructed|--generic|--legacy)
+      echo "The duplicate backend option '$1' was removed." >&2
+      exit 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "${MODE}" == teleop ]]; then
+  /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/verify_checkout.py" --root "${PROJECT_ROOT}"
+  # Real hardware starts without automatic homing or command publication.
+  export HC_CONTROL_START_DISABLED="${HC_CONTROL_START_DISABLED:-1}"
+fi
+
+[[ -f "${MIDDLEWARE_CONFIG}" ]] || {
+  echo "Middleware config not found: ${MIDDLEWARE_CONFIG}" >&2
+  exit 2
+}
+
+# Cached scans and survey reads only: never trigger an off-channel scan or
+# change network configuration while another session might already be active.
+# A missing tool/permission must not prevent starting the control stack.
+if [[ "${MODE}" != sim && "${HC_WIFI_PREFLIGHT:-1}" != 0 && -f "${PROJECT_ROOT}/tools/diagnostics/wifi_preflight.py" ]]; then
+  PREFLIGHT_DIR="${PROJECT_ROOT}/runtime/network_preflight"
+  if mkdir -p "${PREFLIGHT_DIR}"; then
+    PREFLIGHT_TMP="$(mktemp "${PREFLIGHT_DIR}/.report.XXXXXX")"
+    PREFLIGHT_ARGS=(--width "${HC_WIFI_WIDTH:-80}")
+    [[ -z "${HC_WIFI_INTERFACE:-}" ]] || PREFLIGHT_ARGS+=(--interface "${HC_WIFI_INTERFACE}")
+    if timeout 20s /usr/bin/python3 "${PROJECT_ROOT}/tools/diagnostics/wifi_preflight.py" "${PREFLIGHT_ARGS[@]}" > "${PREFLIGHT_TMP}" && [[ -s "${PREFLIGHT_TMP}" ]]; then
+      mv -- "${PREFLIGHT_TMP}" "${PREFLIGHT_DIR}/latest.json"
+      echo "[HC] Read-only Wi-Fi preflight: ${PREFLIGHT_DIR}/latest.json (unknown values do not imply a clear channel)"
+    else
+      rm -f -- "${PREFLIGHT_TMP}"
+      echo "[HC] Wi-Fi preflight unavailable or timed out; continuing startup." >&2
+    fi
+  fi
+fi
+
+# The command selects the mode, never a stale parent-shell setting.
+export HC_RUNTIME_MODE=simulation
+[[ "${MODE}" != teleop ]] || export HC_RUNTIME_MODE=teleop
+
+if [[ "${MODE}" == middleware ]]; then
+  [[ "${HEADLESS}" == false ]] || { echo "Configure headless mode in Dashboard." >&2; exit 2; }
+  unset HC_EXTERNAL_STACK HC_TELEOP_MODE HC_MANAGED_CONTROL HC_CONTROL_LOG_DIR
+  ARGS=(--config "${MIDDLEWARE_CONFIG}")
+  [[ -z "${LOG_DIR}" ]] || ARGS+=(--log-dir "${LOG_DIR}")
+  [[ "${MONITOR}" == true ]] || ARGS+=(--no-monitor)
+  [[ -z "${SERVER_HOST}" ]] || ARGS+=(--host "${SERVER_HOST}")
+  [[ -z "${SERVER_PORT}" ]] || ARGS+=(--port "${SERVER_PORT}")
+  # Keep the public entry point visible in ps, and own the child's lifetime.
+  MIDDLEWARE_PID=""
+  cleanup_middleware() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "${MIDDLEWARE_PID}" ]]; then
+      kill -TERM "${MIDDLEWARE_PID}" 2>/dev/null || true
+      wait "${MIDDLEWARE_PID}" 2>/dev/null || true
+    fi
+    exit "${status}"
+  }
+  trap cleanup_middleware EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" \
+    --parent "$$" -- "${PROJECT_ROOT}/middleware/start.sh" "${ARGS[@]}" &
+  MIDDLEWARE_PID=$!
+  echo "[HC] run.sh PID=$$; stop this stack with: kill $$"
+  wait "${MIDDLEWARE_PID}"
+  exit $?
+fi
+export HC_EXTERNAL_STACK=1
+
+set +u
+source /opt/ros/humble/setup.bash
+set -u
+export HC_MIDDLEWARE_CONFIG="${MIDDLEWARE_CONFIG}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/upload_client:${PROJECT_ROOT}/.deps${PYTHONPATH:+:${PYTHONPATH}}"
+DOMAIN_VALUES="$(/usr/bin/python3 -m middleware.core.runtime_mode "${MIDDLEWARE_CONFIG}" --shell-values)"
+read -r ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID <<< "${DOMAIN_VALUES}"
+export ROS_DOMAIN_ID HC_HARDWARE_DOMAIN_ID
+if [[ "${HC_RUNTIME_MODE}" == simulation ]]; then
+  export HC_SIMULATION_DOMAIN_ID="${ROS_DOMAIN_ID}" ROS_LOCALHOST_ONLY=1
+else
+  unset HC_SIMULATION_DOMAIN_ID
+  # HC_X1 and the middleware must use the same Fast DDS transports. Without
+  # this profile Fast DDS may select wlan0, while HC_X1 is restricted to the
+  # robot-internal and inference Ethernet interfaces, splitting the local graph.
+  export ROS_LOCALHOST_ONLY=0
+  if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+    [[ -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]] || {
+      echo "Fast DDS profile not found: ${FASTRTPS_DEFAULT_PROFILES_FILE}" >&2
+      exit 2
+    }
+    export FASTRTPS_DEFAULT_PROFILES_FILE
+  elif [[ -f "${HOME}/shm_profile.xml" ]]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE="${HOME}/shm_profile.xml"
+  else
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+    echo "[HC] Fast DDS profile not found; using the middleware default transport." >&2
+  fi
+fi
+
+PROFILE_DIR="$(/usr/bin/python3 -m middleware.profile_cli profile-dir --config "${MIDDLEWARE_CONFIG}")"
+ROBOT_CONFIG_ROOT="$(dirname -- "${PROFILE_DIR}")"
+ROBOT_NAME="$(basename -- "${PROFILE_DIR}")"
+if [[ "${MODE}" == teleop && "${HEADLESS}" == true ]]; then
+  echo "--headless is only valid in sim mode." >&2
+  exit 2
+fi
+
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="${PROJECT_ROOT}/runtime/teleop_logs/session_$(date +%Y%m%d_%H%M%S)"
+fi
+mkdir -p "${LOG_DIR}/control" "${LOG_DIR}/middleware"
+chmod 700 "${LOG_DIR}" "${LOG_DIR}/control" "${LOG_DIR}/middleware"
+mkdir -p "${PROJECT_ROOT}/runtime/teleop_logs"
+ln -sfn "${LOG_DIR}" "${PROJECT_ROOT}/runtime/teleop_logs/latest"
+
+MIDDLEWARE_ARGS=(
+  --config "${MIDDLEWARE_CONFIG}"
+  --log-dir "${LOG_DIR}/middleware"
+)
+[[ "${MONITOR}" == true ]] || MIDDLEWARE_ARGS+=(--no-monitor)
+[[ -z "${SERVER_HOST}" ]] || MIDDLEWARE_ARGS+=(--host "${SERVER_HOST}")
+[[ -z "${SERVER_PORT}" ]] || MIDDLEWARE_ARGS+=(--port "${SERVER_PORT}")
+
+SIM_ENTRY=""
+SIM_ARGS=()
+SIM_ROS_ARGS=()
+if [[ "${MODE}" == sim ]]; then
+  SIM_ENTRY="${PROJECT_ROOT}/simulation/general_sim_robot_control_node_ros2.py"
+
+  [[ -d "${PROJECT_ROOT}/.deps/pybullet-3.2.6.dist-info" ]] || {
+    echo "Simulation dependencies not found. Run ${PROJECT_ROOT}/install.sh first." >&2
+    exit 2
+  }
+  [[ -f "${SIM_ENTRY}" ]] || { echo "Bundled simulator not found: ${SIM_ENTRY}" >&2; exit 2; }
+  [[ -f "${PROFILE_DIR}/arm_teleop.yaml" || -f "${PROFILE_DIR}/vr_configs.yml" ]] || {
+    echo "Active profile has no simulation config: ${PROFILE_DIR}/arm_teleop.yaml or vr_configs.yml" >&2
+    exit 2
+  }
+
+  export HC_ROBOT_CONFIG_ROOT="${ROBOT_CONFIG_ROOT}"
+  export HC_ROBOT_NAME="${ROBOT_NAME}"
+  SIM_ARGS=(--profile "${PROFILE_DIR}")
+  [[ "${HEADLESS}" == false ]] || SIM_ARGS+=(--headless)
+  SIM_ROS_ARGS=(
+    --ros-args
+    -r /io_teleop/joint_states:=/observation/joint_states
+    -r /io_teleop/joint_cmd:=/action/joint_states
+    -r /io_teleop/target_joint_from_vr:=/control/solver/target_joint_from_vr
+    -r /io_teleop/target_finger_joints:=/action/hands/joint_targets
+    -r /io_teleop/target_ee_poses:=/action/ee_poses
+    -r /io_teleop/target_gripper_status:=/action/hands/gripper_status
+    -r /io_teleop/hardware_ready:=/status/hardware/ready
+  )
+fi
+
+MIDDLEWARE_PID=""
+CONTROL_PID=""
+SIM_PID=""
+DIAGNOSTICS_PID=""
+
+collect_process_tree() {
+  local parent="$1"
+  local child
+  while read -r child; do
+    [[ -n "${child}" ]] || continue
+    collect_process_tree "${child}"
+  done < <(pgrep -P "${parent}" 2>/dev/null || true)
+  printf '%s\n' "${parent}"
+}
+
+stop_tree() {
+  local root_pid="$1"
+  [[ -n "${root_pid}" ]] || return 0
+  local -a tree=()
+  mapfile -t tree < <(collect_process_tree "${root_pid}")
+  ((${#tree[@]})) || return 0
+  kill -TERM "${tree[@]}" 2>/dev/null || true
+  for _ in {1..30}; do
+    local alive=false
+    local pid
+    for pid in "${tree[@]}"; do
+      if kill -0 "${pid}" 2>/dev/null; then alive=true; break; fi
+    done
+    [[ "${alive}" == true ]] || return 0
+    sleep 0.1
+  done
+  for pid in "${tree[@]}"; do kill -KILL "${pid}" 2>/dev/null || true; done
+}
+
+cleanup() {
+  local status=$?
+  trap - HUP INT TERM EXIT
+  stop_tree "${DIAGNOSTICS_PID}"
+  stop_tree "${SIM_PID}"
+  stop_tree "${CONTROL_PID}"
+  stop_tree "${MIDDLEWARE_PID}"
+  [[ -z "${DIAGNOSTICS_PID}" ]] || wait "${DIAGNOSTICS_PID}" 2>/dev/null || true
+  [[ -z "${SIM_PID}" ]] || wait "${SIM_PID}" 2>/dev/null || true
+  [[ -z "${CONTROL_PID}" ]] || wait "${CONTROL_PID}" 2>/dev/null || true
+  [[ -z "${MIDDLEWARE_PID}" ]] || wait "${MIDDLEWARE_PID}" 2>/dev/null || true
+  exit "${status}"
+}
+trap cleanup HUP INT TERM EXIT
+
+# Start discovery first so the headset can pair while IK and simulation load.
+export HC_TELEOP_MODE="${MODE}"
+if [[ "${MODE}" == teleop ]]; then
+  export HC_MANAGED_CONTROL="${HC_MANAGED_CONTROL:-1}" HC_CONTROL_LOG_DIR="${LOG_DIR}/control"
+else
+  unset HC_MANAGED_CONTROL HC_CONTROL_LOG_DIR
+fi
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${PROJECT_ROOT}/middleware/start.sh" "${MIDDLEWARE_ARGS[@]}" &
+MIDDLEWARE_PID=$!
+if [[ "${MODE}" != teleop || "${HC_MANAGED_CONTROL:-0}" != 1 ]]; then
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${PROJECT_ROOT}/adapters/start.sh" \
+  --config "${MIDDLEWARE_CONFIG}" --log-dir "${LOG_DIR}/control" &
+CONTROL_PID=$!
+fi
+
+if [[ "${MODE}" == sim ]]; then
+  setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 "${SIM_ENTRY}" "${SIM_ARGS[@]}" "${SIM_ROS_ARGS[@]}" &
+  SIM_PID=$!
+  if [[ "${DIAGNOSTICS}" == true && -f "${PROJECT_ROOT}/tools/diagnostics/teleop_diagnostics.py" ]]; then
+    DIAGNOSTICS_LOG="${TELEOP_LOG_PATH:-${LOG_DIR}/teleop_diagnostics.csv}"
+    setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -m tools.diagnostics.teleop_diagnostics \
+      --output "${DIAGNOSTICS_LOG}" --rate "${TELEOP_LOG_RATE:-30}" &
+    DIAGNOSTICS_PID=$!
+    echo "[HC] diagnostics=${DIAGNOSTICS_LOG}"
+  fi
+fi
+
+echo "[HC] mode=${MODE} ROS_DOMAIN_ID=${ROS_DOMAIN_ID} config=${MIDDLEWARE_CONFIG}"
+echo "[HC] VR discovery, Dashboard and control are running. Ctrl+C stops this stack."
+if [[ "${MODE}" == teleop ]]; then
+  echo "[HC] Start the HC_X1 hardware project separately with ROS_DOMAIN_ID=${ROS_DOMAIN_ID}."
+fi
+
+REQUIRED_PIDS=("${MIDDLEWARE_PID}")
+[[ -z "${CONTROL_PID}" ]] || REQUIRED_PIDS+=("${CONTROL_PID}")
+[[ -z "${SIM_PID}" ]] || REQUIRED_PIDS+=("${SIM_PID}")
+set +e
+wait -n "${REQUIRED_PIDS[@]}"
+status=$?
+set -e
+if [[ ${status} -ne 0 ]]; then
+  echo "[HC] A required component exited with status ${status}; see ${LOG_DIR}." >&2
+fi
+exit "${status}"

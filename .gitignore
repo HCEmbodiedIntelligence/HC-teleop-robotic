@@ -51,3 +51,13 @@ log_motion/
 .deps
 .venv-lerobot
 *.so
+
+# Process-isolated platform build outputs; dependency locks remain tracked.
+.platform-deps/
+.platform-venv/
+.venv-lerobot-platform/
+platform/control/build/
+platform/kinematics/build/
+platform/web/node_modules/
+platform/web/dist/
+platform/**/.ruff_cache/
