@@ -1277,6 +1277,10 @@ class RosBridge:
                         self._boundary.arm_publish_gap_max_ms = 0.0
             errors = []
             for event in events:
+                # This loop is outside the actuator/authority lock. Persist
+                # every transition, including the precursor ACKs and handover,
+                # instead of retaining only the final FAULT log line.
+                self.on_event(envelope('control_event', 'ros_bridge', event), [])
                 events_pub.publish(String(data=json.dumps(event, allow_nan=False)))
                 if (event['kind'] in {'recording_failed', 'heartbeat_timeout', 'manual_input_timeout'} or
                         (event['kind'] == 'revoked' and event['state'] in {'FAULT', 'ESTOP'})):
@@ -1285,6 +1289,7 @@ class RosBridge:
             if errors:
                 node.get_logger().error('[control-event] '+json.dumps(errors, allow_nan=False))
             if diagnostic is not None:
+                self.on_event(envelope('control_diagnostic', 'ros_bridge', diagnostic), [])
                 node.get_logger().error('[control-diag] '+json.dumps(diagnostic, allow_nan=False))
             if state is not None:
                 state_pub.publish(String(data=json.dumps(state, allow_nan=False)))
