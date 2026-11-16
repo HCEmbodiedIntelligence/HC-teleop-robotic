@@ -140,6 +140,7 @@ class TopicHealthTracker:
 
 class RosBridge:
     """Run rclpy in its own thread and expose thread-safe bridge operations."""
+    COMMAND_CHANNELS = ('arms', 'right_hand', 'left_hand', 'other')
 
     def __init__(
         self,
@@ -210,6 +211,12 @@ class RosBridge:
             "vr": deque(maxlen=300), "exoskeleton": deque(maxlen=300), "motion": deque(maxlen=300)
         }
         self._mux_forwarded_times: deque[float] = deque(maxlen=300)
+        self._mux_channel_received = dict.fromkeys(self.COMMAND_CHANNELS, 0)
+        self._mux_channel_forwarded = dict.fromkeys(self.COMMAND_CHANNELS, 0)
+        self._mux_channel_received_times = {channel: deque(maxlen=300) for channel in self.COMMAND_CHANNELS}
+        self._mux_channel_forwarded_times = {channel: deque(maxlen=300) for channel in self.COMMAND_CHANNELS}
+        self._command_channel_boundary = object()
+        self._command_channel_cache = {}
         self._mux_forwarded = 0
         self._mux_rejected = 0
         self._mux_rejection_reasons = Counter()
@@ -304,9 +311,32 @@ class RosBridge:
                 },
                 "forwarded": self._mux_forwarded,
                 "forwarded_hz": recent_rate(self._mux_forwarded_times),
+                "rate_scope": {
+                    "received_hz": "per_source_combined_joint_channels",
+                    "forwarded_hz": "all_sources_combined_joint_channels",
+                    "channels": "per_joint_channel_all_sources",
+                },
                 "rejected": self._mux_rejected,
                 "rejection_reasons": dict(self._mux_rejection_reasons),
             }
+            # Snapshot only; rate/gap scans never occupy the authority lock.
+            channel_samples = {
+                channel: (self._mux_channel_received[channel], self._mux_channel_forwarded[channel],
+                          list(self._mux_channel_received_times[channel]),
+                          list(self._mux_channel_forwarded_times[channel]))
+                for channel in self.COMMAND_CHANNELS
+            }
+        result['command_mux']['channels'] = {}
+        for channel, (received, forwarded, receives, publishes) in channel_samples.items():
+            recent_publishes = [stamp for stamp in publishes if now-stamp <= 2.0]
+            gaps = [(later-earlier)*1000 for earlier,later in zip(recent_publishes,recent_publishes[1:])]
+            result['command_mux']['channels'][channel] = dict(
+                received=received, forwarded=forwarded,
+                received_hz=recent_rate(receives), forwarded_hz=recent_rate(publishes),
+                max_publication_gap_ms=round(max(gaps), 3) if gaps else None,
+                publication_gap_window_sec=2.0,
+                last_received_age=round(now-receives[-1], 3) if receives else None,
+                last_forwarded_age=round(now-publishes[-1], 3) if publishes else None)
         result["topic_health"] = {
             topic: tracker.status(now) for topic, tracker in trackers
         }
@@ -629,6 +659,36 @@ class RosBridge:
         with self._telemetry_count_lock:
             self._telemetry_messages += 1
 
+    def _command_channel(self, names):
+        """Classify a stable joint layout once, independently of control policy."""
+        if self._command_channel_boundary is not self._boundary:
+            self._command_channel_boundary = self._boundary
+            self._command_channel_cache.clear()
+        try:
+            key = names if isinstance(names, tuple) else tuple(names or ())
+            cached = self._command_channel_cache.get(key)
+            if cached is not None:
+                return cached
+            boundary = self._boundary
+            arms, hands = getattr(boundary, 'arms', ()), getattr(boundary, 'hands', {})
+            if not isinstance(arms, (tuple, list, set, frozenset)):
+                arms = ()
+            if not isinstance(hands, dict):
+                hands = {}
+            if any(name in arms for name in key):
+                channel = 'arms'
+            else:
+                sides = [side for side in ('right', 'left')
+                         if any(name in hands.get(side, ()) for name in key)]
+                channel = sides[0]+'_hand' if len(sides) == 1 else 'other'
+            # Command layouts are few and fixed. Unknown layouts must not
+            # turn malformed traffic into an unbounded diagnostic cache.
+            if len(self._command_channel_cache) < 64:
+                self._command_channel_cache[key] = channel
+            return channel
+        except (TypeError, ValueError):
+            return 'other'
+
     def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
         """Keep authority across slow conversion and recheck at actuator send."""
         now = time.monotonic()
@@ -649,12 +709,16 @@ class RosBridge:
                                          message.velocity, message.effort, to_model=True)
         except (AttributeError, TypeError, ValueError):
             valid, stamp = False, 0.0
+        channel = self._command_channel(stream[1] if isinstance(stream, tuple)
+                                        else getattr(message, 'name', ()))
         initial_attempt = self._command_instant(timing)
         with self._lock:
             initial_acquired = self._command_instant(timing)
             self._mux_received[source] += 1
             self._mux_last_received[source] = now
             self._mux_received_times[source].append(now)
+            self._mux_channel_received[channel] += 1
+            self._mux_channel_received_times[channel].append(now)
             ready = self._ready_locked(now)
             if (not valid or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
                     or not ready or not self._command_output_enabled
@@ -721,6 +785,8 @@ class RosBridge:
                         self._action_sink(evidence)
                 self._mux_forwarded += 1
                 self._mux_forwarded_times.append(time.monotonic())
+                self._mux_channel_forwarded[channel] += 1
+                self._mux_channel_forwarded_times[channel].append(publication_monotonic)
                 return True
         finally:
             # No snapshot copy, serialization, queue IPC or capture bookkeeping
