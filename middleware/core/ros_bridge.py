@@ -1250,12 +1250,16 @@ class RosBridge:
             This observer never advances, grants or revokes robot authority.
             """
             nonlocal event_cursor, state_last, state_sequence, diagnostic_last, diagnostic_previous
+            # snapshot() also takes this same RLock. Its internal timestamp
+            # lookup would therefore still run under the outer publication
+            # lock unless the observational clock is sampled here first.
+            wall_ns = self.ownership.ros_clock()
             with self._lock:
                 ownership = self.ownership
                 events = [event for event in ownership.events
                           if event['sequence'] > event_cursor]
                 now = time.monotonic()
-                state = (ownership.snapshot()
+                state = (ownership.snapshot(wall_ns=wall_ns)
                          if now-state_last >= .1 or state_sequence != ownership.event_seq
                          else None)
                 sequence = ownership.event_seq

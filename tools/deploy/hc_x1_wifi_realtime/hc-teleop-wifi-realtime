@@ -1,0 +1,23 @@
+#!/bin/sh
+# NetworkManager dispatcher, scoped to this robot's fixed teleoperation WLAN.
+# Releases the scan fence before disconnect/association so discovery can work.
+set -eu
+[ "${1:-}" = wlan0 ] || exit 0
+scan_dir=/proc/net/rtl8852be/wlan0
+[ -w "$scan_dir/scan_deny" ] || exit 0
+case "${2:-}" in
+  pre-up|pre-down|down)
+    printf '0\n' > "$scan_dir/scan_deny"
+    ;;
+  up)
+    if [ "${CONNECTION_UUID:-}" != 5aef0153-ba17-48c3-830a-f8d49afd10f9 ]; then
+      printf '0\n' > "$scan_dir/scan_deny"
+      exit 0
+    fi
+    /usr/sbin/iw dev wlan0 set power_save off
+    printf '1\n' > "$scan_dir/scan_deny"
+    # Stop an already running scan, with a bounded 1000 ms abort wait.
+    printf '1000\n' > "$scan_dir/scan_abort"
+    logger -t hc-teleop-wifi 'fixed teleop WLAN connected: power saving off; background scans fenced'
+    ;;
+esac

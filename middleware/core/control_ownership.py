@@ -467,11 +467,14 @@ class ControlOwnership:
                 self.requests.popitem(last=False)
             return self.snapshot()
 
-    def snapshot(self):
+    def snapshot(self, *, wall_ns=None):
         # rclpy Clock.now() may briefly wait in the C extension under load.
         # Never hold the final command/authority lock across that observer-only
         # timestamp lookup: a dashboard snapshot must not stall actuator output.
-        published_stamp_ns = self.ros_clock()
+        # A caller already holding this RLock must obtain this observational
+        # timestamp before entering its outer lock. Decision/command paths keep
+        # their independent real-clock checks; the default remains a fresh read.
+        published_stamp_ns = self.ros_clock() if wall_ns is None else wall_ns
         with self.lock:
             return dict(state=self.state, phase=self.phase, reason=self.reason,
                         dagger_enabled=self.dagger_enabled,

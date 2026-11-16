@@ -223,11 +223,24 @@ class LegacyTopicControl:
             names = set(values)
             home = frame_id == 'home'
             allowed = set(self.arm_fields) if home else set(self.arm_fields) | self.hand_names
-            if token.source != 'vr' or not names <= allowed:
+            if token.source != 'vr':
                 return
+            if not names <= allowed:
+                raise ValueError('unknown command joints')
+            physical = {n for n, value in values.items() if not math.isnan(value)} - self.sim_joints - self.model_only_joints
+            if not physical:
+                raise ValueError('command has no physical joints')
+            if physical.intersection(self.hand_names) and not physical.intersection(self.arms):
+                # A binary marker for the other hand must not become an
+                # unchecked field merely because that hand has no commands.
+                if any(values[n] not in (0., 1.) for n in names & self.sim_joints):
+                    raise ValueError('invalid binary gripper field')
             groups = (self.arm_fields,) if home else (self.arm_fields, *self.hands.values())
             for group in groups:
-                if not names.intersection(group):
+                # Binary hand markers also occur in the recorded arm layout.
+                # They accompany a physical group; they never create an arm
+                # projection of their own when only fingers are commanded.
+                if not physical.intersection(group):
                     continue
                 markers = (set() if home else self.sim_joints if group == self.arm_fields else
                            {self.teleop['grippers'][side]['binary_state_joint']
@@ -237,8 +250,8 @@ class LegacyTopicControl:
                 if frame_id is not None:
                     target.header.frame_id = frame_id
                 self.bridge.forward_live_command('vr', target, self.publish_selected, token)
-        except (ValueError, TypeError):
-            return
+        except (ValueError, TypeError) as exc:
+            self.reject(str(exc))
 
     def prepare(self, message):
         try:
