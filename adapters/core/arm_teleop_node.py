@@ -133,6 +133,31 @@ def _generic_pipeline_snapshot(metrics):
     return result
 
 
+def _reset_model_joint_states(node) -> None:
+    """Synchronize the same selected scalar joints in one PyBullet call."""
+    selected = []
+    for name, value in node.joint_state.items():
+        index = node.joint_by_name.get(name)
+        if index is not None and index in node.dof_by_joint:
+            selected.append((index, value))
+    if not selected:
+        return
+    bulk = getattr(bullet, 'resetJointStatesMultiDof', None)
+    if callable(bulk) and getattr(node, '_model_sync_bulk_supported', True) is not False:
+        try:
+            bulk(node.robot_id, [index for index, _value in selected],
+                 [[value] for _index, value in selected],
+                 targetVelocities=[[0.]] * len(selected), physicsClientId=node.physics_client)
+            return
+        except (TypeError, NotImplementedError, bullet.error):
+            # Older/custom PyBullet builds may expose an unsupported batch API.
+            # Reapply the entire original selection, then retain the scalar
+            # path so an unsupported call never repeats on every control tick.
+            node._model_sync_bulk_supported = False
+    for index, value in selected:
+        bullet.resetJointState(node.robot_id, index, value, physicsClientId=node.physics_client)
+
+
 class RobotArmTeleopNode(Node):
     """Profile-driven bimanual teleop node with a two-clutch state machine."""
 
@@ -1570,15 +1595,7 @@ class RobotArmTeleopNode(Node):
         return self.waist_output_enabled
 
     def _sync_model(self) -> None:
-        for name, value in self.joint_state.items():
-            index = self.joint_by_name.get(name)
-            if index is not None and index in self.dof_by_joint:
-                bullet.resetJointState(
-                    self.robot_id,
-                    index,
-                    value,
-                    physicsClientId=self.physics_client,
-                )
+        _reset_model_joint_states(self)
 
     def _initialize_collision_safety(self) -> None:
         collision_links = {
