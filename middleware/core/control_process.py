@@ -11,6 +11,7 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import select
 import sys
 import threading
 import time
@@ -65,6 +66,30 @@ def _generation(shared):
         return int(shared.value)
 
 
+class _ParentLiveness:
+    """Poll the spawn parent's sentinel on every checkpoint using one poller."""
+    def __init__(self, expected_pid):
+        self.expected_pid = expected_pid
+        self.parent = mp.parent_process()
+        self.poller = None
+        if self.parent is not None and hasattr(select, 'poll'):
+            poller = select.poll()
+            poller.register(self.parent.sentinel, select.POLLIN | select.POLLHUP | select.POLLERR)
+            self.poller = poller
+
+    def is_alive(self):
+        if os.getppid() != self.expected_pid:
+            return False
+        if self.poller is not None:
+            try:
+                # Sentinel readiness includes HUP/error/invalid descriptor;
+                # all mean the parent is no longer a verified live owner.
+                return not self.poller.poll(0)
+            except (OSError, ValueError):
+                return False
+        return self.parent is None or self.parent.is_alive()
+
+
 class _RecordingIngress:
     def __init__(self, resources, finish):
         self.resources, self.finish = resources, finish
@@ -90,6 +115,7 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
                 'rpc_replies_dropped': 0, 'stale_queued_commands': 0}
     hook_sequence = 0
     pumping, hard_stopped = False, False
+    parent_liveness = _ParentLiveness(channels['parent_pid'])
     seen_parent = _generation(channels['parent_generation'])
     applied_parent = seen_parent
     last_snapshot = 0.
@@ -332,8 +358,7 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
 
     def urgent_check():
         nonlocal hard_stopped, seen_parent
-        parent = mp.parent_process()
-        if os.getppid() != channels['parent_pid'] or parent is not None and not parent.is_alive():
+        if not parent_liveness.is_alive():
             channels['failure_stop'].set()
         if channels['failure_stop'].is_set():
             if not hard_stopped:

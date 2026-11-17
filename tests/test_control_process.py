@@ -14,6 +14,70 @@ import pytest
 from middleware.core.control_ownership import ControlOwnership
 from middleware.core.control_process import CoreProcessClient, RemoteOwnership, RemotePublicationCapture
 from middleware.core.control_process import IsolatedRosBridge, publish_readonly_observation
+from middleware.core.control_process import _ParentLiveness
+
+
+def test_parent_sentinel_reuses_one_registration_and_polls_every_checkpoint(monkeypatch):
+    import middleware.core.control_process as module
+    parent_calls, created, registrations, polls = [], [], [], []
+    class Poller:
+        def register(self, descriptor, mask):
+            registrations.append((descriptor, mask))
+        def poll(self, timeout):
+            polls.append(timeout)
+            return []
+    parent = SimpleNamespace(sentinel=123, is_alive=lambda:pytest.fail('per-check selector fallback used'))
+    monkeypatch.setattr(module.mp, 'parent_process', lambda:parent_calls.append(True) or parent)
+    monkeypatch.setattr(module.os, 'getppid', lambda:321)
+    monkeypatch.setattr(module.select, 'poll', lambda:created.append(True) or Poller())
+    liveness = _ParentLiveness(321)
+    for _ in range(20):
+        assert liveness.is_alive()
+    assert len(parent_calls) == len(created) == len(registrations) == 1
+    assert registrations[0][0] == 123
+    assert polls == [0]*20
+    monkeypatch.setattr(module.os, 'getppid', lambda:322)
+    assert not liveness.is_alive()
+
+
+def test_parent_sentinel_hangup_detected_even_before_ppid_changes(monkeypatch):
+    import middleware.core.control_process as module
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(module.mp, 'parent_process', lambda:SimpleNamespace(sentinel=read_fd))
+    monkeypatch.setattr(module.os, 'getppid', lambda:123)
+    try:
+        liveness = _ParentLiveness(123)
+        assert liveness.is_alive()
+        os.close(write_fd)
+        write_fd = None
+        assert not liveness.is_alive()
+        assert not liveness.is_alive()
+        os.fstat(read_fd)  # The checker never closes the parent-owned handle.
+        os.close(read_fd)
+        read_fd = None
+        assert not liveness.is_alive()  # POLLNVAL is also fail-closed.
+    finally:
+        for descriptor in (read_fd, write_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def test_parent_sentinel_error_fails_closed_and_nonpoll_platform_keeps_old_check(monkeypatch):
+    import middleware.core.control_process as module
+    monkeypatch.setattr(module.os, 'getppid', lambda:123)
+    parent = SimpleNamespace(sentinel=5, is_alive=lambda:False)
+    monkeypatch.setattr(module.mp, 'parent_process', lambda:parent)
+    class Poller:
+        def register(self, *_args): pass
+        def poll(self, timeout): raise OSError('sentinel unavailable')
+    monkeypatch.setattr(module.select, 'poll', Poller)
+    assert not _ParentLiveness(123).is_alive()
+    monkeypatch.delattr(module.select, 'poll')
+    assert not _ParentLiveness(123).is_alive()
+    parent.is_alive = lambda:True
+    assert _ParentLiveness(123).is_alive()
+    monkeypatch.setattr(module.mp, 'parent_process', lambda:None)
+    assert _ParentLiveness(123).is_alive()
 
 
 class FakeBridge:
@@ -254,7 +318,7 @@ def test_slow_observer_cannot_stall_actor_or_replies():
         time.sleep(.4)
         assert client.call('clock') > 0
         wait_until(lambda: client.snapshot()['pumps'] > previous+100)
-        assert client.snapshot()['control_process']['observer_dropped'] > 0
+        wait_until(lambda:client.snapshot()['control_process']['observer_dropped'] > 0, timeout=1.)
     finally:
         release.set()
         client.stop()
