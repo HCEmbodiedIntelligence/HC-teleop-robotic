@@ -749,3 +749,218 @@ def test_gripper_capability_requires_authorized_fresh_hand_feedback(
             await release_clients(runtime)
 
     asyncio.run(run())
+
+
+def test_vr_events_drain_during_slow_recording_stop_and_coalesce_toggles(tmp_path):
+    async def run():
+        runtime, _ = await make_runtime(tmp_path)
+        receiver, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        runtime.event_socket = receiver
+        runtime.active_recording = "rec-1"
+        notifications = []
+        runtime.notify_vr = lambda kind, payload: notifications.append((kind, payload))
+        stop_entered = asyncio.Event()
+        allow_stop = asyncio.Event()
+        stop_calls = 0
+
+        async def status():
+            return {"active_session_id": runtime.active_recording}
+
+        async def stop_child(*args, **kwargs):
+            pass
+
+        async def stop_session(session_id, cutoff_monotonic_ns=None):
+            nonlocal stop_calls
+            stop_calls += 1
+            stop_entered.set()
+            await allow_stop.wait()
+            return {"id": session_id, "state": "READY"}
+
+        runtime.status_data.status = status
+        runtime.supervisor.stop = stop_child
+        runtime.audit_data.stop_session = stop_session
+        runtime.audit_watermark_boot = "test-boot"
+        runtime.audit_watermark_ns = time.monotonic_ns() + 10_000_000_000
+        consumer = asyncio.create_task(runtime._vr_events())
+
+        async def send_vr(kind):
+            await asyncio.get_running_loop().sock_sendall(
+                sender,
+                json.dumps(
+                    {
+                        "kind": kind,
+                        "sample_mono_ns": time.monotonic_ns(),
+                        "boot_id": "test-boot",
+                        "epoch": 1,
+                    }
+                ).encode(),
+            )
+
+        try:
+            await send_vr("record_toggle")
+            await asyncio.wait_for(stop_entered.wait(), 1)
+            assert any(
+                kind == "recording_status"
+                and payload.get("recording") is False
+                and payload.get("finalizing") is True
+                for kind, payload in notifications
+            )
+            # Send duplicate record_toggle presses + an unrelated control event while
+            # stop_session is still finalizing beyond the 500ms wire expiry window.
+            for _ in range(3):
+                await send_vr("record_toggle")
+            await send_vr("control_pause")
+            await asyncio.sleep(0.55)
+            allow_stop.set()
+            for _ in range(50):
+                if any(op == "pause" for op, _ in runtime.core.calls) and any(
+                    kind == "recording_stopped" for kind, _ in notifications
+                ):
+                    break
+                await asyncio.sleep(0.01)
+            assert stop_calls == 1
+            assert runtime.active_recording is None
+            assert any(op == "pause" for op, _ in runtime.core.calls)
+            assert not any(
+                entry["level"] == "ERROR" for entry in runtime.supervisor.logs
+            )
+            assert not any(kind == "recording_error" for kind, _ in notifications)
+            kinds = [kind for kind, _ in notifications]
+            assert kinds.index("recording_status") < kinds.index("recording_stopped")
+        finally:
+            allow_stop.set()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            receiver.close()
+            sender.close()
+            runtime.event_socket = None
+            await release_clients(runtime)
+
+    asyncio.run(run())
+
+
+def test_vr_record_toggle_while_starting_does_not_abort_new_recording_or_expire(
+    tmp_path,
+):
+    async def run():
+        runtime, _ = await make_runtime(tmp_path)
+        receiver, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        runtime.event_socket = receiver
+        notifications = []
+        runtime.notify_vr = lambda kind, payload: notifications.append((kind, payload))
+        start_entered = asyncio.Event()
+        allow_start = asyncio.Event()
+        starts = []
+        stops = []
+
+        async def start_impl(spec, request_id, selected):
+            start_entered.set()
+            await allow_start.wait()
+            runtime.active_recording = "rec-2"
+            starts.append("rec-2")
+            return {"id": "rec-2"}
+
+        async def stop_impl():
+            stops.append(runtime.active_recording)
+            runtime.active_recording = None
+            return {"id": "rec-2"}
+
+        runtime._start_recording_impl = start_impl
+        runtime._stop_recording_impl = stop_impl
+        consumer = asyncio.create_task(runtime._vr_events())
+
+        async def send_toggle():
+            await asyncio.get_running_loop().sock_sendall(
+                sender,
+                json.dumps(
+                    {
+                        "kind": "record_toggle",
+                        "sample_mono_ns": time.monotonic_ns(),
+                        "boot_id": "test-boot",
+                        "epoch": 1,
+                    }
+                ).encode(),
+            )
+
+        try:
+            await send_toggle()
+            await asyncio.wait_for(start_entered.wait(), 1)
+            await send_toggle()
+            await send_toggle()
+            await asyncio.sleep(0.55)
+            allow_start.set()
+            for _ in range(50):
+                if starts:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            assert starts == ["rec-2"]
+            assert stops == []
+            assert runtime.active_recording == "rec-2"
+            assert not any(
+                entry["level"] == "ERROR" for entry in runtime.supervisor.logs
+            )
+            assert not any(kind == "recording_error" for kind, _ in notifications)
+        finally:
+            allow_start.set()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            receiver.close()
+            sender.close()
+            runtime.event_socket = None
+            await release_clients(runtime)
+
+    asyncio.run(run())
+
+
+def test_vr_expired_wire_event_still_rejected(tmp_path):
+    async def run():
+        runtime, _ = await make_runtime(tmp_path)
+        receiver, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        runtime.event_socket = receiver
+        logged = []
+        error_event = asyncio.Event()
+        started = []
+
+        def log(subsystem, message, level="INFO"):
+            logged.append((subsystem, message, level))
+            if level == "ERROR":
+                error_event.set()
+
+        async def start(*args, **kwargs):
+            started.append(True)
+
+        runtime.supervisor.log = log
+        runtime.start_recording = start
+        consumer = asyncio.create_task(runtime._vr_events())
+        try:
+            event = {
+                "kind": "record_toggle",
+                "sample_mono_ns": time.monotonic_ns() - 600_000_000,
+                "boot_id": "test-boot",
+                "epoch": 1,
+            }
+            await asyncio.get_running_loop().sock_sendall(
+                sender, json.dumps(event).encode()
+            )
+            await asyncio.wait_for(error_event.wait(), 1)
+            assert started == []
+            assert any(
+                sub == "vr-events" and "Expired VR management event" in msg and lvl == "ERROR"
+                for sub, msg, lvl in logged
+            )
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            receiver.close()
+            sender.close()
+            runtime.event_socket = None
+            await release_clients(runtime)
+
+    asyncio.run(run())

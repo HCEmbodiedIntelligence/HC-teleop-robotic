@@ -108,6 +108,7 @@ class Runtime:
         self.shutdown_requested = False
         self._closing_task = None
         self._home_resume_task = None
+        self._recording_transition = None
         self.instance_lock = None
         self.hardware_lock = None
         self.motion = self.replay = None
@@ -604,6 +605,15 @@ class Runtime:
         selected = spec.get("topics", self.topics.selected())
         for item in selected:
             TopicRegistry.validate(item)
+        previous_transition = self._recording_transition
+        self._recording_transition = "starting"
+        try:
+            return await self._start_recording_impl(spec, request_id, selected)
+        finally:
+            if self._recording_transition == "starting":
+                self._recording_transition = previous_transition
+
+    async def _start_recording_impl(self, spec, request_id, selected):
         preflight = await self.recording_preflight(spec)
         if not preflight["ready"]:
             raise ConfigurationError(
@@ -739,6 +749,15 @@ class Runtime:
         return result
 
     async def stop_recording(self):
+        previous_transition = self._recording_transition
+        self._recording_transition = "stopping"
+        try:
+            return await self._stop_recording_impl()
+        finally:
+            if self._recording_transition == "stopping":
+                self._recording_transition = previous_transition
+
+    async def _stop_recording_impl(self):
         status = await self.status_data.status()
         session_id = status.get("active_session_id") or self.active_recording
         if not session_id:
@@ -765,6 +784,17 @@ class Runtime:
                     1,
                 )
         self.active_recording = None
+        # Capture has already stopped; clear VR headset recording state immediately
+        # rather than keeping the HUD stuck on "Recording" during artifact sealing.
+        self.notify_vr(
+            "recording_status",
+            {
+                "recording": False,
+                "finalizing": True,
+                "session_id": session_id,
+                "message": "正在保存录制...",
+            },
+        )
         result = await self.audit_data.stop_session(
             session_id=session_id, cutoff_monotonic_ns=cutoff
         )
@@ -801,11 +831,14 @@ class Runtime:
                     str(self.run_dir / "vr-events.sock"),
                 )
 
-    async def validate_vr_management(self, event):
+    async def validate_vr_management(self, event, *, max_age_ns=500_000_000):
         if self.shutdown_requested:
             raise ValueError("Runtime is shutting down")
         now = time.monotonic_ns()
-        if not 0 <= now - int(event.get("sample_mono_ns", 0)) <= 500_000_000:
+        if (
+            max_age_ns is not None
+            and not 0 <= now - int(event.get("sample_mono_ns", 0)) <= max_age_ns
+        ):
             raise ValueError("Expired VR management event")
         current = (await self.core.request("status"))["state"]
         if event.get("boot_id") != current.get("boot_id") or event.get(
@@ -892,106 +925,187 @@ class Runtime:
             if not self.shutdown_requested:
                 self.supervisor.log("vr-events", str(exc), "WARN")
 
-    async def _vr_events(self):
-        while True:
-            raw = await asyncio.get_running_loop().sock_recv(self.event_socket, 65536)
-            if self.shutdown_requested:
-                continue
-            try:
-                event = json.loads(raw)
-                kind = event.get("kind")
-                generation = self.management_generation
-                await self.validate_vr_management(event)
-                if kind == "record_toggle":
-                    async with self.mutation_lock:
-                        await self.validate_vr_management(event)
-                        if self.active_recording:
-                            await self.stop_recording()
-                        elif self.core.state.get("mode") == "program":
-                            raise ValueError(
-                                "Ordinary recording is unavailable during an autonomous session"
-                            )
-                        else:
-                            await self.start_recording(
-                                {"format": "mcap"}, event.get("id", str(time.time_ns()))
-                            )
-                elif kind == "record_stop":
-                    async with self.mutation_lock:
-                        await self.validate_vr_management(event)
+    async def _handle_vr_event(self, event, kind, generation):
+        try:
+            await self.validate_vr_management(event)
+            if kind == "record_toggle":
+                async with self.mutation_lock:
+                    current = await self.validate_vr_management(
+                        event, max_age_ns=None
+                    )
+                    if generation != self.management_generation:
+                        raise ValueError(
+                            "VR operation was cancelled by stop or configuration change"
+                        )
+                    if self.active_recording:
                         await self.stop_recording()
-                elif kind == "record_mark" and self.active_recording:
-                    await self.audit_data.append_sample(
-                        session_id=self.active_recording,
-                        topic="/capture/marks",
-                        payload={
-                            "kind": "operator_mark",
-                            "event": event,
-                            "task_success": None,
-                        },
+                    elif current.get("mode", self.core.state.get("mode")) == "program":
+                        raise ValueError(
+                            "Ordinary recording is unavailable during an autonomous session"
+                        )
+                    else:
+                        await self.start_recording(
+                            {"format": "mcap"}, event.get("id", str(time.time_ns()))
+                        )
+            elif kind == "record_stop":
+                async with self.mutation_lock:
+                    await self.validate_vr_management(event, max_age_ns=None)
+                    if generation != self.management_generation:
+                        raise ValueError(
+                            "VR operation was cancelled by stop or configuration change"
+                        )
+                    await self.stop_recording()
+            elif kind == "record_mark" and self.active_recording:
+                await self.audit_data.append_sample(
+                    session_id=self.active_recording,
+                    topic="/capture/marks",
+                    payload={
+                        "kind": "operator_mark",
+                        "event": event,
+                        "task_success": None,
+                    },
+                )
+                self.notify_vr(
+                    "recording_marked",
+                    {
+                        "marked": True,
+                        "session_id": self.active_recording,
+                        "filename": self.active_recording,
+                        "message": "已标记关键片段",
+                    },
+                )
+            elif kind in (
+                "control_recover",
+                "control_resume",
+                "control_pause",
+                "home",
+            ):
+                async with self.mutation_lock:
+                    current = await self.validate_vr_management(
+                        event, max_age_ns=None
                     )
-                    self.notify_vr(
-                        "recording_marked",
-                        {
-                            "marked": True,
-                            "session_id": self.active_recording,
-                            "filename": self.active_recording,
-                            "message": "已标记关键片段",
-                        },
-                    )
-                elif kind in (
-                    "control_recover",
-                    "control_resume",
-                    "control_pause",
-                    "home",
-                ):
-                    async with self.mutation_lock:
-                        current = await self.validate_vr_management(event)
-                        if (
-                            self.replay
-                            and (await self.replay.status()).get("phase")
-                            in REPLAY_ACTIVE
-                        ):
-                            raise ValueError("Replay owns control; stop replay first")
+                    if (
+                        self.replay
+                        and (await self.replay.status()).get("phase")
+                        in REPLAY_ACTIVE
+                    ):
+                        raise ValueError("Replay owns control; stop replay first")
+                    if generation != self.management_generation:
+                        raise ValueError(
+                            "VR operation was cancelled by stop or configuration change"
+                        )
+                    changed = False
+                    if kind == "control_recover":
+                        changed = await self._handle_vr_control_recover(
+                            event, generation, current
+                        )
+                    else:
+                        tokens = (
+                            await self.motion.validate_home()
+                            if kind == "home"
+                            else {
+                                "expected_boot_id": event["boot_id"],
+                                "expected_epoch": event["epoch"],
+                            }
+                        )
                         if generation != self.management_generation:
                             raise ValueError(
                                 "VR operation was cancelled by stop or configuration change"
                             )
-                        changed = False
-                        if kind == "control_recover":
-                            changed = await self._handle_vr_control_recover(
-                                event, generation, current
-                            )
-                        else:
-                            tokens = (
-                                await self.motion.validate_home()
-                                if kind == "home"
-                                else {
-                                    "expected_boot_id": event["boot_id"],
-                                    "expected_epoch": event["epoch"],
-                                }
-                            )
-                            if generation != self.management_generation:
-                                raise ValueError(
-                                    "VR operation was cancelled by stop or configuration change"
-                                )
-                            await self.core.request(
-                                {
-                                    "control_resume": "resume",
-                                    "control_pause": "pause",
-                                    "home": "home",
-                                }[kind],
-                                **tokens,
-                            )
-                            changed = kind == "control_resume"
-                        if changed and self.replay:
-                            mark_reset = getattr(self.replay, "mark_reset", None)
-                            if callable(mark_reset):
-                                await mark_reset()
-            except Exception as exc:
+                        await self.core.request(
+                            {
+                                "control_resume": "resume",
+                                "control_pause": "pause",
+                                "home": "home",
+                            }[kind],
+                            **tokens,
+                        )
+                        changed = kind == "control_resume"
+                    if changed and self.replay:
+                        mark_reset = getattr(self.replay, "mark_reset", None)
+                        if callable(mark_reset):
+                            await mark_reset()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self.shutdown_requested:
+                return
+            self.supervisor.log("vr-events", str(exc), "ERROR")
+            self.notify_vr("recording_error", {"message": str(exc)})
+
+    async def _vr_events(self):
+        in_flight = set()
+        recording_toggle_task = None
+
+        def spawn(coro):
+            task = asyncio.create_task(coro)
+            in_flight.add(task)
+            task.add_done_callback(in_flight.discard)
+            return task
+
+        try:
+            while True:
+                raw = await asyncio.get_running_loop().sock_recv(
+                    self.event_socket, 65536
+                )
                 if self.shutdown_requested:
                     continue
-                self.supervisor.log("vr-events", str(exc), "ERROR")
-                self.notify_vr("recording_error", {"message": str(exc)})
+                try:
+                    event = json.loads(raw)
+                    kind = event.get("kind")
+                    generation = self.management_generation
+                    now = time.monotonic_ns()
+                    if not 0 <= now - int(event.get("sample_mono_ns", 0)) <= 500_000_000:
+                        raise ValueError("Expired VR management event")
+                    if kind == "record_toggle" and (
+                        self._recording_transition is not None
+                        or (
+                            recording_toggle_task is not None
+                            and not recording_toggle_task.done()
+                        )
+                    ):
+                        if self._recording_transition == "stopping":
+                            self.notify_vr(
+                                "recording_status",
+                                {
+                                    "recording": False,
+                                    "finalizing": True,
+                                    "message": "正在保存录制，请稍候",
+                                },
+                            )
+                        elif self._recording_transition == "starting":
+                            self.notify_vr(
+                                "recording_status",
+                                {
+                                    "recording": False,
+                                    "starting": True,
+                                    "message": "正在启动录制，请稍候",
+                                },
+                            )
+                        continue
+                    if kind == "record_stop" and self._recording_transition == "stopping":
+                        self.notify_vr(
+                            "recording_status",
+                            {
+                                "recording": False,
+                                "finalizing": True,
+                                "message": "正在保存录制，请稍候",
+                            },
+                        )
+                        continue
+                    task = spawn(self._handle_vr_event(event, kind, generation))
+                    if kind == "record_toggle":
+                        recording_toggle_task = task
+                except Exception as exc:
+                    if self.shutdown_requested:
+                        continue
+                    self.supervisor.log("vr-events", str(exc), "ERROR")
+                    self.notify_vr("recording_error", {"message": str(exc)})
+        finally:
+            for task in list(in_flight):
+                task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
 
     async def _flush_audit_batch(self, session_id, batch):
         if not batch or not session_id:
