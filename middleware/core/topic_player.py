@@ -219,6 +219,11 @@ class TopicPlayer:
             else:
                 self._selected_topics = []
                 self._topic_remap = {}
+                if (
+                    self._recorded_profile_id == "x1"
+                    and "/internal/recording/published_action" in avail_topics
+                ):
+                    self._topic_remap["/internal/recording/published_action"] = "/action/joint_states"
 
             # Pause live teleop controller to prevent conflict over /action/joint_states
             ros = self._get_ros()
@@ -343,15 +348,48 @@ class TopicPlayer:
                     # their historic names. Never send those back into a live solver.
                     record_only = {m.metadata['topic'] for m in reader.iter_metadata()
                                    if m.name == 'hc_teleop.record_only' and 'topic' in m.metadata}
+                    record_only.update((
+                        '/control/joint_cmd',
+                        '/events/recording/action_provenance',
+                        '/events/recording/sample_provenance',
+                    ))
                     if self._recorded_profile_id == 'x1' and any(
                             c.topic == '/action/joint_states' for c in summary.channels.values()):
-                        # X1 captures store the final joint command. Solver labels are
-                        # never an additional command stream, even without a sidecar.
-                        record_only.update(('/action/ee_poses', '/control/solver/ee_targets',
-                                            '/control/solver/joint_targets', '/observation/ee_poses'))
+                        # X1 captures store the final joint command. Solver labels,
+                        # hardware smoother output, live joint feedback, status and
+                        # dataset projections are never an additional command stream.
+                        record_only.update((
+                            '/action/ee_poses',
+                            '/control/solver/ee_targets',
+                            '/control/solver/joint_targets',
+                            '/observation/ee_poses',
+                            '/control/vr/joint_states',
+                            '/observation/joint_states',
+                            '/observation/left_arm/joint_states',
+                            '/observation/right_arm/joint_states',
+                            '/observation/waist/joint_states',
+                            '/observation/left_arm/ee_pose',
+                            '/observation/right_arm/ee_pose',
+                            '/observation/head/pose',
+                            '/observation/headset/pose',
+                            '/action/left_arm/joint_states',
+                            '/action/right_arm/joint_states',
+                            '/action/waist/joint_states',
+                            '/action/left_arm/ee_pose',
+                            '/action/right_arm/ee_pose',
+                            '/action/head/pose',
+                            '/status/control/ownership',
+                            '/status/teleop',
+                            '/status/hardware/ready',
+                            '/status/base',
+                            '/vrdata',
+                        ))
                     channels = {
                         c_id: (c.topic, schemas.get(c.schema_id, "std_msgs/msg/String"))
-                        for c_id, c in summary.channels.items() if c.topic not in record_only
+                        for c_id, c in summary.channels.items()
+                        if c.topic not in record_only
+                        and "/msg/" in schemas.get(c.schema_id, "std_msgs/msg/String")
+                        and (not getattr(c, "message_encoding", "") or c.message_encoding == "cdr")
                     }
 
                     with self._lock:

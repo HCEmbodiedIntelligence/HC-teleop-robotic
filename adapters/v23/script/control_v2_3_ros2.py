@@ -63,6 +63,11 @@ class ControllerNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        feedback_reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=4,
+        )
         self.command_pub = self.create_publisher(
             JointState, publications["joint_target"], latest_reliable_qos
         )
@@ -76,17 +81,17 @@ class ControllerNode(Node):
         self.reset_ack_pub = self.create_publisher(
             Header,
             publications.get("reset_ack", "/status/solver/reset_ack"),
-            latest_reliable_qos,
+            feedback_reliable_qos,
         )
         self.create_subscription(
             JointState,
             subscriptions["joint_state"],
             self._joint_callback,
-            latest_reliable_qos,
+            feedback_reliable_qos,
         )
         if subscriptions.get("reset"):
             self.create_subscription(
-                Bool, subscriptions["reset"], self._reset_callback, latest_reliable_qos
+                Bool, subscriptions["reset"], self._reset_callback, feedback_reliable_qos
             )
         if subscriptions.get("tf_target"):
             self.create_subscription(
@@ -109,6 +114,8 @@ class ControllerNode(Node):
         self.failure_count = 0
         self.last_failure_log = 0.0
         self.reset_pending = False
+        self.feedback_rejections = {}
+        self.last_feedback_rejection_log = float("-inf")
         self.reset_cutoff_ns = 0
         self.control_source = "vr"
         self.source_target_pending = False
@@ -149,17 +156,36 @@ class ControllerNode(Node):
 
     def _joint_callback(self, message: JointState) -> None:
         try:
+            stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+            now_ns = int(self.get_clock().now().nanoseconds)
+            resetting = self.reset_pending and not (self.intervention and self.intervention.active)
+            reason = None
+            if len(message.name) != len(message.position):
+                reason = "length_mismatch"
+            elif len(set(message.name)) != len(message.name):
+                reason = "duplicate_names"
+            elif not set(self.controller.free_joint_names) <= set(message.name):
+                reason = "incomplete_joints"
+            elif not all(np.isfinite(value) for value in message.position):
+                reason = "nonfinite_position"
+            elif not -50_000_000 <= now_ns - stamp_ns <= 250_000_000:
+                reason = "stale_or_future_feedback"
+            elif resetting and stamp_ns <= self.reset_cutoff_ns:
+                reason = "before_reset_cutoff"
+            if reason:
+                self.feedback_rejections[reason] = self.feedback_rejections.get(reason, 0) + 1
+                now = time.monotonic()
+                if now - self.last_feedback_rejection_log >= 2.0:
+                    self.last_feedback_rejection_log = now
+                    self.get_logger().warning(
+                        f"joint feedback rejected before state update: reason={reason}, "
+                        f"source_ns={stamp_ns}, receive_ns={now_ns}, "
+                        f"age_ms={(now_ns-stamp_ns)/1e6:.3f}, "
+                        f"reset_pending={self.reset_pending}, reset_cutoff_ns={self.reset_cutoff_ns}"
+                    )
+                return
             self.controller.update_joint_state(message.name, message.position)
-            if self.reset_pending and not (self.intervention and self.intervention.active):
-                stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
-                now_ns = int(self.get_clock().now().nanoseconds)
-                if (stamp_ns <= self.reset_cutoff_ns
-                        or not -50_000_000 <= now_ns-stamp_ns <= 250_000_000
-                        or len(message.name) != len(message.position)
-                        or len(set(message.name)) != len(message.name)
-                        or not set(self.controller.free_joint_names) <= set(message.name)
-                        or not all(np.isfinite(value) for value in message.position)):
-                    return
+            if resetting:
                 self.controller.reset_to_feedback()
                 self.reset_pending = False
                 if self.source_target_pending:

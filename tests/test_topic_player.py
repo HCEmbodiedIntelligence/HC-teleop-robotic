@@ -133,6 +133,59 @@ class TopicPlayerTests(unittest.TestCase):
             player.play(path.name, mode="drive")
         self.assertEqual(player.status()["state"], "idle")
 
+    def test_x1_raw_replay_excludes_hardware_smoother_feedback_and_event_channels(self) -> None:
+        path = self.dir_path / "x1_full.mcap"
+        with path.open("wb") as stream:
+            writer = McapWriter(stream)
+            writer.start(profile="ros2")
+            writer.add_metadata("hc_teleop.session", {"profile_id": "x1"})
+            writer.add_metadata("hc_teleop.record_only", {"topic": "/action/joint_states"})
+            joint_schema = writer.register_schema(
+                "sensor_msgs/msg/JointState",
+                SchemaEncoding.ROS2,
+                _get_msg_def("sensor_msgs/msg/JointState"),
+            )
+            event_schema = writer.register_schema(
+                "teleop_event", SchemaEncoding.JSONSchema, b""
+            )
+            chan_label = writer.register_channel("/action/joint_states", MessageEncoding.CDR, joint_schema)
+            chan_pub = writer.register_channel("/internal/recording/published_action", MessageEncoding.CDR, joint_schema)
+            chan_smoother = writer.register_channel("/control/joint_cmd", MessageEncoding.CDR, joint_schema)
+            chan_fb = writer.register_channel("/observation/joint_states", MessageEncoding.CDR, joint_schema)
+            chan_vr = writer.register_channel("/control/vr/joint_states", MessageEncoding.CDR, joint_schema)
+            chan_hand = writer.register_channel("/action/right_hand/joint_states", MessageEncoding.CDR, joint_schema)
+            chan_evt = writer.register_channel("/events/recording/action_provenance", MessageEncoding.JSON, event_schema)
+
+            msg_label = JointState(name=["Joint1_R"], position=[0.9])
+            msg_pub = JointState(name=["Joint1_R"], position=[0.25])
+            msg_hand = JointState(name=["r_f1"], position=[0.5])
+            t0 = 1_000_000_000
+            writer.add_message(chan_label, t0, bytes(serialize_message(msg_label)), t0)
+            writer.add_message(chan_pub, t0 + 1000, bytes(serialize_message(msg_pub)), t0 + 1000)
+            writer.add_message(chan_smoother, t0 + 2000, bytes(serialize_message(msg_pub)), t0 + 2000)
+            writer.add_message(chan_fb, t0 + 3000, bytes(serialize_message(msg_pub)), t0 + 3000)
+            writer.add_message(chan_vr, t0 + 4000, bytes(serialize_message(msg_pub)), t0 + 4000)
+            writer.add_message(chan_hand, t0 + 5000, bytes(serialize_message(msg_hand)), t0 + 5000)
+            writer.add_message(chan_evt, t0 + 6000, b'{"source":"published"}', t0 + 6000)
+            writer.finish()
+
+        player = TopicPlayer(
+            self.dir_path,
+            lambda: self.mock_ros,
+            active_profile_provider=lambda: "x1",
+        )
+        try:
+            player.play(path.name, speed=10.0, mode="raw")
+            for _ in range(50):
+                if player.status()["state"] == "completed":
+                    break
+                time.sleep(0.02)
+            self.assertEqual(player.status()["state"], "completed")
+            topics = [topic for topic, _msg_type, _raw in self.published_messages]
+            self.assertEqual(topics, ["/action/joint_states", "/action/right_hand/joint_states"])
+        finally:
+            player.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -403,6 +403,8 @@ class RosBridge:
         return {topic: tracker.status(now) for topic, tracker in trackers}
 
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
+        if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type):
+            return False
         if self.ownership.active and self._ownership_control_topic(topic):
             return False
         if self._is_final_joint_command(topic):
@@ -421,6 +423,8 @@ class RosBridge:
             return self._enqueue('manual_home', self.ownership.token)
 
     def publish_raw(self, topic: str, msg_type: str, raw_data: bytes) -> bool:
+        if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type):
+            return False
         if self.ownership.active and self._ownership_control_topic(topic):
             return False
         if self._is_final_joint_command(topic):
@@ -1943,6 +1947,8 @@ class RosBridge:
                         self._publish_hardware_enable_locked(node, publishers, True)
                 elif command == "publish":
                     topic, msg_type_name, data = args
+                    if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type_name):
+                        continue
                     if self.ownership.active and self._ownership_control_topic(topic):
                         continue
                     message_type = get_message(msg_type_name)
@@ -1957,6 +1963,8 @@ class RosBridge:
                     publisher.publish(message)
                 elif command in {"publish_raw", "replay_raw"}:
                     topic, msg_type_name, raw_bytes = args[:3]
+                    if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type_name):
+                        continue
                     if self.ownership.active and self._ownership_control_topic(topic):
                         continue
                     if command == "replay_raw":

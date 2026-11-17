@@ -58,6 +58,31 @@ class ReplaySafetyTests(unittest.TestCase):
             )
         )
 
+    def test_hardware_smoother_output_and_non_ros_event_schemas_rejected(self):
+        self.bridge.receive_hardware_ready(True)
+        self.assertTrue(self.bridge.begin_replay())
+        self.assertFalse(
+            self.bridge.publish(
+                "/control/joint_cmd",
+                "sensor_msgs/msg/JointState",
+                {"name": ["joint1"], "position": [0.1]},
+            )
+        )
+        self.assertFalse(
+            self.bridge.publish_raw(
+                "/control/joint_cmd",
+                "sensor_msgs/msg/JointState",
+                b"serialized",
+            )
+        )
+        self.assertFalse(
+            self.bridge.publish_raw(
+                "/events/recording/action_provenance",
+                "teleop_event",
+                b"{}",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

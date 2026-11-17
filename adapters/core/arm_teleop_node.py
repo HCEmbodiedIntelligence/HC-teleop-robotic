@@ -426,7 +426,7 @@ class RobotArmTeleopNode(Node):
         self.solver_reset_pub = self.create_publisher(
             Bool,
             self.control.get("solver_reset_topic", "/control/solver/reset"),
-            latest_reliable_qos,
+            solver_sub_qos,
         )
         self.create_subscription(
             String, self.control.get("control_source_topic", "/control/source"),
@@ -1080,9 +1080,22 @@ class RobotArmTeleopNode(Node):
             cutoff_ns = int(self.get_clock().now().nanoseconds)
             self.solver_reset_pub.publish(Bool(data=True))
             self.solver_rearm.reset_published(cutoff_ns)
+            self._last_solver_reset_retry_ns = cutoff_ns
             self.get_logger().info(
                 "post-home joint feedback received; solver reset requested"
             )
+        elif (
+            self.external_ik
+            and self.solver_rearm.state == self.solver_rearm.WAIT_ACK
+            and self._complete_feedback_fresh()
+        ):
+            now_ns = int(self.get_clock().now().nanoseconds)
+            last_retry_ns = getattr(
+                self, "_last_solver_reset_retry_ns", self.solver_rearm.reset_cutoff_ns
+            )
+            if now_ns - last_retry_ns >= 500_000_000:
+                self._last_solver_reset_retry_ns = now_ns
+                self.solver_reset_pub.publish(Bool(data=True))
 
     def _complete_feedback_fresh(self) -> bool:
         age_ns = self.get_clock().now().nanoseconds - self.joint_state_source_ns
