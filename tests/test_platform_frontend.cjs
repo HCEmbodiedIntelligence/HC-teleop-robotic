@@ -213,3 +213,41 @@ test('shared scheme details, pinned revision and independent receipt states rema
     assert.equal(requests.some(op => op.includes('prepare')), false);
   } finally { w.close(); }
 });
+
+test('syncUploadFormatOptions updates backend even when select already defaults to mcap or after enabling uploads', async () => {
+  const root = path.resolve(__dirname, '../middleware/core/static');
+  const dom = new JSDOM(fs.readFileSync(path.join(root, 'index.html'), 'utf8'), {
+    url: 'http://robot.example/', runScripts: 'outside-only', pretendToBeVisual: true,
+  });
+  const w = dom.window, doc = w.document;
+  const connection = { id: 'connection-a', platform_name: 'Platform', robot_name: 'Robot', verified: true };
+  let uploadEnabled = false, uploadFormat = 'lerobot';
+  const uploadFormatPosts = [];
+  w.setInterval = () => 1; w.clearInterval = () => {};
+  w.HTMLDialogElement.prototype.close = function() { this.open = false; };
+  w.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
+  w.fetch = async (url, options) => {
+    const operation = url.replace('/api/platform/', '').split('?')[0];
+    if (operation === 'enabled') uploadEnabled = JSON.parse(options.body).enabled;
+    if (operation === 'upload-format') {
+      uploadFormat = JSON.parse(options.body).format;
+      uploadFormatPosts.push(uploadFormat);
+    }
+    const body = ['status', 'verify', 'connect', 'upload-format', 'enabled'].includes(operation)
+      ? { connection, uploads_enabled: uploadEnabled, upload_format: uploadFormat, auto_upload: uploadEnabled, recent: null, recording_selection: { mode: 'local' }, local_format: 'mcap' }
+      : { items: [], jobs: [], total: 0, projects: [] };
+    return { ok: true, json: async () => body };
+  };
+  const settle = () => new Promise(resolve => setTimeout(resolve, 25));
+  try {
+    w.eval(fs.readFileSync(path.join(root, 'platform_panel.js'), 'utf8'));
+    await settle();
+    assert.equal(uploadFormatPosts.length, 0);
+    assert.equal(doc.getElementById('platformUploadFormat').value, 'mcap');
+    const enabled = doc.getElementById('platformEnabled');
+    enabled.checked = true; await enabled.onchange();
+    await settle();
+    assert.deepEqual(uploadFormatPosts, ['mcap']);
+    assert.equal(uploadFormat, 'mcap');
+  } finally { dom.window.close(); }
+});

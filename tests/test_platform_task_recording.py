@@ -779,3 +779,37 @@ def test_lerobot_local_rejects_mcap_upload_format(tmp_path, monkeypatch):
             recorder.start(selection=choice(service, 'A'))
     finally:
         recorder.close()
+
+
+def test_disabled_uploads_ignore_stale_upload_format_and_allow_local_capture(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_upload_format('lerobot')
+        service.set_enabled(False)
+        # VR X button calls start() without explicit selection, reading recording_selection().
+        path = recorder.start(metadata={'profile_id': LOCAL['profile_id']})
+        assert recorder.is_recording()
+        recorder.record({'topic': '/test', 'payload': {'frame': 1}, 'stamp_ns': time.time_ns()})
+        recorder.stop()
+        finish(recorder)
+        assert Path(path).is_file()
+        assert recorder.records()[0]['upload_format'] == 'mcap'
+        assert recorder.records()[0]['state'] == 'ready'
+        with pytest.raises(UploadError, match='UPLOAD_DISABLED'):
+            recorder.start(selection=choice(service, 'A'))
+    finally:
+        recorder.close()
+
+
+def test_local_mode_capture_ignores_incompatible_upload_format_when_uploads_enabled(tmp_path, monkeypatch):
+    cfg, service, recorder = connected(tmp_path, monkeypatch)
+    try:
+        recorder.set_upload_format('lerobot')
+        path = capture(recorder, {'mode': 'local'})
+        assert Path(path).is_file()
+        assert recorder.records()[0]['upload_format'] == 'mcap'
+        assert recorder.records()[0]['state'] == 'ready'
+        with pytest.raises(UploadError, match='UPLOAD_FORMAT_UNAVAILABLE'):
+            recorder.start(selection=choice(service, 'A'))
+    finally:
+        recorder.close()

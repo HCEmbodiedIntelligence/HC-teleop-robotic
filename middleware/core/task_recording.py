@@ -20,6 +20,15 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _format_incompatible(save_format, upload_format):
+    """Return an error message if ``upload_format`` cannot be built from ``save_format``."""
+    if upload_format in ('lerobot', 'both') and save_format not in ('lerobot', 'both'):
+        return '上传 LeRobot 需要在话题录制页将本地保存方式设为 LeRobot 或 MCAP + LeRobot'
+    if save_format == 'lerobot' and upload_format != 'lerobot':
+        return '本地保存格式为 LeRobot 时，上传格式只能选择 LeRobot'
+    return None
+
+
 from .correction_support import CorrectionSupport
 
 
@@ -121,11 +130,20 @@ class TaskRecorder(CorrectionSupport):
                             and j['intent'] == intent and j['requested_filename'] == filename), None)
             if self.active or self.recorder.is_recording():
                 raise UploadError('RECORDING_ACTIVE', '已有录制正在进行，请先停止')
-            upload_format = self.upload_format(job) if job is not None else self.platform.state['upload_format']
-            if upload_format in ('lerobot', 'both') and writer.save_format not in ('lerobot', 'both'):
-                raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '上传 LeRobot 需要在话题录制页将本地保存方式设为 LeRobot 或 MCAP + LeRobot')
-            if writer.save_format == 'lerobot' and upload_format != 'lerobot':
-                raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', '本地保存格式为 LeRobot 时，上传格式只能选择 LeRobot')
+            uploads_enabled = bool(self.platform.state.get('uploads_enabled', False))
+            if intent['mode'] == 'platform':
+                self.platform.require_uploads_enabled()
+                upload_format = self.upload_format(job) if job is not None else self.platform.state['upload_format']
+                reason = _format_incompatible(writer.save_format, upload_format)
+                if reason:
+                    raise UploadError('UPLOAD_FORMAT_UNAVAILABLE', reason)
+            else:
+                local_default = 'mcap' if writer.save_format == 'both' else writer.save_format
+                if not uploads_enabled:
+                    upload_format = local_default
+                else:
+                    candidate = self.upload_format(job) if job is not None else self.platform.state['upload_format']
+                    upload_format = local_default if _format_incompatible(writer.save_format, candidate) else candidate
             if job is None:
                 identity = uuid4().hex
                 chosen = filename or ('ros2_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + identity[:8])

@@ -126,36 +126,71 @@
     }
     if (active) el('platformHistoryDialog').close();
   };
+  let syncingUploadFormat = null, syncUploadGeneration = 0;
+  function syncUploadFormat(target) {
+    if (state.uploads_enabled === false || !state.upload_format) return;
+    if (state.upload_format === target && syncingUploadFormat === null) return;
+    if (syncingUploadFormat === target) return;
+    const generation = ++syncUploadGeneration;
+    syncingUploadFormat = target;
+    void post('upload-format', { format: target })
+      .then(res => {
+        if (generation !== syncUploadGeneration) return;
+        syncingUploadFormat = null;
+        state = res;
+        renderConnection();
+      })
+      .catch(() => {
+        if (generation === syncUploadGeneration) syncingUploadFormat = null;
+      });
+  }
   function syncUploadFormatOptions(localFormat) {
     const formatField = el('platformUploadFormat');
     if (!formatField) return;
     const hint = el('platformFormatHint');
-    const mcapOption = [...formatField.options].find(o => o.value === 'mcap');
-    const lerobotOption = [...formatField.options].find(o => o.value === 'lerobot');
+    const option = value => [...formatField.options].find(o => o.value === value);
+    const mcapOption = option('mcap');
+    const mcapMp4Option = option('mcap_mp4');
+    const lerobotOption = option('lerobot');
+    const bothOption = option('both');
     if (localFormat === 'mcap') {
       if (mcapOption) { mcapOption.disabled = false; mcapOption.textContent = 'MCAP · 原始话题'; }
+      if (mcapMp4Option) mcapMp4Option.disabled = true;
       if (lerobotOption) { lerobotOption.disabled = true; lerobotOption.textContent = 'LeRobot · 训练数据集（本地未保存）'; }
-      if (formatField.value !== 'mcap') {
-        formatField.value = 'mcap';
-        if (state.upload_format !== 'mcap') {
-          void post('upload-format', { format: 'mcap' }).then(res => { state = res; renderConnection(); }).catch(() => {});
-        }
-      }
+      if (bothOption) bothOption.disabled = true;
+      formatField.value = 'mcap';
+      syncUploadFormat('mcap');
       if (hint) hint.textContent = '本地保存格式为 MCAP，上传格式固定为 MCAP。';
+    } else if (localFormat === 'mcap_mp4') {
+      if (mcapOption) { mcapOption.disabled = false; mcapOption.textContent = 'MCAP · 原始话题'; }
+      if (mcapMp4Option) mcapMp4Option.disabled = false;
+      if (lerobotOption) { lerobotOption.disabled = true; lerobotOption.textContent = 'LeRobot · 训练数据集（本地未保存）'; }
+      if (bothOption) bothOption.disabled = true;
+      const target = state.upload_format === 'mcap' || state.upload_format === 'mcap_mp4' ? state.upload_format : 'mcap_mp4';
+      formatField.value = target;
+      syncUploadFormat(target);
+      if (hint) hint.textContent = '本地保存格式为 MCAP＋独立 MP4，可上传该原始包或 MCAP。';
     } else if (localFormat === 'lerobot') {
       if (lerobotOption) { lerobotOption.disabled = false; lerobotOption.textContent = 'LeRobot · 训练数据集'; }
       if (mcapOption) { mcapOption.disabled = true; mcapOption.textContent = 'MCAP · 原始话题（本地未保存）'; }
-      if (formatField.value !== 'lerobot') {
-        formatField.value = 'lerobot';
-        if (state.upload_format !== 'lerobot') {
-          void post('upload-format', { format: 'lerobot' }).then(res => { state = res; renderConnection(); }).catch(() => {});
-        }
-      }
+      if (mcapMp4Option) mcapMp4Option.disabled = true;
+      if (bothOption) bothOption.disabled = true;
+      formatField.value = 'lerobot';
+      syncUploadFormat('lerobot');
       if (hint) hint.textContent = '本地保存格式为 LeRobot，上传格式固定为 LeRobot。';
     } else { // both
       if (mcapOption) { mcapOption.disabled = false; mcapOption.textContent = 'MCAP · 原始话题'; }
+      if (mcapMp4Option) mcapMp4Option.disabled = true;
       if (lerobotOption) { lerobotOption.disabled = false; lerobotOption.textContent = 'LeRobot · 训练数据集'; }
-      formatField.value = state.upload_format || 'lerobot';
+      if (bothOption) bothOption.disabled = false;
+      const target = ['mcap', 'lerobot', 'both'].includes(state.upload_format) ? state.upload_format : 'lerobot';
+      formatField.value = target;
+      if (state.upload_format && !['mcap', 'lerobot', 'both'].includes(state.upload_format)) {
+        syncUploadFormat(target);
+      } else {
+        syncUploadGeneration++;
+        syncingUploadFormat = null;
+      }
       if (hint) hint.textContent = '本地同时保存 MCAP 与 LeRobot，可任选一种上传格式。';
     }
   }
@@ -400,6 +435,7 @@
       el('platformDescription').textContent = taskDescription(tasks.find(task => task.collection_task_id === selected));
       return saveSelection(); };
     el('platformUploadFormat').onchange = async () => {
+      syncUploadGeneration++; syncingUploadFormat = null;
       const field = el('platformUploadFormat'); field.disabled = true;
       try { state = await post('upload-format', { format: field.value }); renderConnection();
         requestId = null; await refreshTasks(); message('上传格式已保存，仅对之后开始的录制生效。');

@@ -44,6 +44,13 @@ def _platform_recordings(runtime, platform):
     return {'items': items, 'jobs': jobs}
 
 
+def _with_local_format(runtime, result):
+    local_fmt = getattr(getattr(runtime, 'recorder', None), 'save_format', None)
+    if not local_fmt and hasattr(runtime, 'config'):
+        local_fmt = runtime.config.get('ros', {}).get('recording', {}).get('format')
+    return {**result, 'local_format': local_fmt or 'both'}
+
+
 def register_platform_routes(app, runtime):
     async def dispatch(request):
         if getattr(runtime, 'platform', None) is None:
@@ -58,11 +65,7 @@ def register_platform_routes(app, runtime):
         try:
             if request.method == 'GET':
                 if operation == 'status':
-                    result = await asyncio.to_thread(platform.status)
-                    local_fmt = getattr(runtime.recorder, 'save_format', None)
-                    if not local_fmt and hasattr(runtime, 'config'):
-                        local_fmt = runtime.config.get('ros', {}).get('recording', {}).get('format')
-                    result = {**result, 'local_format': local_fmt or 'both'}
+                    result = _with_local_format(runtime, await asyncio.to_thread(platform.status))
                 elif operation == 'tasks':
                     query = dict(request.query)
                     query['page'] = max(1, int(query.get('page', 1)))
@@ -90,23 +93,19 @@ def register_platform_routes(app, runtime):
                 if not isinstance(body, dict):
                     raise ValueError()
                 if operation == 'connect':
-                    result = await asyncio.to_thread(platform.connect, body['link'])
+                    result = _with_local_format(runtime, await asyncio.to_thread(platform.connect, body['link']))
                 elif operation == 'enabled':
                     if set(body) != {'enabled'} or type(body['enabled']) is not bool:
                         raise ValueError()
                     if runtime.recorder.is_recording():
                         raise UploadError('ARTIFACT_BUSY', '请停止当前录制后修改上传总开关')
-                    result = await asyncio.to_thread(platform.set_enabled, body['enabled'])
+                    result = _with_local_format(runtime, await asyncio.to_thread(platform.set_enabled, body['enabled']))
                 elif operation == 'verify':
-                    result = await asyncio.to_thread(platform.verify)
+                    result = _with_local_format(runtime, await asyncio.to_thread(platform.verify))
                 elif operation == 'upload-format':
-                    result = await asyncio.to_thread(runtime.recorder.set_upload_format, body['format'])
-                    local_fmt = getattr(runtime.recorder, 'save_format', None)
-                    if not local_fmt and hasattr(runtime, 'config'):
-                        local_fmt = runtime.config.get('ros', {}).get('recording', {}).get('format')
-                    result['local_format'] = local_fmt or 'both'
+                    result = _with_local_format(runtime, await asyncio.to_thread(runtime.recorder.set_upload_format, body['format']))
                 elif operation == 'auto-upload':
-                    result = await asyncio.to_thread(platform.set_auto, body['enabled'])
+                    result = _with_local_format(runtime, await asyncio.to_thread(platform.set_auto, body['enabled']))
                 elif operation == 'preflight':
                     result = await asyncio.to_thread(platform.preflight, body, remember=False)
                 elif operation == 'selection':
