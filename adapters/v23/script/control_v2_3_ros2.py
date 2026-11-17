@@ -87,7 +87,7 @@ class ControllerNode(Node):
             JointState,
             subscriptions["joint_state"],
             self._joint_callback,
-            feedback_reliable_qos,
+            latest_reliable_qos,
         )
         if subscriptions.get("reset"):
             self.create_subscription(
@@ -114,6 +114,10 @@ class ControllerNode(Node):
         self.failure_count = 0
         self.last_failure_log = 0.0
         self.reset_pending = False
+        self.feedback_received_total = 0
+        self.last_feedback_receive_ns = 0
+        self.last_feedback_source_ns = 0
+        self.last_reset_wait_log = float("-inf")
         self.feedback_rejections = {}
         self.last_feedback_rejection_log = float("-inf")
         self.reset_cutoff_ns = 0
@@ -155,6 +159,10 @@ class ControllerNode(Node):
         self.controller.targets.transforms.clear()
 
     def _joint_callback(self, message: JointState) -> None:
+        self.feedback_received_total += 1
+        self.last_feedback_receive_ns = int(self.get_clock().now().nanoseconds)
+        self.last_feedback_source_ns = (message.header.stamp.sec * 1_000_000_000
+                                        + message.header.stamp.nanosec)
         try:
             stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
             now_ns = int(self.get_clock().now().nanoseconds)
@@ -275,9 +283,23 @@ class ControllerNode(Node):
         owned = self.intervention if self.intervention and self.intervention.active else None
         if owned and not owned.authorized():
             return
-        if not owned and (self.control_source != "vr" or self.source_target_pending):
-            return
         if self.reset_pending:
+            now = time.monotonic()
+            if now - self.last_reset_wait_log >= 2.0:
+                self.last_reset_wait_log = now
+                now_ns = int(self.get_clock().now().nanoseconds)
+                receive_age = ((now_ns-self.last_feedback_receive_ns)/1e6
+                               if self.last_feedback_receive_ns else None)
+                source_age = ((now_ns-self.last_feedback_source_ns)/1e6
+                              if self.last_feedback_source_ns else None)
+                self.get_logger().warning(
+                    f"solver reset waiting for fresh feedback: cutoff_ns={self.reset_cutoff_ns}, "
+                    f"feedback_received={self.feedback_received_total}, "
+                    f"receive_age_ms={receive_age}, source_age_ms={source_age}, "
+                    f"rejected={self.feedback_rejections}; output remains blocked"
+                )
+            return
+        if not owned and (self.control_source != "vr" or self.source_target_pending):
             return
         if owned and owned.homing:
             # Serialize home and IK in this executor; never let both publish.

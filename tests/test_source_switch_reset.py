@@ -622,3 +622,40 @@ def test_invalid_feedback_never_mutates_solver_state(rig, resetting, invalid):
     solver.reset_ack_pub.publish.assert_not_called()
     assert sum(solver.feedback_rejections.values()) == 1
     assert solver.reset_pending == resetting
+
+
+def test_reset_retry_stays_blocked_until_ack_and_new_grip(rig):
+    teleop, solver = rig
+    teleop.initial_homing_done = True
+    teleop.solver_rearm.start_homing()
+    teleop.solver_rearm.homing_complete()
+    teleop._joint_state_callback(feedback(*rig))
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_ACK
+    cutoff = teleop.solver_rearm.reset_cutoff_ns
+    teleop.command_pub.publish.reset_mock()
+    teleop.solver_reset_pub.publish.reset_mock()
+    teleop._last_solver_reset_retry_ns -= 500_000_000
+    teleop._joint_state_callback(feedback(*rig))
+    teleop.solver_reset_pub.publish.assert_called_once()
+    assert teleop.solver_rearm.reset_cutoff_ns == cutoff
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_ACK
+    before = dict(teleop.last_command)
+    teleop._generic_command_callback(feedback(*rig, offset=.6))
+    output = teleop.command_pub.publish.call_args.args[0]
+    actual = dict(zip(output.name, output.position))
+    for arm in teleop.arms.values():
+        for name in arm.joint_names:
+            assert actual[name] == before[name]
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_ACK
+
+
+def test_reset_wait_logs_missing_feedback_instead_of_silent_zero_hz(rig):
+    _, solver = rig
+    solver._reset_references()
+    logger = Mock()
+    solver.get_logger = Mock(return_value=logger)
+    solver._tick()
+    warning = logger.warning.call_args.args[0]
+    assert "feedback_received=0" in warning
+    assert "output remains blocked" in warning
+    solver.command_pub.publish.assert_not_called()

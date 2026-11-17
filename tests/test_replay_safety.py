@@ -83,6 +83,17 @@ class ReplaySafetyTests(unittest.TestCase):
             )
         )
 
+    def test_raw_replay_cannot_impersonate_feedback_safety_or_solver(self):
+        self.bridge.receive_hardware_ready(True)
+        self.assertTrue(self.bridge.begin_replay())
+        for topic in ("/observation/joint_states", "/observation/hands/joint_states",
+                      "/status/solver/reset_ack", "/control/solver/reset",
+                      "/control/source", "/control/teleop/enabled",
+                      "/control/motion/permit", "/events/teleop/clutch", "/vrdata"):
+            with self.subTest(topic=topic):
+                self.assertFalse(self.bridge.publish_raw(topic, "sensor_msgs/msg/JointState", b"old"))
+        self.assertTrue(self.bridge._commands.empty())
+
 
 if __name__ == "__main__":
     unittest.main()

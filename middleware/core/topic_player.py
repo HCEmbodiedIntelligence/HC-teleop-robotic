@@ -353,8 +353,8 @@ class TopicPlayer:
                         '/events/recording/action_provenance',
                         '/events/recording/sample_provenance',
                     ))
-                    if self._recorded_profile_id == 'x1' and any(
-                            c.topic == '/action/joint_states' for c in summary.channels.values()):
+                    live_x1 = "x1" in {self._recorded_profile_id, str(self._get_active_profile() or "").strip()}
+                    if live_x1:
                         # X1 captures store the final joint command. Solver labels,
                         # hardware smoother output, live joint feedback, status and
                         # dataset projections are never an additional command stream.
@@ -387,7 +387,10 @@ class TopicPlayer:
                     channels = {
                         c_id: (c.topic, schemas.get(c.schema_id, "std_msgs/msg/String"))
                         for c_id, c in summary.channels.items()
-                        if c.topic not in record_only
+                        if (c.topic not in record_only or (
+                            c.topic == "/observation/joint_states"
+                            and self._topic_remap.get(c.topic) == "/action/joint_states"
+                        ))
                         and "/msg/" in schemas.get(c.schema_id, "std_msgs/msg/String")
                         and (not getattr(c, "message_encoding", "") or c.message_encoding == "cdr")
                     }
@@ -442,6 +445,15 @@ class TopicPlayer:
                                 selected = set(self._selected_topics)
 
                             target_topic = remap.get(orig_topic, orig_topic)
+                            # Check the destination after remapping: a bag must
+                            # never impersonate feedback, safety or solver nodes.
+                            if live_x1 and target_topic not in {
+                                "/action/joint_states", "/action/base/command",
+                                "/action/hands/joint_targets",
+                                "/action/left_hand/joint_states",
+                                "/action/right_hand/joint_states",
+                            }:
+                                continue
                             if not selected or (orig_topic in selected) or (target_topic in selected):
                                 ros = self._get_ros()
                                 # The provider may have waited while stop/reset

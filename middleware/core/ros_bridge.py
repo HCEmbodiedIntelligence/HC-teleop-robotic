@@ -422,7 +422,17 @@ class RosBridge:
                 return False
             return self._enqueue('manual_home', self.ownership.token)
 
+    def _raw_replay_destination_allowed(self, topic: str) -> bool:
+        topic = str(topic)
+        return not (
+            topic == "/vrdata"
+            or topic.startswith(("/control/", "/status/", "/events/", "/internal/"))
+            or (topic.startswith("/observation/") and topic.endswith("/joint_states"))
+        )
+
     def publish_raw(self, topic: str, msg_type: str, raw_data: bytes) -> bool:
+        if not self._raw_replay_destination_allowed(topic):
+            return False
         if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type):
             return False
         if self.ownership.active and self._ownership_control_topic(topic):
@@ -1964,6 +1974,8 @@ class RosBridge:
                 elif command in {"publish_raw", "replay_raw"}:
                     topic, msg_type_name, raw_bytes = args[:3]
                     if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type_name):
+                        continue
+                    if not self._raw_replay_destination_allowed(topic):
                         continue
                     if self.ownership.active and self._ownership_control_topic(topic):
                         continue

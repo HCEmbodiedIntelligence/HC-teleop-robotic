@@ -186,6 +186,57 @@ class TopicPlayerTests(unittest.TestCase):
         finally:
             player.stop()
 
+    def test_active_x1_raw_blocks_feedback_without_recording_metadata(self):
+        player = TopicPlayer(self.dir_path, lambda: self.mock_ros,
+                             active_profile_provider=lambda: "x1")
+        try:
+            player.play("test_recording.mcap", mode="raw", speed=10)
+            for _ in range(100):
+                if player.status()["state"] == "completed":
+                    break
+                time.sleep(.01)
+            self.assertEqual(player.status()["state"], "completed")
+            self.assertEqual([t for t, _, _ in self.published_messages], ["/action/joint_states"] * 5)
+        finally:
+            player.stop()
+
+    def test_active_x1_blocks_remap_to_feedback_reset_and_permit(self):
+        for destination in ("/observation/joint_states", "/control/solver/reset",
+                            "/status/solver/reset_ack", "/control/motion/permit"):
+            with self.subTest(destination=destination):
+                self.published_messages.clear()
+                player = TopicPlayer(self.dir_path, lambda: self.mock_ros,
+                                     active_profile_provider=lambda: "x1")
+                try:
+                    player.play("test_recording.mcap", mode="raw", speed=10,
+                                selected_topics=["/action/joint_states"],
+                                topic_remap={"/action/joint_states": destination})
+                    for _ in range(100):
+                        if player.status()["state"] == "completed":
+                            break
+                        time.sleep(.01)
+                    self.assertEqual(player.status()["state"], "completed")
+                    self.assertEqual(self.published_messages, [])
+                finally:
+                    player.stop()
+
+    def test_explicit_legacy_feedback_to_action_conversion_is_preserved(self):
+        player = TopicPlayer(self.dir_path, lambda: self.mock_ros,
+                             active_profile_provider=lambda: "x1")
+        try:
+            player.play("test_recording.mcap", speed=10,
+                        selected_topics=["/observation/joint_states"],
+                        topic_remap={"/observation/joint_states": "/action/joint_states"})
+            for _ in range(100):
+                if player.status()["state"] == "completed":
+                    break
+                time.sleep(.01)
+            self.assertEqual(player.status()["state"], "completed")
+            self.assertEqual(len(self.published_messages), 5)
+            self.assertTrue(all(t == "/action/joint_states" for t, _, _ in self.published_messages))
+        finally:
+            player.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
