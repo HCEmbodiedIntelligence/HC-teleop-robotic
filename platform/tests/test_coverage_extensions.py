@@ -579,3 +579,20 @@ def test_capture_teardown_shuts_down_context_before_joining_executor():
         "executor_shutdown",
         "node_destroy",
     ]
+
+
+def test_web_console_avoids_unguarded_crypto_random_uuid():
+    web_src = REPO / "platform/web/src"
+    for source in web_src.glob("*.ts*"):
+        text = source.read_text()
+        if "randomUUID" in text:
+            assert "createRequestId" in text
+            # Only the fallback guard itself may touch crypto.randomUUID.
+            assert text.count("randomUUID()") == 1
+            assert text.count("typeof c.randomUUID") == 1
+    assets = list((REPO / "platform/web/dist/assets").glob("index-*.js"))
+    if assets:
+        bundle = assets[0].read_text()
+        assert bundle.count("randomUUID()") <= 1
+        if "randomUUID()" in bundle:
+            assert 'randomUUID=="function"' in bundle or "randomUUID==='function'" in bundle
