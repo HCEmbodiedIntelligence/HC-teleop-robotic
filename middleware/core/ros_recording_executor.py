@@ -269,6 +269,8 @@ def _raw_recording_process(
     context = None
     executor = None
     node = None
+    from .recording_frame_log import RecordingFrameLog
+    frame_log = RecordingFrameLog('dds_'+str(config.get('_recording_reader_group', 'all')))
     counters = {
         "received": 0,
         "recorded": 0,
@@ -362,6 +364,7 @@ def _raw_recording_process(
                 "pid": __import__("os").getpid(),
                 "priority": "normal" if normal_priority else "low",
                 "reader_group": config.get('_recording_reader_group', 'all'),
+                "frame_interval_log": frame_log.status(),
                 "state_preroll_ms": 250. if sensor_window else preroll.seconds * 1000,
                 "history_retention_ms": preroll.seconds * 1000,
                 "capture_window": capture_window.snapshot() if sensor_window else {},
@@ -417,7 +420,10 @@ def _raw_recording_process(
                 max_hz: float = max_hz,
             ) -> None:
                 nonlocal capture_active
-                now = time.monotonic()
+                entry_mono_ns, entry_wall_ns = time.monotonic_ns(), time.time_ns()
+                now = entry_mono_ns/1e9
+                frame_log.offer(topic, source, msg_type, raw_data, entry_wall_ns, entry_mono_ns,
+                                active=accepting_event.is_set())
                 counters["received"] += 1
                 message_counts[topic] += 1
                 timestamps[topic].append(now)
@@ -433,7 +439,7 @@ def _raw_recording_process(
                     "msg_type": msg_type,
                     "_raw": raw_data,
                     "record_only": source != topic,
-                    "stamp_ns": time.time_ns(),
+                    "stamp_ns": entry_wall_ns,
                 }
                 if accepting_event.is_set():
                     begin_capture()
@@ -544,6 +550,7 @@ def _raw_recording_process(
             f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=8)}",
         )
     finally:
+        frame_log.close()
         if executor is not None:
             try:
                 if node is not None:

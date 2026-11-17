@@ -86,6 +86,8 @@ class PublicationCapture:
         self._last_error = ''
         self._admission_closed_at = None
         self._outside_preroll = 0
+        from .recording_frame_log import RecordingFrameLog
+        self._frame_log = RecordingFrameLog('published_action')
         self._thread = threading.Thread(target=self._run,
                                         name='published-action-recorder', daemon=True)
         self._thread.start()
@@ -229,7 +231,7 @@ class PublicationCapture:
                         outside_preroll=self._outside_preroll,
                         queued=len(self._queue), inflight=sum(self._inflight.values()),
                         pending_ingress=sum(self._pending.values()),
-                        error=self._last_error)
+                        error=self._last_error, frame_interval_log=self._frame_log.status())
 
     def close(self):
         self.end_generation()
@@ -239,6 +241,7 @@ class PublicationCapture:
         self._thread.join(timeout=2)
         if self._thread.is_alive():
             raise RuntimeError('published action recorder thread did not stop')
+        self._frame_log.close()
 
     def _run(self):
         while True:
@@ -249,14 +252,19 @@ class PublicationCapture:
                     return
                 generation, snapshot = self._queue.popleft()
             error = None
+            raw, accepted = None, False
             try:
                 raw = self.serializer(snapshot)
-                if not self.record_event(dict(kind='ros_message', topic=self.TOPIC,
+                accepted = self.record_event(dict(kind='ros_message', topic=self.TOPIC,
                         msg_type=self.TYPE, record_only=True, _raw=raw,
-                        stamp_ns=snapshot.publication_ns)):
+                        stamp_ns=snapshot.publication_ns))
+                if not accepted:
                     raise RuntimeError('published action rejected by recorder ingress')
             except Exception as exc:
                 error = str(exc)
+            self._frame_log.offer(self.TOPIC, self.TOPIC, self.TYPE, raw,
+                snapshot.publication_ns, time.monotonic_ns(), active=True,
+                generation=generation, accepted=bool(accepted))
             with self._condition:
                 if error is None:
                     self._enqueued += 1

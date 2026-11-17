@@ -204,6 +204,8 @@ class RosRecordingExecutorTests(unittest.TestCase):
                    side_effect=lambda resources, event: recorded.append(
                        {**event, '_test_capture': capture[0]}) or True), \
              patch.object(recording_module.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(recording_module.time, 'monotonic_ns',
+                          side_effect=lambda: round(clock[0] * 1_000_000_000)), \
              patch.object(recording_module.time, 'time_ns',
                           side_effect=lambda: round(clock[0] * 1_000_000_000)):
             recording_module._raw_recording_process(
