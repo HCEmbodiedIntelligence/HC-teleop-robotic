@@ -1236,9 +1236,86 @@ def create_app(runtime: Runtime):
             with contextlib.suppress(Exception):
                 await ws.close(code=1008)
 
+    @app.websocket("/ws")
+    async def legacy_websocket(ws: WebSocket):
+        """Legacy compatibility WebSocket endpoint for VR headset and tools."""
+        if len(viewers) >= 16:
+            await ws.close(code=1013)
+            return
+        await ws.accept()
+        viewers.add(ws)
+
+        def _envelope(kind: str, payload: dict):
+            return {
+                "version": 1,
+                "type": "event",
+                "kind": kind,
+                "source": "middleware",
+                "timestamp": time.time(),
+                "payload": payload,
+            }
+
+        try:
+            initial = await runtime.status()
+            last_state = (
+                initial.get("control", {}).get("safety"),
+                initial.get("control", {}).get("mode"),
+            )
+            await ws.send_json(_envelope("connected", initial))
+            while not runtime.shutdown_requested:
+                try:
+                    raw = await asyncio.wait_for(ws.receive_text(), 0.5)
+                    try:
+                        data = json.loads(raw)
+                    except ValueError:
+                        await ws.send_json({"error": "invalid JSON"})
+                        continue
+                    if isinstance(data, dict):
+                        if data.get("kind") == "ping":
+                            await ws.send_json(_envelope("pong", {}))
+                        elif data.get("type") == "simulation_viewer":
+                            await ws.send_json(
+                                {
+                                    "type": "simulation_viewer_ack",
+                                    "data": {"registered": False},
+                                }
+                            )
+                except asyncio.TimeoutError:
+                    current = await runtime.status()
+                    control = current.get("control", {})
+                    pair = (control.get("safety"), control.get("mode"))
+                    if pair != last_state:
+                        last_state = pair
+                        kind = "safety_resume" if pair[0] == "ready" else "safety_stop"
+                        await ws.send_json(
+                            _envelope(
+                                kind,
+                                {
+                                    "reason": control.get("reason", ""),
+                                    "safety": pair[0],
+                                    "mode": pair[1],
+                                },
+                            )
+                        )
+        except (WebSocketDisconnect, asyncio.TimeoutError, OSError, RuntimeError):
+            pass
+        finally:
+            viewers.discard(ws)
+
     web_root = runtime.repo / "platform/web/dist"
     if web_root.exists():
-        app.mount("/", StaticFiles(directory=web_root, html=True), name="console")
+
+        class _HttpStaticFiles(StaticFiles):
+            async def __call__(self, scope, receive, send):
+                if scope["type"] != "http":
+                    if scope["type"] == "websocket":
+                        await send({"type": "websocket.close", "code": 1008})
+                    return
+                await super().__call__(scope, receive, send)
+
+        app.mount(
+            "/", _HttpStaticFiles(directory=web_root, html=True), name="console"
+        )
     return app
 
 

@@ -596,3 +596,229 @@ def test_web_console_avoids_unguarded_crypto_random_uuid():
         assert bundle.count("randomUUID()") <= 1
         if "randomUUID()" in bundle:
             assert 'randomUUID=="function"' in bundle or "randomUUID==='function'" in bundle
+
+
+def test_legacy_ws_and_unknown_ws_do_not_crash_staticfiles(tmp_path):
+    async def setup():
+        return await _make_runtime(tmp_path)
+
+    runtime, app = asyncio.run(setup())
+    try:
+        client = TestClient(app)
+        with client.websocket_connect("/ws") as ws:
+            hello = ws.receive_json()
+            assert hello["kind"] == "connected"
+            ws.send_json({"kind": "ping"})
+            pong = ws.receive_json()
+            assert pong["kind"] == "pong"
+        with pytest.raises(Exception):
+            with client.websocket_connect("/ws-unknown") as bad_ws:
+                bad_ws.receive_text()
+    finally:
+        asyncio.run(_release_clients(runtime))
+
+
+def test_teleop_runtime_reenters_teleop_after_home_complete(tmp_path):
+    class HomeTeleopCore:
+        def __init__(self):
+            self.calls = []
+            self.state = {
+                "boot_id": "test-boot",
+                "epoch": 4,
+                "safety": "ready",
+                "mode": "idle",
+                "paused": False,
+                "transition_pending": False,
+                "owner": "none",
+                "issued_mono_ns": time.monotonic_ns(),
+            }
+
+        async def request(self, op, **values):
+            self.calls.append((op, dict(values)))
+            if op == "session_start":
+                self.state.update(
+                    epoch=self.state["epoch"] + 1,
+                    mode=values["mode"],
+                    owner="vr",
+                )
+            return {"ok": True, "state": copy.deepcopy(self.state)}
+
+        async def close(self):
+            pass
+
+    async def run():
+        runtime = Runtime(REPO, tmp_path, mode="teleop")
+        await runtime.core.close()
+        runtime.core = HomeTeleopCore()
+        runtime.replay = _FakeAux()
+        runtime.config = {"config_hash": "test", "groups": {}, "joint_names": []}
+        runtime.topics = TopicRegistry(tmp_path / "topics.json")
+        runtime.audit.events.put_nowait(
+            {
+                "type": "ownership_transition",
+                "reason": "HOME_COMPLETE",
+                "boot_id": "test-boot",
+                "epoch": 4,
+                "mono_ns": time.monotonic_ns(),
+            }
+        )
+        task = asyncio.create_task(runtime._control_events())
+        try:
+            for _ in range(50):
+                if runtime.core.state["mode"] == "teleop":
+                    break
+                await asyncio.sleep(0.01)
+            assert [op for op, _ in runtime.core.calls if op != "status"] == [
+                "session_start"
+            ]
+            assert runtime.core.state["mode"] == "teleop"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if runtime._home_resume_task:
+                runtime._home_resume_task.cancel()
+                await asyncio.gather(runtime._home_resume_task, return_exceptions=True)
+            await _release_clients(runtime)
+
+    asyncio.run(run())
+
+
+def test_sim_camera_renderer_produces_jpeg_depth_and_intrinsics():
+    pytest.importorskip("pybullet")
+    from PIL import Image
+    import io
+    from hc_platform.adapters.model import UrdfModel
+    from hc_platform.adapters.sim_camera import SimCameraRenderer
+    from hc_platform.configuration import compile_package
+
+    cfg = compile_package(REPO / "adapters/robots/x1")
+    cfg.setdefault("sim", {})["camera_fps"] = 30.0
+    model = UrdfModel(cfg["urdf_path"], cfg["package_root"])
+    renderer = SimCameraRenderer(cfg, model, cfg.get("topics", []))
+    assert renderer.available
+    assert any(t == "/observation/cameras/head/color/compressed" for t, _ in renderer.required_topics())
+    assert any(t == "/observation/cameras/head/depth/compressed" for t, _ in renderer.required_topics())
+    assert renderer.info_topic == "/observation/cameras/head/camera_info"
+    assert renderer.calibration_topic == "/observation/cameras/head/calibration"
+
+    renderer.start()
+    try:
+        sample = None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and sample is None:
+            sample = renderer.pop_latest()
+            if sample is None:
+                time.sleep(0.02)
+        assert sample is not None
+        rgb_payloads, depth_payloads, primary_meta, stamp_ns, mono_ns = sample
+        assert len(rgb_payloads) == 1
+        topic, kind, w, h, frame_id, data = rgb_payloads[0]
+        assert topic == "/observation/cameras/head/color/compressed"
+        assert kind == "CompressedImage" and (w, h) == (640, 400)
+        img = Image.open(io.BytesIO(data))
+        assert img.size == (640, 400)
+        assert len(depth_payloads) == 1
+        d_topic, _, png_bytes = depth_payloads[0]
+        assert d_topic == "/observation/cameras/head/depth/compressed"
+        assert Image.open(io.BytesIO(png_bytes)).size == (640, 400)
+        assert primary_meta[:2] == (640, 400) and primary_meta[2] > 0
+        assert stamp_ns > 0 and mono_ns > 0
+    finally:
+        renderer.close()
+
+
+def test_real_sim_camera_capture_preview_and_lerobot_export(tmp_path):
+    pytest.importorskip("rclpy")
+    pytest.importorskip("pybullet")
+    import os
+    from hc_platform.data.sample_codec import iter_samples
+
+    converter = Path(
+        os.environ.get(
+            "HC_CONVERTER_PYTHON", REPO / ".venv-lerobot-platform/bin/python"
+        )
+    )
+    if not (REPO / "platform/control/build/hc-control").exists() or not converter.exists():
+        pytest.skip("Build hc-control and converter environment first")
+
+    def free_port():
+        with __import__("socket").socket(__import__("socket").AF_INET, __import__("socket").SOCK_DGRAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    runtime = Runtime(REPO, tmp_path, vr_port=free_port(), discovery_port=free_port())
+    with TestClient(create_app(runtime)) as client:
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            st = client.get("/api/status").json()
+            cams = client.get("/api/cameras").json()["streams"]
+            head = next(c for c in cams if c["id"] == "head")
+            if st["control"].get("backend_ready") and st["backend"].get("process_alive") and head.get("source_alive"):
+                break
+            time.sleep(0.05)
+        cams = client.get("/api/cameras").json()["streams"]
+        head = next(c for c in cams if c["id"] == "head")
+        assert head["source_alive"] and head["frames_received"] > 0
+        snap = client.get("/api/cameras/head/snapshot")
+        assert snap.status_code == 200 and snap.headers["content-type"].startswith("image/jpeg")
+
+        assert client.post("/api/control/operations", json={"op": "recover", "request_id": "recov"}).status_code == 202
+        for _ in range(100):
+            if client.get("/api/status").json()["control"]["safety"] == "ready":
+                break
+            time.sleep(0.02)
+
+        rec = client.post(
+            "/api/recordings",
+            json={
+                "format": "mcap_lerobot",
+                "local_format": "mcap_lerobot",
+                "filename": "sim_full.mcap",
+                "dataset_fps": 10,
+                "task_description": "sim camera reach",
+                "request_id": "sim-e2e-rec",
+            },
+        )
+        assert rec.status_code == 201, rec.text
+        aid = rec.json()["id"]
+
+        assert client.post(
+            "/api/control/operations",
+            json={"op": "session_start", "mode": "program", "groups": ["right_arm"]},
+        ).status_code == 202
+        while client.get("/api/status").json()["control"]["transition_pending"]:
+            time.sleep(0.02)
+
+        for seq in range(1, 35):
+            cur = client.get("/api/status").json()["control"]
+            names = runtime.config["groups"]["right_arm"]
+            pos = dict(zip(cur["joint_names"], cur["positions"]))
+            payload = {k: cur[k] for k in ("boot_id", "epoch", "lease_id", "reference_epoch")}
+            payload.update(
+                source="program",
+                seq=seq,
+                ttl_ms=150,
+                joint_names=names,
+                positions=[pos[n] + (0.015 if i == 0 else 0.0) for i, n in enumerate(names)],
+            )
+            assert client.post("/api/control/command", json=payload).status_code == 200
+            time.sleep(0.02)
+
+        stop = client.post("/api/recordings/stop")
+        assert stop.status_code == 200, stop.text
+        mcap_path = Path(stop.json()["root"]) / "sim_full.mcap"
+        gaps = [s for s in iter_samples(mcap_path, ["/capture/gaps"])]
+        assert not gaps
+
+        for _ in range(300):
+            datasets = [d for d in client.get("/api/datasets").json() if d.get("session_id") == aid]
+            lerobot_ds = [d for d in datasets if d.get("format") == "lerobot" and d.get("state") == "READY"]
+            if lerobot_ds:
+                assert lerobot_ds[0]["summary"]["camera_count"] >= 1
+                assert lerobot_ds[0]["summary"]["frame_count"] > 0
+                break
+            failed = [d for d in datasets if d.get("state") in ("FAILED", "DERIVATION_FAILED")]
+            assert not failed, failed
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Timed out waiting for LeRobot simulation dataset conversion")

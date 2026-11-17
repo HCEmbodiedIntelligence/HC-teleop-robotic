@@ -26,9 +26,18 @@ class ObservationPublisher:
                 "physical robot observation mirroring is forbidden; use --vr-only"
             )
         self.config, self.state_dir, self.vr_only = config, Path(state_dir), vr_only
-        self.counts = {"feedback": 0, "action": 0, "vr": 0, "invalid": 0, "stale": 0}
+        self.counts = {
+            "feedback": 0,
+            "action": 0,
+            "vr": 0,
+            "camera": 0,
+            "invalid": 0,
+            "stale": 0,
+        }
         self.q = {}
         self.last_metadata = 0.0
+        self.last_camera_calib = 0.0
+        self.sim_camera = None
         self.stopped = False
         import rclpy
         from rclpy.context import Context
@@ -38,7 +47,7 @@ class ObservationPublisher:
             HistoryPolicy,
             DurabilityPolicy,
         )
-        from sensor_msgs.msg import JointState
+        from sensor_msgs.msg import JointState, CompressedImage, Image, CameraInfo
         from std_msgs.msg import Bool, String
         from geometry_msgs.msg import (
             PoseStamped,
@@ -53,6 +62,9 @@ class ObservationPublisher:
             cls.__name__: cls
             for cls in (
                 JointState,
+                CompressedImage,
+                Image,
+                CameraInfo,
                 Bool,
                 String,
                 PoseStamped,
@@ -114,6 +126,15 @@ class ObservationPublisher:
             for side in self.arms:
                 self._publisher(f"/observation/{side}_arm/ee_pose", "PoseStamped")
                 self._publisher(f"/action/{side}_arm/ee_pose", "PoseStamped")
+            from .sim_camera import SimCameraRenderer
+
+            self.sim_camera = SimCameraRenderer(
+                config, self.model, config.get("topics", [])
+            )
+            for topic, kind in self.sim_camera.required_topics():
+                if topic not in self.publishers:
+                    self._publisher(topic, kind)
+            self.sim_camera.start()
         path = self.state_dir / "observations.sock"
         if len(os.fsencode(path)) >= 108:
             raise ValueError("observation socket path exceeds Unix limit")
@@ -225,6 +246,8 @@ class ObservationPublisher:
                 data.get("model_positions", positions),
             )
         )
+        if getattr(self, "sim_camera", None):
+            self.sim_camera.update_state(self.q, data.get("base_pose"))
         self._ee("observation", self.q, stamp)
         ready = self.types["Bool"]()
         ready.data = bool(data.get("ready"))
@@ -357,6 +380,85 @@ class ObservationPublisher:
         getattr(self, "_" + kind)(data)
         self.counts[kind] += 1
 
+    def _publish_sim_camera(self):
+        if not getattr(self, "sim_camera", None):
+            return
+        sample = self.sim_camera.pop_latest()
+        if sample is None:
+            return
+        rgb_payloads, depth_payloads, primary_meta, stamp_ns, mono_ns = sample
+        for topic, kind, width, height, frame_id, data in rgb_payloads:
+            pub = self.publishers.get(topic)
+            if pub is None:
+                continue
+            if kind == "Image":
+                msg = self.types["Image"]()
+                self._stamp(msg, stamp_ns)
+                msg.header.frame_id = frame_id
+                msg.width = int(width)
+                msg.height = int(height)
+                msg.encoding = "rgb8"
+                msg.step = int(width) * 3
+                msg.data = data
+            else:
+                msg = self.types["CompressedImage"]()
+                self._stamp(msg, stamp_ns)
+                msg.header.frame_id = frame_id
+                msg.format = "jpeg"
+                msg.data = data
+            pub.publish(msg)
+        for topic, frame_id, png_bytes in depth_payloads:
+            pub = self.publishers.get(topic)
+            if pub is None:
+                continue
+            msg = self.types["CompressedImage"]()
+            self._stamp(msg, stamp_ns)
+            msg.header.frame_id = frame_id
+            msg.format = "png"
+            msg.data = png_bytes
+            pub.publish(msg)
+        if primary_meta:
+            w, h, fx, fy, cx, cy, frame_id = primary_meta
+            if self.sim_camera.info_topic in self.publishers:
+                info = self.types["CameraInfo"]()
+                self._stamp(info, stamp_ns)
+                info.header.frame_id = frame_id
+                info.width = int(w)
+                info.height = int(h)
+                info.distortion_model = "plumb_bob"
+                info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+                info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+                info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+                self.publishers[self.sim_camera.info_topic].publish(info)
+            now_mono = time.monotonic()
+            if (
+                self.sim_camera.calibration_topic in self.publishers
+                and now_mono - self.last_camera_calib >= 0.5
+            ):
+                self._string(
+                    self.sim_camera.calibration_topic,
+                    {
+                        "schema": "hc-camera-calibration/v1",
+                        "source": "sim_camera_model",
+                        "calibrated": False,
+                        "runtime_mode": "sim",
+                        "config_hash": self.config.get("config_hash"),
+                        "camera": "head",
+                        "frame_id": frame_id,
+                        "width": int(w),
+                        "height": int(h),
+                        "distortion_model": "plumb_bob",
+                        "K": [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0],
+                        "P": [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        "R": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                        "D": [0.0, 0.0, 0.0, 0.0, 0.0],
+                        "sample_mono_ns": mono_ns,
+                    },
+                )
+                self.last_camera_calib = now_mono
+        self.counts["camera"] += 1
+
     def run(self):
         last_status = 0.0
         while not self.stopped:
@@ -370,6 +472,7 @@ class ObservationPublisher:
             except (ValueError, KeyError, TypeError) as error:
                 self.counts["invalid"] += 1
                 self.last_error = str(error)
+            self._publish_sim_camera()
             if time.monotonic() - last_status > 0.25:
                 write_status(
                     self.state_dir,
@@ -379,6 +482,10 @@ class ObservationPublisher:
                         "mode": "vr_only" if self.vr_only else "simulation",
                         "counts": self.counts,
                         "pose_source": "model_fk",
+                        "camera_source": "pybullet_tiny_renderer"
+                        if getattr(self, "sim_camera", None)
+                        and self.sim_camera.available
+                        else None,
                         "camera_extrinsics_calibrated": False,
                         "last_error": getattr(self, "last_error", None),
                     },
@@ -386,6 +493,8 @@ class ObservationPublisher:
                 last_status = time.monotonic()
 
     def close(self):
+        if getattr(self, "sim_camera", None):
+            self.sim_camera.close()
         self.socket.close()
         self.path.unlink(missing_ok=True)
         self.node.destroy_node()

@@ -105,6 +105,7 @@ class Runtime:
         self.management_generation = 0
         self.shutdown_requested = False
         self._closing_task = None
+        self._home_resume_task = None
         self.instance_lock = None
         self.hardware_lock = None
         self.motion = self.replay = None
@@ -689,6 +690,7 @@ class Runtime:
         session_id = result.get("id", result.get("session_id"))
         if not session_id:
             raise RuntimeError("Recorder did not return a session ID")
+        self.audit.dropped_events = 0
         self.active_recording = session_id
         self.recording_mode = frozen.get("mode", "ordinary")
         self.recording_cutoff_ns = None
@@ -857,6 +859,37 @@ class Runtime:
             return True
         return transitioned
 
+    async def _resume_teleop_after_home(self, generation):
+        try:
+            async with self.mutation_lock:
+                if (
+                    self.mode != "teleop"
+                    or self.shutdown_requested
+                    or generation != self.management_generation
+                ):
+                    return
+                if (
+                    self.replay
+                    and (await self.replay.status()).get("phase") in REPLAY_ACTIVE
+                ):
+                    return
+                current = (await self.core.request("status"))["state"]
+                current = await self._wait_transition_settled(generation, current)
+                if (
+                    current.get("safety") == "ready"
+                    and current.get("mode") == "idle"
+                    and not current.get("transition_pending")
+                ):
+                    await self.core.request(
+                        "session_start",
+                        mode="teleop",
+                        expected_boot_id=current["boot_id"],
+                        expected_epoch=current["epoch"],
+                    )
+        except Exception as exc:
+            if not self.shutdown_requested:
+                self.supervisor.log("vr-events", str(exc), "WARN")
+
     async def _vr_events(self):
         while True:
             raw = await asyncio.get_running_loop().sock_recv(self.event_socket, 65536)
@@ -970,6 +1003,18 @@ class Runtime:
                 and isinstance(sample_ns, int)
                 and sample_ns > self.recording_cutoff_ns
             )
+            if not session_id:
+                self.audit.dropped_events = 0
+            if (
+                self.mode == "teleop"
+                and event.get("type") == "ownership_transition"
+                and event.get("reason") == "HOME_COMPLETE"
+                and not self.shutdown_requested
+            ):
+                if self._home_resume_task is None or self._home_resume_task.done():
+                    self._home_resume_task = asyncio.create_task(
+                        self._resume_teleop_after_home(self.management_generation)
+                    )
             if session_id and not beyond_cutoff:
                 try:
                     if (
@@ -1088,9 +1133,10 @@ class Runtime:
     async def _close_owned(self):
         self.shutdown_requested = True
         try:
-            if self.vr_events_task:
-                self.vr_events_task.cancel()
-                await asyncio.gather(self.vr_events_task, return_exceptions=True)
+            for task in (self.vr_events_task, self._home_resume_task):
+                if task:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             with contextlib.suppress(Exception):
                 await self.core.request("stop")
                 # Keep audit capture alive for the stop, fence and dispatch ack.

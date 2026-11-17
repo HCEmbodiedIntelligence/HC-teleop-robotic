@@ -387,9 +387,20 @@ function App() {
                 <span>
                   {control.transition_pending
                     ? "切换等待确认"
-                    : control.reason || "等待操作"}
+                    : control.paused
+                      ? `已暂停 (${control.reason || "PAUSED"})`
+                      : control.reason || "等待操作"}
                 </span>
               </div>
+              <p className="muted">
+                {control.safety === "stopped" || control.safety === "fault"
+                  ? "当前未解锁控制：请先点击「故障复位／恢复许可」或按头显右手 A 键恢复。"
+                  : control.mode === "idle"
+                    ? "当前处于待机 (idle)：请先点击「开始会话」进入 teleop/program 后再控制或采集。"
+                    : control.paused
+                      ? "当前会话已暂停：点击「继续」或按头显右手 A 键恢复。"
+                      : `当前会话运行中（模式 ${control.mode}，控制源 ${control.owner || "none"}）。`}
+              </p>
               <div className="row">
                 <button onClick={() => operate("recover")} disabled={busy}>
                   故障复位／恢复许可
