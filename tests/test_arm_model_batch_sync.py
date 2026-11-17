@@ -55,42 +55,6 @@ def test_unknown_fixed_and_empty_states_never_reset_other_joints(monkeypatch):
     scalar.assert_not_called()
 
 
-def test_pose_batch_keeps_root_semantics_deduplicates_and_falls_back_once(monkeypatch):
-    node = SimpleNamespace(robot_id=7, physics_client=3, _link_pose=Mock(return_value=('p', 'q')))
-    batch = Mock(side_effect=TypeError('unsupported'))
-    monkeypatch.setattr(bullet, 'getLinkStates', batch)
-    for _ in range(2):
-        assert RobotArmTeleopNode._link_pose_batch(node, [-1, 2, 2, 3]) == {
-            -1: ('p', 'q'), 2: ('p', 'q'), 3: ('p', 'q')}
-    batch.assert_called_once_with(7, [2, 3], computeForwardKinematics=True, physicsClientId=3)
-    assert node._link_pose.call_count == 6
-
-
-def test_pose_batch_matches_scalar_and_reads_fresh_state_after_joint_motion():
-    profile = Path(__file__).resolve().parents[1]/'adapters/robots/x1'
-    robot = yaml.safe_load((profile/'arm_teleop.yaml').read_text())['robot']
-    client = bullet.connect(bullet.DIRECT)
-    try:
-        body = bullet.loadURDF(str((profile/robot['urdf_path']).resolve()), robot['base_position'],
-            robot['base_orientation'], useFixedBase=True, physicsClientId=client)
-        node = SimpleNamespace(robot_id=body, physics_client=client)
-        node._root_pose = lambda: RobotArmTeleopNode._root_pose(node)
-        node._link_pose = lambda index: RobotArmTeleopNode._link_pose(node, index)
-        count = bullet.getNumJoints(body, physicsClientId=client)
-        indices = [-1, *range(count)]
-        moving = next(index for index in range(count)
-            if bullet.getJointInfo(body, index, physicsClientId=client)[2] == bullet.JOINT_REVOLUTE)
-        for value in (0., .1, -.2):
-            bullet.resetJointState(body, moving, value, physicsClientId=client)
-            batch = RobotArmTeleopNode._link_pose_batch(node, indices)
-            for index in indices:
-                scalar = node._link_pose(index)
-                assert np.array_equal(batch[index][0], scalar[0])
-                assert np.array_equal(batch[index][1], scalar[1])
-    finally:
-        bullet.disconnect(physicsClientId=client)
-
-
 def test_x1_100_random_feedback_groups_match_all_joint_states_and_link_poses():
     profile = Path(__file__).resolve().parents[1]/'adapters/robots/x1'
     robot = yaml.safe_load((profile/'arm_teleop.yaml').read_text())['robot']

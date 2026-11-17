@@ -90,59 +90,6 @@ class _ParentLiveness:
         return self.parent is None or self.parent.is_alive()
 
 
-class _CallbackBatchBudget:
-    """Bound ready-callback batching, without changing any safety checkpoint.
-
-    The actor alone owns this object. A callback already in progress is never
-    interrupted; the budget only yields between callbacks so latest targets
-    can reach the original final gate sooner. Counters have constant size.
-    """
-    def __init__(self, budget_ms=2., *, clock=time.monotonic_ns):
-        if not 0 < budget_ms <= 10:
-            raise ValueError('callback batch budget must be in (0, 10] ms')
-        self.budget_ns = int(budget_ms * 1_000_000)
-        self.clock = clock
-        self._started = None
-        self._callbacks = 0
-        self._yielded = False
-        self.batches = self.callbacks = self.budget_yields = 0
-        self.last_callbacks = self.max_callbacks = 0
-        self.last_wall_ns = self.max_wall_ns = 0
-
-    def begin(self):
-        self._started = self.clock()
-        self._callbacks = 0
-        self._yielded = False
-
-    def after_callback(self, pending_targets=True):
-        if self._started is None:
-            raise RuntimeError('callback batch has not begun')
-        self._callbacks += 1
-        self._yielded = bool(pending_targets and self.clock() - self._started >= self.budget_ns)
-        return self._yielded
-
-    def finish(self):
-        if self._started is None:
-            return
-        elapsed = max(0, self.clock() - self._started)
-        self.batches += 1
-        self.callbacks += self._callbacks
-        self.budget_yields += int(self._yielded)
-        self.last_callbacks = self._callbacks
-        self.max_callbacks = max(self.max_callbacks, self._callbacks)
-        self.last_wall_ns = elapsed
-        self.max_wall_ns = max(self.max_wall_ns, elapsed)
-        self._started = None
-
-    def status(self):
-        return dict(budget_ms=self.budget_ns / 1_000_000,
-                    batches=self.batches, callbacks=self.callbacks,
-                    budget_yields=self.budget_yields,
-                    last_callbacks=self.last_callbacks, max_callbacks=self.max_callbacks,
-                    last_wall_ms=self.last_wall_ns / 1_000_000,
-                    max_wall_ms=self.max_wall_ns / 1_000_000)
-
-
 class _RecordingIngress:
     def __init__(self, resources, finish):
         self.resources, self.finish = resources, finish
@@ -182,7 +129,6 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
             counters['observer_dropped'] += 1
 
     bridge = bridge_factory(core_config, emit)
-    bridge._actor_callback_budget = _CallbackBatchBudget()
     def observer_ros_publish(topic, payload):
         if topic not in _READONLY_ROS_TOPICS or not isinstance(payload, dict):
             counters['observer_ros_rejected'] += 1
@@ -287,7 +233,6 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
         result['control_process'] = dict(pid=os.getpid(), boot_id=channels['boot'],
             actor=True, parent_pid=channels['parent_pid'],
             python_switch_interval_ms=sys.getswitchinterval()*1000,
-            callback_batches=bridge._actor_callback_budget.status(),
             applied_negative_generation=applied_parent,
             pending_negative_generation=(_generation(channels['parent_generation']) if authority_blocked() else None),
             **counters)
