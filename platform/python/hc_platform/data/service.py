@@ -474,6 +474,18 @@ class DataService:
             sample_monotonic_ns=sample_monotonic_ns,
         )
 
+    async def append_samples(self, session_id, samples):
+        last = None
+        for sample in samples:
+            last = await self._append(
+                session_id,
+                sample["topic"],
+                sample["payload"],
+                sample.get("source_time_ns"),
+                sample_monotonic_ns=sample.get("sample_monotonic_ns"),
+            )
+        return last or {"accepted": True}
+
     async def _append(
         self,
         session_id,

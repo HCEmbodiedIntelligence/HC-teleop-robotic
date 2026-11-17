@@ -16,13 +16,13 @@ class CoreError(RuntimeError):
 
 
 class CoreClient:
-    def __init__(self, path: str, role="api"):
+    def __init__(self, path: str, role="api", event_queue_size: int = 256):
         self.path, self.role = str(path), role
         self.socket = None
         self.reader = None
         self.pending = {}
         self.state = {}
-        self.events = asyncio.Queue(maxsize=256)
+        self.events = asyncio.Queue(maxsize=max(1, int(event_queue_size)))
         self.lock = asyncio.Lock()
         self.send_lock = asyncio.Lock()
         self.dropped_events = 0

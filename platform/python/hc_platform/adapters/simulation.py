@@ -27,6 +27,15 @@ class SimulationAdapter:
             for name, joint in self.model.joints.items()
             if joint.mimic is not None
         }
+        self._limits = {
+            name: (float(lo), float(hi))
+            for name, lo, hi in zip(
+                config.get("joint_names", ()),
+                config.get("lower", ()),
+                config.get("upper", ()),
+            )
+            if lo <= hi
+        }
         self.client = self.robot = None
         self.pending = None
         self.active = None
@@ -159,8 +168,16 @@ class SimulationAdapter:
         self.gate.fence(boot_id, epoch)
         self.stop(force=True)
 
+    def _clamp_target(self, name: str, value: float) -> float:
+        bounds = self._limits.get(name)
+        if bounds is None:
+            return float(value)
+        return max(bounds[0], min(bounds[1], float(value)))
+
     def _apply_motors(self):
         names = list(self.targets)
+        for n in names:
+            self.targets[n] = self._clamp_target(n, self.targets[n])
         self.bullet.setJointMotorControlArray(
             self.robot,
             [self.joint_indices[n] for n in names],
@@ -270,7 +287,10 @@ class SimulationAdapter:
                 [self.joint_indices[n] for n in names],
                 physicsClientId=self.client,
             )
-            self.targets = {name: state[0] for name, state in zip(names, states)}
+            self.targets = {
+                name: self._clamp_target(name, state[0])
+                for name, state in zip(names, states)
+            }
             self._apply_motors()
 
     def status(self):

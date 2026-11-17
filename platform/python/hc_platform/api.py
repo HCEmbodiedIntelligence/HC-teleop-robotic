@@ -1348,6 +1348,12 @@ def main():
         discovery_port=args.discovery_port,
     )
     runtime.api_url = f"http://127.0.0.1:{args.port}"
+    if args.host in ("127.0.0.1", "localhost", "::1"):
+        print(
+            f"[hc_platform] HTTP/WebRTC bound to {args.host}:{args.port} "
+            "(LAN VR headset video projection requires --host 0.0.0.0)",
+            flush=True,
+        )
     os.umask(0o077)
     config = uvicorn.Config(
         create_app(runtime),

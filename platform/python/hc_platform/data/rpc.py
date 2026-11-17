@@ -18,6 +18,7 @@ METHODS = frozenset(
         "status",
         "start_session",
         "append_sample",
+        "append_samples",
         "set_intervention",
         "stop_session",
         "get_session",
@@ -74,6 +75,15 @@ class DataClient:
             # Capture/core timestamps carried in the payload take precedence.
             params = dict(params or {})
             params.setdefault("sample_monotonic_ns", time.monotonic_ns())
+        elif method == "append_samples":
+            params = dict(params or {})
+            now_mono = time.monotonic_ns()
+            params["samples"] = [
+                {"sample_monotonic_ns": now_mono, **item}
+                if "sample_monotonic_ns" not in item
+                else item
+                for item in params.get("samples", ())
+            ]
         async with self.lock:
             request_id = str(uuid.uuid4())
             request = (

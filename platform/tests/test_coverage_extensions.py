@@ -822,3 +822,109 @@ def test_real_sim_camera_capture_preview_and_lerobot_export(tmp_path):
             time.sleep(0.1)
         else:
             raise AssertionError("Timed out waiting for LeRobot simulation dataset conversion")
+
+
+def test_audit_dropped_events_resets_after_reporting(tmp_path):
+    class _AuditDataStub:
+        def __init__(self):
+            self.samples = []
+
+        async def append_sample(self, *, session_id, topic, payload):
+            self.samples.append((session_id, topic, dict(payload)))
+
+        async def close(self):
+            pass
+
+    async def run():
+        runtime = Runtime(REPO, tmp_path, mode="sim")
+        stub = _AuditDataStub()
+        await runtime.audit_data.close()
+        runtime.audit_data = stub
+        runtime.active_recording = "sess-1"
+        runtime.audit.dropped_events = 3
+        for seq in (1, 2):
+            runtime.audit.events.put_nowait(
+                {"type": "output", "boot_id": "b", "epoch": 1, "seq": seq, "mono_ns": seq}
+            )
+        task = asyncio.create_task(runtime._control_events())
+        try:
+            for _ in range(50):
+                if len(stub.samples) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            gap_samples = [s for s in stub.samples if s[1] == "/capture/gaps"]
+            assert len(gap_samples) == 1
+            assert gap_samples[0][2]["dropped"] == 3
+            assert runtime.audit.dropped_events == 0
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await _release_clients(runtime)
+
+    asyncio.run(run())
+
+
+def test_simulation_adapter_clamps_joint_limit_and_stays_ready(tmp_path):
+    pytest.importorskip("pybullet")
+    from hc_platform.adapters.simulation import SimulationAdapter
+    from hc_platform.configuration import compile_package
+
+    cfg = compile_package(REPO / "adapters/robots/x1")
+    feedbacks = []
+    adapter = SimulationAdapter(cfg, feedbacks.append)
+    adapter.start()
+    try:
+        j6_idx = cfg["joint_names"].index("Joint6_R")
+        upper_j6 = cfg["upper"][j6_idx]
+        adapter.targets["Joint6_R"] = upper_j6 + 0.5
+        adapter._apply_motors()
+        assert adapter.targets["Joint6_R"] == upper_j6
+        for _ in range(60):
+            adapter.step()
+        latest = feedbacks[-1]
+        measured_j6 = latest["positions"][latest["joint_names"].index("Joint6_R")]
+        assert measured_j6 <= upper_j6 + 0.005
+    finally:
+        adapter.close()
+
+
+def test_data_client_and_capture_batch_append_samples(tmp_path):
+    from hc_platform.capture import Capture
+    from hc_platform.data import DataClient, DataServer, DataService
+    from hc_platform.data.sample_codec import iter_samples
+
+    async def run():
+        sock = tmp_path / "data.sock"
+        service = await DataService(tmp_path / "data").open()
+        server = await DataServer(service, sock).start()
+        client = DataClient(sock)
+        try:
+            sess = await client.start_session(
+                {"robot_id": "x1", "config_hash": "test", "filename": "batch.mcap"},
+                "ordinary",
+            )
+            capture = Capture(str(sock), sess["id"], [])
+            for idx in range(5):
+                capture.receive(
+                    b"\x00\x01\x00\x00\x01",
+                    "/status/test",
+                    "std_msgs/msg/Bool",
+                    "bool data\n",
+                    0,
+                )
+            capture.start_ros = lambda: None
+            capture.stopping = True
+            await capture.run()
+            stopped = await client.stop_session(sess["id"])
+            samples = [
+                s
+                for s in iter_samples(Path(stopped["root"]) / "batch.mcap")
+                if s["topic"] == "/status/test"
+            ]
+            assert len(samples) == 5
+        finally:
+            await client.close()
+            await server.close()
+            await service.close()
+
+    asyncio.run(run())

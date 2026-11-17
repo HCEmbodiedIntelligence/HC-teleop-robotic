@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import selectors
 import signal
 import socket
 import stat
@@ -147,7 +148,9 @@ class ObservationPublisher:
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
         self.socket.bind(str(path))
-        self.socket.settimeout(0.02)
+        self.socket.setblocking(False)
+        self._selector = selectors.DefaultSelector()
+        self._selector.register(self.socket, selectors.EVENT_READ)
         path.chmod(0o600)
 
     def _publisher(self, topic, kind):
@@ -459,16 +462,22 @@ class ObservationPublisher:
                 self.last_camera_calib = now_mono
         self.counts["camera"] += 1
 
+    def _consume_datagram(self, raw: bytes):
+        if len(raw) > 65536:
+            raise ValueError("oversized observation event")
+        self.handle(json.loads(raw))
+
     def run(self):
         last_status = 0.0
         while not self.stopped:
             try:
-                raw = self.socket.recv(65537)
-                if len(raw) > 65536:
-                    raise ValueError("oversized observation event")
-                self.handle(json.loads(raw))
-            except socket.timeout:
-                pass
+                if self._selector.select(0.005):
+                    for _ in range(64):
+                        try:
+                            raw = self.socket.recv(65537)
+                        except BlockingIOError:
+                            break
+                        self._consume_datagram(raw)
             except (ValueError, KeyError, TypeError) as error:
                 self.counts["invalid"] += 1
                 self.last_error = str(error)
@@ -482,10 +491,13 @@ class ObservationPublisher:
                         "mode": "vr_only" if self.vr_only else "simulation",
                         "counts": self.counts,
                         "pose_source": "model_fk",
-                        "camera_source": "pybullet_tiny_renderer"
-                        if getattr(self, "sim_camera", None)
-                        and self.sim_camera.available
-                        else None,
+                        "camera_source": getattr(self.sim_camera, "renderer_name", None)
+                        or (
+                            "pybullet"
+                            if getattr(self, "sim_camera", None)
+                            and self.sim_camera.available
+                            else None
+                        ),
                         "camera_extrinsics_calibrated": False,
                         "last_error": getattr(self, "last_error", None),
                     },
@@ -495,6 +507,8 @@ class ObservationPublisher:
     def close(self):
         if getattr(self, "sim_camera", None):
             self.sim_camera.close()
+        if getattr(self, "_selector", None):
+            self._selector.close()
         self.socket.close()
         self.path.unlink(missing_ok=True)
         self.node.destroy_node()

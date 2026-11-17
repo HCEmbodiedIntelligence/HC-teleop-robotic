@@ -207,8 +207,15 @@ class Capture:
                     stage="subscription",
                     cause=error,
                 ) from error
+        def spin():
+            try:
+                self.executor.spin()
+            except Exception as error:
+                if type(error).__name__ != "ExternalShutdownException":
+                    raise
+
         self.thread = threading.Thread(
-            target=self.executor.spin, daemon=True, name="ros-capture"
+            target=spin, daemon=True, name="ros-capture"
         )
         self.thread.start()
 
@@ -245,24 +252,42 @@ class Capture:
                         "topics": len(self.subscriptions),
                     },
                 )
+            can_batch = callable(getattr(self.client, "append_samples", None))
             while not self.stopping or self.queue:
+                batch = []
+                batch_bytes = 0
                 with self.lock:
-                    item = self.queue.popleft() if self.queue else None
-                    if item:
+                    while self.queue and len(batch) < 64:
+                        next_bytes = len(self.queue[0][3])
+                        if batch and batch_bytes + next_bytes > 512 * 1024:
+                            break
+                        item = self.queue.popleft()
                         self.bytes -= len(item[3])
-                if item:
-                    topic, type_name, schema, data, wall, steady = item
-                    await self.client.append_sample(
-                        session_id=self.session_id,
-                        topic=topic,
-                        payload={
-                            "__cdr_b64": base64.b64encode(data).decode(),
-                            "__ros_type": type_name,
-                            "__ros_schema": schema,
-                            "received_monotonic_ns": steady,
-                        },
-                        source_time_ns=wall,
-                    )
+                        batch.append(item)
+                        batch_bytes += next_bytes
+                if batch:
+                    samples = [
+                        {
+                            "topic": topic,
+                            "payload": {
+                                "__cdr_b64": base64.b64encode(data).decode(),
+                                "__ros_type": type_name,
+                                "__ros_schema": schema,
+                                "received_monotonic_ns": steady,
+                            },
+                            "source_time_ns": wall,
+                        }
+                        for topic, type_name, schema, data, wall, steady in batch
+                    ]
+                    if can_batch and len(samples) > 1:
+                        await self.client.append_samples(
+                            session_id=self.session_id, samples=samples
+                        )
+                    else:
+                        for sample in samples:
+                            await self.client.append_sample(
+                                session_id=self.session_id, **sample
+                            )
                 else:
                     await asyncio.sleep(0.005)
                 await report_drops()

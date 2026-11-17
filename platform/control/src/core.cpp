@@ -6,6 +6,8 @@
 namespace hc {
 namespace {
 constexpr Mask bit(std::size_t i) { return Mask{1} << i; }
+// Allow small servo PD overshoot or encoder jitter when resting against a limit.
+constexpr double kFeedbackLimitTolerance = 0.005;
 Owner owner_for(Mode mode) {
     switch (mode) {
     case Mode::Teleop: return Owner::Vr;
@@ -88,7 +90,8 @@ Mask Controller::fresh_mask() const noexcept {
     for (std::size_t i = 0; i < config_.count; ++i)
         if ((state_.feedback_mask & bit(i)) && now_ >= feedback_time_[i]
             && now_ - feedback_time_[i] <= config_.feedback_timeout_ns
-            && state_.feedback[i] >= config_.lower[i] && state_.feedback[i] <= config_.upper[i])
+            && state_.feedback[i] >= config_.lower[i] - kFeedbackLimitTolerance
+            && state_.feedback[i] <= config_.upper[i] + kFeedbackLimitTolerance)
             result |= bit(i);
     return result;
 }
@@ -380,7 +383,8 @@ void Controller::accept(const Event& e, Nanoseconds now) noexcept {
             state_.feedback[i] = e.positions[i];
             feedback_time_[i] = sample;
             invalid_active_feedback = invalid_active_feedback || ((state_.leased_mask & bit(i))
-                && (e.positions[i] < config_.lower[i] || e.positions[i] > config_.upper[i]));
+                && (e.positions[i] < config_.lower[i] - kFeedbackLimitTolerance
+                    || e.positions[i] > config_.upper[i] + kFeedbackLimitTolerance));
         }
         state_.feedback_mask |= e.mask;
         if (invalid_active_feedback && state_.safety == Safety::Ready) fault("FEEDBACK_JOINT_LIMIT");

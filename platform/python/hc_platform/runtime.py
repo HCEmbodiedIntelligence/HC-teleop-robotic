@@ -65,7 +65,9 @@ class Runtime:
                 self.robot = "x1"
         self.supervisor = Supervisor(repo, self.state_dir / "logs")
         self.core = CoreClient(str(self.run_dir / "control.sock"))
-        self.audit = CoreClient(str(self.run_dir / "control.sock"), "recorder")
+        self.audit = CoreClient(
+            str(self.run_dir / "control.sock"), "recorder", event_queue_size=4096
+        )
         self.source_clients = {
             role: CoreClient(str(self.run_dir / "control.sock"), role)
             for role in ("program", "exo", "replay")
@@ -991,95 +993,136 @@ class Runtime:
                 self.supervisor.log("vr-events", str(exc), "ERROR")
                 self.notify_vr("recording_error", {"message": str(exc)})
 
+    async def _flush_audit_batch(self, session_id, batch):
+        if not batch or not session_id:
+            return
+        if len(batch) > 1 and callable(getattr(self.audit_data, "append_samples", None)):
+            await self.audit_data.append_samples(session_id=session_id, samples=batch)
+        else:
+            for sample in batch:
+                await self.audit_data.append_sample(session_id=session_id, **sample)
+
     async def _control_events(self):
         while True:
-            event = await self.audit.events.get()
-            session_id = self.active_recording
-            sample_ns = event.get(
-                "mono_ns", event.get("issued_mono_ns", event.get("monotonic_ns", 0))
-            )
-            beyond_cutoff = (
-                self.recording_cutoff_ns is not None
-                and isinstance(sample_ns, int)
-                and sample_ns > self.recording_cutoff_ns
-            )
-            if not session_id:
-                self.audit.dropped_events = 0
-            if (
-                self.mode == "teleop"
-                and event.get("type") == "ownership_transition"
-                and event.get("reason") == "HOME_COMPLETE"
-                and not self.shutdown_requested
-            ):
-                if self._home_resume_task is None or self._home_resume_task.done():
-                    self._home_resume_task = asyncio.create_task(
-                        self._resume_teleop_after_home(self.management_generation)
-                    )
-            if session_id and not beyond_cutoff:
+            events = [await self.audit.events.get()]
+            for _ in range(31):
                 try:
-                    if (
-                        self.recording_mode.startswith("dagger")
-                        and event.get("type") == "ownership_transition"
-                    ):
-                        owner = event.get("owner", event.get("new_owner"))
-                        active = owner == "human"
-                        if owner is not None and active != self.intervention_active:
-                            confirmed = {
-                                **event,
-                                "confirmed": True,
-                                "event_id": str(event.get("boot_id"))
-                                + ":"
-                                + str(event.get("event_seq", event.get("seq"))),
-                                "control_epoch": event["epoch"],
-                                "monotonic_ns": event.get(
-                                    "mono_ns",
-                                    event.get(
-                                        "issued_mono_ns", event.get("monotonic_ns")
-                                    ),
-                                ),
-                            }
-                            result = await self.audit_data.set_intervention(
-                                session_id=session_id, active=active, event=confirmed
-                            )
-                            self.intervention_active = bool(
-                                result.get("active", active)
-                            )
-                    topic = (
-                        "/platform/control/commands"
-                        if event.get("type") == "output"
-                        else "/platform/control/events"
-                        if event.get("type") != "state"
-                        else "/platform/control/state"
-                    )
-                    await self.audit_data.append_sample(
-                        session_id=session_id, topic=topic, payload=event
-                    )
-                    if self.audit.dropped_events:
-                        await self.audit_data.append_sample(
-                            session_id=session_id,
-                            topic="/capture/gaps",
-                            payload={
-                                "reason": "CONTROL_AUDIT_QUEUE_OVERFLOW",
-                                "dropped": self.audit.dropped_events,
-                            },
+                    events.append(self.audit.events.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            batch = []
+            batch_session = None
+            for event in events:
+                session_id = self.active_recording
+                sample_ns = event.get(
+                    "mono_ns", event.get("issued_mono_ns", event.get("monotonic_ns", 0))
+                )
+                beyond_cutoff = (
+                    self.recording_cutoff_ns is not None
+                    and isinstance(sample_ns, int)
+                    and sample_ns > self.recording_cutoff_ns
+                )
+                if not session_id:
+                    self.audit.dropped_events = 0
+                if (
+                    self.mode == "teleop"
+                    and event.get("type") == "ownership_transition"
+                    and event.get("reason") == "HOME_COMPLETE"
+                    and not self.shutdown_requested
+                ):
+                    if self._home_resume_task is None or self._home_resume_task.done():
+                        self._home_resume_task = asyncio.create_task(
+                            self._resume_teleop_after_home(self.management_generation)
                         )
-                        self.audit.dropped_events = 0
+                if session_id and not beyond_cutoff:
+                    try:
+                        if (
+                            self.recording_mode.startswith("dagger")
+                            and event.get("type") == "ownership_transition"
+                        ):
+                            owner = event.get("owner", event.get("new_owner"))
+                            active = owner == "human"
+                            if owner is not None and active != self.intervention_active:
+                                if batch:
+                                    await self._flush_audit_batch(batch_session, batch)
+                                    batch = []
+                                    batch_session = None
+                                confirmed = {
+                                    **event,
+                                    "confirmed": True,
+                                    "event_id": str(event.get("boot_id"))
+                                    + ":"
+                                    + str(event.get("event_seq", event.get("seq"))),
+                                    "control_epoch": event["epoch"],
+                                    "monotonic_ns": event.get(
+                                        "mono_ns",
+                                        event.get(
+                                            "issued_mono_ns", event.get("monotonic_ns")
+                                        ),
+                                    ),
+                                }
+                                result = await self.audit_data.set_intervention(
+                                    session_id=session_id, active=active, event=confirmed
+                                )
+                                self.intervention_active = bool(
+                                    result.get("active", active)
+                                )
+                        topic = (
+                            "/platform/control/commands"
+                            if event.get("type") == "output"
+                            else "/platform/control/events"
+                            if event.get("type") != "state"
+                            else "/platform/control/state"
+                        )
+                        if batch_session and batch_session != session_id:
+                            await self._flush_audit_batch(batch_session, batch)
+                            batch = []
+                        batch_session = session_id
+                        batch.append({"topic": topic, "payload": event})
+                        dropped = self.audit.dropped_events
+                        if dropped:
+                            self.audit.dropped_events = 0
+                            batch.append(
+                                {
+                                    "topic": "/capture/gaps",
+                                    "payload": {
+                                        "reason": "CONTROL_AUDIT_QUEUE_OVERFLOW",
+                                        "dropped": dropped,
+                                    },
+                                }
+                            )
+                    except Exception as exc:
+                        batch = []
+                        batch_session = None
+                        self.supervisor.log("capture", str(exc), "ERROR")
+                        if self.active_recording == session_id:
+                            self.audit_error = str(exc)
+                        if (
+                            self.recording_policy.get("required")
+                            and self.active_recording == session_id
+                        ):
+                            with contextlib.suppress(Exception):
+                                await self.core.request("pause")
+            if batch:
+                try:
+                    await self._flush_audit_batch(batch_session, batch)
                 except Exception as exc:
                     self.supervisor.log("capture", str(exc), "ERROR")
-                    if self.active_recording == session_id:
+                    if self.active_recording == batch_session:
                         self.audit_error = str(exc)
                     if (
                         self.recording_policy.get("required")
-                        and self.active_recording == session_id
+                        and self.active_recording == batch_session
                     ):
                         with contextlib.suppress(Exception):
                             await self.core.request("pause")
-            if event.get("type") == "state":
-                stamp = event.get("issued_mono_ns", 0)
-                if isinstance(stamp, int) and stamp > 0:
-                    self.audit_watermark_boot = event.get("boot_id")
-                    self.audit_watermark_ns = stamp
-                    self.audit_progress.set()
+            for event in events:
+                if event.get("type") == "state":
+                    stamp = event.get("issued_mono_ns", 0)
+                    if isinstance(stamp, int) and stamp > 0:
+                        self.audit_watermark_boot = event.get("boot_id")
+                        self.audit_watermark_ns = stamp
+                        self.audit_progress.set()
 
     async def _health_watch(self):
         reported = set()

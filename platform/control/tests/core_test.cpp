@@ -147,6 +147,11 @@ void configured_home_scope_and_dynamics() {
 }
 void feedback_joint_limits_fail_closed() {
     Fixture f;f.recover();f.start();
+    Event small_overshoot;small_overshoot.op=Op::Feedback;small_overshoot.client=2;small_overshoot.seq=++f.feedback_seq;
+    small_overshoot.ready=true;small_overshoot.mask=1;small_overshoot.positions[0]=2.001;f.send(small_overshoot);
+    f.core.tick(f.now);
+    CHECK(f.core.state().safety==Safety::Ready);
+    CHECK((f.core.state().fresh_feedback_mask&1u)!=0u);
     Event feedback;feedback.op=Op::Feedback;feedback.client=2;feedback.seq=++f.feedback_seq;
     feedback.ready=true;feedback.mask=1;feedback.positions[0]=2.1;f.send(feedback);
     CHECK(f.core.state().safety==Safety::Fault);CHECK(f.core.state().reason.equals("FEEDBACK_JOINT_LIMIT"));
