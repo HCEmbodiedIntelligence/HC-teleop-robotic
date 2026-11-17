@@ -56,6 +56,8 @@ class X1RosAdapter:
         self._thread = None
         self._last_applied = None
         self._moving = False
+        self._holding = False
+        self._held_positions = {}
         self.node = self.context = self.executor = None
 
     def start(self):
@@ -279,9 +281,12 @@ class X1RosAdapter:
             (n, p) for n, p in zip(names, command["positions"]) if n not in sim_names
         ]
         if joints:
+            for name, position in joints:
+                self._held_positions[name] = float(position)
             self._publish_joints(
                 self.joint_pub, [n for n, p in joints], [p for n, p in joints]
             )
+        self._holding = False
         if self.base_pub:
             vx, vy, wz = command.get("base_velocity", [0, 0, 0])
             message = self._Base()
@@ -323,22 +328,38 @@ class X1RosAdapter:
         if self.node is None:
             return
         now = time.monotonic()
-        pairs = [
-            (name, value)
-            for name, value in self.feedback.items()
-            if name in self.allowed_names
-            and now - self.feedback_at[name] < self.feedback_timeout
-        ]
-        if (
-            pairs
-            and hasattr(self, "joint_pub")
+        hardware_ok = (
+            hasattr(self, "joint_pub")
             and not self.conflict
             and self.ready
             and now - self.ready_at < self.ready_timeout
-        ):
-            self._publish_joints(
-                self.joint_pub, [n for n, p in pairs], [p for n, p in pairs]
-            )
+        )
+        if not hardware_ok:
+            self._holding = False
+            self._held_positions.clear()
+        else:
+            fresh_names = [
+                name
+                for name in self.feedback
+                if name in self.allowed_names
+                and now - self.feedback_at[name] < self.feedback_timeout
+            ]
+            if fresh_names:
+                fresh_set = set(fresh_names)
+                for stale in [k for k in self._held_positions if k not in fresh_set]:
+                    del self._held_positions[stale]
+                for name in fresh_names:
+                    if name not in self._held_positions:
+                        self._held_positions[name] = float(self.feedback[name])
+                self._publish_joints(
+                    self.joint_pub,
+                    fresh_names,
+                    [self._held_positions[n] for n in fresh_names],
+                )
+                self._holding = True
+            else:
+                self._holding = False
+                self._held_positions.clear()
         if getattr(self, "base_pub", None):
             message = self._Base()
             message.data = [0.0, 0.0, 0.0]

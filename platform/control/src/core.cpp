@@ -170,6 +170,7 @@ void Controller::revoke(std::string_view reason) noexcept {
 }
 void Controller::stop(std::string_view reason) noexcept {
     revoke(reason);
+    command_initialized_mask_ = 0;
     state_.safety = Safety::Stopped;
     state_.mode = Mode::Idle;
     state_.paused = false;
@@ -201,7 +202,10 @@ void Controller::begin(Transition t, Mode mode, Owner owner, std::string_view re
     state_.requested_owner = owner;
     state_.transition_pending = true;
     transition_deadline_ = now_ + config_.handover_timeout_ns;
-    hold_q_ = state_.feedback;
+    if (t == Transition::Recover || state_.safety != Safety::Ready) {
+        command_initialized_mask_ = 0;
+        hold_q_ = state_.feedback;
+    }
     initialize_command_from_feedback();
     if (t == Transition::Recover) state_.safety = Safety::Recovering;
     Outbound message;
@@ -214,7 +218,10 @@ void Controller::begin(Transition t, Mode mode, Owner owner, std::string_view re
 void Controller::initialize_command_from_feedback() noexcept {
     const auto fresh = fresh_mask();
     for (std::size_t i = 0; i < config_.count; ++i)
-        if (fresh & bit(i)) q_command_[i] = state_.feedback[i];
+        if ((fresh & bit(i)) && !(command_initialized_mask_ & bit(i))) {
+            q_command_[i] = state_.feedback[i];
+            command_initialized_mask_ |= bit(i);
+        }
     v_command_.fill(0);
 }
 void Controller::finish_transition() noexcept {
@@ -227,6 +234,7 @@ void Controller::finish_transition() noexcept {
     set_owner(t == Transition::Handback ? Owner::None : target_owner_, state_.reason.c_str());
     state_.requested_owner = Owner::None;
     state_.reason.set("READY");
+    if (t == Transition::Recover) command_initialized_mask_ = 0;
     initialize_command_from_feedback();
     if (t == Transition::Recover || t == Transition::End) {
         state_.mode = Mode::Idle;
@@ -491,8 +499,11 @@ void Controller::handle_vr(const Event& e) noexcept {
         }
         if (state_.grip[hand] && !previous[hand]) {
             pressed = true;
-            if (hand == 0) { left_reference_ = e.left; left_reference_q_ = state_.feedback; head_reference_ = e.head; }
-            else { right_reference_ = e.right; right_reference_q_ = state_.feedback; }
+            JointArray reference_q{};
+            for (std::size_t i = 0; i < config_.count; ++i)
+                reference_q[i] = (command_initialized_mask_ & bit(i)) ? q_command_[i] : state_.feedback[i];
+            if (hand == 0) { left_reference_ = e.left; left_reference_q_ = reference_q; head_reference_ = e.head; }
+            else { right_reference_ = e.right; right_reference_q_ = reference_q; }
         }
         changed = changed || state_.grip[hand] != previous[hand];
     }
@@ -655,7 +666,10 @@ void Controller::publish_output(double dt) noexcept {
             output.mode = OutputMode::Position;
         } else {
             v_command_[i] = 0;
-            if (state_.mode == Mode::Idle || output.mode == OutputMode::Stop) q_command_[i] = state_.feedback[i];
+            if (state_.safety != Safety::Ready || !(command_initialized_mask_ & bit(i))) {
+                q_command_[i] = state_.feedback[i];
+                if (state_.safety == Safety::Ready) command_initialized_mask_ |= bit(i);
+            }
         }
     }
     output.positions = q_command_;

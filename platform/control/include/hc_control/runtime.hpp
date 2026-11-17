@@ -254,7 +254,7 @@ private:
     Transition transition_{Transition::None};
     Mode target_mode_{Mode::Idle};
     Owner target_owner_{Owner::None};
-    Mask session_mask_{0}, candidate_mask_{0};
+    Mask session_mask_{0}, candidate_mask_{0}, command_initialized_mask_{0};
     JointArray candidate_{}, q_command_{}, v_command_{}, left_reference_q_{}, right_reference_q_{};
     JointArray hold_q_{};
     JointArray feedback_velocity_{};

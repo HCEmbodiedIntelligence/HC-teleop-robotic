@@ -159,12 +159,71 @@ void latest_buffer_concurrency() {
     while(!finished.load()){Value value;if(latest.consume(value)){CHECK(value.seq>=last);for(auto v:value.values)CHECK(v==value.seq);last=value.seq;++reads;}}
     producer.join();CHECK(reads>0);
 }
+void ready_hold_and_transitions_do_not_chase_gravity_sag() {
+    Fixture f;
+    auto push_fb=[&](double q0){
+        Event e;e.op=Op::Feedback;e.client=2;e.seq=++f.feedback_seq;e.ready=true;e.mask=7;
+        e.positions={q0,-0.2,0.1};e.sample_ns=f.now;f.send(e);
+    };
+    push_fb(0.4);
+    f.recover();
+    f.advance(5000000,false);
+    Output out;
+    CHECK(f.shared->output.consume(out));
+    CHECK(out.mode==OutputMode::Hold);
+    CHECK(std::abs(out.positions[0]-0.4)<1e-12);
+
+    for(int step=0;step<10;++step){
+        f.now+=5000000;
+        push_fb(0.4-0.01*(step+1));
+        f.core.tick(f.now);
+        CHECK(f.shared->output.consume(out));
+        CHECK(out.mode==OutputMode::Hold);
+        CHECK(std::abs(out.positions[0]-0.4)<1e-12);
+    }
+
+    Event start_e;start_e.op=Op::Start;start_e.client=1;start_e.mode=Mode::Teleop;f.send(start_e);
+    f.now+=5000000;push_fb(0.28);f.core.tick(f.now);
+    CHECK(f.shared->output.consume(out));
+    CHECK(out.mode==OutputMode::Stop);
+    CHECK(std::abs(out.positions[0]-0.4)<1e-12);
+    f.ack();
+    f.now+=5000000;push_fb(0.28);f.core.tick(f.now);
+    CHECK(f.shared->output.consume(out));
+    CHECK(out.mode==OutputMode::Hold);
+    CHECK(std::abs(out.positions[0]-0.4)<1e-12);
+
+    f.vr(false,false);
+    f.now+=5000000;push_fb(0.28);f.core.tick(f.now);
+    f.vr(true,false);
+    f.now+=5000000;push_fb(0.28);f.core.tick(f.now);
+    IkRequest ik;
+    CHECK(f.shared->ik.consume(ik));
+    CHECK(std::abs(ik.reference_left[0]-0.4)<1e-12);
+
+    f.manage(Op::Pause);f.now+=5000000;push_fb(0.25);f.core.tick(f.now);f.ack();
+    f.now+=5000000;push_fb(0.25);f.core.tick(f.now);
+    CHECK(f.shared->output.consume(out));
+    CHECK(std::abs(out.positions[0]-0.4)<1e-12);
+
+    f.manage(Op::Stop);
+    f.now+=5000000;push_fb(0.25);f.core.tick(f.now);
+    CHECK(f.shared->output.consume(out));
+    CHECK(out.mode==OutputMode::Stop);
+    CHECK(std::abs(out.positions[0]-0.25)<1e-12);
+
+    f.recover();
+    f.now+=5000000;push_fb(0.25);f.core.tick(f.now);
+    CHECK(f.shared->output.consume(out));
+    CHECK(out.mode==OutputMode::Hold);
+    CHECK(std::abs(out.positions[0]-0.25)<1e-12);
+}
 }
 int main() {
     try {
         boot_and_fencing();partial_feedback_and_staleness();dagger_bundle_and_paused_return();tracking_loss_is_not_release();
         ik_older_than_latest_and_stale_rejection();fixed_limits_and_acceleration();leases_replay_home_and_overflow();
-        expected_epoch_and_exclusive_backend();ownership_audit_and_recording();management_queue_and_stop_reason();input_deadline_cannot_be_renewed();disabled_dagger_does_not_change_program_reference();configured_home_scope_and_dynamics();feedback_joint_limits_fail_closed();latest_buffer_concurrency();
-        std::cout<<"15 control contract tests passed\n";return 0;
+        expected_epoch_and_exclusive_backend();ownership_audit_and_recording();management_queue_and_stop_reason();input_deadline_cannot_be_renewed();disabled_dagger_does_not_change_program_reference();configured_home_scope_and_dynamics();feedback_joint_limits_fail_closed();latest_buffer_concurrency();ready_hold_and_transitions_do_not_chase_gravity_sag();
+        std::cout<<"16 control contract tests passed\n";return 0;
     } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -81,6 +81,7 @@ class Runtime:
             timeout=3,
         )
         self.config = {}
+        self.vr_events_task = None
         self.tasks = []
         self.event_socket = None
         self.active_recording = None
@@ -228,8 +229,9 @@ class Runtime:
         self.event_socket.setblocking(False)
         self.event_socket.bind(str(self.run_dir / "api-events.sock"))
         os.chmod(self.run_dir / "api-events.sock", 0o600)
+        self.vr_events_task = asyncio.create_task(self._vr_events())
         self.tasks = [
-            asyncio.create_task(self._vr_events()),
+            self.vr_events_task,
             asyncio.create_task(self._control_events()),
             asyncio.create_task(self._health_watch()),
         ]
@@ -808,10 +810,58 @@ class Runtime:
             raise ValueError(
                 "VR management event belongs to a previous control generation"
             )
+        return current
+
+    async def _wait_transition_settled(self, generation, current, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while current.get("transition_pending") and time.monotonic() < deadline:
+            if generation != self.management_generation or self.shutdown_requested:
+                raise ValueError(
+                    "VR operation was cancelled by stop or configuration change"
+                )
+            await asyncio.sleep(0.02)
+            current = (await self.core.request("status"))["state"]
+        if generation != self.management_generation or self.shutdown_requested:
+            raise ValueError(
+                "VR operation was cancelled by stop or configuration change"
+            )
+        return current
+
+    async def _handle_vr_control_recover(self, event, generation, current):
+        safety = current.get("safety")
+        transitioned = False
+        if safety in ("stopped", "fault"):
+            resp = await self.core.request(
+                "recover",
+                expected_boot_id=event["boot_id"],
+                expected_epoch=event["epoch"],
+            )
+            current = resp.get("state") or current
+            current = await self._wait_transition_settled(generation, current)
+            transitioned = True
+        elif safety == "recovering" or current.get("transition_pending"):
+            current = await self._wait_transition_settled(generation, current)
+
+        if current.get("safety") != "ready" or current.get("transition_pending"):
+            return transitioned
+        tokens = {
+            "expected_boot_id": current["boot_id"],
+            "expected_epoch": current["epoch"],
+        }
+        mode = current.get("mode")
+        if mode == "idle" and self.mode == "teleop":
+            await self.core.request("session_start", mode="teleop", **tokens)
+            return True
+        if current.get("paused") and mode == "teleop":
+            await self.core.request("resume", **tokens)
+            return True
+        return transitioned
 
     async def _vr_events(self):
         while True:
             raw = await asyncio.get_running_loop().sock_recv(self.event_socket, 65536)
+            if self.shutdown_requested:
+                continue
             try:
                 event = json.loads(raw)
                 kind = event.get("kind")
@@ -860,39 +910,51 @@ class Runtime:
                     "home",
                 ):
                     async with self.mutation_lock:
-                        await self.validate_vr_management(event)
+                        current = await self.validate_vr_management(event)
                         if (
                             self.replay
                             and (await self.replay.status()).get("phase")
                             in REPLAY_ACTIVE
                         ):
                             raise ValueError("Replay owns control; stop replay first")
-                        tokens = (
-                            await self.motion.validate_home()
-                            if kind == "home"
-                            else {
-                                "expected_boot_id": event["boot_id"],
-                                "expected_epoch": event["epoch"],
-                            }
-                        )
                         if generation != self.management_generation:
                             raise ValueError(
                                 "VR operation was cancelled by stop or configuration change"
                             )
-                        await self.core.request(
-                            {
-                                "control_recover": "recover",
-                                "control_resume": "resume",
-                                "control_pause": "pause",
-                                "home": "home",
-                            }[kind],
-                            **tokens,
-                        )
-                        if kind in ("control_recover", "control_resume") and self.replay:
+                        changed = False
+                        if kind == "control_recover":
+                            changed = await self._handle_vr_control_recover(
+                                event, generation, current
+                            )
+                        else:
+                            tokens = (
+                                await self.motion.validate_home()
+                                if kind == "home"
+                                else {
+                                    "expected_boot_id": event["boot_id"],
+                                    "expected_epoch": event["epoch"],
+                                }
+                            )
+                            if generation != self.management_generation:
+                                raise ValueError(
+                                    "VR operation was cancelled by stop or configuration change"
+                                )
+                            await self.core.request(
+                                {
+                                    "control_resume": "resume",
+                                    "control_pause": "pause",
+                                    "home": "home",
+                                }[kind],
+                                **tokens,
+                            )
+                            changed = kind == "control_resume"
+                        if changed and self.replay:
                             mark_reset = getattr(self.replay, "mark_reset", None)
                             if callable(mark_reset):
                                 await mark_reset()
             except Exception as exc:
+                if self.shutdown_requested:
+                    continue
                 self.supervisor.log("vr-events", str(exc), "ERROR")
                 self.notify_vr("recording_error", {"message": str(exc)})
 
@@ -1010,6 +1072,7 @@ class Runtime:
                                     await self.stop_recording()
 
     async def close(self):
+        self.shutdown_requested = True
         if self._closing_task is None:
             self.management_generation += 1
             self._closing_task = asyncio.create_task(
@@ -1023,7 +1086,11 @@ class Runtime:
             raise
 
     async def _close_owned(self):
+        self.shutdown_requested = True
         try:
+            if self.vr_events_task:
+                self.vr_events_task.cancel()
+                await asyncio.gather(self.vr_events_task, return_exceptions=True)
             with contextlib.suppress(Exception):
                 await self.core.request("stop")
                 # Keep audit capture alive for the stop, fence and dispatch ack.

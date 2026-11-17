@@ -304,3 +304,278 @@ def test_vr_replay_and_mark_notifications_and_preview_404(tmp_path):
             await _release_clients(runtime)
 
     asyncio.run(run())
+
+
+def test_x1_adapter_halt_holds_latched_position_without_chasing_sag():
+    from hc_platform.adapters.x1 import X1RosAdapter
+
+    config = {
+        "joint_names": ["Joint1_R", "Joint2_R"],
+        "groups": {"right_arm": ["Joint1_R", "Joint2_R"]},
+        "allowed_groups": ["right_arm"],
+        "hardware": {"allowed_groups": ["right_arm"]},
+    }
+    adapter = X1RosAdapter(config, lambda _fb: None)
+    published = []
+
+    class FakeClock:
+        def now(self):
+            return NS(to_msg=lambda: NS(sec=0, nanosec=0))
+
+    class FakeJointState:
+        def __init__(self):
+            self.header = NS(stamp=None)
+            self.name = []
+            self.position = []
+
+    adapter.node = NS(get_clock=lambda: FakeClock())
+    adapter._JointState = FakeJointState
+    adapter.joint_pub = NS(publish=lambda msg: published.append(dict(zip(msg.name, msg.position))))
+    adapter.hand_pubs = {}
+    adapter.base_pub = None
+    adapter.ready = True
+    adapter.ready_at = time.monotonic()
+
+    def push_fb(p1, p2):
+        now = time.monotonic()
+        adapter.feedback = {"Joint1_R": p1, "Joint2_R": p2}
+        adapter.feedback_at = {"Joint1_R": now, "Joint2_R": now}
+
+    adapter.gate.fence("b", 1)
+    push_fb(0.5, 0.6)
+    now_ns = time.monotonic_ns()
+    adapter.submit(
+        {
+            "boot_id": "b",
+            "epoch": 1,
+            "lease_id": 0,
+            "reference_epoch": 1,
+            "seq": 1,
+            "mode": "stop",
+            "joint_names": ["Joint1_R", "Joint2_R"],
+            "positions": [0.5, 0.6],
+            "deadline_mono_ns": now_ns + 200_000_000,
+        }
+    )
+    adapter._tick()
+    assert published[-1] == {"Joint1_R": 0.5, "Joint2_R": 0.6}
+
+    push_fb(0.42, 0.51)
+    adapter.submit(
+        {
+            "boot_id": "b",
+            "epoch": 1,
+            "lease_id": 0,
+            "reference_epoch": 1,
+            "seq": 2,
+            "mode": "stop",
+            "joint_names": ["Joint1_R", "Joint2_R"],
+            "positions": [0.42, 0.51],
+            "deadline_mono_ns": time.monotonic_ns() + 200_000_000,
+        }
+    )
+    adapter._tick()
+    assert published[-1] == {"Joint1_R": 0.5, "Joint2_R": 0.6}
+
+    adapter.submit(
+        {
+            "boot_id": "b",
+            "epoch": 1,
+            "lease_id": 1,
+            "reference_epoch": 1,
+            "seq": 3,
+            "mode": "position",
+            "joint_names": ["Joint1_R", "Joint2_R"],
+            "positions": [0.8, 0.9],
+            "deadline_mono_ns": time.monotonic_ns() + 200_000_000,
+        }
+    )
+    adapter._tick()
+    assert published[-1] == {"Joint1_R": 0.8, "Joint2_R": 0.9}
+
+    push_fb(0.71, 0.79)
+    adapter.submit(
+        {
+            "boot_id": "b",
+            "epoch": 1,
+            "lease_id": 0,
+            "reference_epoch": 1,
+            "seq": 4,
+            "mode": "stop",
+            "joint_names": ["Joint1_R", "Joint2_R"],
+            "positions": [0.71, 0.79],
+            "deadline_mono_ns": time.monotonic_ns() + 200_000_000,
+        }
+    )
+    adapter._tick()
+    assert published[-1] == {"Joint1_R": 0.8, "Joint2_R": 0.9}
+
+    adapter.ready = False
+    count_before = len(published)
+    adapter._halt()
+    assert len(published) == count_before
+
+    adapter.ready = True
+    adapter.ready_at = time.monotonic()
+    push_fb(0.3, 0.4)
+    adapter._halt()
+    assert published[-1] == {"Joint1_R": 0.3, "Joint2_R": 0.4}
+
+
+def test_vr_control_recover_teleop_lifecycle_and_shutdown_suppression(tmp_path):
+    class TeleopCore:
+        def __init__(self):
+            self.calls = []
+            self.state = {
+                "boot_id": "test-boot",
+                "epoch": 1,
+                "safety": "stopped",
+                "mode": "idle",
+                "paused": False,
+                "transition_pending": False,
+                "owner": "none",
+                "issued_mono_ns": time.monotonic_ns(),
+            }
+
+        async def request(self, op, **values):
+            self.calls.append((op, dict(values)))
+            if op == "recover":
+                if self.state["safety"] not in ("stopped", "fault"):
+                    raise RuntimeError("RECOVERY_NOT_ALLOWED")
+                self.state.update(epoch=self.state["epoch"] + 1, safety="ready", mode="idle", paused=False)
+            elif op == "session_start":
+                assert values["expected_epoch"] == self.state["epoch"]
+                self.state.update(epoch=self.state["epoch"] + 1, mode=values["mode"], paused=False, owner="vr")
+            elif op == "resume":
+                assert values["expected_epoch"] == self.state["epoch"]
+                self.state.update(epoch=self.state["epoch"] + 1, paused=False, owner="vr")
+            elif op == "stop":
+                self.state.update(epoch=self.state["epoch"] + 1, safety="stopped", mode="idle", paused=False)
+            self.state["issued_mono_ns"] = time.monotonic_ns()
+            return {"ok": True, "state": copy.deepcopy(self.state)}
+
+        async def close(self):
+            pass
+
+    async def run():
+        import socket
+
+        runtime = Runtime(REPO, tmp_path, mode="teleop")
+        runtime.core = TeleopCore()
+        runtime.replay = _FakeAux()
+        runtime.config = {"config_hash": "test", "groups": {}, "joint_names": []}
+        runtime.topics = TopicRegistry(tmp_path / "topics.json")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        sock_path = tmp_path / "api-events.sock"
+        sock.bind(str(sock_path))
+        runtime.event_socket = sock
+        vr_errors = []
+        runtime.notify_vr = lambda kind, payload: vr_errors.append((kind, payload))
+        task = asyncio.create_task(runtime._vr_events())
+
+        sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            def send_recover():
+                sender.sendto(
+                    json.dumps(
+                        {
+                            "kind": "control_recover",
+                            "boot_id": runtime.core.state["boot_id"],
+                            "epoch": runtime.core.state["epoch"],
+                            "sample_mono_ns": time.monotonic_ns(),
+                        }
+                    ).encode(),
+                    str(sock_path),
+                )
+
+            send_recover()
+            for _ in range(50):
+                if runtime.core.state["mode"] == "teleop":
+                    break
+                await asyncio.sleep(0.01)
+            assert [op for op, _ in runtime.core.calls if op != "status"] == [
+                "recover",
+                "session_start",
+            ]
+            assert runtime.core.state["safety"] == "ready"
+            assert runtime.core.state["mode"] == "teleop"
+
+            # Pressing A again while already active in teleop is idempotent (no RECOVERY_NOT_ALLOWED).
+            send_recover()
+            await asyncio.sleep(0.05)
+            assert [op for op, _ in runtime.core.calls if op != "status"] == [
+                "recover",
+                "session_start",
+            ]
+            assert not any(entry["level"] == "ERROR" for entry in runtime.supervisor.logs)
+
+            # Pressing A while paused resumes teleop.
+            runtime.core.state["paused"] = True
+            runtime.core.state["epoch"] += 1
+            send_recover()
+            for _ in range(50):
+                if not runtime.core.state["paused"]:
+                    break
+                await asyncio.sleep(0.01)
+            assert [op for op, _ in runtime.core.calls if op != "status"] == [
+                "recover",
+                "session_start",
+                "resume",
+            ]
+
+            # Events arriving after shutdown_requested must not spam ERROR logs.
+            runtime.shutdown_requested = True
+            send_recover()
+            await asyncio.sleep(0.05)
+            assert not any(entry["level"] == "ERROR" for entry in runtime.supervisor.logs)
+            assert not vr_errors
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            sender.close()
+            sock.close()
+            await _release_clients(runtime)
+
+    asyncio.run(run())
+
+
+def test_capture_teardown_shuts_down_context_before_joining_executor():
+    from hc_platform.capture import Capture
+
+    capture = Capture("/unused", "sess", [])
+    capture.start_ros = lambda: None
+    capture.stopping = True
+    events = []
+
+    class FakeContext:
+        def try_shutdown(self):
+            events.append("context_shutdown")
+
+    class FakeExecutor:
+        def shutdown(self):
+            events.append("executor_shutdown")
+
+    class FakeNode:
+        def destroy_node(self):
+            events.append("node_destroy")
+
+    class FakeThread:
+        def join(self, timeout=None):
+            events.append(("thread_join", timeout))
+
+        def is_alive(self):
+            return False
+
+    capture.context = FakeContext()
+    capture.executor = FakeExecutor()
+    capture.node = FakeNode()
+    capture.thread = FakeThread()
+
+    asyncio.run(capture.run())
+    assert events == [
+        "context_shutdown",
+        ("thread_join", 2),
+        "executor_shutdown",
+        "node_destroy",
+    ]

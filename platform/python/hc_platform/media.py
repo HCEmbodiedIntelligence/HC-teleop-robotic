@@ -880,15 +880,14 @@ def create_media_app(config):
 
     @app.post("/publish")
     async def publish(payload: dict):
-        from rosidl_runtime_py.utilities import get_message
-        from rosidl_runtime_py.set_message import set_message_fields
-
         if not public_publish_allowed(payload.get("topic", "")):
             raise HTTPException(
                 403, "Only /external/ non-control topics may be published"
             )
         if not media.node:
             raise HTTPException(503, "ROS_UNAVAILABLE")
+        from rosidl_runtime_py.utilities import get_message
+        from rosidl_runtime_py.set_message import set_message_fields
         if len(json.dumps(payload)) > 65536:
             raise HTTPException(413, "Message too large")
         try:

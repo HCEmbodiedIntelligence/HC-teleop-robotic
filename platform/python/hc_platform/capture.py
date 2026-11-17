@@ -269,14 +269,18 @@ class Capture:
             # Also audit a final oversized packet when no item was enqueued.
             await report_drops()
         finally:
-            if self.executor:
-                self.executor.shutdown()
+            if getattr(self, "context", None):
+                with contextlib.suppress(Exception):
+                    self.context.try_shutdown()
             if self.thread:
                 self.thread.join(timeout=2)
-            if self.node:
-                self.node.destroy_node()
-            if getattr(self, "context", None):
-                self.context.try_shutdown()
+            thread_stopped = not self.thread or not self.thread.is_alive()
+            if self.executor and thread_stopped:
+                with contextlib.suppress(Exception):
+                    self.executor.shutdown()
+            if self.node and thread_stopped:
+                with contextlib.suppress(Exception):
+                    self.node.destroy_node()
             close = getattr(self.client, "close", None)
             if close:
                 await close()
