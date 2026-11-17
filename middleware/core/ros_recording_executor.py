@@ -391,6 +391,7 @@ def _raw_recording_process(
         import rclpy
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
+        from .ros_executor import create_single_threaded_executor
         from rclpy.qos import qos_profile_sensor_data
         from .ros_qos import recording_subscription_qos
         if sensor_window:
@@ -402,7 +403,7 @@ def _raw_recording_process(
         rclpy.init(args=[], context=context, domain_id=domain_id)
         node_name = f"{config.get('node_name', 'hc_teleop_middleware')}_recorder"
         node = rclpy.create_node(node_name, context=context)
-        executor = SingleThreadedExecutor(context=context)
+        executor = create_single_threaded_executor(SingleThreadedExecutor, context=context)
         executor.add_node(node)
 
         def create_subscription(item: dict[str, Any], source: str, *, recording: bool,
@@ -428,8 +429,9 @@ def _raw_recording_process(
                 nonlocal capture_active
                 entry_mono_ns, entry_wall_ns = time.monotonic_ns(), time.time_ns()
                 now = entry_mono_ns/1e9
-                frame_log.offer(topic, source, msg_type, raw_data, entry_wall_ns, entry_mono_ns,
-                                active=accepting_event.is_set())
+                if accepting_event.is_set() or has_capture_subscriptions:
+                    frame_log.offer(topic, source, msg_type, raw_data, entry_wall_ns, entry_mono_ns,
+                                    active=accepting_event.is_set())
                 counters["received"] += 1
                 message_counts[topic] += 1
                 timestamps[topic].append(now)
@@ -536,6 +538,15 @@ def _raw_recording_process(
                 capture_active = False
             if ros_subscriptions:
                 executor.spin_once(timeout_sec=0.02)
+                for _ in range(32):
+                    if (
+                        getattr(executor, '_cb_iter', None) is None
+                        or stop_event.is_set()
+                        or accepting_event.is_set() != accepting
+                        or reset_event.is_set()
+                    ):
+                        break
+                    executor.spin_once(timeout_sec=0.0)
             else:
                 stop_event.wait(0.05)
             now = time.monotonic()

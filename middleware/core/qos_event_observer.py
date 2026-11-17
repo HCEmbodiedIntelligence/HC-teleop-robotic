@@ -17,6 +17,7 @@ from rclpy.executors import (
 )
 from rclpy.node import Node
 from rclpy.qos_event import QoSEventHandler, QoSPublisherEventType, QoSSubscriptionEventType
+from .ros_executor import create_single_threaded_executor
 
 
 class QosEventObserver:
@@ -78,7 +79,7 @@ class QosEventObserver:
             self._observer = Node(self._nodes[0].get_name()+'_qos_observer', context=context,
                                   enable_rosout=False, start_parameter_services=False)
             self._group = ReentrantCallbackGroup()
-            self._executor = SingleThreadedExecutor(context=context)
+            self._executor = create_single_threaded_executor(SingleThreadedExecutor, context=context)
             self._executor.add_node(self._observer)
             for owner in self._nodes:
                 for endpoint in (*owner.publishers, *owner.subscriptions):
@@ -107,6 +108,21 @@ class QosEventObserver:
             return False
 
     def _run(self):
+        if hasattr(os, 'sched_getaffinity') and hasattr(os, 'sched_setaffinity'):
+            try:
+                cur = os.sched_getaffinity(0)
+                if len(cur) == 1:
+                    from .control_process import _parse_cpu_list
+                    with open('/sys/devices/system/cpu/online', encoding='utf-8') as f:
+                        online = _parse_cpu_list(f.read())
+                    with open('/sys/devices/system/cpu/isolated', encoding='utf-8') as f:
+                        isolated = _parse_cpu_list(f.read())
+                    if cur <= isolated:
+                        non_iso = online - isolated
+                        if non_iso:
+                            os.sched_setaffinity(0, non_iso)
+            except OSError:
+                pass
         try:
             # Some RMWs wake event-only wait sets on ordinary data activity.
             # Unbounded spin then just moves CPU consumption to this thread.

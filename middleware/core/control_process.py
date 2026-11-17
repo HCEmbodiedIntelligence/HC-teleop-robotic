@@ -66,6 +66,60 @@ def _generation(shared):
         return int(shared.value)
 
 
+def _parse_cpu_list(text):
+    cpus = set()
+    for part in str(text).split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            start, end = (int(item) for item in part.split('-', 1))
+            cpus.update(range(start, end + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
+def _pin_control_actor_cpu():
+    """Pin the control actor loop onto isolated CPU 3 when available, keeping helpers off it."""
+    if not hasattr(os, 'sched_getaffinity') or not hasattr(os, 'sched_setaffinity'):
+        return None, None
+    choice = os.environ.get('HC_CONTROL_CPU', 'auto').strip().lower()
+    if choice in {'off', 'none', 'false', ''}:
+        return None, None
+    try:
+        orig = os.sched_getaffinity(0)
+        with open('/sys/devices/system/cpu/online', encoding='utf-8') as f:
+            online = _parse_cpu_list(f.read())
+        with open('/sys/devices/system/cpu/isolated', encoding='utf-8') as f:
+            isolated = _parse_cpu_list(f.read())
+    except OSError:
+        return None, None
+    if choice == 'auto':
+        if 3 not in isolated or 3 not in online:
+            return None, None
+        target = 3
+    else:
+        try:
+            target = int(choice)
+        except ValueError:
+            return None, None
+        if target not in online:
+            return None, None
+    if target not in orig and target not in isolated:
+        return None, None
+    non_isolated = (online - isolated) & orig
+    if not non_isolated:
+        non_isolated = orig - {target}
+    if target not in orig:
+        non_isolated = non_isolated | orig
+    try:
+        os.sched_setaffinity(0, {target})
+    except OSError:
+        return None, None
+    return orig, (non_isolated or None)
+
+
 class _ParentLiveness:
     """Poll the spawn parent's sentinel on every checkpoint using one poller."""
     def __init__(self, expected_pid):
@@ -92,14 +146,15 @@ class _ParentLiveness:
 
 class _RecordingIngress:
     def __init__(self, resources, finish):
+        from .topic_recorder import enqueue_record
         self.resources, self.finish = resources, finish
+        self._enqueue_record = enqueue_record
 
     def record(self, event):
         return self.record_publication(event)
 
     def record_publication(self, event):
-        from .topic_recorder import enqueue_record
-        return enqueue_record(self.resources, event, allow_closed=True, finished=self.finish)
+        return self._enqueue_record(self.resources, event, allow_closed=True, finished=self.finish)
 
 
 def _control_worker(config, channels, capture_spec, bridge_factory=None):
@@ -115,10 +170,15 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
                 'rpc_replies_dropped': 0, 'stale_queued_commands': 0}
     hook_sequence = 0
     pumping, hard_stopped = False, False
+    ipc_drained = threading.Event()
+    ipc_stop_r = None
+    ipc_stop_w = None
+    ipc_wake_thread = None
     parent_liveness = _ParentLiveness(channels['parent_pid'])
     seen_parent = _generation(channels['parent_generation'])
     applied_parent = seen_parent
     last_snapshot = 0.
+    last_ownership_active = None
     child_selected = [True]
     bridge = None
 
@@ -244,9 +304,12 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
         return result
 
     def update_snapshot(force=False):
-        nonlocal last_snapshot
-        channels['ownership_active'].value = bool(owner.active)
-        if force or time.monotonic()-last_snapshot >= .1:
+        nonlocal last_snapshot, last_ownership_active
+        active_now = bool(owner.active)
+        if active_now != last_ownership_active:
+            channels['ownership_active'].value = active_now
+            last_ownership_active = active_now
+        if force or time.monotonic()-last_snapshot >= .15:
             _offer_latest(channels['status'], snapshot())
             last_snapshot = time.monotonic()
 
@@ -378,7 +441,7 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
             seen_parent = parent_gen
         return not bridge._stop.is_set()
 
-    def pump():
+    def pump(*, allow_snapshot=True):
         nonlocal pumping, applied_parent
         if pumping:
             return
@@ -386,10 +449,17 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
         try:
             if not urgent_check():
                 return
-            # Bound administrative work per turn. Status stays at 10 Hz rather
-            # than re-running all feedback/UI diagnostics for each RPC.
+            # Bound administrative work per turn. Status stays off the hot
+            # command-forwarding path and never serializes mid-command.
             deadline = time.monotonic()+.001
             for source in ('urgent', 'requests'):
+                reader = getattr(channels[source], '_reader', None)
+                if reader is not None:
+                    try:
+                        if not reader.poll(0):
+                            continue
+                    except (OSError, ValueError):
+                        pass
                 for _ in range(4 if source == 'urgent' else 2):
                     if time.monotonic() >= deadline:
                         break
@@ -417,14 +487,75 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
                     except queue.Full:
                         counters['rpc_replies_dropped'] += 1
                         channels['failure_stop'].set()
-            update_snapshot()
+            if allow_snapshot:
+                update_snapshot()
         finally:
             pumping = False
+            ipc_drained.set()
+
+    def start_ipc_wake():
+        nonlocal ipc_stop_r, ipc_stop_w, ipc_wake_thread
+        update_snapshot(True)
+        wake = getattr(bridge, '_actor_wake', None)
+        if ipc_wake_thread is not None or not callable(wake) or not hasattr(select, 'poll'):
+            return
+        poller = select.poll()
+        queue_fds = set()
+        for source in ('urgent', 'requests'):
+            reader = getattr(channels[source], '_reader', None)
+            fd = reader.fileno() if reader is not None and hasattr(reader, 'fileno') else None
+            if isinstance(fd, int):
+                poller.register(fd, select.POLLIN)
+                queue_fds.add(fd)
+        sentinel = getattr(parent_liveness.parent, 'sentinel', None)
+        sentinel_fd = sentinel if isinstance(sentinel, int) else None
+        if sentinel_fd is not None:
+            poller.register(sentinel_fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+        if not queue_fds and sentinel_fd is None:
+            return
+        ipc_stop_r, ipc_stop_w = os.pipe()
+        poller.register(ipc_stop_r, select.POLLIN)
+
+        def wake_loop():
+            nonlocal sentinel_fd
+            if non_isolated_cpus is not None and hasattr(os, 'sched_setaffinity'):
+                try:
+                    os.sched_setaffinity(0, non_isolated_cpus)
+                except OSError:
+                    pass
+            while True:
+                try:
+                    events = poller.poll(500)
+                except (OSError, ValueError):
+                    break
+                if not events:
+                    continue
+                if any(fd == ipc_stop_r for fd, _ in events):
+                    break
+                for fd, mask in list(events):
+                    if fd == sentinel_fd or (mask & select.POLLNVAL):
+                        try:
+                            poller.unregister(fd)
+                        except (OSError, KeyError, ValueError):
+                            pass
+                        queue_fds.discard(fd)
+                        if fd == sentinel_fd:
+                            sentinel_fd = None
+                if any(fd in queue_fds for fd, _ in events):
+                    ipc_drained.clear()
+                    wake()
+                    ipc_drained.wait(.005)
+                else:
+                    wake()
+
+        ipc_wake_thread = threading.Thread(target=wake_loop, name='control-ipc-wake', daemon=True)
+        ipc_wake_thread.start()
 
     bridge._actor_pump = pump
+    bridge._actor_pump_checkpoint = lambda allow_snapshot=False: pump(allow_snapshot=allow_snapshot)
     bridge._actor_urgent_check = urgent_check
     bridge._actor_authority_blocked = authority_blocked
-    bridge._actor_ready = lambda: update_snapshot(True)
+    bridge._actor_ready = start_ipc_wake
     bridge._actor_command_fence = lambda: (_generation(channels['parent_generation']), bridge._output_epoch)
     def allowed(expected, command, data):
         result = tuple(expected) == bridge._actor_command_fence()
@@ -436,11 +567,50 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
             counters['stale_queued_commands'] += 1
         return result
     bridge._actor_command_allowed = allowed
+    prev_switch_interval = sys.getswitchinterval() if hasattr(sys, 'getswitchinterval') else None
+    if hasattr(sys, 'setswitchinterval'):
+        try:
+            sys.setswitchinterval(0.001)
+        except ValueError:
+            pass
+    orig_affinity, non_isolated_cpus = _pin_control_actor_cpu()
+    if orig_affinity is not None and hasattr(os, 'sched_getaffinity') and hasattr(os, 'sched_setaffinity'):
+        try:
+            actor_cpus = os.sched_getaffinity(0)
+        except OSError:
+            actor_cpus = None
+        if actor_cpus:
+            setup_cpus = non_isolated_cpus or orig_affinity
+            bridge._actor_setup_affinity = lambda pin_actor: os.sched_setaffinity(
+                0, actor_cpus if pin_actor else setup_cpus)
     try:
         bridge._run()
     except BaseException as exc:
         _offer_latest(channels['status'], dict(state='error', error=type(exc).__name__+': '+str(exc)))
     finally:
+        if prev_switch_interval is not None and hasattr(sys, 'setswitchinterval'):
+            try:
+                sys.setswitchinterval(prev_switch_interval)
+            except ValueError:
+                pass
+        if orig_affinity is not None and hasattr(os, 'sched_setaffinity'):
+            try:
+                os.sched_setaffinity(0, orig_affinity)
+            except OSError:
+                pass
+        if ipc_stop_w is not None:
+            try:
+                os.write(ipc_stop_w, b'x')
+            except OSError:
+                pass
+        if ipc_wake_thread is not None:
+            ipc_wake_thread.join(timeout=1.0)
+        for pipe_fd in (ipc_stop_r, ipc_stop_w):
+            if pipe_fd is not None:
+                try:
+                    os.close(pipe_fd)
+                except OSError:
+                    pass
         # Normal shutdown is drained by the parent before this point. Crashes
         # remain explicit; never let a writer stall prevent process shutdown.
         capture = getattr(bridge, '_publication_capture', None)

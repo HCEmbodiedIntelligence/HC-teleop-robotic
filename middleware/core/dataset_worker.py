@@ -92,29 +92,60 @@ class DatasetTopicProcess:
 
 def main():
     import rclpy
+    from rclpy.executors import SingleThreadedExecutor
     from .dataset_topics import DatasetTopics
+    from .qos_event_observer import QosEventObserver
+    from .ros_executor import create_single_threaded_executor
     request = json.loads(sys.stdin.readline())
     domain = int(request['domain_id'])
     os.environ['ROS_DOMAIN_ID'] = str(domain)
     stopped = threading.Event()
+    stop_guard = None
     # Start the lifetime guard before ROS initialization, so startup failures
     # or a disappearing parent never leave a detached projection publisher.
     def parent_lifetime():
         sys.stdin.read()
         stopped.set()
+        guard = stop_guard
+        if guard is not None:
+            try:
+                guard.trigger()
+            except Exception:
+                pass
     threading.Thread(target=parent_lifetime, name='dataset-parent-lifetime', daemon=True).start()
     node = None
+    executor = None
+    qos_observer = None
     try:
         rclpy.init(args=[], domain_id=domain)
         node = rclpy.create_node(request['node_name'], enable_rosout=False, start_parameter_services=False)
+        executor = create_single_threaded_executor(SingleThreadedExecutor)
+        executor.add_node(node)
+        stop_guard = node.create_guard_condition(lambda: None)
         projection = DatasetTopics(node, request['config'])
+        qos_observer = QosEventObserver([node])
+        qos_observer.start()
         print(json.dumps(dict(state='ready', pid=os.getpid())), flush=True)
         while not stopped.is_set():
-            rclpy.spin_once(node, timeout_sec=.1)
+            executor.spin_once(timeout_sec=.1)
     except Exception as error:
         print(json.dumps(dict(state='error', error=f'{type(error).__name__}: {error}')), flush=True)
         raise
     finally:
+        if qos_observer is not None:
+            try:
+                qos_observer.close()
+            except Exception:
+                pass
+        if executor is not None:
+            executor.shutdown(timeout_sec=1.)
+            if node is not None:
+                executor.remove_node(node)
+        if node is not None and stop_guard is not None:
+            try:
+                node.destroy_guard_condition(stop_guard)
+            except Exception:
+                pass
         if node is not None:
             node.destroy_node()
         rclpy.try_shutdown()

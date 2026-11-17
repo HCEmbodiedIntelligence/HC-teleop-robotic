@@ -23,6 +23,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState, CompressedImage, Image
 from std_msgs.msg import Float64MultiArray, String
+from middleware.core.ros_executor import create_single_threaded_executor
 
 
 class TeleopSessionMonitor(Node):
@@ -202,6 +203,10 @@ class TeleopSessionMonitor(Node):
 
 
 def main() -> None:
+    try:
+        os.nice(10)
+    except (OSError, AttributeError):
+        pass
     parser = argparse.ArgumentParser(description="Teleop session monitor and logger")
     parser.add_argument("--log-file", required=True, help="Destination log file path")
     parser.add_argument("--monitor-camera", action="store_true",
@@ -211,12 +216,19 @@ def main() -> None:
     domain_id = int(os.environ.get("ROS_DOMAIN_ID", 14))
     rclpy.init(domain_id=domain_id)
     node = None
+    executor = None
     try:
         node = TeleopSessionMonitor(args.log_file, monitor_camera=args.monitor_camera)
-        rclpy.spin(node)
+        executor = create_single_threaded_executor()
+        executor.add_node(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
+        if executor is not None:
+            executor.shutdown(timeout_sec=1.)
+            if node is not None:
+                executor.remove_node(node)
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

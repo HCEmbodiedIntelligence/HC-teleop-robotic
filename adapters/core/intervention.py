@@ -195,10 +195,12 @@ class InterventionTeleop:
                 return
             self.cutoff = stamp
             self.granted = False
-            self.node._release_all(send_base_zero=True)
-            self.node.generic_aux_command.clear()
-            self.node.homing = False
-            self.node.body.target_base = None
+            from contextlib import nullcontext
+            with (getattr(self.node, '_command_state_lock', None) or nullcontext()):
+                self.node._release_all(send_base_zero=True)
+                self.node.generic_aux_command.clear()
+                self.node.homing = False
+                self.node.body.target_base = None
             self.token, self.phase = token, phase
             if phase == 'grant':
                 self.node.control_source = token.source

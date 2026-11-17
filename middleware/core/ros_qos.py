@@ -33,9 +33,9 @@ def recording_subscription_qos(item: dict[str, Any]):
     """
     qos = subscription_qos(item)
     if item.get('type') not in {
-        'sensor_msgs/msg/JointState', 'geometry_msgs/msg/PoseStamped',
-        'geometry_msgs/msg/TwistStamped', 'geometry_msgs/msg/WrenchStamped',
-        'nav_msgs/msg/Odometry',
+        'sensor_msgs/msg/JointState', 'geometry_msgs/msg/PoseArray',
+        'geometry_msgs/msg/PoseStamped', 'geometry_msgs/msg/TwistStamped',
+        'geometry_msgs/msg/WrenchStamped', 'nav_msgs/msg/Odometry',
     }:
         return qos
     from rclpy.qos import QoSProfile

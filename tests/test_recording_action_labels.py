@@ -244,3 +244,99 @@ def test_drive_replay_uses_real_commands_and_excludes_feedback_labels(tmp_path):
         assert list(deserialize_message(calls[0].args[2], JointState).position) == [.2]
     finally:
         player.stop()
+
+
+def test_monotonic_action_output_rejects_backdated_feedback_hold_and_late_action():
+    labels = policy_ready()
+    # Emit a published action onto ACTION_TOPIC before delayed rearm status arrives.
+    labels.process(status(BASE + 1_000_000, mode='arms_grippers'))
+    pub_res = labels.process(joint(ACTION_TOPIC, BASE + 20_000_000), output_allowed=True)
+    assert any(row['topic'] == ACTION_TOPIC for row in pub_res)
+
+    # Rearm status arrives covering earlier timestamps; feedback earlier than +20ms
+    # must not jump ACTION_TOPIC backward in time.
+    labels.process(status(BASE + 25_000_000))
+    early_fb = joint(FEEDBACK_TOPIC, BASE + 26_000_000, age=10_000_000)  # source=BASE+16ms < 20ms
+    assert labels.process(early_fb, output_allowed=True) == [early_fb]
+    assert labels.rejected_feedback == 1
+
+    # Feedback strictly newer than last_action_output_ns emits normally.
+    fresh_fb = joint(FEEDBACK_TOPIC, BASE + 30_000_000)  # source=BASE+30ms > 20ms
+    fresh_res = labels.process(fresh_fb, output_allowed=True)
+    assert any(row['topic'] == ACTION_TOPIC for row in fresh_res)
+
+    # If a delayed ACTION_TOPIC publication later arrives with <= 30ms during normal mode,
+    # PUBLISHED_TOPIC still keeps it while ACTION_TOPIC stays monotonic.
+    labels.process(status(BASE + 31_000_000, mode='arms_grippers'))
+    late_pub = labels.process(joint(ACTION_TOPIC, BASE + 28_000_000), output_allowed=True)
+    assert all(row['topic'] != ACTION_TOPIC for row in late_pub)
+    assert any(row['topic'] == PUBLISHED_TOPIC for row in late_pub)
+
+
+def test_action_label_buffer_absorbs_150ms_producer_skew_without_gap():
+    buffer = ActionLabelBuffer(POLICY, delay_ns=150_000_000, max_events=2048)
+    # Simulate dds_small arriving ahead of PublicationCapture's preroll burst by ~120ms.
+    for event in [
+        joint(ACTION_TOPIC, BASE),
+        status(BASE + 10_000_000),
+        owner(BASE + 10_000_000),
+        joint(FEEDBACK_TOPIC, BASE + 120_000_000),
+    ]:
+        buffer.offer(event)
+    # At +200ms wall time, +120ms is held (< 150ms), so late preroll actions still order before it.
+    early_flushed = list(buffer.ready(BASE + 200_000_000))
+    assert all(row.get('stamp_ns', 0) <= BASE + 50_000_000 for row in early_flushed)
+    buffer.offer(joint(FEEDBACK_TOPIC, BASE + 30_000_000))
+    buffer.offer(joint(ACTION_TOPIC, BASE + 40_000_000))
+    final_flushed = early_flushed + list(buffer.ready(BASE + 400_000_000, final=True))
+    action_stamps = [row['stamp_ns'] for row in final_flushed if row['topic'] == ACTION_TOPIC]
+    assert action_stamps == sorted(action_stamps)
+    assert BASE + 30_000_000 in action_stamps
+    assert BASE + 120_000_000 in action_stamps
+
+
+def test_action_label_buffer_holds_ahead_stream_within_skew_window():
+    buffer = ActionLabelBuffer(POLICY, delay_ns=150_000_000, skew_wait_ns=500_000_000, max_events=4096)
+    # Direction 1: dds_small delivers +230ms while published_action is only at +10ms.
+    for event in [
+        joint(ACTION_TOPIC, BASE + 10_000_000),
+        status(BASE + 20_000_000),
+        owner(BASE + 20_000_000),
+        joint(FEEDBACK_TOPIC, BASE + 230_000_000),
+    ]:
+        buffer.offer(event)
+    # Only +10ms is at or below min(10ms, 230ms); +20ms/+230ms wait up to 500ms for lagging published_action.
+    flushed_init = list(buffer.ready(BASE + 400_000_000))
+    assert not any(
+        row.get('topic') == ACTION_TOPIC and row.get('stamp_ns', 0) > BASE + 10_000_000
+        for row in flushed_init
+    )
+    assert not any(
+        row.get('topic') == PROVENANCE_TOPIC
+        and row.get('payload', {}).get('source') == 'feedback_hold'
+        for row in flushed_init
+    )
+
+    # Delayed published_action & intermediate feedback arrive before 500ms skew limit.
+    buffer.offer(joint(ACTION_TOPIC, BASE + 30_000_000))
+    buffer.offer(joint(FEEDBACK_TOPIC, BASE + 40_000_000))
+
+    # Direction 2: published_action jumps to +930ms while dds_small is lagging at +650ms.
+    buffer.offer(joint(FEEDBACK_TOPIC, BASE + 650_000_000))
+    buffer.offer(joint(ACTION_TOPIC, BASE + 800_000_000))
+    buffer.offer(joint(ACTION_TOPIC, BASE + 930_000_000))
+    # At +1000ms (200ms after +800ms > 150ms, < 500ms), +800ms waits for lagging dds_small.
+    early = list(buffer.ready(BASE + 1_000_000_000))
+    early_actions = [row['stamp_ns'] for row in early if row['topic'] == ACTION_TOPIC]
+    assert BASE + 40_000_000 in early_actions
+    assert BASE + 800_000_000 not in early_actions
+
+    buffer.offer(status(BASE + 780_000_000))
+    buffer.offer(owner(BASE + 780_000_000))
+    buffer.offer(joint(FEEDBACK_TOPIC, BASE + 790_000_000))
+    buffer.offer(joint(FEEDBACK_TOPIC, BASE + 940_000_000))
+    flushed = early + list(buffer.ready(BASE + 1_200_000_000, final=True))
+    action_stamps = [row['stamp_ns'] for row in flushed if row['topic'] == ACTION_TOPIC]
+    assert action_stamps == sorted(action_stamps)
+    assert BASE + 790_000_000 in action_stamps
+    assert BASE + 940_000_000 in action_stamps

@@ -50,4 +50,5 @@ def test_images_and_live_control_keep_their_existing_small_queues():
         for reliability in ['best_effort','reliable']:
             item=dict(topic='/camera',type=kind,qos_reliability=reliability)
             assert recording_subscription_qos(item).depth==subscription_qos(item).depth
+    assert recording_subscription_qos(dict(topic='/action/ee_poses',type='geometry_msgs/msg/PoseArray')).depth>=64
     assert subscription_qos(dict(topic='/observation/joint_states',type='sensor_msgs/msg/JointState')).depth==5

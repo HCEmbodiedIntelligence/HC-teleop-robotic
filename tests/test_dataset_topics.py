@@ -188,3 +188,101 @@ def test_groups_follow_profile_without_waist(tmp_path, monkeypatch):
         'left_arm': ['left_1', 'left_2'],
         'right_arm': ['right_1', 'right_2'],
     }
+
+
+def test_skips_construction_and_publish_when_subscription_count_is_zero():
+    class CountingPublisher(Publisher):
+        def __init__(self, count):
+            super().__init__()
+            self._count = count
+
+        def get_subscription_count(self):
+            return self._count
+
+    class CountingNode(Node):
+        def __init__(self, active_topics):
+            self.active_topics = set(active_topics)
+
+        def create_publisher(self, cls, topic, qos):
+            return CountingPublisher(1 if topic in self.active_topics else 0)
+
+    active = {'/action/left_arm/joint_states', '/observation/right_arm/ee_pose', '/action/head/pose'}
+    b = DatasetTopics(
+        CountingNode(active),
+        {'joint_groups': {'left_arm': ['Joint1_L', 'Joint2_L'], 'waist': ['leg_1', 'leg_2', 'zhi']}},
+    )
+
+    js = JointState(name=['Joint1_L', 'Joint2_L', 'leg_1', 'leg_2', 'zhi'], position=[1., 2., 3., 4., 5.])
+    b.joints('action', js)
+    assert len(b.publishers['/action/left_arm/joint_states'].messages) == 1
+    assert len(b.publishers['/action/waist/joint_states'].messages) == 0
+
+    pa = PoseArray(poses=[Pose(), Pose()])
+    b.poses('observation', pa)
+    assert len(b.publishers['/observation/right_arm/ee_pose'].messages) == 1
+    assert len(b.publishers['/observation/left_arm/ee_pose'].messages) == 0
+
+    b.robot_head(pa)
+    assert len(b.publishers['/action/head/pose'].messages) == 1
+    assert len(b.publishers['/observation/head/pose'].messages) == 0
+
+    b.base(Float64MultiArray(data=[0.1, 0.2, 0.3]))
+    assert len(b.publishers['/action/base/velocity'].messages) == 0
+
+    b.head(String(data='not-json'))
+    assert len(b.publishers['/observation/headset/pose'].messages) == 0
+
+
+def test_raw_subscription_skips_deserialization_until_subscriber_present(monkeypatch):
+    import time
+    rclpy = pytest.importorskip('rclpy')
+    from rclpy.context import Context
+    from rclpy.qos import qos_profile_sensor_data
+    import rclpy.serialization
+    from middleware.core.ros_executor import CachedWaitSetExecutor
+
+    monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
+    monkeypatch.setenv('ROS_DOMAIN_ID', '231')
+    orig_deserialize = rclpy.serialization.deserialize_message
+    deserialize_calls = []
+
+    def tracking_deserialize(raw, cls):
+        deserialize_calls.append(cls)
+        return orig_deserialize(raw, cls)
+
+    monkeypatch.setattr(rclpy.serialization, 'deserialize_message', tracking_deserialize)
+    context = Context()
+    rclpy.init(args=[], context=context, domain_id=231)
+    node = rclpy.create_node('test_dataset_raw_filter', context=context,
+                             enable_rosout=False, start_parameter_services=False)
+    executor = CachedWaitSetExecutor(context=context)
+    executor.add_node(node)
+    src_pub = node.create_publisher(JointState, '/observation/joint_states', qos_profile_sensor_data)
+    b = DatasetTopics(node, {'joint_groups': {'left_arm': ['Joint1_L', 'Joint2_L']}})
+    received = []
+    sub = None
+    try:
+        # With zero downstream subscribers, raw bytes must not be deserialized.
+        assert b.publishers['/observation/left_arm/joint_states'].get_subscription_count() == 0
+        for _ in range(3):
+            src_pub.publish(JointState(name=['Joint1_L', 'Joint2_L'], position=[0.5, 0.6]))
+            executor.spin_once(timeout_sec=0.02)
+        assert deserialize_calls == []
+
+        # Once a subscriber connects, messages deserialize and split normally.
+        sub = node.create_subscription(JointState, '/observation/left_arm/joint_states',
+                                       received.append, 10)
+        deadline = time.monotonic() + 2.0
+        while not received and time.monotonic() < deadline:
+            src_pub.publish(JointState(name=['Joint2_L', 'Joint1_L'], position=[2.0, 1.0]))
+            executor.spin_once(timeout_sec=0.02)
+        assert received
+        assert list(received[-1].position) == [1.0, 2.0]
+        assert deserialize_calls
+    finally:
+        if sub is not None:
+            node.destroy_subscription(sub)
+        node.destroy_publisher(src_pub)
+        executor.shutdown(timeout_sec=1.0)
+        node.destroy_node()
+        context.try_shutdown()

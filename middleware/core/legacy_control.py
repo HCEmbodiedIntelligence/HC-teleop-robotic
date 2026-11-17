@@ -112,12 +112,17 @@ class LegacyTopicControl:
                                     if bridge._control_actor_mode else callback), qos_profile_sensor_data,
                 callback_group=feedback_group))
         subscribe(JointState, '/hc_teleop/joint_cmd', lambda msg: self.program(msg, 'arms'))
+        hand_fields = {side: self.hand_fields(side) for side in self.hands}
         for side in self.hands:
             subscribe(JointState, '/hc_teleop/joint_cmd_finger_'+side,
                       lambda msg, side=side: self.program(msg, side), hand=True)
+            fields = hand_fields[side]
             subscribe(JointState, f'/control/vr/{side}_hand/joint_states',
-                      lambda msg, side=side: self.bridge.forward_live_command(
-                          'vr', self.select(msg, self.hand_fields(side)), self.publish_selected), hand=True)
+                      lambda msg, fields=fields: self.bridge.forward_live_command(
+                          'vr',
+                          msg if tuple(msg.name) == fields else self.select(msg, fields),
+                          self.publish_selected),
+                      hand=True)
 
     def hand_fields(self, side):
         marker = self.teleop['grippers'][side].get('binary_state_joint')
@@ -344,8 +349,9 @@ class LegacyTopicControl:
                             self.last_clip = dict(joint=name, requested=value, sent=values[name],
                                 delta_rad=value-values[name], limit_rad_s=speed, dt_s=dt,
                                 stamp_ns=wall_ns)
-                measured = dict(self.positions)
-            if self.collision and set(values) & set(self.arms):
+                needs_collision = bool(self.collision and set(values) & set(self.arms))
+                measured = dict(self.positions) if needs_collision else None
+            if needs_collision:
                 if not self.feedback_fresh():
                     raise ValueError('collision check requires fresh body feedback')
                 allowed, collision, _ = self.collision.check(measured, values)

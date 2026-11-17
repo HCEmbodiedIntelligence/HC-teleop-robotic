@@ -49,6 +49,31 @@ DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
 }
 
 
+def _copy_actor_message(message: Any) -> Any:
+    """Copy incoming JointState targets without deep-copy traversal overhead."""
+    name = getattr(message, 'name', None)
+    position = getattr(message, 'position', None)
+    header = getattr(message, 'header', None)
+    stamp = getattr(header, 'stamp', None)
+    velocity = getattr(message, 'velocity', None)
+    effort = getattr(message, 'effort', None)
+    if (header is None or stamp is None or name is None or position is None
+            or velocity is None or effort is None):
+        return copy.deepcopy(message)
+    try:
+        cloned = type(message)()
+        cloned.header.stamp.sec = stamp.sec
+        cloned.header.stamp.nanosec = stamp.nanosec
+        cloned.header.frame_id = header.frame_id
+        cloned.name = list(name)
+        cloned.position = list(position)
+        cloned.velocity = list(velocity)
+        cloned.effort = list(effort)
+        return cloned
+    except (AttributeError, TypeError, ValueError):
+        return copy.deepcopy(message)
+
+
 class TopicHealthTracker:
     """Track message rate and quality for a subscribed ROS topic."""
 
@@ -165,6 +190,7 @@ class RosBridge:
         self._actor_urgent = deque(maxlen=8)
         self._actor_counts = Counter()
         self._actor_flush_commands = None
+        self._actor_wake = None
         self._qos_event_observer = None
         self._public_api = None
         self._legacy_enabled = bool(config.get("legacy_control_profile"))
@@ -260,6 +286,9 @@ class RosBridge:
 
     def stop(self) -> None:
         self._stop.set()
+        wake = getattr(self, '_actor_wake', None)
+        if callable(wake):
+            wake()
         if self._thread is not None:
             self._thread.join(timeout=5)
         if self._contention_thread is not None:
@@ -636,15 +665,19 @@ class RosBridge:
             self._hardware_ready = bool(ready)
             self._hardware_ready_last = current
 
-    def _actor_checkpoint(self):
+    def _actor_checkpoint(self, *, allow_snapshot: bool = True):
         """Process bounded urgent IPC and original watchdogs, without ROS spin."""
         if not self._control_actor_mode or self._actor_pumping:
             return
         self._actor_pumping = True
         try:
-            pump = getattr(self, '_actor_pump', None)
+            pump = getattr(self, '_actor_pump_checkpoint', None) if not allow_snapshot else None
             if callable(pump):
-                pump()
+                pump(allow_snapshot)
+            else:
+                pump = getattr(self, '_actor_pump', None)
+                if callable(pump):
+                    pump()
             with self._lock:
                 self._ready_locked(time.monotonic())
                 self.ownership.watchdog()
@@ -663,14 +696,15 @@ class RosBridge:
         # between callbacks, then run the original complete safety checkpoint
         # before any queued DDS output or target is drained.
         urgent = getattr(self, '_actor_urgent_check', None)
+        wait_sec = .01 if callable(getattr(self, '_actor_wake', None)) else .001
         for index in range(32):
             before = self._actor_callback_count
-            executor.spin_once(timeout_sec=.001 if index == 0 else 0.)
+            executor.spin_once(timeout_sec=wait_sec if index == 0 else 0.)
             if callable(urgent):
                 urgent()
             if self._stop.is_set() or self._actor_callback_count == before:
                 break
-        self._actor_checkpoint()
+        self._actor_checkpoint(allow_snapshot=False)
 
     def _count_live_input_locked(self, source, channel, now):
         self._mux_received[source] += 1
@@ -689,7 +723,7 @@ class RosBridge:
         with self._lock:
             self._count_live_input_locked(source, channel, now)
         try:
-            target = copy.deepcopy(message)
+            target = _copy_actor_message(message)
             names = tuple(target.name)
             stamp = target.header.stamp.sec + target.header.stamp.nanosec * 1e-9
             valid = (bool(names) and len(names) == len(target.position)
@@ -721,23 +755,27 @@ class RosBridge:
     def _drain_actor_targets(self):
         if not self._control_actor_mode:
             return
-        for source in ('vr', 'exoskeleton', 'motion'):
-            for channel in self.COMMAND_CHANNELS:
-                with self._lock:
-                    if (source, channel) not in self._actor_targets:
-                        continue
-                with self._lock:
+        with self._lock:
+            if not self._actor_targets or self._stop.is_set():
+                return
+            ready = []
+            for source in ('vr', 'exoskeleton', 'motion'):
+                for channel in self.COMMAND_CHANNELS:
                     pending = self._actor_targets.pop((source, channel), None)
-                    if pending is None or pending[1] != self._output_epoch or self._stop.is_set():
-                        continue
-                _, _, target, publish, token = pending
-                self._actor_dispatching = True
-                self._actor_dispatch_epoch = pending[1]
-                try:
-                    self.forward_live_command(source, target, publish, token)
-                finally:
-                    self._actor_dispatching = False
-                    self._actor_dispatch_epoch = None
+                    if pending is not None and pending[1] == self._output_epoch:
+                        ready.append((source, pending))
+        for source, pending in ready:
+            with self._lock:
+                if pending[1] != self._output_epoch or self._stop.is_set():
+                    continue
+            _, _, target, publish, token = pending
+            self._actor_dispatching = True
+            self._actor_dispatch_epoch = pending[1]
+            try:
+                self.forward_live_command(source, target, publish, token)
+            finally:
+                self._actor_dispatching = False
+                self._actor_dispatch_epoch = None
 
     def forward_live_command(self, source: str, message: Any, publish: Callable, token=None) -> bool:
         if (self._control_actor_mode and not (self._actor_dispatching
@@ -834,7 +872,7 @@ class RosBridge:
 
     def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
         """Keep authority across slow conversion and recheck at actuator send."""
-        self._actor_checkpoint()
+        self._actor_checkpoint(allow_snapshot=False)
         now = time.monotonic()
         stream = source
         try:
@@ -892,7 +930,7 @@ class RosBridge:
         self._command_checkpoint(timing, 'prepare_publication')
         # A slow collision/serialization step must not delay a newly arrived
         # revoke. Reuse the host pump and original freshness/watchdog checks.
-        self._actor_checkpoint()
+        self._actor_checkpoint(allow_snapshot=False)
         capture = getattr(self, '_publication_capture', None)
         arm_target = (self._legacy_enabled and self._boundary and prepared is not None
                       and set(prepared[0].name).intersection(self._boundary.arms))
@@ -972,13 +1010,22 @@ class RosBridge:
             with self._lock:
                 if command == 'stop':
                     self._actor_urgent.append(item)
+                    wake = self._actor_wake
+                    if callable(wake):
+                        wake()
                     return True
                 if command == 'replay_raw':
                     # Each final channel is a latest slot, never a replay FIFO.
                     self._actor_replay[(data[0], data[1])] = item
+                    wake = self._actor_wake
+                    if callable(wake):
+                        wake()
                     return True
         try:
             self._commands.put_nowait(item)
+            wake = self._actor_wake
+            if callable(wake):
+                wake()
             return True
         except queue.Full:
             with self._lock:
@@ -1016,6 +1063,7 @@ class RosBridge:
             import rclpy
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
+            from .ros_executor import create_single_threaded_executor
             from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
             from rclpy.qos import (
                 DurabilityPolicy,
@@ -1032,6 +1080,12 @@ class RosBridge:
             domain_id = int(self.config.get("domain_id", int(os.environ.get("ROS_DOMAIN_ID", 14))))
             os.environ["ROS_DOMAIN_ID"] = str(domain_id)
 
+            setup_affinity = getattr(self, '_actor_setup_affinity', None)
+            if self._control_actor_mode and callable(setup_affinity):
+                try:
+                    setup_affinity(False)
+                except OSError:
+                    pass
             context = Context()
             rclpy.init(args=[], context=context, domain_id=domain_id)
             node_options = ({'enable_rosout': False, 'start_parameter_services': False}
@@ -1050,7 +1104,7 @@ class RosBridge:
             # Humble's shared thread pool adds wait-set/GIL contention here.
             # Keep authority/feedback on their own executor so a slow command
             # preparation cannot prevent Grip from revoking the final gate.
-            executor = SingleThreadedExecutor(context=context)
+            executor = create_single_threaded_executor(SingleThreadedExecutor, context=context)
             self._ownership_callback_group = MutuallyExclusiveCallbackGroup()
             # The node's default callback group is mutually exclusive.  Keep
             # actuator commands out of that group so status/recording traffic
@@ -1063,12 +1117,14 @@ class RosBridge:
             # Dashboard callbacks must not queue behind collision checking and
             # command preparation. Count actual received messages independently.
             telemetry_node = control_node_for("_telemetry")
-            telemetry_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
+            telemetry_executor = (executor if self._control_actor_mode
+                                  else create_single_threaded_executor(SingleThreadedExecutor, context=context))
             if telemetry_node is not node:
                 telemetry_executor.add_node(telemetry_node)
             if self._mux_enabled:
                 control_node = control_node_for("_control")
-                control_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
+                control_executor = (executor if self._control_actor_mode
+                                    else create_single_threaded_executor(SingleThreadedExecutor, context=context))
                 if control_node is not node:
                     control_executor.add_node(control_node)
                 # MutuallyExclusiveCallbackGroup alone does not isolate work
@@ -1077,13 +1133,15 @@ class RosBridge:
                 # Authority and feedback remain on the control executor; the
                 # existing final gate still rechecks them immediately at send.
                 command_node = control_node_for("_commands")
-                command_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
+                command_executor = (executor if self._control_actor_mode
+                                    else create_single_threaded_executor(SingleThreadedExecutor, context=context))
                 if command_node is not node:
                     command_executor.add_node(command_node)
                 # Finger targets are independent overwriteable streams. Keep
                 # their callbacks from consuming the arm's depth-one reader.
                 hand_node = control_node_for("_hands")
-                hand_executor = executor if self._control_actor_mode else SingleThreadedExecutor(context=context)
+                hand_executor = (executor if self._control_actor_mode
+                                 else create_single_threaded_executor(SingleThreadedExecutor, context=context))
                 if hand_node is not node:
                     hand_executor.add_node(hand_node)
             if self.camera_topics and not self._control_actor_mode:
@@ -1095,7 +1153,7 @@ class RosBridge:
                     self.config.get("node_name", "hc_teleop_middleware") + "_camera",
                     context=context,
                 )
-                camera_executor = SingleThreadedExecutor(context=context)
+                camera_executor = create_single_threaded_executor(SingleThreadedExecutor, context=context)
                 camera_executor.add_node(camera_node)
             publishers: dict[tuple[str, str], Any] = {}
             subscriptions = []
@@ -1205,7 +1263,7 @@ class RosBridge:
                 # the newest target instead of replaying a stale burst later.
                 command_qos = QoSProfile(
                     history=HistoryPolicy.KEEP_LAST,
-                    depth=1,
+                    depth=4,
                     reliability=ReliabilityPolicy.BEST_EFFORT,
                 )
                 for source, topic in (
@@ -1362,11 +1420,21 @@ class RosBridge:
                 self._actor_thread_ident = threading.get_ident()
                 self._actor_flush_commands = lambda: self._drain_commands(
                     node, publishers, get_message, set_message_fields, wait=0.)
+                wake_guard = None
+                if hasattr(node, 'create_guard_condition'):
+                    wake_guard = node.create_guard_condition(lambda: None)
+                    self._actor_wake = wake_guard.trigger
+                setup_affinity = getattr(self, '_actor_setup_affinity', None)
+                if callable(setup_affinity):
+                    try:
+                        setup_affinity(True)
+                    except OSError:
+                        pass
                 ready_hook = getattr(self, '_actor_ready', None)
                 if callable(ready_hook):
                     ready_hook()
                 while not self._stop.is_set():
-                    self._actor_checkpoint()
+                    self._actor_checkpoint(allow_snapshot=False)
                     if self._stop.is_set():
                         break
                     self._actor_flush_commands()
@@ -1377,7 +1445,19 @@ class RosBridge:
                         break
                     self._actor_flush_commands()
                     self._drain_actor_targets()
+                    if not self._actor_targets:
+                        self._actor_checkpoint(allow_snapshot=True)
             else:
+                from .qos_event_observer import QosEventObserver
+                unique_nodes = []
+                seen_node_ids = set()
+                for candidate in (node, telemetry_node, control_node, command_node, hand_node, camera_node):
+                    if candidate is not None and id(candidate) not in seen_node_ids:
+                        seen_node_ids.add(id(candidate))
+                        unique_nodes.append(candidate)
+                if unique_nodes:
+                    self._qos_event_observer = QosEventObserver(unique_nodes)
+                    self._qos_event_observer.start()
                 telemetry_executor_thread = threading.Thread(
                     target=telemetry_executor.spin, name="ros-telemetry-executor", daemon=True)
                 telemetry_executor_thread.start()
@@ -1435,6 +1515,7 @@ class RosBridge:
                             self._publish_hardware_enable_locked(node, publishers, False)
                         except Exception:
                             pass
+                self._actor_wake = None
                 self._actor_flush_commands = None
                 if self._qos_event_observer is not None:
                     # Restore each native event to its original owner before
@@ -1447,6 +1528,11 @@ class RosBridge:
                         if actor_node is not None and id(actor_node) not in seen_nodes:
                             executor.remove_node(actor_node)
                             seen_nodes.add(id(actor_node))
+                if 'wake_guard' in locals() and wake_guard is not None and hasattr(node, 'destroy_guard_condition'):
+                    try:
+                        node.destroy_guard_condition(wake_guard)
+                    except Exception:
+                        pass
                 # Release shared clock/collision resources before destroying the
                 # single node in the normal main-node cleanup below.
                 telemetry_node = None if telemetry_node is node else telemetry_node
@@ -1457,6 +1543,8 @@ class RosBridge:
                 # executor must only be stopped and removed once.
                 executor = telemetry_executor = control_executor = command_executor = hand_executor = camera_executor = None
             self._permit_sender = None
+            if not self._control_actor_mode and self._qos_event_observer is not None:
+                self._qos_event_observer.close()
             if telemetry_executor is not None:
                 telemetry_executor.shutdown(timeout_sec=5.0)
             if telemetry_executor_thread is not None:
@@ -1774,7 +1862,7 @@ class RosBridge:
             (command_node or node).create_subscription(JointState, '/internal/control/joint_targets', self._timed_callback('owned_target', owned_target), 10,
                                      callback_group=self._command_callback_group),
         ])
-        node.create_timer(.005, self._timed_callback('ownership_tick', tick), callback_group=self._ownership_callback_group)
+        node.create_timer(.02, self._timed_callback('ownership_tick', tick), callback_group=self._ownership_callback_group)
 
     def _actor_negative_command(self, command, args):
         if (command == 'stop' or command == 'command_output' and not args[0] or

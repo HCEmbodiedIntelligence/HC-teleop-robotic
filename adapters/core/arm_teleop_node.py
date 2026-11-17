@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import math
 import os
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -11,7 +13,7 @@ from typing import Any
 import numpy as np
 import pybullet as bullet
 import yaml
-from geometry_msgs.msg import Pose, PoseArray, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseArray, PoseStamped, Quaternion
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -120,16 +122,19 @@ def _generic_pipeline_metrics() -> dict[str, Any]:
                 _publication_gaps=deque(maxlen=256), _source_ages=deque(maxlen=256))
 
 
-def _generic_pipeline_snapshot(metrics):
+def _generic_pipeline_snapshot(metrics, lock=None):
     if metrics is None:
         return None
     now = time.monotonic_ns()
-    result = {key: value for key, value in metrics.items() if not key.startswith('_')}
+    with (lock if lock is not None else nullcontext()):
+        result = {key: value for key, value in metrics.items() if not key.startswith('_')}
+        pub_gaps = list(metrics['_publication_gaps'])
+        src_ages = list(metrics['_source_ages'])
     result['recent_window_seconds'] = 2.
     result['max_publication_gap_ms_recent'] = max(
-        (value for stamp, value in metrics['_publication_gaps'] if now-stamp <= 2_000_000_000), default=None)
+        (value for stamp, value in pub_gaps if now-stamp <= 2_000_000_000), default=None)
     result['max_receive_source_age_ms_recent'] = max(
-        (value for stamp, value in metrics['_source_ages'] if now-stamp <= 2_000_000_000), default=None)
+        (value for stamp, value in src_ages if now-stamp <= 2_000_000_000), default=None)
     return result
 
 
@@ -161,8 +166,11 @@ def _reset_model_joint_states(node) -> None:
 class RobotArmTeleopNode(Node):
     """Profile-driven bimanual teleop node with a two-clutch state machine."""
 
-    def __init__(self, config_path: str, backend: str | None = None):
+    def __init__(self, config_path: str, backend: str | None = None, *, command_node: Node | None = None):
         super().__init__("hc_robot_vr_teleop")
+        self._command_node = command_node
+        self._command_state_lock = threading.RLock()
+        self._model_lock = threading.RLock()
         self.config_path = Path(config_path).expanduser().resolve()
         with self.config_path.open(encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream)
@@ -322,6 +330,10 @@ class RobotArmTeleopNode(Node):
             side: self.link_by_name[arm_config["generic_task_base_link"]]
             for side, arm_config in self.config["arms"].items()
         }
+        base_links = {config["base_link"] for config in self.config["arms"].values()}
+        self._arm_base_frame_id = (
+            next(iter(base_links)) if len(base_links) == 1 else "hc_tj_arm_bases"
+        )
         self.body = self._create_body(self.body_config)
         self.neck_enabled = bool(self.body_config.get("neck_tracking_enabled", True))
         raw_neck_names = self.body_config.get("neck_joint_names", ["head_1", "head_2"])
@@ -392,8 +404,19 @@ class RobotArmTeleopNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        self.command_pub = self.create_publisher(
-            JointState, self.control["command_topic"], latest_reliable_qos
+        command_pub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=4,
+        )
+        solver_sub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=4,
+        )
+        cmd_node = self._command_node if self._command_node is not None else self
+        self.command_pub = cmd_node.create_publisher(
+            JointState, self.control["command_topic"], command_pub_qos
         )
         if self.backend == "motion":
             self.motion_home_pub = self.create_publisher(Header, "/internal/vr/home", 1)
@@ -413,7 +436,7 @@ class RobotArmTeleopNode(Node):
         )
         self.solver_reset_ack_sub = None
         self.target_pub = self.create_publisher(
-            PoseArray, self.control["target_pose_topic"], latest_reliable_qos
+            PoseArray, self.control["target_pose_topic"], command_pub_qos
         )
         self.controller_target_pub = self.create_publisher(
             PoseArray,
@@ -421,19 +444,19 @@ class RobotArmTeleopNode(Node):
                 "controller_target_pose_topic",
                 "/control/solver/ee_targets",
             ),
-            latest_reliable_qos,
+            command_pub_qos,
         )
         self.actual_pub = None
         self.record_actual_pub = None
         if self.config_path.parent.name == 'x1' and self.control.get('legacy_intervention'):
             self.record_actual_pub = self.create_publisher(
-                PoseArray, '/internal/recording/observation/ee_poses', latest_reliable_qos)
+                PoseArray, '/internal/recording/observation/ee_poses', command_pub_qos)
         if not (self.control.get("actual_pose_from_hardware", False)
                 and os.environ.get("HC_RUNTIME_MODE") == "teleop"):
             self.actual_pub = self.create_publisher(
                 PoseArray,
                 self.control.get("actual_pose_topic", "/observation/ee_poses"),
-                latest_reliable_qos,
+                command_pub_qos,
             )
         self.base_pub = self.create_publisher(
             Float64MultiArray, self.body_config["base_command_topic"], 10
@@ -445,11 +468,18 @@ class RobotArmTeleopNode(Node):
                 self._base_pose_callback, qos_profile_sensor_data,
             )
         self.head_visualization_pub = self.create_publisher(
-            PoseArray, "/status/head/tracking_poses", latest_reliable_qos
+            PoseArray, "/status/head/tracking_poses", command_pub_qos
         )
         self.status_pub = self.create_publisher(
             String, self.control["status_topic"], 10
         )
+        self._gripper_open_closed = {
+            side: (
+                np.asarray(self.config["grippers"][side]["finger_open"], dtype=float),
+                np.asarray(self.config["grippers"][side]["finger_closed"], dtype=float),
+            )
+            for side in ("left", "right")
+        }
         self.finger_pubs = {
             side: self.create_publisher(
                 JointState, (f"/control/vr/{side}_hand/joint_states"
@@ -465,14 +495,16 @@ class RobotArmTeleopNode(Node):
             JointState,
             self.control["joint_state_topic"],
             self._joint_state_callback,
-            qos_profile_sensor_data if self.backend == "motion" else latest_reliable_qos,
+            qos_profile_sensor_data
+            if self.backend == "motion"
+            else (solver_sub_qos if self.backend in {"v23", "generic"} else latest_reliable_qos),
         )
         if self.external_ik:
             self.create_subscription(
                 JointState,
                 self.control.get("solver_topic", "/status/solver/joint_states"),
                 self._solver_callback,
-                latest_reliable_qos,
+                solver_sub_qos,
             )
             self.solver_reset_ack_sub = self.create_subscription(
                 Header,
@@ -480,15 +512,15 @@ class RobotArmTeleopNode(Node):
                     "solver_reset_ack_topic", "/status/solver/reset_ack"
                 ),
                 self._solver_reset_ack_callback,
-                latest_reliable_qos,
+                solver_sub_qos,
             )
-            self.create_subscription(
+            cmd_node.create_subscription(
                 JointState,
                 self.control.get(
                     "generic_command_topic", "/control/solver/joint_targets"
                 ),
                 self._generic_command_callback,
-                latest_reliable_qos,
+                solver_sub_qos,
             )
         self.create_subscription(
             Bool,
@@ -537,7 +569,8 @@ class RobotArmTeleopNode(Node):
             f"enabled={self.enabled}"
         )
         from middleware.core.qos_event_observer import QosEventObserver
-        self._qos_event_observer = QosEventObserver([self], enabled=(
+        observed_nodes = [self, self._command_node] if self._command_node is not None else [self]
+        self._qos_event_observer = QosEventObserver(observed_nodes, enabled=(
             None if self.backend == 'v23' and self.config_path.parent.name == 'x1' else False))
         self._qos_event_observer.start()
 
@@ -958,10 +991,11 @@ class RobotArmTeleopNode(Node):
             self.body.reference_target_link = None
             self.body.target_head_local = None
             self.body.smoothed_head_pose = None
-        for name in self.body.joint_names:
-            if name in self.joint_state:
-                self.last_command[name] = float(self.joint_state[name])
-            self.generic_aux_command.pop(name, None)
+        with (getattr(self, "_command_state_lock", None) or nullcontext()):
+            for name in self.body.joint_names:
+                if name in self.joint_state:
+                    self.last_command[name] = float(self.joint_state[name])
+                self.generic_aux_command.pop(name, None)
         now = self._monotonic()
         left_input_fresh = self._input_fresh(self.arms["left"], now)
         self._prev_left_grip = bool(
@@ -982,20 +1016,21 @@ class RobotArmTeleopNode(Node):
         self.get_logger().info(f"control source changed to {source}; old VR state discarded")
 
     def _reset_control_references(self) -> None:
-        self._release_all(send_base_zero=True)
-        self.arms["right"].joy = None  # A cached release cannot rearm the solver.
-        self.body.smoothed_head_pose = None
-        self.homing = False
-        self.generic_aux_command.clear()
-        self.body.target_base = None
-        self.waist_output_enabled = False
-        self.waist_clutch_rearm_required = True
-        self.source_feedback_pending = True
-        self.source_cutoff_ns = int(self.get_clock().now().nanoseconds)
-        if self.external_ik:
-            self.solver_rearm.start_homing()
-            if self.control_source == "vr":
-                self.solver_rearm.homing_complete()
+        with (getattr(self, "_command_state_lock", None) or nullcontext()):
+            self._release_all(send_base_zero=True)
+            self.arms["right"].joy = None  # A cached release cannot rearm the solver.
+            self.body.smoothed_head_pose = None
+            self.homing = False
+            self.generic_aux_command.clear()
+            self.body.target_base = None
+            self.waist_output_enabled = False
+            self.waist_clutch_rearm_required = True
+            self.source_feedback_pending = True
+            self.source_cutoff_ns = int(self.get_clock().now().nanoseconds)
+            if self.external_ik:
+                self.solver_rearm.start_homing()
+                if self.control_source == "vr":
+                    self.solver_rearm.homing_complete()
 
     def _joint_state_callback(self, message: JointState) -> None:
         if len(message.name) != len(message.position) or len(set(message.name)) != len(message.name):
@@ -1009,30 +1044,36 @@ class RobotArmTeleopNode(Node):
         values = dict(zip(message.name, message.position))
         if not all(math.isfinite(float(value)) for value in values.values()):
             return
-        self.joint_state = {name: float(value) for name, value in values.items()}
-        self.joint_state_stamp = self._monotonic()
-        self.joint_state_source_ns = stamp_ns
-        if self.source_feedback_pending:
-            if (not self.hardware_ready or self.joint_state_source_ns <= self.source_cutoff_ns
-                    or not self._complete_feedback_fresh()):
-                return
-            self.last_command = dict(self.joint_state)
-            self.generic_aux_command.clear()
+        state_lock = getattr(self, "_command_state_lock", None) or nullcontext()
+        joint_state_next = {name: float(value) for name, value in values.items()}
+        with state_lock:
+            self.joint_state = joint_state_next
+            self.joint_state_stamp = self._monotonic()
+            self.joint_state_source_ns = stamp_ns
+            pending_check = self.source_feedback_pending
+            if pending_check:
+                if (not self.hardware_ready or self.joint_state_source_ns <= self.source_cutoff_ns
+                        or not self._complete_feedback_fresh()):
+                    return
+                self.last_command = dict(self.joint_state)
+                self.generic_aux_command.clear()
+            if not self.last_command:
+                self.last_command = dict(self.joint_state)
+        if pending_check:
             for arm in self.arms.values():
                 arm.target_local = None
             self.body.target_base = None
             self._sync_model()
             self._ensure_generic_targets()
-            self.source_feedback_pending = False
+            with state_lock:
+                self.source_feedback_pending = False
             if (self.enabled and self.control_source == "vr" and self.backend in {"v23", "generic"}
                     and not (self.intervention and self.intervention.active)):
                 # Hold the arms at measured positions while waiting for the IK reset/Grip.
                 names = self.arms["right"].joint_names + self.arms["left"].joint_names
-                hold = JointState(name=list(names), position=[self.joint_state[name] for name in names])
+                hold = JointState(name=list(names), position=[joint_state_next[name] for name in names])
                 hold.header.stamp = self.get_clock().now().to_msg()
                 self.command_pub.publish(hold)
-        if not self.last_command:
-            self.last_command = dict(self.joint_state)
         if not self.initial_homing_done and self.hardware_ready and self.control_source == "vr":
             self._check_initial_homing()
         if self.external_ik and self.solver_rearm.observe_feedback():
@@ -1130,87 +1171,94 @@ class RobotArmTeleopNode(Node):
             RobotArmTeleopNode._forward_generic_command(self, message)
             return
         started = _measure_clocks()
-        metrics['received_total'] += 1
-        metrics['last_received_monotonic_ns'] = started[0]
         source_ns = int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec)
-        metrics['last_received_source_stamp_ns'] = source_ns
         received_wall_ns = time.time_ns()
-        metrics['last_received_wall_ns'] = received_wall_ns
         # This is observation only. Avoid an additional native ROS Clock.now()
         # read on the forwarding path. Simulated/foreign epoch headers cannot
         # be compared to wall time and must not masquerade as control latency.
         comparable = source_ns > 0 and abs(received_wall_ns-source_ns) <= 86_400_000_000_000
         source_age = (received_wall_ns-source_ns)/1e6 if comparable else None
-        metrics['last_receive_source_age_comparable'] = comparable
-        metrics['source_age_incomparable_total'] += not comparable
-        metrics['last_receive_source_age_ms'] = source_age
-        previous_max = metrics['max_receive_source_age_ms']
-        if source_age is not None:
-            metrics['max_receive_source_age_ms'] = source_age if previous_max is None else max(previous_max, source_age)
-            metrics['_source_ages'].append((started[0], source_age))
+        state_lock = getattr(self, "_command_state_lock", None) or nullcontext()
+        with state_lock:
+            metrics['received_total'] += 1
+            metrics['last_received_monotonic_ns'] = started[0]
+            metrics['last_received_source_stamp_ns'] = source_ns
+            metrics['last_received_wall_ns'] = received_wall_ns
+            metrics['last_receive_source_age_comparable'] = comparable
+            metrics['source_age_incomparable_total'] += not comparable
+            metrics['last_receive_source_age_ms'] = source_age
+            previous_max = metrics['max_receive_source_age_ms']
+            if source_age is not None:
+                metrics['max_receive_source_age_ms'] = source_age if previous_max is None else max(previous_max, source_age)
+                metrics['_source_ages'].append((started[0], source_age))
         try:
             rejected = RobotArmTeleopNode._forward_generic_command(self, message)
             if rejected is not None:
-                metrics['rejected'][rejected] += 1
+                with state_lock:
+                    metrics['rejected'][rejected] += 1
         except Exception:
-            metrics['callback_errors'] += 1
+            with state_lock:
+                metrics['callback_errors'] += 1
             raise
         finally:
             finished = _measure_clocks()
-            _record_elapsed(metrics['callback'], finished[0]-started[0], finished[1]-started[1])
+            with state_lock:
+                _record_elapsed(metrics['callback'], finished[0]-started[0], finished[1]-started[1])
 
     def _forward_generic_command(self, message: JointState) -> str | None:
-        if getattr(self, "intervention", None) and self.intervention.active:
-            return 'intervention_active'
-        if self.control_source != "vr":
-            return 'source_not_vr'
-        if self.source_feedback_pending:
-            return 'source_feedback_pending'
-        if self.backend == "motion":
-            return 'motion_backend'  # Shared RTC output goes directly to the selected boundary.
-        if len(message.name) != len(message.position):
-            return 'length_mismatch'
-        if not all(math.isfinite(float(value)) for value in message.position):
-            return 'nonfinite_position'
-        now = self._monotonic()
-        previous_stamp = self.generic_command_stamp
-        self.generic_command_stamp = now
-        self.generic_command_count += 1
-        if not self.enabled:
-            return 'disabled'
-        if not self.hardware_ready:
-            return 'hardware_not_ready'
-        if self.homing:
-            return 'homing'
-        if not self._ensure_vr_feedback():
-            return 'stale_feedback'
-        if self.solver_rearm.blocked:
-            stamp_ns = (
-                int(message.header.stamp.sec) * 1_000_000_000
-                + int(message.header.stamp.nanosec)
-            )
-            if self.hardware_ready and self.solver_rearm.observe_solver_output(stamp_ns):
-                self.get_logger().info(
-                    "fresh post-reset IK output received; release and press right Grip to resume"
+        state_lock = getattr(self, "_command_state_lock", None) or nullcontext()
+        with state_lock:
+            if getattr(self, "intervention", None) and self.intervention.active:
+                return 'intervention_active'
+            if self.control_source != "vr":
+                return 'source_not_vr'
+            if self.source_feedback_pending:
+                return 'source_feedback_pending'
+            if self.backend == "motion":
+                return 'motion_backend'  # Shared RTC output goes directly to the selected boundary.
+            if len(message.name) != len(message.position):
+                return 'length_mismatch'
+            if not all(math.isfinite(float(value)) for value in message.position):
+                return 'nonfinite_position'
+            now = self._monotonic()
+            self.generic_command_stamp = now
+            self.generic_command_count += 1
+            if not self.enabled:
+                return 'disabled'
+            if not self.hardware_ready:
+                return 'hardware_not_ready'
+            if self.homing:
+                return 'homing'
+            if not self._ensure_vr_feedback():
+                return 'stale_feedback'
+            if self.solver_rearm.blocked:
+                stamp_ns = (
+                    int(message.header.stamp.sec) * 1_000_000_000
+                    + int(message.header.stamp.nanosec)
                 )
-        merged = dict(zip(message.name, (float(value) for value in message.position)))
-        arms_active = (
-            not self.solver_rearm.blocked
-            and any(self.arms[side].active for side in ("right", "left"))
-        )
-        if not arms_active:
-            for arm in self.arms.values():
-                for name in arm.joint_names:
-                    merged[name] = float(
-                        self.last_command.get(
-                            name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
-                        )
+                if self.hardware_ready and self.solver_rearm.observe_solver_output(stamp_ns):
+                    self.get_logger().info(
+                        "fresh post-reset IK output received; release and press right Grip to resume"
                     )
-        merged.update(self.generic_aux_command)
-        if not self.body.active:
-            for name in self.body.joint_names:
-                merged.pop(name, None)
-        if arms_active or self.body.active:
+            merged = dict(zip(message.name, (float(value) for value in message.position)))
+            arms_active = (
+                not self.solver_rearm.blocked
+                and any(self.arms[side].active for side in ("right", "left"))
+            )
+            body_active = self.body.active
+            if not arms_active:
+                for arm in self.arms.values():
+                    for name in arm.joint_names:
+                        merged[name] = float(
+                            self.last_command.get(
+                                name, self.joint_state.get(name, self.initial_joints.get(name, 0.0))
+                            )
+                        )
+            merged.update(self.generic_aux_command)
+            if not body_active:
+                for name in self.body.joint_names:
+                    merged.pop(name, None)
+        if arms_active or body_active:
             if not self._collision_command_allowed(merged, now):
                 return 'collision'
         output = JointState()
@@ -1225,32 +1273,37 @@ class RobotArmTeleopNode(Node):
             try:
                 self.command_pub.publish(output)
             except Exception:
-                metrics['publish_errors'] += 1
+                with state_lock:
+                    metrics['publish_errors'] += 1
                 raise
             finally:
                 finished = _measure_clocks()
-                _record_elapsed(metrics['publish'], finished[0]-started[0], finished[1]-started[1])
-            previous = metrics['last_published_monotonic_ns']
-            if previous:
-                gap = (started[0]-previous)/1e6
-                metrics['last_publication_gap_ms'] = gap
-                metrics['max_publication_gap_ms'] = max(metrics['max_publication_gap_ms'], gap)
-                metrics['_publication_gaps'].append((started[0], gap))
-            metrics['published_total'] += 1
-            metrics['last_published_monotonic_ns'] = started[0]
-            metrics['last_published_source_stamp_ns'] = (
-                int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec))
-        self.last_command.update(merged)
+                with state_lock:
+                    _record_elapsed(metrics['publish'], finished[0]-started[0], finished[1]-started[1])
+            with state_lock:
+                previous = metrics['last_published_monotonic_ns']
+                if previous:
+                    gap = (started[0]-previous)/1e6
+                    metrics['last_publication_gap_ms'] = gap
+                    metrics['max_publication_gap_ms'] = max(metrics['max_publication_gap_ms'], gap)
+                    metrics['_publication_gaps'].append((started[0], gap))
+                metrics['published_total'] += 1
+                metrics['last_published_monotonic_ns'] = started[0]
+                metrics['last_published_source_stamp_ns'] = (
+                    int(message.header.stamp.sec)*1_000_000_000 + int(message.header.stamp.nanosec))
+        with state_lock:
+            self.last_command.update(merged)
 
     def _stop_callback(self, message: Bool) -> None:
         if message.data:
-            self.enabled = False
-            self.stop_reason = "emergency stop topic"
-            self.waist_output_enabled = False
-            self.waist_clutch_rearm_required = True
-            for name in self.body.joint_names:
-                self.generic_aux_command.pop(name, None)
-            self._release_all(send_base_zero=True)
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                self.enabled = False
+                self.stop_reason = "emergency stop topic"
+                self.waist_output_enabled = False
+                self.waist_clutch_rearm_required = True
+                for name in self.body.joint_names:
+                    self.generic_aux_command.pop(name, None)
+                self._release_all(send_base_zero=True)
             self.get_logger().error("Teleop disabled by emergency stop")
 
     def _enabled_callback(self, message: Bool) -> None:
@@ -1259,13 +1312,14 @@ class RobotArmTeleopNode(Node):
         if message.data and not self.enabled:
             self._resume_teleop("teleoperation enabled by command topic")
         elif not message.data:
-            self.enabled = False
-            self.stop_reason = "disabled by command topic"
-            self.waist_output_enabled = False
-            self.waist_clutch_rearm_required = True
-            for name in self.body.joint_names:
-                self.generic_aux_command.pop(name, None)
-            self._release_all(send_base_zero=True)
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                self.enabled = False
+                self.stop_reason = "disabled by command topic"
+                self.waist_output_enabled = False
+                self.waist_clutch_rearm_required = True
+                for name in self.body.joint_names:
+                    self.generic_aux_command.pop(name, None)
+                self._release_all(send_base_zero=True)
             self.get_logger().info("Teleop disabled by command topic")
 
     def _enable_service(self, _request: Trigger.Request, response: Trigger.Response):
@@ -1376,8 +1430,9 @@ class RobotArmTeleopNode(Node):
         self.body.target_head_local = None
         self.waist_output_enabled = False
         self.waist_clutch_rearm_required = True
-        for name in self.body.joint_names:
-            self.generic_aux_command.pop(name, None)
+        with (getattr(self, "_command_state_lock", None) or nullcontext()):
+            for name in self.body.joint_names:
+                self.generic_aux_command.pop(name, None)
         if send_base_zero:
             self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
 
@@ -1510,10 +1565,11 @@ class RobotArmTeleopNode(Node):
             else:
                 next_values[index] = previous[index] + step
             self.homing_velocity[name] = new_velocity
-        for name, value in zip(names, next_values):
-            command[name] = float(value)
-            if name in self.body.joint_names or name in self.neck_joint_names:
-                self.generic_aux_command[name] = float(value)
+        with (getattr(self, "_command_state_lock", None) or nullcontext()):
+            for name, value in zip(names, next_values):
+                command[name] = float(value)
+                if name in self.body.joint_names or name in self.neck_joint_names:
+                    self.generic_aux_command[name] = float(value)
 
         feedback_error = max(
             abs(self.joint_state.get(name, self.initial_joints[name]) - self.initial_joints[name]) for name in names
@@ -1530,11 +1586,12 @@ class RobotArmTeleopNode(Node):
             >= float(self.control.get("home_feedback_timeout", 2.0))
         )
         if reached and feedback_requirement_met:
-            for name, value in zip(names, target):
-                command[name] = float(value)
-                if name in self.body.joint_names or name in self.neck_joint_names:
-                    self.generic_aux_command[name] = float(value)
-            self.homing = False
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                for name, value in zip(names, target):
+                    command[name] = float(value)
+                    if name in self.body.joint_names or name in self.neck_joint_names:
+                        self.generic_aux_command[name] = float(value)
+                self.homing = False
             self.homing_velocity.clear()
             for name in names:
                 bullet.resetJointState(
@@ -1599,7 +1656,8 @@ class RobotArmTeleopNode(Node):
         return self.waist_output_enabled
 
     def _sync_model(self) -> None:
-        _reset_model_joint_states(self)
+        with (getattr(self, "_model_lock", None) or nullcontext()):
+            _reset_model_joint_states(self)
 
     def _initialize_collision_safety(self) -> None:
         collision_links = {
@@ -1671,72 +1729,73 @@ class RobotArmTeleopNode(Node):
             return None
         previous: list[tuple[int, float]] = []
         updated: set[int] = set()
-        try:
-            for name, value in command.items():
-                index = self.joint_by_name.get(name)
-                if index is None or index not in self.dof_by_joint or index in updated:
-                    continue
-                previous.append(
-                    (
-                        index,
-                        float(
-                            bullet.getJointState(
-                                self.robot_id,
-                                index,
-                                physicsClientId=self.physics_client,
-                            )[0]
-                        ),
+        with (getattr(self, "_model_lock", None) or nullcontext()):
+            try:
+                for name, value in command.items():
+                    index = self.joint_by_name.get(name)
+                    if index is None or index not in self.dof_by_joint or index in updated:
+                        continue
+                    previous.append(
+                        (
+                            index,
+                            float(
+                                bullet.getJointState(
+                                    self.robot_id,
+                                    index,
+                                    physicsClientId=self.physics_client,
+                                )[0]
+                            ),
+                        )
                     )
-                )
-                updated.add(index)
-                bullet.resetJointState(
-                    self.robot_id,
-                    index,
-                    float(value),
-                    physicsClientId=self.physics_client,
-                )
+                    updated.add(index)
+                    bullet.resetJointState(
+                        self.robot_id,
+                        index,
+                        float(value),
+                        physicsClientId=self.physics_client,
+                    )
 
-            aabbs = {
-                index: bullet.getAABB(
-                    self.robot_id, index, physicsClientId=self.physics_client
-                )
-                for index in self.collision_links
-            }
-            closest: tuple[str, str, float, float] | None = None
-            for pair in self.collision_pairs:
-                clearance = self.collision_clearances[pair]
-                if aabb_distance(aabbs[pair[0]], aabbs[pair[1]]) > clearance:
-                    continue
-                points = bullet.getClosestPoints(
-                    self.robot_id,
-                    self.robot_id,
-                    clearance,
-                    linkIndexA=pair[0],
-                    linkIndexB=pair[1],
-                    physicsClientId=self.physics_client,
-                )
-                if not points:
-                    continue
-                distance = min(float(point[8]) for point in points)
-                if distance >= clearance:
-                    continue
-                candidate = (
-                    self.link_name_by_index[pair[0]],
-                    self.link_name_by_index[pair[1]],
-                    distance,
-                    clearance,
-                )
-                if closest is None or distance - clearance < closest[2] - closest[3]:
-                    closest = candidate
-            return closest
-        finally:
-            for index, value in previous:
-                bullet.resetJointState(
-                    self.robot_id,
-                    index,
-                    value,
-                    physicsClientId=self.physics_client,
-                )
+                aabbs = {
+                    index: bullet.getAABB(
+                        self.robot_id, index, physicsClientId=self.physics_client
+                    )
+                    for index in self.collision_links
+                }
+                closest: tuple[str, str, float, float] | None = None
+                for pair in self.collision_pairs:
+                    clearance = self.collision_clearances[pair]
+                    if aabb_distance(aabbs[pair[0]], aabbs[pair[1]]) > clearance:
+                        continue
+                    points = bullet.getClosestPoints(
+                        self.robot_id,
+                        self.robot_id,
+                        clearance,
+                        linkIndexA=pair[0],
+                        linkIndexB=pair[1],
+                        physicsClientId=self.physics_client,
+                    )
+                    if not points:
+                        continue
+                    distance = min(float(point[8]) for point in points)
+                    if distance >= clearance:
+                        continue
+                    candidate = (
+                        self.link_name_by_index[pair[0]],
+                        self.link_name_by_index[pair[1]],
+                        distance,
+                        clearance,
+                    )
+                    if closest is None or distance - clearance < closest[2] - closest[3]:
+                        closest = candidate
+                return closest
+            finally:
+                for index, value in previous:
+                    bullet.resetJointState(
+                        self.robot_id,
+                        index,
+                        value,
+                        physicsClientId=self.physics_client,
+                    )
 
     def _block_colliding_command(
         self,
@@ -3301,9 +3360,13 @@ class RobotArmTeleopNode(Node):
             finger = JointState()
             finger.header.stamp = self.get_clock().now().to_msg()
             finger.name = list(cfg["finger_joint_names"])
-            opened = np.asarray(cfg["finger_open"], dtype=float)
-            closed = np.asarray(cfg["finger_closed"], dtype=float)
-            finger.position = list(opened + trigger * (closed - opened))
+            cached = getattr(self, "_gripper_open_closed", None)
+            if cached is not None and side in cached:
+                opened, closed = cached[side]
+            else:
+                opened = np.asarray(cfg["finger_open"], dtype=float)
+                closed = np.asarray(cfg["finger_closed"], dtype=float)
+            finger.position = (opened + trigger * (closed - opened)).tolist()
             binary_state_joint = cfg.get("binary_state_joint")
             if binary_state_joint:
                 finger.name.append(str(binary_state_joint))
@@ -3450,8 +3513,10 @@ class RobotArmTeleopNode(Node):
     def _publish_generic_grippers(self, now: float) -> None:
         command: dict[str, float] = {}
         self._update_grippers(command, now)
-        self.generic_aux_command.update(command)
-        self.last_command.update(command)
+        if command:
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                self.generic_aux_command.update(command)
+                self.last_command.update(command)
 
     def _generic_control_tick(
         self, now: float, feedback_fresh: bool, command: dict[str, float] | None
@@ -3539,30 +3604,35 @@ class RobotArmTeleopNode(Node):
 
         body_command: dict[str, float] = {}
         if body_requested:
-            if not self.body.active:
-                self._engage_body()
-            self._update_body(body_command)
-            self.generic_aux_command.update(body_command)
-            self.last_command.update(body_command)
+            with (getattr(self, "_model_lock", None) or nullcontext()):
+                if not self.body.active:
+                    self._engage_body()
+                self._update_body(body_command)
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                self.generic_aux_command.update(body_command)
+                self.last_command.update(body_command)
         elif self.body.active:
-            self.body.active = False
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                self.body.active = False
+                for name in self.body.joint_names:
+                    self.generic_aux_command.pop(name, None)
             self.body.reference_head = None
             self.body.reference_torso = None
             self.body.reference_target_link = None
             self.body.target_head_local = None
             self.body.smoothed_head_pose = None
             self.get_logger().info("head/left clutch released: waist + yaw hold")
-            for name in self.body.joint_names:
-                self.generic_aux_command.pop(name, None)
         else:
-            for name in self.body.joint_names:
-                self.generic_aux_command.pop(name, None)
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                for name in self.body.joint_names:
+                    self.generic_aux_command.pop(name, None)
 
         neck_command: dict[str, float] = {}
         self._update_neck_joints(neck_command, now)
         if neck_command:
-            self.generic_aux_command.update(neck_command)
-            self.last_command.update(neck_command)
+            with (getattr(self, "_command_state_lock", None) or nullcontext()):
+                self.generic_aux_command.update(neck_command)
+                self.last_command.update(neck_command)
 
         if not base_allowed and self.collision_blocked:
             self.head_velocity_reference = None
@@ -3579,24 +3649,25 @@ class RobotArmTeleopNode(Node):
             )
 
         arm_was_active = any(arm.active for arm in self.arms.values())
-        for side in ("right", "left"):
-            arm = self.arms[side]
-            pose_fresh = now - arm.pose_stamp <= float(self.control["pose_timeout"])
-            if arms_requested and pose_fresh:
-                if not arm.active:
-                    self._engage_arm(arm)
-                if arm.active:
-                    self._update_arm_target(arm)
-            elif arm.active:
-                arm.active = False
-                arm.reference_vr = None
-                arm.reference_local_ee = None
-                arm.target_world = None
-            elif not arms_requested:
-                if arm.target_local is None:
-                    arm.target_local = self._relative_pose(
-                        self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-                    )
+        with (getattr(self, "_model_lock", None) or nullcontext()):
+            for side in ("right", "left"):
+                arm = self.arms[side]
+                pose_fresh = now - arm.pose_stamp <= float(self.control["pose_timeout"])
+                if arms_requested and pose_fresh:
+                    if not arm.active:
+                        self._engage_arm(arm)
+                    if arm.active:
+                        self._update_arm_target(arm)
+                elif arm.active:
+                    arm.active = False
+                    arm.reference_vr = None
+                    arm.reference_local_ee = None
+                    arm.target_world = None
+                elif not arms_requested:
+                    if arm.target_local is None:
+                        arm.target_local = self._relative_pose(
+                            self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                        )
         if arms_requested and not arm_was_active and any(
             arm.active for arm in self.arms.values()
         ):
@@ -3824,42 +3895,56 @@ class RobotArmTeleopNode(Node):
                 self._publish_target_poses()
         self._publish_status(now, feedback_fresh)
 
+    def _arm_base_frame(self) -> str:
+        cached = getattr(self, "_arm_base_frame_id", None)
+        if cached is not None:
+            return cached
+        base_links = {config["base_link"] for config in self.config["arms"].values()}
+        cached = next(iter(base_links)) if len(base_links) == 1 else "hc_tj_arm_bases"
+        self._arm_base_frame_id = cached
+        return cached
+
+    @staticmethod
+    def _pose_from_tuple(position: Any, orientation: Any) -> Pose:
+        return Pose(
+            position=Point(x=float(position[0]), y=float(position[1]), z=float(position[2])),
+            orientation=Quaternion(
+                x=float(orientation[0]),
+                y=float(orientation[1]),
+                z=float(orientation[2]),
+                w=float(orientation[3]),
+            ),
+        )
+
     def _publish_target_poses(self) -> None:
         stamp = self.get_clock().now().to_msg()
+        frame_id = self._arm_base_frame()
         message = PoseArray()
         message.header.stamp = stamp
-        base_links = {config["base_link"] for config in self.config["arms"].values()}
-        message.header.frame_id = (
-            next(iter(base_links))
-            if len(base_links) == 1
-            else "hc_tj_arm_bases"
-        )
+        message.header.frame_id = frame_id
         controller_message = PoseArray()
         controller_message.header.stamp = stamp
         controller_message.header.frame_id = (
-            "generic_task_bases" if self.external_ik else message.header.frame_id
+            "generic_task_bases" if self.external_ik else frame_id
         )
+        link_poses: dict[int, Any] = {}
+        def link_pose(index: int) -> Any:
+            pose = link_poses.get(index)
+            if pose is None:
+                pose = self._link_pose(index)
+                link_poses[index] = pose
+            return pose
         for side in ("right", "left"):
             arm = self.arms[side]
             local = arm.target_local or self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                link_pose(arm.base_index), link_pose(arm.ee_index)
             )
-            pose = Pose()
-            pose.position.x, pose.position.y, pose.position.z = local[0]
-            (
-                pose.orientation.x,
-                pose.orientation.y,
-                pose.orientation.z,
-                pose.orientation.w,
-            ) = local[1]
-            message.poses.append(pose)
+            message.poses.append(self._pose_from_tuple(local[0], local[1]))
             controller_local = local
             if self.external_ik:
-                target_world = self._world_pose(
-                    self._link_pose(arm.base_index), local
-                )
+                target_world = self._world_pose(link_pose(arm.base_index), local)
                 controller_local = self._relative_pose(
-                    self._link_pose(self.generic_task_base_indices[side]),
+                    link_pose(self.generic_task_base_indices[side]),
                     target_world,
                 )
 
@@ -3867,32 +3952,14 @@ class RobotArmTeleopNode(Node):
             # solver already enforces the robot's real joint limits and applies
             # singularity damping; clipping this target used to create a false
             # wall at 0.62-0.65 m and made otherwise reachable poses impossible.
-            controller_pose = Pose()
-            (
-                controller_pose.position.x,
-                controller_pose.position.y,
-                controller_pose.position.z,
-            ) = controller_local[0]
-            (
-                controller_pose.orientation.x,
-                controller_pose.orientation.y,
-                controller_pose.orientation.z,
-                controller_pose.orientation.w,
-            ) = controller_local[1]
-            controller_message.poses.append(controller_pose)
+            controller_message.poses.append(
+                self._pose_from_tuple(controller_local[0], controller_local[1])
+            )
         if self.external_ik and bool(self.body_config.get("include_in_controller_tasks", False)):
             torso = self.body.target_base or self._relative_pose(
-                self._root_pose(), self._link_pose(self.body.torso_index)
+                self._root_pose(), link_pose(self.body.torso_index)
             )
-            pose = Pose()
-            pose.position.x, pose.position.y, pose.position.z = torso[0]
-            (
-                pose.orientation.x,
-                pose.orientation.y,
-                pose.orientation.z,
-                pose.orientation.w,
-            ) = torso[1]
-            controller_message.poses.append(pose)
+            controller_message.poses.append(self._pose_from_tuple(torso[0], torso[1]))
         if getattr(self, 'intervention', None) and self.intervention.active:
             if self.backend == "v23":
                 self.intervention.poses(controller_message, action_pose=message)
@@ -3903,36 +3970,36 @@ class RobotArmTeleopNode(Node):
         self.controller_target_pub.publish(controller_message)
 
     def _publish_actual_poses(self) -> None:
+        stamp = self.get_clock().now().to_msg()
         if self.actual_pub is None and self.record_actual_pub is None:
-            self._publish_head_tracking_poses()
+            with (getattr(self, "_model_lock", None) or nullcontext()):
+                self._publish_head_tracking_poses(stamp=stamp)
             return
         message = PoseArray()
-        message.header.stamp = self.get_clock().now().to_msg()
-        base_links = {config["base_link"] for config in self.config["arms"].values()}
-        message.header.frame_id = (
-            next(iter(base_links)) if len(base_links) == 1 else "hc_tj_arm_bases"
-        )
-        for side in ("right", "left"):
-            arm = self.arms[side]
-            local = self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
-            )
-            pose = Pose()
-            pose.position.x, pose.position.y, pose.position.z = local[0]
-            (
-                pose.orientation.x,
-                pose.orientation.y,
-                pose.orientation.z,
-                pose.orientation.w,
-            ) = local[1]
-            message.poses.append(pose)
+        message.header.stamp = stamp
+        message.header.frame_id = self._arm_base_frame()
+        link_poses: dict[int, Any] = {}
+        with (getattr(self, "_model_lock", None) or nullcontext()):
+            for side in ("right", "left"):
+                arm = self.arms[side]
+                base_pose = link_poses.get(arm.base_index)
+                if base_pose is None:
+                    base_pose = self._link_pose(arm.base_index)
+                    link_poses[arm.base_index] = base_pose
+                ee_pose = link_poses.get(arm.ee_index)
+                if ee_pose is None:
+                    ee_pose = self._link_pose(arm.ee_index)
+                    link_poses[arm.ee_index] = ee_pose
+                local = self._relative_pose(base_pose, ee_pose)
+                message.poses.append(self._pose_from_tuple(local[0], local[1]))
         if self.actual_pub:
             self.actual_pub.publish(message)
         if self.record_actual_pub:
             self.record_actual_pub.publish(message)
-        self._publish_head_tracking_poses()
+        with (getattr(self, "_model_lock", None) or nullcontext()):
+            self._publish_head_tracking_poses(stamp=stamp)
 
-    def _publish_head_tracking_poses(self) -> None:
+    def _publish_head_tracking_poses(self, stamp: Any = None) -> None:
         """Feedback and mapped head target, relative to the model base pose."""
         head_link = self.body_config.get("visualization_head_link")
         if head_link not in self.link_by_name:
@@ -3956,14 +4023,12 @@ class RobotArmTeleopNode(Node):
                 )
                 target = self._world_pose(body.target_base, head_in_torso)
         message = PoseArray()
-        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.stamp = stamp if stamp is not None else self.get_clock().now().to_msg()
         message.header.frame_id = "robot_base"
-        for position, orientation in (actual, target):
-            pose = Pose()
-            pose.position.x, pose.position.y, pose.position.z = position
-            (pose.orientation.x, pose.orientation.y,
-             pose.orientation.z, pose.orientation.w) = orientation
-            message.poses.append(pose)
+        message.poses.extend((
+            self._pose_from_tuple(actual[0], actual[1]),
+            self._pose_from_tuple(target[0], target[1]),
+        ))
         self.head_visualization_pub.publish(message)
 
     def _publish_status(self, now: float, feedback_fresh: bool) -> None:
@@ -3998,7 +4063,10 @@ class RobotArmTeleopNode(Node):
                 "command_messages": self.generic_command_count,
                 # Bounded counters/timings; formatting stays in this existing
                 # low-rate status publication, outside the command callback.
-                "pipeline": _generic_pipeline_snapshot(getattr(self, 'generic_command_pipeline', None)),
+                "pipeline": _generic_pipeline_snapshot(
+                    getattr(self, 'generic_command_pipeline', None),
+                    getattr(self, '_command_state_lock', None),
+                ),
                 "rearm_state": self.solver_rearm.state,
                 "hardware_ready": self.hardware_ready,
             },

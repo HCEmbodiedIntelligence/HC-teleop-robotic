@@ -19,9 +19,19 @@ from std_msgs.msg import Bool, Header, String
 from tf2_msgs.msg import TFMessage
 
 HERE = Path(__file__).resolve()
+REPO_ROOT = HERE.parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 SOURCE = HERE.parent.parent / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
+
+try:
+    from middleware.core.qos_event_observer import QosEventObserver
+    from middleware.core.ros_executor import create_single_threaded_executor
+except ImportError:
+    QosEventObserver = None
+    create_single_threaded_executor = None
 
 from controller_v2_3 import ControllerV23, TargetTransform  # noqa: E402
 
@@ -284,12 +294,31 @@ def main(argv=None) -> None:
     arguments, ros_arguments = parser.parse_known_args(argv)
     rclpy.init(args=ros_arguments)
     node = None
+    executor = None
+    qos_observer = None
     try:
         node = ControllerNode(arguments.config)
-        rclpy.spin(node)
+        if QosEventObserver is not None:
+            qos_observer = QosEventObserver([node])
+            qos_observer.start()
+        if create_single_threaded_executor is not None:
+            executor = create_single_threaded_executor()
+            executor.add_node(node)
+            executor.spin()
+        else:
+            rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
+        if qos_observer is not None:
+            try:
+                qos_observer.close()
+            except Exception:
+                pass
+        if executor is not None:
+            executor.shutdown(timeout_sec=1.0)
+            if node is not None:
+                executor.remove_node(node)
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

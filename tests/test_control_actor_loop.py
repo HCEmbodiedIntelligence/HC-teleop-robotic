@@ -429,3 +429,183 @@ def test_pending_revoke_blocks_positive_permit_but_allows_negative_permit():
     permit.publish.assert_not_called()
     bridge._permit_sender(bridge.ownership.token, 'revoke', time.time_ns(), True)
     permit.publish.assert_called_once()
+
+
+def test_actor_wake_and_10ms_idle_timeout():
+    rig = actor()
+    bridge = rig.bridge
+    timeouts = []
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=lambda timeout_sec=0.0: timeouts.append(timeout_sec)))
+    assert timeouts == [0.001]
+
+    wakes = []
+    bridge._actor_wake = lambda: wakes.append(True)
+    timeouts.clear()
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=lambda timeout_sec=0.0: timeouts.append(timeout_sec)))
+    assert timeouts == [0.01]
+
+    assert bridge._enqueue('publish', ('/x', 'std_msgs/msg/Bool', {'data': True}))
+    assert bridge._enqueue('stop', {})
+    bridge.stop()
+    assert len(wakes) == 3
+    bridge._drain_actor_targets()
+
+
+def test_control_worker_ipc_wake_handles_requests_and_sentinel(monkeypatch):
+    import multiprocessing as mp
+    import os
+    import threading
+    from middleware.core import control_process
+    from middleware.core.ros_bridge import RosBridge
+
+    ctx = mp.get_context('spawn')
+    channels = {
+        name: ctx.Queue(maxsize=8)
+        for name in ('requests', 'urgent', 'replies', 'status', 'observers', 'observer_ros', 'hooks', 'hook_replies')
+    }
+    sent_r, sent_w = os.pipe()
+    channels.update(
+        boot='testboot',
+        parent_pid=os.getppid(),
+        parent_generation=ctx.Value('Q', 0),
+        core_epoch=ctx.Value('q', -1),
+        ownership_active=ctx.Value('b', False),
+        capture_ready=ctx.Value('b', False),
+        capture_ready_at=ctx.Value('d', 0.0),
+        failure_stop=ctx.Event(),
+        observer_ros_enabled=False,
+    )
+    monkeypatch.setattr(
+        control_process,
+        '_ParentLiveness',
+        lambda _pid: SimpleNamespace(parent=SimpleNamespace(sentinel=sent_r), is_alive=lambda: True),
+    )
+
+    woke_on_request = threading.Event()
+    woke_on_sentinel = threading.Event()
+    phase = ['request']
+
+    class WakeBridge(RosBridge):
+        def _run(self):
+            def wake():
+                if phase[0] == 'request':
+                    woke_on_request.set()
+                    self._actor_pump()
+                else:
+                    woke_on_sentinel.set()
+            self._actor_wake = wake
+            self._actor_ready()
+            assert woke_on_request.wait(timeout=2.0)
+            phase[0] = 'sentinel'
+            os.close(sent_w)
+            assert woke_on_sentinel.wait(timeout=2.0)
+
+    thread_errors = []
+    orig_excepthook = threading.excepthook
+    monkeypatch.setattr(threading, 'excepthook', lambda args: thread_errors.append(args.exc_value))
+    try:
+        worker = threading.Thread(
+            target=control_process._control_worker,
+            args=(dict(_control_actor_mode=True), channels, None, lambda cfg, emit: WakeBridge(cfg, emit)),
+        )
+        worker.start()
+        channels['requests'].put({'id': 0, 'op': 'clock'})
+        worker.join(timeout=5.0)
+        assert not worker.is_alive()
+        assert not thread_errors
+        assert woke_on_request.is_set()
+        assert woke_on_sentinel.is_set()
+    finally:
+        monkeypatch.setattr(threading, 'excepthook', orig_excepthook)
+        try:
+            os.close(sent_r)
+        except OSError:
+            pass
+        for q in channels.values():
+            if hasattr(q, 'close'):
+                q.close()
+
+
+def test_parse_cpu_list_and_pin_control_actor_cpu(monkeypatch):
+    import os
+    from middleware.core import control_process
+
+    assert control_process._parse_cpu_list('1-3, 6, 8-9\n') == {1, 2, 3, 6, 8, 9}
+    assert control_process._parse_cpu_list('') == set()
+
+    monkeypatch.setenv('HC_CONTROL_CPU', 'off')
+    assert control_process._pin_control_actor_cpu() == (None, None)
+
+    monkeypatch.setenv('HC_CONTROL_CPU', 'invalid')
+    assert control_process._pin_control_actor_cpu() == (None, None)
+
+    if hasattr(os, 'sched_getaffinity'):
+        orig = os.sched_getaffinity(0)
+        if orig:
+            cpu = next(iter(orig))
+            set_calls = []
+            monkeypatch.setenv('HC_CONTROL_CPU', str(cpu))
+            monkeypatch.setattr(os, 'sched_setaffinity', lambda pid, mask: set_calls.append((pid, set(mask))))
+            from unittest.mock import mock_open
+            import builtins
+            real_open = builtins.open
+            def fake_open(path, *a, **k):
+                if path == '/sys/devices/system/cpu/online':
+                    return mock_open(read_data=','.join(map(str, sorted(orig))))()
+                if path == '/sys/devices/system/cpu/isolated':
+                    return mock_open(read_data=str(cpu))()
+                return real_open(path, *a, **k)
+            monkeypatch.setattr(builtins, 'open', fake_open)
+            got_orig, non_iso = control_process._pin_control_actor_cpu()
+            assert got_orig == orig
+            assert set_calls == [(0, {cpu})]
+            if len(orig) > 1:
+                assert cpu not in non_iso
+
+            set_calls.clear()
+            monkeypatch.setenv('HC_CONTROL_CPU', 'auto')
+            def fake_open_isolated(path, *a, **k):
+                if path == '/sys/devices/system/cpu/online':
+                    return mock_open(read_data='0-11')()
+                if path == '/sys/devices/system/cpu/isolated':
+                    return mock_open(read_data='1-3')()
+                return real_open(path, *a, **k)
+            monkeypatch.setattr(builtins, 'open', fake_open_isolated)
+            monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: {0, 4, 5, 6, 7, 8, 9, 10, 11})
+            got_orig2, non_iso2 = control_process._pin_control_actor_cpu()
+            assert got_orig2 == {0, 4, 5, 6, 7, 8, 9, 10, 11}
+            assert set_calls == [(0, {3})]
+            assert non_iso2 == {0, 4, 5, 6, 7, 8, 9, 10, 11}
+
+
+def test_actor_checkpoint_separates_hot_path_from_snapshot_and_copies_joint_state():
+    from middleware.core.ros_bridge import _copy_actor_message
+    from middleware.core.control_process import _RecordingIngress
+    from sensor_msgs.msg import JointState
+
+    rig = actor()
+    bridge = rig.bridge
+    snapshot_flags = []
+    bridge._actor_pump = lambda: snapshot_flags.append('default')
+    bridge._actor_pump_checkpoint = lambda allow_snapshot=False: snapshot_flags.append(bool(allow_snapshot))
+
+    assert bridge.forward_live_command('vr', arm_target(rig), rig.boundary.publish_selected)
+    bridge._drain_actor_targets()
+    assert snapshot_flags and all(flag is False for flag in snapshot_flags)
+    snapshot_flags.clear()
+    bridge._actor_checkpoint(allow_snapshot=True)
+    assert snapshot_flags == ['default']
+
+    original = JointState(name=['Joint1_R'], position=[0.25], velocity=[0.1], effort=[0.2])
+    original.header.stamp.sec = 12
+    original.header.stamp.nanosec = 345
+    original.header.frame_id = 'base'
+    cloned = _copy_actor_message(original)
+    original.position[0] = 9.0
+    original.header.frame_id = 'mutated'
+    assert list(cloned.position) == [0.25]
+    assert cloned.header.frame_id == 'base'
+    assert cloned.header.stamp.sec == 12 and cloned.header.stamp.nanosec == 345
+
+    ingress = _RecordingIngress(resources=(), finish=threading.Event())
+    assert callable(ingress._enqueue_record)

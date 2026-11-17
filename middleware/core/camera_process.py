@@ -184,6 +184,7 @@ def _camera_worker(connection, config: dict[str, Any], domain_id: int):
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.qos import QoSProfile, ReliabilityPolicy
             from sensor_msgs.msg import CompressedImage, Image
+            from .ros_executor import create_single_threaded_executor
             context = Context()
             rclpy.init(args=[], context=context, domain_id=domain_id)
             node = rclpy.create_node(f"hc_camera_video_{os.getpid()}", context=context)
@@ -192,7 +193,7 @@ def _camera_worker(connection, config: dict[str, Any], domain_id: int):
             node.create_subscription(image_type, topic,
                 lambda msg: camera.handle_ros_message(topic, msg),
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-            executor = SingleThreadedExecutor(context=context)
+            executor = create_single_threaded_executor(SingleThreadedExecutor, context=context)
             executor.add_node(node)
             ros_thread = threading.Thread(target=executor.spin, name="camera-source", daemon=True)
             ros_thread.start()

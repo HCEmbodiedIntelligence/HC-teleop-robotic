@@ -152,3 +152,59 @@ def test_tick_samples_one_in_sixteen_and_splits_cpu_wall_without_extra_work(monk
         assert metrics['stages'][stage]['last_wall_ms'] == wall
         assert metrics['stages'][stage]['last_cpu_ms'] == cpu
     assert node._control_tick_sample is None
+
+
+def test_command_node_isolates_forwarding_and_concurrent_aux_snapshot(monkeypatch):
+    import threading
+    from pathlib import Path
+
+    rclpy = pytest.importorskip('rclpy')
+    root = Path(__file__).resolve().parents[1]
+    cfg = root / 'adapters/robots/x1/arm_teleop.yaml'
+    if not cfg.is_file():
+        pytest.skip('x1 arm_teleop.yaml missing')
+
+    monkeypatch.setenv('ROS_DOMAIN_ID', '231')
+    monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
+    monkeypatch.delenv('FASTRTPS_DEFAULT_PROFILES_FILE', raising=False)
+    inited = not rclpy.ok()
+    if inited:
+        rclpy.init()
+    cmd_node = None
+    node = None
+    try:
+        cmd_node = rclpy.create_node('test_cmd_node_isolated', enable_rosout=False, start_parameter_services=False)
+        node = teleop.RobotArmTeleopNode(str(cfg), backend='v23', command_node=cmd_node)
+        assert node._command_node is cmd_node
+        assert any(s.topic_name == node.control.get('generic_command_topic', '/control/solver/joint_targets')
+                   for s in cmd_node.subscriptions)
+        assert not any(s.topic_name == node.control.get('generic_command_topic', '/control/solver/joint_targets')
+                       for s in node.subscriptions)
+
+        errors = []
+        stop = threading.Event()
+        def writer():
+            try:
+                for idx in range(200):
+                    with node._command_state_lock:
+                        node.generic_aux_command['leg_1'] = float(idx) * 0.001
+                        node.generic_command_pipeline['_publication_gaps'].append((time.monotonic_ns(), 10.0))
+                        node.generic_command_pipeline['_source_ages'].append((time.monotonic_ns(), 1.0))
+                stop.set()
+            except Exception as exc:
+                errors.append(exc)
+                stop.set()
+        import time
+        t = threading.Thread(target=writer)
+        t.start()
+        while not stop.is_set():
+            teleop._generic_pipeline_snapshot(node.generic_command_pipeline, node._command_state_lock)
+        t.join(timeout=2.0)
+        assert not errors
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if cmd_node is not None:
+            cmd_node.destroy_node()
+        if inited and rclpy.ok():
+            rclpy.shutdown()

@@ -4,6 +4,7 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import select
 import subprocess
 import sys
 import threading
@@ -53,41 +54,55 @@ def _lower_recording_priority() -> None:
 
 def _counter_get(counter: Any) -> int:
     with counter.get_lock():
-        return int(counter.value)
+        return int(counter.get_obj().value)
 
 
 def _counter_set(counter: Any, value: int) -> None:
     with counter.get_lock():
-        counter.value = int(value)
+        counter.get_obj().value = int(value)
 
 
 def _counter_add(counter: Any, value: int = 1) -> None:
     with counter.get_lock():
-        counter.value += int(value)
+        counter.get_obj().value += int(value)
 
 
 def enqueue_record(resources, event, *, allow_closed=False, finished=None, capture_window=None):
     """Bound both message count and payload bytes under the ingress barrier."""
-    target, accepting, dropped, lock, accepted, queued_bytes, budget = resources
+    target, accepting, dropped, lock, accepted, queued_bytes, budget = resources[:7]
+    stats = resources[7] if len(resources) > 7 else None
+    bulk_target = resources[8] if len(resources) > 8 else None
     raw = event.get('_raw')
     size = len(raw)+1024 if isinstance(raw, bytes) else len(json.dumps(event, ensure_ascii=False).encode())+1024
+    dest = bulk_target if (bulk_target is not None and size > 16384) else target
     with lock:
-        if ((not accepting.is_set() and not allow_closed)
-                or (allow_closed and (finished is None or finished.is_set()))):
+        if not accepting.is_set() and not allow_closed:
+            if stats is not None: stats[2] += 1
+            return False
+        if allow_closed and (finished is None or finished.is_set()):
+            if stats is not None: stats[3] += 1
             return False
         if capture_window is not None and capture_window.enabled() and not capture_window.allows(event)[0]:
             return False
-        if _counter_get(queued_bytes)+size > budget:
+        next_bytes = _counter_get(queued_bytes)+size
+        if next_bytes > budget:
             _counter_add(dropped)
+            if stats is not None: stats[1] += 1
             return False
-        try:
-            target.put_nowait({**event, '_queue_bytes': size})
-        except queue.Full:
-            _counter_add(dropped)
-            return False
-        _counter_add(queued_bytes, size)
+        payload = {**event, '_queue_bytes': size}
+        _counter_set(queued_bytes, next_bytes)
+        if stats is not None: stats[4] = max(stats[4], next_bytes)
         _counter_add(accepted)
+    try:
+        dest.put_nowait(payload)
         return True
+    except queue.Full:
+        with lock:
+            _counter_add(queued_bytes, -size)
+            _counter_add(accepted, -1)
+            _counter_add(dropped)
+            if stats is not None: stats[0] += 1
+        return False
 
 
 def _get_msg_def(msg_type: str) -> bytes:
@@ -192,13 +207,23 @@ def _mcap_writer_process(
     recording_topics: tuple[tuple[str, str], ...] | None = None,
     capture_window: Any = None,
     action_label_policy: dict | None = None,
+    bulk_queue: Any = None,
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
+    os.environ.update(background_environment())
     _lower_recording_priority()
     record_only_topics = set()
     x1_capture = ordinary_x1_capture(metadata)
     from .recording_action_labels import ActionLabelBuffer, ACTION_TOPIC, PUBLISHED_TOPIC
-    label_buffer = ActionLabelBuffer(action_label_policy) if x1_capture and action_label_policy else None
+    label_buffer = (
+        ActionLabelBuffer(
+            action_label_policy,
+            delay_ns=150_000_000,
+            skew_wait_ns=500_000_000,
+            max_events=4096,
+        )
+        if x1_capture and action_label_policy else None
+    )
     schemas: dict[str, int] = {}
     channels: dict[tuple[str, str], int] = {}
     capture_audit = (CaptureAudit(capture_window=capture_window)
@@ -298,29 +323,75 @@ def _mcap_writer_process(
             # Do not report a recording as active until the destination file
             # has actually been opened and the MCAP header has been written.
             ready_event.set()
+            poller = None
+            poll_fds = set()
+            if bulk_queue is not None and hasattr(select, 'poll'):
+                candidate_poller = select.poll()
+                for q in (event_queue, bulk_queue):
+                    reader = getattr(q, '_reader', None)
+                    fd = reader.fileno() if reader is not None and hasattr(reader, 'fileno') else None
+                    if isinstance(fd, int):
+                        candidate_poller.register(fd, select.POLLIN)
+                        poll_fds.add(fd)
+                if poll_fds:
+                    poller = candidate_poller
             try:
                 while True:
                     if finish_event.is_set() and _counter_get(messages) >= _counter_get(accepted):
                         break
-                    try:
-                        event = event_queue.get(timeout=.1)
-                    except queue.Empty:
+                    batch = []
+                    while len(batch) < 256:
+                        try:
+                            batch.append(event_queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    if bulk_queue is not None:
+                        bulk_cap = 8 if batch else 32
+                        for _ in range(bulk_cap):
+                            try:
+                                batch.append(bulk_queue.get_nowait())
+                            except queue.Empty:
+                                break
+                    if not batch:
                         if label_buffer is not None:
                             for output in label_buffer.ready(time.time_ns()):
                                 write_event(output)
-                        continue
-
-                    if _matches_recording_topics(event, recording_topics):
-                        if label_buffer is not None and event.get('topic') in label_buffer.TOPICS:
-                            label_buffer.offer(event)
+                        if bulk_queue is None:
+                            try:
+                                batch.append(event_queue.get(timeout=.1))
+                            except queue.Empty:
+                                continue
+                            while len(batch) < 64:
+                                try:
+                                    batch.append(event_queue.get_nowait())
+                                except queue.Empty:
+                                    break
                         else:
-                            write_event(event)
+                            if poller is not None and poll_fds:
+                                for fd, mask in poller.poll(20):
+                                    if mask & (select.POLLERR | select.POLLHUP | select.POLLNVAL) and not (mask & select.POLLIN):
+                                        try:
+                                            poller.unregister(fd)
+                                        except (OSError, KeyError, ValueError):
+                                            pass
+                                        poll_fds.discard(fd)
+                            else:
+                                time.sleep(.005)
+                            continue
+                    batch_bytes = 0
+                    for event in batch:
+                        if _matches_recording_topics(event, recording_topics):
+                            if label_buffer is not None and event.get('topic') in label_buffer.TOPICS:
+                                label_buffer.offer(event)
+                            else:
+                                write_event(event)
+                        batch_bytes += int(event.get('_queue_bytes', 0))
                     if label_buffer is not None:
                         for output in label_buffer.ready(time.time_ns()):
                             write_event(output)
                     with ingress_lock:
-                        _counter_add(messages)
-                        _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
+                        _counter_add(messages, len(batch))
+                        _counter_add(queued_bytes, -batch_bytes)
             finally:
                 if label_buffer is not None:
                     for output in label_buffer.ready(time.time_ns(), final=True):
@@ -515,8 +586,10 @@ class TopicRecorder(CorrectionSupport):
         self.takeovers = None
         self._mp = mp.get_context("spawn")
         self._queue = self._mp.Queue(maxsize=int(config.get('queue_capacity', 8192)))
+        self._bulk_queue = self._mp.Queue(maxsize=int(config.get('bulk_queue_capacity', config.get('queue_capacity', 2048))))
         self._ingress_lock = self._mp.RLock()
         self._accepted = self._mp.Value('Q', 0)
+        self._ingress_stats = self._mp.Array('Q', 5, lock=False)
         self._queued_bytes = self._mp.Value('Q', 0)
         self._byte_budget = int(config.get('queue_bytes', 128*1024**2))
         self._finish_event = self._mp.Event()
@@ -549,7 +622,8 @@ class TopicRecorder(CorrectionSupport):
     def ipc_resources(self) -> tuple:
         """Resources inherited by the raw ROS subscription process."""
         return (self._queue, self._accepting_event, self._dropped, self._ingress_lock,
-                self._accepted, self._queued_bytes, self._byte_budget)
+                self._accepted, self._queued_bytes, self._byte_budget, self._ingress_stats,
+                None if self._reusable else self._bulk_queue)
 
     def convert_recordings_to_lerobot(self, identifiers):
         """Validate and enqueue a sequential, detached historical conversion batch."""
@@ -677,6 +751,7 @@ class TopicRecorder(CorrectionSupport):
             prepare_window()
         with self._lock:
             self._drain_queue(self._queue)
+            self._drain_queue(self._bulk_queue)
             self._drain_queue(self._error_queue)
             self._ready_event.clear()
             self._finish_event.clear()
@@ -711,6 +786,7 @@ class TopicRecorder(CorrectionSupport):
                     self._recording_topics,
                     self._capture_window,
                     (self.action_label_policy if self._capture_window.enabled() else None),
+                    self._bulk_queue,
                 ),
                 name="mcap-writer",
                 daemon=True,
@@ -732,16 +808,18 @@ class TopicRecorder(CorrectionSupport):
             if self.takeovers and not self._reusable:
                 self.takeovers.begin(self.path)
             with self._ingress_lock:
+                self._ingress_stats[:] = [0]*5
                 self._capture_window.open()
+            capture = self.publication_capture
+            if capture is not None:
+                try:
+                    window = self._capture_window.snapshot()
+                    capture.begin_generation(**({'window_start_ns': window['window_start_ns']} if window else {}))
+                except Exception:
+                    self.stop()
+                    raise
+            with self._ingress_lock:
                 self._accepting_event.set()
-        capture = self.publication_capture
-        if capture is not None:
-            try:
-                window = self._capture_window.snapshot()
-                capture.begin_generation(**({'window_start_ns': window['window_start_ns']} if window else {}))
-            except Exception:
-                self.stop()
-                raise
         return str(self.path)
 
     def request_capture_stop(self):
@@ -984,6 +1062,9 @@ class TopicRecorder(CorrectionSupport):
                 "accepted": _counter_get(self._accepted),
                 "queued_bytes": _counter_get(self._queued_bytes),
                 "queue_byte_budget": self._byte_budget,
+                "ingress_diagnostics": dict(zip(
+                    ('queue_capacity_rejections', 'byte_budget_rejections', 'closed_rejections',
+                     'finished_rejections', 'peak_queued_bytes'), self._ingress_stats)),
                 "dropped": _counter_get(self._dropped) + (capture_status or {}).get('dropped', 0),
                 "writer_pid": process.pid if process is not None else None,
                 "writer_priority": "low",

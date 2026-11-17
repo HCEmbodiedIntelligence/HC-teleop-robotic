@@ -12,6 +12,7 @@ import json
 import math
 
 from .capture_window import header_stamp_ns
+from .recording_cdr import read_joint_state, read_string, position_label
 
 
 ACTION_TOPIC = '/action/joint_states'
@@ -74,13 +75,12 @@ class RecordingActionLabels:
         self.owner_ns = 0
         self.last_feedback_ns = 0
         self.last_action_ns = 0
+        self.last_action_output_ns = 0
         self.published_frames = self.feedback_frames = self.rejected_feedback = 0
 
     @staticmethod
     def _joint_message(event, *, allow_placeholders=False):
-        from rclpy.serialization import deserialize_message
-        from sensor_msgs.msg import JointState
-        message = deserialize_message(event['_raw'], JointState)
+        message = read_joint_state(event['_raw'])
         if (not message.name or len(set(message.name)) != len(message.name)
                 or any(not name for name in message.name)
                 or len(message.position) != len(message.name)
@@ -111,9 +111,7 @@ class RecordingActionLabels:
         try:
             payload = event.get('payload')
             if payload is None:
-                from rclpy.serialization import deserialize_message
-                from std_msgs.msg import String
-                payload = json.loads(deserialize_message(event['_raw'], String).data)
+                payload = json.loads(read_string(event['_raw']))
             if isinstance(payload, dict):
                 self.status = deepcopy(payload)
         except Exception:
@@ -164,9 +162,7 @@ class RecordingActionLabels:
             if stamp >= self.owner_ns:
                 self.owner, self.owner_ns = None, stamp
                 try:
-                    from rclpy.serialization import deserialize_message
-                    from std_msgs.msg import String
-                    value = json.loads(deserialize_message(event['_raw'], String).data)
+                    value = json.loads(read_string(event['_raw']))
                     if isinstance(value, dict):
                         self.owner = value
                 except Exception:
@@ -194,9 +190,14 @@ class RecordingActionLabels:
             # In the rearm phase the training action comes from feedback;
             # the exact real command remains on PUBLISHED_TOPIC in all cases.
             in_labels = not (output_allowed is True and self._healthy_rearm(int(event['stamp_ns'])))
+            stamp = int(event['stamp_ns'])
+            if in_labels and stamp <= self.last_action_output_ns:
+                in_labels = False
             provenance['payload']['included_in_action_labels'] = in_labels
             if not in_labels:
                 result = result[1:]
+            else:
+                self.last_action_output_ns = stamp
             result.append(provenance)
             self.published_frames += 1
             return result
@@ -207,27 +208,26 @@ class RecordingActionLabels:
         if (output_allowed is not True or not self.names or not self._healthy_rearm(stamp)
                 or source_stamp is None
                 or not 0 <= stamp-source_stamp <= self.feedback_timeout_ns
-                or source_stamp <= self.last_feedback_ns):
+                or source_stamp <= self.last_feedback_ns
+                or source_stamp <= self.last_action_output_ns):
             self.rejected_feedback += 1
             return result
         try:
-            from rclpy.serialization import serialize_message
-            from sensor_msgs.msg import JointState
             feedback = self._joint_message(event, allow_placeholders=True)
             positions = dict(zip(feedback.name, feedback.position))
             if any(name not in positions or not math.isfinite(float(positions[name])) for name in self.names):
                 raise ValueError('feedback does not cover the command joint set')
             # Feedback velocities/efforts describe measured motion, not a hold
             # command. Keep only measured positions in this derived target.
-            message = JointState(name=list(self.names), position=[positions[name] for name in self.names])
-            message.header = deepcopy(feedback.header)
             derived = dict(kind='ros_message', topic=ACTION_TOPIC, msg_type=JOINT_TYPE,
-                           record_only=True, _raw=serialize_message(message),
+                           record_only=True, _raw=position_label(feedback.header_prefix, self.names,
+                               [positions[name] for name in self.names]),
                            stamp_ns=source_stamp, _recording_derived=True)
         except Exception:
             self.rejected_feedback += 1
             return result
         self.last_feedback_ns = source_stamp
+        self.last_action_output_ns = source_stamp
         self.feedback_frames += 1
         result.append(derived)
         result.append(self._provenance(derived, 'feedback_hold', source_topic=FEEDBACK_TOPIC,
@@ -260,21 +260,43 @@ class ActionLabelBuffer:
     the control process. Images never enter this buffer.
     """
     TOPICS = {ACTION_TOPIC, FEEDBACK_TOPIC, STATUS_TOPIC, OWNERSHIP_TOPIC}
+    _DDS_TOPICS = {FEEDBACK_TOPIC, STATUS_TOPIC, OWNERSHIP_TOPIC}
 
-    def __init__(self, policy, *, delay_ns=50_000_000, max_events=512):
+    def __init__(self, policy, *, delay_ns=50_000_000, max_events=512, skew_wait_ns=0):
         self.labels = RecordingActionLabels(**policy)
         self.delay_ns, self.max_events = delay_ns, max_events
+        self.skew_wait_ns = max(0, int(skew_wait_ns))
         self.heap = []
         self.sequence = 0
         self.pressure_flushes = 0
+        self.last_action_stamp_ns = None
+        self.last_dds_stamp_ns = None
 
     def offer(self, event):
+        stamp = int(event['stamp_ns'])
+        topic = event.get('topic')
+        if topic == ACTION_TOPIC:
+            if self.last_action_stamp_ns is None or stamp > self.last_action_stamp_ns:
+                self.last_action_stamp_ns = stamp
+        elif topic in self._DDS_TOPICS:
+            if self.last_dds_stamp_ns is None or stamp > self.last_dds_stamp_ns:
+                self.last_dds_stamp_ns = stamp
         self.sequence += 1
-        heapq.heappush(self.heap, (int(event['stamp_ns']), self.sequence, event))
+        heapq.heappush(self.heap, (stamp, self.sequence, event))
 
     def ready(self, now_ns, *, final=False):
-        while self.heap and (final or self.heap[0][0] <= now_ns-self.delay_ns
-                             or len(self.heap) > self.max_events):
+        while self.heap:
+            stamp = self.heap[0][0]
+            if not final and len(self.heap) <= self.max_events:
+                delay = self.delay_ns
+                if self.skew_wait_ns > delay and (
+                    self.last_action_stamp_ns is None
+                    or self.last_dds_stamp_ns is None
+                    or stamp > min(self.last_action_stamp_ns, self.last_dds_stamp_ns)
+                ):
+                    delay = self.skew_wait_ns
+                if stamp > now_ns - delay:
+                    break
             if len(self.heap) > self.max_events:
                 self.pressure_flushes += 1
             stamp, _, event = heapq.heappop(self.heap)
