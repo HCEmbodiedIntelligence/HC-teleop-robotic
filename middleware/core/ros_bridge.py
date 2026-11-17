@@ -165,6 +165,7 @@ class RosBridge:
         self._actor_urgent = deque(maxlen=8)
         self._actor_counts = Counter()
         self._actor_flush_commands = None
+        self._qos_event_observer = None
         self._public_api = None
         self._legacy_enabled = bool(config.get("legacy_control_profile"))
         if config.get("robot_api_profile"):
@@ -289,6 +290,8 @@ class RosBridge:
             if self._control_actor_mode:
                 result['control_actor'] = dict(enabled=True, thread_id=self._actor_thread_ident,
                     pending_targets=len(self._actor_targets), pending_replay=len(self._actor_replay),
+                    qos_events=(self._qos_event_observer.status()
+                                if self._qos_event_observer is not None else None),
                     **self._actor_counts)
             with self._callback_timing_lock:
                 result['callback_timings'] = {name:dict(value) for name,value in self._callback_timings.items()}
@@ -1350,6 +1353,12 @@ class RosBridge:
                 self._trackers = trackers
             self._set_status(state="running", subscriptions=subscription_names, error=None)
             if self._control_actor_mode:
+                # Keep the original endpoint's default QoS mismatch warning,
+                # but scan its read-only native event on the low-rate observer.
+                # Custom/liveliness/deadline events remain on the actor node.
+                from .qos_event_observer import QosEventObserver
+                self._qos_event_observer = QosEventObserver([node])
+                self._qos_event_observer.start()
                 self._actor_thread_ident = threading.get_ident()
                 self._actor_flush_commands = lambda: self._drain_commands(
                     node, publishers, get_message, set_message_fields, wait=0.)
@@ -1427,6 +1436,10 @@ class RosBridge:
                         except Exception:
                             pass
                 self._actor_flush_commands = None
+                if self._qos_event_observer is not None:
+                    # Restore each native event to its original owner before
+                    # rclpy destroys any publisher/subscription on that node.
+                    self._qos_event_observer.close()
                 if executor is not None:
                     executor.shutdown(timeout_sec=5.)
                     seen_nodes = set()

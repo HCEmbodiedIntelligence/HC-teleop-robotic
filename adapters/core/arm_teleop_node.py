@@ -536,6 +536,10 @@ class RobotArmTeleopNode(Node):
             f"backend={self.backend}, command={self.control['command_topic']}, "
             f"enabled={self.enabled}"
         )
+        from middleware.core.qos_event_observer import QosEventObserver
+        self._qos_event_observer = QosEventObserver([self], enabled=(
+            None if self.backend == 'v23' and self.config_path.parent.name == 'x1' else False))
+        self._qos_event_observer.start()
 
     def _validate_config(self) -> None:
         if not isinstance(self.config, dict):
@@ -3990,6 +3994,8 @@ class RobotArmTeleopNode(Node):
                 "hardware_ready": self.hardware_ready,
             },
             "control_tick_timing": getattr(self, 'control_tick_metrics', None),
+            "qos_events": (self._qos_event_observer.status()
+                           if getattr(self, '_qos_event_observer', None) is not None else None),
             "head_base_pose": {
                 "mode": getattr(self, "head_base_mode", "pose"),
                 "enabled": (getattr(self, "head_base_follower", None) is not None or
@@ -4072,6 +4078,8 @@ class RobotArmTeleopNode(Node):
             self.base_pub.publish(Float64MultiArray(data=[0.0, 0.0, 0.0]))
         except Exception:
             pass
+        if getattr(self, '_qos_event_observer', None) is not None:
+            self._qos_event_observer.close()
         if bullet.isConnected(self.physics_client):
             bullet.disconnect(self.physics_client)
         return super().destroy_node()

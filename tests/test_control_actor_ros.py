@@ -50,7 +50,7 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
     original_create = rclpy.create_node
     def create_node(name, **kwargs):
         created = original_create(name, **kwargs)
-        if name.startswith('test_control_actor_core'):
+        if name == 'test_control_actor_core':
             core_nodes.append((created, kwargs))
             original_destroy = created.destroy_node
             def destroy():
@@ -59,6 +59,8 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
             created.destroy_node = destroy
         return created
     monkeypatch.setattr(rclpy, 'create_node', create_node)
+    waitables_at_ready = []
+    bridge._actor_ready = lambda: waitables_at_ready.extend(tuple(core_nodes[0][0].waitables))
     try:
         bridge.start()
         deadline = time.monotonic()+5.
@@ -75,6 +77,13 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
         assert core_nodes[0][1]['enable_rosout'] is False
         assert core_nodes[0][1]['start_parameter_services'] is False
         assert not tuple(core_nodes[0][0].services)
+        qos_observer = bridge.status()['control_actor']['qos_events']
+        assert qos_observer is not None
+        if qos_observer['enabled']:
+            assert qos_observer['moved'] > 0
+            from middleware.core.qos_event_observer import QosEventObserver
+            assert not any(QosEventObserver._is_default_incompatible(handler)
+                           for handler in waitables_at_ready)
         assert bridge._contention_thread is None
         assert bridge.status()['topic_health'] == {}
         assert not bridge.status().get('dataset_process')
@@ -107,6 +116,10 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
         assert bridge.status()['state'] != 'error', bridge.status()
         assert bridge._thread is None or not bridge._thread.is_alive()
         assert destroyed == [id(core_nodes[0][0])]
+        qos_observer = bridge.status()['control_actor']['qos_events']
+        assert qos_observer['moved'] == 0
+        assert qos_observer['thread_alive'] is False
+        assert not qos_observer['error']
         node.destroy_subscription(subscription)
         executor.shutdown()
         node.destroy_node()
