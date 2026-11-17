@@ -15,6 +15,8 @@ import yaml
 
 
 class LegacyTopicControl:
+    FEEDBACK_MAX_AGE_S = .25
+
     def __init__(self, node, bridge, output, *, feedback_node=None, hand_node=None):
         from sensor_msgs.msg import JointState
         from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, qos_profile_sensor_data
@@ -29,7 +31,7 @@ class LegacyTopicControl:
         profile = Path(bridge.config['legacy_control_profile'])
         self.teleop = yaml.safe_load((profile/'arm_teleop.yaml').read_text())
         self.settings = bridge.config.get('intervention', {})
-        self.max_age = .25
+        self.max_age = self.FEEDBACK_MAX_AGE_S
         self.arm_velocity = float(self.settings.get('max_arm_velocity_rad_s', .25))
         self.max_error = float(self.settings.get('max_target_error_rad', .30))
         if not all(math.isfinite(x) and x > 0 for x in (self.arm_velocity, self.max_error)):

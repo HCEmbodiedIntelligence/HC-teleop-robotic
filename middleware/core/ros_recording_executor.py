@@ -16,11 +16,17 @@ from .config import isolated_control_process_enabled
 
 def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Return enabled ROS subscriptions explicitly selected for MCAP recording."""
-    return [
+    selected = [
         dict(item)
         for item in config.get("subscriptions", [])
         if item.get("enabled", True) and "record" in item.get("outputs", [])
     ]
+    from .recording_action_labels import action_label_policy, OWNERSHIP_TOPIC
+    if action_label_policy(config) and not any(item['topic'] == OWNERSHIP_TOPIC for item in selected):
+        # Required provenance for derived labels, never an actuator input.
+        selected.append(dict(topic=OWNERSHIP_TOPIC, type='std_msgs/msg/String',
+                             enabled=True, outputs=['record'], max_hz=0.))
+    return selected
 
 
 def recording_reader_groups(config, subscriptions):

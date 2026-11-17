@@ -191,15 +191,20 @@ def _mcap_writer_process(
     ingress_lock: Any,
     recording_topics: tuple[tuple[str, str], ...] | None = None,
     capture_window: Any = None,
+    action_label_policy: dict | None = None,
 ) -> None:
     """Write MCAP in a process isolated from WebRTC and the dashboard."""
     _lower_recording_priority()
     record_only_topics = set()
     x1_capture = ordinary_x1_capture(metadata)
+    from .recording_action_labels import ActionLabelBuffer, ACTION_TOPIC, PUBLISHED_TOPIC
+    label_buffer = ActionLabelBuffer(action_label_policy) if x1_capture and action_label_policy else None
     schemas: dict[str, int] = {}
     channels: dict[tuple[str, str], int] = {}
     capture_audit = (CaptureAudit(capture_window=capture_window)
                      if capture_window is not None and capture_window.enabled() else None)
+    if capture_audit is not None and label_buffer is not None:
+        capture_audit.action['topic'] = PUBLISHED_TOPIC
     try:
         with Path(path).open("wb") as stream:
             writer = McapWriter(stream)
@@ -214,6 +219,82 @@ def _mcap_writer_process(
                         name=msg_type, encoding=SchemaEncoding.ROS2, data=_get_msg_def(msg_type))
                 channels[(topic, msg_type)] = writer.register_channel(
                     topic=topic, message_encoding=MessageEncoding.CDR, schema_id=schemas[msg_type])
+            def write_event(event):
+                topic = str(event.get("topic") or "/events")
+                msg_type = str(
+                    event.get("msg_type") or "std_msgs/msg/String"
+                )
+                raw_data = event.get("_raw")
+                stamp_ns = int(event.get("stamp_ns") or time.time_ns())
+                if (capture_audit is not None and isinstance(raw_data, bytes)
+                        and (label_buffer is None or topic != ACTION_TOPIC)):
+                    capture_audit.observe({**event, 'topic': ACTION_TOPIC}
+                        if label_buffer is not None and topic == PUBLISHED_TOPIC else event)
+
+                if isinstance(raw_data, bytes):
+                    if ((not x1_capture and event.get('record_only')
+                            or label_buffer is not None and topic == ACTION_TOPIC)
+                            and topic not in record_only_topics):
+                        writer.add_metadata('hc_teleop.record_only', {'topic': topic})
+                        record_only_topics.add(topic)
+                    if msg_type not in schemas:
+                        schemas[msg_type] = writer.register_schema(
+                            name=msg_type,
+                            encoding=SchemaEncoding.ROS2,
+                            data=_get_msg_def(msg_type),
+                        )
+                    schema_id = schemas[msg_type]
+                    chan_key = (topic, msg_type)
+                    if chan_key not in channels:
+                        channels[chan_key] = writer.register_channel(
+                            topic=topic,
+                            message_encoding=MessageEncoding.CDR,
+                            schema_id=schema_id,
+                        )
+                    writer.add_message(
+                        channel_id=channels[chan_key],
+                        log_time=stamp_ns,
+                        data=raw_data,
+                        publish_time=stamp_ns,
+                    )
+                else:
+                    payload = event.get("payload")
+                    if payload is None:
+                        payload = {k:v for k,v in event.items() if not k.startswith('_')}
+                    json_bytes = json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    if "teleop_event" not in schemas:
+                        schemas["teleop_event"] = writer.register_schema(
+                            name="teleop_event",
+                            encoding=SchemaEncoding.JSONSchema,
+                            data=b"",
+                        )
+                    schema_id = schemas["teleop_event"]
+                    chan_key = (topic, "teleop_event")
+                    if chan_key not in channels:
+                        channels[chan_key] = writer.register_channel(
+                            topic=topic,
+                            message_encoding=MessageEncoding.JSON,
+                            schema_id=schema_id,
+                        )
+                    writer.add_message(
+                        channel_id=channels[chan_key],
+                        log_time=stamp_ns,
+                        data=json_bytes,
+                        publish_time=stamp_ns,
+                    )
+                provenance = event.get('_provenance')
+                if provenance and not x1_capture and recording_topics is None:
+                    key = ('/events/recording/sample_provenance', 'teleop_event')
+                    if key not in channels:
+                        channels[key] = writer.register_channel(topic=key[0], message_encoding=MessageEncoding.JSON,
+                            schema_id=writer.register_schema(name='hc-sample-provenance/v1', encoding=SchemaEncoding.JSONSchema, data=b''))
+                    writer.add_message(channel_id=channels[key], log_time=stamp_ns, publish_time=stamp_ns,
+                                       data=json.dumps(provenance, allow_nan=False).encode())
+
             # Do not report a recording as active until the destination file
             # has actually been opened and the MCAP header has been written.
             ready_event.set()
@@ -224,89 +305,35 @@ def _mcap_writer_process(
                     try:
                         event = event_queue.get(timeout=.1)
                     except queue.Empty:
+                        if label_buffer is not None:
+                            for output in label_buffer.ready(time.time_ns()):
+                                write_event(output)
                         continue
 
-                    topic = str(event.get("topic") or "/events")
-                    msg_type = str(
-                        event.get("msg_type") or "std_msgs/msg/String"
-                    )
-                    raw_data = event.get("_raw")
-                    if not _matches_recording_topics(event, recording_topics):
-                        with ingress_lock:
-                            _counter_add(messages)
-                            _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
-                        continue
-                    stamp_ns = int(event.get("stamp_ns") or time.time_ns())
-                    if capture_audit is not None and isinstance(raw_data, bytes):
-                        capture_audit.observe(event)
-
-                    if isinstance(raw_data, bytes):
-                        if not x1_capture and event.get('record_only') and topic not in record_only_topics:
-                            writer.add_metadata('hc_teleop.record_only', {'topic': topic})
-                            record_only_topics.add(topic)
-                        if msg_type not in schemas:
-                            schemas[msg_type] = writer.register_schema(
-                                name=msg_type,
-                                encoding=SchemaEncoding.ROS2,
-                                data=_get_msg_def(msg_type),
-                            )
-                        schema_id = schemas[msg_type]
-                        chan_key = (topic, msg_type)
-                        if chan_key not in channels:
-                            channels[chan_key] = writer.register_channel(
-                                topic=topic,
-                                message_encoding=MessageEncoding.CDR,
-                                schema_id=schema_id,
-                            )
-                        writer.add_message(
-                            channel_id=channels[chan_key],
-                            log_time=stamp_ns,
-                            data=raw_data,
-                            publish_time=stamp_ns,
-                        )
-                    else:
-                        payload = event.get("payload")
-                        if payload is None:
-                            payload = {k:v for k,v in event.items() if not k.startswith('_')}
-                        json_bytes = json.dumps(
-                            payload,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                        if "teleop_event" not in schemas:
-                            schemas["teleop_event"] = writer.register_schema(
-                                name="teleop_event",
-                                encoding=SchemaEncoding.JSONSchema,
-                                data=b"",
-                            )
-                        schema_id = schemas["teleop_event"]
-                        chan_key = (topic, "teleop_event")
-                        if chan_key not in channels:
-                            channels[chan_key] = writer.register_channel(
-                                topic=topic,
-                                message_encoding=MessageEncoding.JSON,
-                                schema_id=schema_id,
-                            )
-                        writer.add_message(
-                            channel_id=channels[chan_key],
-                            log_time=stamp_ns,
-                            data=json_bytes,
-                            publish_time=stamp_ns,
-                        )
-                    provenance = event.get('_provenance')
-                    if provenance and not x1_capture and recording_topics is None:
-                        key = ('/events/recording/sample_provenance', 'teleop_event')
-                        if key not in channels:
-                            channels[key] = writer.register_channel(topic=key[0], message_encoding=MessageEncoding.JSON,
-                                schema_id=writer.register_schema(name='hc-sample-provenance/v1', encoding=SchemaEncoding.JSONSchema, data=b''))
-                        writer.add_message(channel_id=channels[key], log_time=stamp_ns, publish_time=stamp_ns,
-                                           data=json.dumps(provenance, allow_nan=False).encode())
+                    if _matches_recording_topics(event, recording_topics):
+                        if label_buffer is not None and event.get('topic') in label_buffer.TOPICS:
+                            label_buffer.offer(event)
+                        else:
+                            write_event(event)
+                    if label_buffer is not None:
+                        for output in label_buffer.ready(time.time_ns()):
+                            write_event(output)
                     with ingress_lock:
                         _counter_add(messages)
                         _counter_add(queued_bytes, -int(event.get('_queue_bytes', 0)))
             finally:
+                if label_buffer is not None:
+                    for output in label_buffer.ready(time.time_ns(), final=True):
+                        write_event(output)
+                    writer.add_metadata('hc_teleop.action_labels', {
+                        'json': json.dumps(label_buffer.summary(), separators=(',', ':'))})
                 window = capture_window.snapshot() if capture_window is not None else {}
                 if window:
+                    if label_buffer is not None:
+                        window.update(action_at_publication='false',
+                            real_publication_topic=PUBLISHED_TOPIC,
+                            real_action_at_publication='true',
+                            sample_clock='action: recorded label; see per-frame action_provenance; real publication: '+PUBLISHED_TOPIC)
                     writer.add_metadata(WINDOW_METADATA, {
                         key: json.dumps(value) if isinstance(value, (list, dict)) else str(value)
                         for key, value in window.items()})
@@ -468,6 +495,7 @@ class TopicRecorder(CorrectionSupport):
     def __init__(self, config: dict[str, Any], config_dir: Path, *, topics=None):
         self.config, self.config_dir = dict(config), config_dir
         self.publication_capture = None
+        self.action_label_policy = None
         self._recording_topics = (None if topics is None else tuple(dict.fromkeys(
             (str(item['topic']), str(item['type'])) for item in topics)))
         directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
@@ -682,6 +710,7 @@ class TopicRecorder(CorrectionSupport):
                     self._ingress_lock,
                     self._recording_topics,
                     self._capture_window,
+                    (self.action_label_policy if self._capture_window.enabled() else None),
                 ),
                 name="mcap-writer",
                 daemon=True,

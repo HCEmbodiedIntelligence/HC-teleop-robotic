@@ -1,5 +1,6 @@
 """Regression checks for the operator's real recording acceptance criteria."""
 import struct
+import json
 
 from mcap.writer import Writer
 
@@ -95,3 +96,44 @@ def test_older_recording_without_optional_vr_stage_is_explicitly_unavailable(tmp
     result = audit(path)
     assert result['result'] == 'PASS'
     assert result['control_pipeline']['vr_target_available'] is False
+
+
+def test_filled_labels_cannot_hide_actual_publication_gap(tmp_path):
+    from tools.diagnostics.audit_mcap_timing import PUBLISHED_ACTION, ACTION_PROVENANCE
+    path = tmp_path/'labels.mcap'
+    recording(path, vr_target=True)
+    # Build a complete fixture with continuous labels and sparse real sends.
+    with path.open('wb') as stream:
+        writer = Writer(stream); writer.start(profile='ros2')
+        writer.add_metadata('hc_teleop.action_labels', {'json': '{}'})
+        writer.add_metadata('hc_teleop.capture_window', {
+            'schema_version': 'hc-capture-window/v1', 'action_at_publication': 'false',
+            'real_publication_topic': PUBLISHED_ACTION, 'real_action_at_publication': 'true',
+            'window_start_ns': str(BASE), 'admission_start_ns': str(BASE),
+            'stop_requested_ns': str(BASE+100_000_000), 'raw_ingress_closed_ns': str(BASE+350_000_000)})
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        prov = writer.register_channel(ACTION_PROVENANCE, 'json', 0)
+        for topic in TOPICS+(PUBLISHED_ACTION,):
+            kind = 'sensor_msgs/msg/CompressedImage' if topic in (COLOR, DEPTH) else 'sensor_msgs/msg/JointState'
+            sid = writer.register_schema(kind, 'ros2msg', b'') if kind != 'sensor_msgs/msg/JointState' else schema
+            channel = writer.register_channel(topic, 'cdr', sid)
+            offsets = (0, 99_000_000) if topic == PUBLISHED_ACTION else (0, 33_000_000, 66_000_000, 99_000_000)
+            for offset in offsets:
+                stamp = BASE+offset
+                data = b'\x00\x01\x00\x00'+struct.pack('<iI', *divmod(stamp, 10**9))
+                writer.add_message(channel, stamp, data, publish_time=stamp)
+                if topic == ACTION:
+                    real = offset in (0, 99_000_000)
+                    payload = dict(schema_version='hc-action-provenance/v1',
+                        source='published_action' if real else 'feedback_hold',
+                        action_log_time_ns=stamp, publication_ns=stamp if real else None,
+                        sent_to_robot=real, included_in_action_labels=True)
+                    writer.add_message(prov, stamp, json.dumps(payload).encode(), publish_time=stamp)
+        writer.finish()
+    result = audit(path)
+    assert result['topics'][ACTION]['log']['max_gap_ms'] == 33
+    assert result['real_publication']['log']['max_gap_ms'] == 99
+    assert result['label_provenance']['sources'] == dict(published_action=2, feedback_hold=2)
+    assert result['label_provenance']['unmarked_action_frames'] == 0
+    assert any('real publication gaps' in failure for failure in result['failures'])
+    assert result['result'] == 'FAIL'

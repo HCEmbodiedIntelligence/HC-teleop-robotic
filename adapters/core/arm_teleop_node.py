@@ -1884,6 +1884,27 @@ class RobotArmTeleopNode(Node):
         )
         return np.asarray(position, dtype=float), np.asarray(orientation, dtype=float)
 
+    def _link_pose_batch(self, indices):
+        """Read one unchanged model snapshot; never cache across control ticks."""
+        unique = tuple(dict.fromkeys(indices))
+        joints = [index for index in unique if index >= 0]
+        poses = {index: self._link_pose(index) for index in unique if index < 0}
+        bulk = getattr(bullet, 'getLinkStates', None)
+        if joints and callable(bulk) and getattr(self, '_pose_batch_supported', True):
+            try:
+                states = bulk(self.robot_id, joints, computeForwardKinematics=True,
+                              physicsClientId=self.physics_client)
+                if len(states) != len(joints):
+                    raise TypeError('incomplete link-state batch')
+                poses.update({index: (np.asarray(state[4], dtype=float),
+                                      np.asarray(state[5], dtype=float))
+                              for index, state in zip(joints, states)})
+                return poses
+            except (TypeError, NotImplementedError, bullet.error):
+                self._pose_batch_supported = False
+        poses.update({index: self._link_pose(index) for index in joints})
+        return poses
+
     def _relative_pose(
         self, parent: tuple[np.ndarray, np.ndarray], child: tuple[np.ndarray, np.ndarray]
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -3911,10 +3932,12 @@ class RobotArmTeleopNode(Node):
         message.header.frame_id = (
             next(iter(base_links)) if len(base_links) == 1 else "hc_tj_arm_bases"
         )
+        poses = self._link_pose_batch(index for side in ('right', 'left')
+            for index in (self.arms[side].base_index, self.arms[side].ee_index))
         for side in ("right", "left"):
             arm = self.arms[side]
             local = self._relative_pose(
-                self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
+                poses[arm.base_index], poses[arm.ee_index]
             )
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = local[0]
@@ -3966,8 +3989,13 @@ class RobotArmTeleopNode(Node):
         self.head_visualization_pub.publish(message)
 
     def _publish_status(self, now: float, feedback_fresh: bool) -> None:
-        if now - self.last_status_publish < 0.2:
+        status_key = (self.enabled, self.hardware_ready, feedback_fresh,
+                      self.solver_rearm.state, self.homing, self.control_source,
+                      self.source_feedback_pending, self.stop_reason, self.collision_blocked)
+        if (now - self.last_status_publish < 0.2
+                and status_key == getattr(self, '_last_status_transition_key', None)):
             return
+        self._last_status_transition_key = status_key
         self.last_status_publish = now
         left_clutch = self._input_fresh(self.arms["left"], now) and self._clutch_pressed(
             self.arms["left"]
@@ -3976,7 +4004,10 @@ class RobotArmTeleopNode(Node):
             self.arms["right"]
         )
         payload = {
+            "stamp_ns": time.time_ns(),
             "enabled": self.enabled,
+            "control_source": self.control_source,
+            "source_feedback_pending": self.source_feedback_pending,
             "backend": self.backend,
             "generic_controller": {
                 "solver_fresh": not self.external_ik

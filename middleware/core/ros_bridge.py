@@ -161,6 +161,7 @@ class RosBridge:
         self._actor_pumping = False
         self._actor_callback_count = 0
         self._actor_targets = {}
+        self._actor_target_wait = {}
         self._actor_replay = {}
         self._actor_urgent = deque(maxlen=8)
         self._actor_counts = Counter()
@@ -290,6 +291,7 @@ class RosBridge:
             if self._control_actor_mode:
                 result['control_actor'] = dict(enabled=True, thread_id=self._actor_thread_ident,
                     pending_targets=len(self._actor_targets), pending_replay=len(self._actor_replay),
+                    target_wait={key: dict(value) for key, value in self._actor_target_wait.copy().items()},
                     qos_events=(self._qos_event_observer.status()
                                 if self._qos_event_observer is not None else None),
                     **self._actor_counts)
@@ -663,13 +665,23 @@ class RosBridge:
         # between callbacks, then run the original complete safety checkpoint
         # before any queued DDS output or target is drained.
         urgent = getattr(self, '_actor_urgent_check', None)
-        for index in range(32):
-            before = self._actor_callback_count
-            executor.spin_once(timeout_sec=.001 if index == 0 else 0.)
-            if callable(urgent):
-                urgent()
-            if self._stop.is_set() or self._actor_callback_count == before:
-                break
+        budget = getattr(self, '_actor_callback_budget', None)
+        if budget is not None:
+            budget.begin()
+        try:
+            for index in range(32):
+                before = self._actor_callback_count
+                had_targets = bool(self._actor_targets)
+                executor.spin_once(timeout_sec=.001 if index == 0 else 0.)
+                if callable(urgent):
+                    urgent()
+                if self._stop.is_set() or self._actor_callback_count == before:
+                    break
+                if budget is not None and budget.after_callback(had_targets or bool(self._actor_targets)):
+                    break  # Yield to latest targets; never interrupt a callback.
+        finally:
+            if budget is not None:
+                budget.finish()
         self._actor_checkpoint()
 
     def _count_live_input_locked(self, source, channel, now):
@@ -714,7 +726,7 @@ class RosBridge:
                 return False
             if pending is not None:
                 self._actor_counts['coalesced'] += 1
-            self._actor_targets[key] = stamp, self._output_epoch, target, publish, token
+            self._actor_targets[key] = stamp, self._output_epoch, target, publish, token, now
             self._actor_callback_count += 1
             return True
 
@@ -730,7 +742,14 @@ class RosBridge:
                     pending = self._actor_targets.pop((source, channel), None)
                     if pending is None or pending[1] != self._output_epoch or self._stop.is_set():
                         continue
-                _, _, target, publish, token = pending
+                _, _, target, publish, token, entered_at = pending
+                wait_ms = max(0., (time.monotonic()-entered_at)*1000.)
+                metric = self._actor_target_wait.setdefault(source+':'+channel,
+                    dict(samples=0, max_ms=0., gt_10ms=0, gt_40ms=0))
+                metric.update(samples=metric['samples']+1, last_ms=wait_ms,
+                    max_ms=max(metric['max_ms'], wait_ms),
+                    gt_10ms=metric['gt_10ms']+int(wait_ms>10.),
+                    gt_40ms=metric['gt_40ms']+int(wait_ms>40.))
                 self._actor_dispatching = True
                 self._actor_dispatch_epoch = pending[1]
                 try:
@@ -1706,6 +1725,18 @@ class RosBridge:
                          if now-state_last >= .1 or state_sequence != ownership.event_seq
                          else None)
                 sequence = ownership.event_seq
+                if state is not None:
+                    # Recording-only evidence, sampled under the existing
+                    # observer lock. It never grants hardware authority.
+                    state['recording_output'] = dict(
+                        allowed=bool(self._command_output_enabled
+                            and not self._actor_output_blocked()
+                            and self._hardware_ready and not self._replay_active
+                            and self._command_source == 'vr'
+                            and ownership.state not in {'FAULT', 'ESTOP'}),
+                        output_epoch=self._output_epoch,
+                        source=self._command_source,
+                        stamp_ns=wall_ns)
                 diagnostic = None
                 if now-diagnostic_last >= 1.0:
                     counts = rejection_counts()

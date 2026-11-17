@@ -171,7 +171,12 @@ class TopicPlayer:
                     "/io_teleop/joint_cmd_finger_right": "/action/right_hand/joint_states",
                 }
                 drive_passthrough.update(legacy_drive_remap)
-                if "/io_teleop/joint_cmd" in avail_topics:
+                if "/internal/recording/published_action" in avail_topics:
+                    self._selected_topics = [t for t in avail_topics if t in drive_passthrough
+                                             or t == '/internal/recording/published_action']
+                    self._topic_remap = dict(legacy_drive_remap)
+                    self._topic_remap['/internal/recording/published_action'] = '/action/joint_states'
+                elif "/io_teleop/joint_cmd" in avail_topics:
                     self._selected_topics = [
                         t for t in avail_topics
                         if t in drive_passthrough or t == "/io_teleop/joint_cmd"

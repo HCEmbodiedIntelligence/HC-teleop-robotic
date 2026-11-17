@@ -455,6 +455,9 @@ class MiddlewareRuntime:
         action_capture = bool(self.config['ros'].get('legacy_control_profile')
                               and action_max_hz <= 0)
         self.config['ros']['record_action_at_publication'] = action_capture
+        from .recording_action_labels import action_label_policy
+        recorder.action_label_policy = (action_label_policy(self.config['ros'])
+                                        if action_capture else None)
         if action_capture:
             selected = lambda: recorder.records_topic(
                 '/action/joint_states', 'sensor_msgs/msg/JointState')

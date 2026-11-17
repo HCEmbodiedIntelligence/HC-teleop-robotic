@@ -15,6 +15,8 @@ import struct
 from mcap.reader import make_reader
 
 ACTION = '/action/joint_states'
+PUBLISHED_ACTION = '/internal/recording/published_action'
+ACTION_PROVENANCE = '/events/recording/action_provenance'
 VR_TARGET = '/control/vr/joint_states'
 COLOR = '/observation/cameras/head/color/compressed'
 DEPTH = '/observation/cameras/head/depth/compressed'
@@ -57,11 +59,25 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
     rows = defaultdict(lambda: dict(log=[], header=[], invalid_headers=0))
     metadata = {}
     publication_metadata = False
+    provenance, invalid_provenance = [], 0
     with Path(path).open('rb') as stream:
         reader = make_reader(stream, validate_crcs=True)
         for record in reader.iter_metadata():
             metadata[record.name] = dict(record.metadata)
-        for schema, channel, message in reader.iter_messages(topics=TOPICS+(VR_TARGET,), log_time_order=False):
+        for schema, channel, message in reader.iter_messages(topics=TOPICS+(VR_TARGET, PUBLISHED_ACTION, ACTION_PROVENANCE), log_time_order=False):
+            if channel.topic == ACTION_PROVENANCE:
+                try:
+                    value = json.loads(message.data)
+                    if (value.get('schema_version') != 'hc-action-provenance/v1'
+                            or value.get('action_log_time_ns') != message.log_time
+                            or value.get('source') not in {'published_action', 'feedback_hold'}
+                            or value.get('sent_to_robot') is not (value['source'] == 'published_action')
+                            or (value['source'] == 'feedback_hold' and value.get('publication_ns') is not None)):
+                        raise ValueError('inconsistent label provenance')
+                    provenance.append(value)
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    invalid_provenance += 1
+                continue
             row = rows[channel.topic]
             row['log'].append(message.log_time)
             stamp = header_stamp(message.data) if schema.name in HEADER_TYPES else None
@@ -71,7 +87,30 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
                 row['header'].append(stamp)
     report = dict(path=str(Path(path).resolve()), threshold_ms=threshold_ms,
                   metadata=metadata, topics={}, failures=[], unverified=[])
-    source, action = rows[VR_TARGET], rows[ACTION]
+    labelled = 'hc_teleop.action_labels' in metadata
+    source, action = rows[VR_TARGET], rows[PUBLISHED_ACTION if labelled else ACTION]
+    if labelled:
+        report['real_publication'] = dict(topic=PUBLISHED_ACTION,
+            **{clock: clock_summary(action[clock], threshold_ns) for clock in ('log', 'header')})
+        if not action['log']:
+            report['failures'].append(f'{PUBLISHED_ACTION}: no successful publication evidence')
+        elif report['real_publication']['log']['gaps_gt_threshold']:
+            report['failures'].append(f'{PUBLISHED_ACTION}: real publication gaps > {threshold_ms:g} ms')
+        report['action_label_policy'] = metadata['hc_teleop.action_labels']
+        expected_labels = Counter(p['action_log_time_ns'] for p in provenance
+                                  if p.get('included_in_action_labels') is True)
+        expected_publications = Counter(p['publication_ns'] for p in provenance
+                                        if p['source'] == 'published_action')
+        label_missing = sum((Counter(rows[ACTION]['log'])-expected_labels).values())
+        claim_missing = sum((expected_labels-Counter(rows[ACTION]['log'])).values())
+        publication_mismatch = sum((Counter(action['log'])-expected_publications).values()) + sum(
+            (expected_publications-Counter(action['log'])).values())
+        report['label_provenance'] = dict(
+            sources=dict(Counter(p['source'] for p in provenance)),
+            invalid=invalid_provenance, unmarked_action_frames=label_missing,
+            markers_without_action=claim_missing, publication_marker_mismatch=publication_mismatch)
+        if invalid_provenance or label_missing or claim_missing or publication_mismatch:
+            report['failures'].append('action labels: missing or inconsistent per-frame provenance')
     source_counts, action_counts = Counter(source['header']), Counter(action['header'])
     report['control_pipeline'] = dict(
         vr_target_available=bool(source['log']),
@@ -79,6 +118,7 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
         exact_vr_action_header_matches=sum((source_counts & action_counts).values()),
         vr_headers_without_action=sum((source_counts-action_counts).values()),
         action_headers_without_vr=sum((action_counts-source_counts).values()),
+        action_evidence_topic=PUBLISHED_ACTION if labelled else ACTION,
         interpretation='Observed original-header correspondence only. Source selection, stop, home and latest-target coalescing can intentionally omit targets; unmatched counts alone are not proof of data loss.')
     for topic in TOPICS:
         row = rows[topic]
@@ -96,7 +136,7 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
         if result['header']['duplicates'] or result['header']['out_of_order']:
             report['failures'].append(f'{topic}: duplicate or out-of-order source stamps')
     if report['topics'][ACTION]['log']['gaps_gt_threshold']:
-        report['failures'].append(f'{ACTION}: publication/reception gaps > {threshold_ms:g} ms')
+        report['failures'].append(f'{ACTION}: {"recorded label" if labelled else "publication/reception"} gaps > {threshold_ms:g} ms')
     color, depth = Counter(rows[COLOR]['header']), Counter(rows[DEPTH]['header'])
     color_missing, depth_missing = color-depth, depth-color
     report['rgbd'] = dict(paired_exact=sum((color & depth).values()),
@@ -120,7 +160,9 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
             report['failures'].append(f'invalid capture window: {exc}')
         else:
             publication_metadata = (window.get('schema_version') == 'hc-capture-window/v1'
-                                    and window.get('action_at_publication') == 'true')
+                                    and (window.get('action_at_publication') == 'true'
+                                         or labelled and window.get('real_publication_topic') == PUBLISHED_ACTION
+                                         and window.get('real_action_at_publication') == 'true'))
             report['window_coverage'] = {}
             for topic in TOPICS:
                 # An action already reserved before stop may finish publishing

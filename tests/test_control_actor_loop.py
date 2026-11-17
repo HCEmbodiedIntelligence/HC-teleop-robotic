@@ -321,6 +321,48 @@ def test_negative_intent_between_callbacks_discards_targets_before_final_send():
     assert not [m for topic,m in rig.wire if topic in {'/action/joint_states', '/control/hardware/enabled'}]
 
 
+def test_wall_budget_yields_to_latest_target_with_original_safety_checkpoint():
+    from middleware.core.control_process import _CallbackBatchBudget
+    from unittest.mock import Mock
+    rig = actor()
+    bridge = rig.bridge
+    clock = [0]
+    bridge._actor_callback_budget = _CallbackBatchBudget(clock=lambda: clock[0])
+    bridge._actor_pump = Mock()
+    bridge._actor_urgent_check = Mock()
+    def spin_once(**_):
+        clock[0] += 1_100_000
+        bridge._actor_callback_count += 1
+        assert bridge.forward_live_command('vr', arm_target(rig, offset=.001), rig.boundary.publish_selected)
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=spin_once))
+    assert bridge._actor_callback_budget.status()['last_callbacks'] == 2
+    assert bridge._actor_callback_budget.status()['budget_yields'] == 1
+    assert bridge._actor_urgent_check.call_count == 2
+    assert bridge._actor_pump.call_count == 1
+    assert len(bridge._actor_targets) == 1
+    bridge._drain_actor_targets()
+    assert len([m for topic, m in rig.wire if topic == '/action/joint_states']) == 1
+
+
+def test_budget_yield_still_applies_negative_intent_before_sending():
+    from middleware.core.control_process import _CallbackBatchBudget
+    rig = actor()
+    bridge = rig.bridge
+    clock = [0]
+    bridge._actor_callback_budget = _CallbackBatchBudget(clock=lambda: clock[0])
+    assert bridge.forward_live_command('vr', arm_target(rig), rig.boundary.publish_selected)
+    def spin_once(**_):
+        clock[0] += 20_000_000  # An already-running callback is not interrupted.
+        bridge._actor_callback_count += 1
+    def urgent():
+        bridge.set_command_output_enabled(False)
+    bridge._actor_urgent_check = urgent
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=spin_once))
+    bridge._drain_actor_targets()
+    assert bridge._actor_callback_budget.status()['last_callbacks'] == 1
+    assert not [m for topic, m in rig.wire if topic == '/action/joint_states']
+
+
 def test_revoke_latch_arriving_during_prepare_blocks_prepared_target():
     rig = actor()
     bridge, boundary = rig.bridge, rig.boundary

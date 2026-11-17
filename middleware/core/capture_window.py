@@ -40,7 +40,9 @@ def sample_time(event):
 
 
 def buffered_sensor(item):
-    return (item.get('type') in {'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage'}
+    return (item.get('topic') in {'/status/teleop', '/status/control/ownership'}
+            and item.get('type') == 'std_msgs/msg/String'
+            or item.get('type') in {'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage'}
             or item.get('topic') in {'/observation/joint_states', '/observation/hands/joint_states',
                 '/control/joint_cmd', '/control/solver/joint_targets', '/control/vr/joint_states'}
             and item.get('type') in _HEADER_TYPES)
