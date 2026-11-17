@@ -591,3 +591,34 @@ def test_manual_aux_is_generation_scoped_and_expires(rig):
     ik.publish(target)
     assert ik.output.publish.call_args.args[0].name == ['Joint1_R']
     assert target.name == ['Joint1_R']
+
+
+@pytest.mark.parametrize("resetting", [False, True])
+@pytest.mark.parametrize("invalid", ["stale", "future", "incomplete", "duplicate", "nonfinite", "length"])
+def test_invalid_feedback_never_mutates_solver_state(rig, resetting, invalid):
+    teleop, solver = rig
+    solver._joint_callback(feedback(*rig))
+    before = solver.controller.q.copy()
+    if resetting:
+        solver._reset_references()
+    msg = feedback(*rig, offset=.6)
+    if invalid == "stale":
+        msg.header.stamp.sec -= 1
+    elif invalid == "future":
+        msg.header.stamp.sec += 1
+    elif invalid == "incomplete":
+        index = msg.name.index(solver.controller.free_joint_names[0])
+        del msg.name[index]
+        del msg.position[index]
+    elif invalid == "duplicate":
+        msg.name.append(msg.name[0])
+        msg.position.append(msg.position[0])
+    elif invalid == "nonfinite":
+        msg.position[0] = float("nan")
+    else:
+        msg.position.pop()
+    solver._joint_callback(msg)
+    np.testing.assert_array_equal(solver.controller.q, before)
+    solver.reset_ack_pub.publish.assert_not_called()
+    assert sum(solver.feedback_rejections.values()) == 1
+    assert solver.reset_pending == resetting
