@@ -293,3 +293,24 @@ test('new jobs appear first in the floating panel without scrolling the document
   assert.equal(fields['#datasetDownloadJobs'].children[0].children[0].textContent,'new.zip');
   assert.equal(fields['#datasetDownloadPanel'].scrollTop,0);
 });
+
+test('completed job automatically closes its card and hides the panel after 5 seconds',()=>{
+  const {ctx,fields}=setup();const scheduled=[];let saved='';
+  ctx.setTimeout=(callback,delay)=>{scheduled.push({callback,delay});return scheduled.length;};
+  ctx.sessionStorage={getItem:()=>'[]',setItem:(_key,value)=>{saved=value;}};
+  ctx.snapshot={id:'auto-close',state:'ready',download_url:'/api/recordings/download-jobs/auto-close/download',archive_size:1024};
+  vm.runInContext('acceptDatasetDownloadJob(snapshot)',ctx);
+  assert.equal(ctx.document.body.children.length,1);
+  const frame=ctx.document.body.children[0];
+  ctx.snapshot={...ctx.snapshot,state:'completed',bytes_sent:1024,percent:100};
+  vm.runInContext('acceptDatasetDownloadJob(snapshot)',ctx);
+  const autoClose=scheduled.find(item=>item.delay===5000);
+  assert.ok(autoClose,'expected a 5000ms auto-close timer');
+  assert.equal(fields['#datasetDownloadPanel'].hidden,false);
+  const card=fields['#datasetDownloadJobs'].children[0];
+  autoClose.callback();
+  assert.equal(card.removed,true);
+  assert.equal(frame.removed,true);
+  assert.equal(fields['#datasetDownloadPanel'].hidden,true);
+  assert.deepEqual(JSON.parse(saved),[]);
+});

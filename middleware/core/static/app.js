@@ -1308,6 +1308,19 @@ const datasetDownloadStorageKey = 'dataset-download-jobs-v1';
 let datasetDownloadPollTimer = null;
 let datasetDownloadPolling = false;
 const datasetDownloadTerminal = new Set(['completed', 'cancelled', 'error']);
+const datasetDownloadAutoCloseMs = 5000;
+
+function dismissDatasetDownloadJob(entry) {
+  if (!entry) return;
+  if (entry.dismissTimer && typeof clearTimeout !== 'undefined') clearTimeout(entry.dismissTimer);
+  entry.dismissTimer = null;
+  entry.frame?.remove();
+  entry.elements?.card?.remove();
+  datasetDownloadJobs.delete(entry.job.id);
+  const panel = $('#datasetDownloadPanel');
+  if (panel) panel.hidden = !datasetDownloadJobs.size;
+  saveDatasetDownloadJobs();
+}
 
 function datasetDownloadBytes(value) {
   let size = Math.max(0, Number(value) || 0), unit = 0;
@@ -1349,10 +1362,7 @@ function renderDatasetDownloadJob(entry) {
     };
     const dismiss = document.createElement('button'); dismiss.type = 'button'; dismiss.className = 'btn-sm';
     dismiss.textContent = '收起';
-    dismiss.onclick = () => {
-      entry.frame?.remove(); card.remove(); datasetDownloadJobs.delete(entry.job.id);
-      panel.hidden = !datasetDownloadJobs.size; saveDatasetDownloadJobs();
-    };
+    dismiss.onclick = () => dismissDatasetDownloadJob(entry);
     actions.append(cancel, retry, dismiss);
     card.append(heading, stage, progress, details, current, message, actions); list.prepend(card);
     panel.scrollTop = 0; // Reveal the newest task inside the floating panel; never move the page.
@@ -1375,7 +1385,7 @@ function renderDatasetDownloadJob(entry) {
   el.current.textContent = job.current_file || '';
   el.current.hidden = !job.current_file;
   el.message.textContent = entry.requestError || job.error || (job.state === 'completed'
-    ? '服务器已完成发送，请在浏览器下载列表确认保存结果。'
+    ? '服务器已完成发送，请在浏览器下载列表确认保存结果（5 秒后自动关闭）。'
     : job.state === 'ready' && entry.downloadStarted ? '已请求浏览器下载；若未开始，请点击“重试下载”。' : '');
   el.message.hidden = !el.message.textContent;
   el.card.classList?.toggle('failed', Boolean(entry.requestError || job.state === 'error'));
@@ -1412,6 +1422,17 @@ function acceptDatasetDownloadJob(job, metadata = {}) {
   entry.job = job;
   renderDatasetDownloadJob(entry);
   saveDatasetDownloadJobs();
+  if (job.state === 'completed') {
+    if (!entry.dismissTimer && typeof setTimeout !== 'undefined') {
+      entry.dismissTimer = setTimeout(() => {
+        entry.dismissTimer = null;
+        dismissDatasetDownloadJob(entry);
+      }, datasetDownloadAutoCloseMs);
+    }
+  } else if (entry.dismissTimer && typeof clearTimeout !== 'undefined') {
+    clearTimeout(entry.dismissTimer);
+    entry.dismissTimer = null;
+  }
   if (job.state === 'ready') launchDatasetDownload(entry);
   return entry;
 }
@@ -1502,8 +1523,12 @@ async function restoreDatasetDownloadJobs() {
     for (const id of restoredIds) {
       const entry = datasetDownloadJobs.get(id);
       if (entry && !entry.filenames?.length && !currentIds.has(entry.job.id)) {
-        entry.expired = true;
-        acceptDatasetDownloadJob({...entry.job, state: 'error', error: '下载任务已失效，请重新选择数据集下载。'});
+        if (entry.job.state === 'completed') {
+          acceptDatasetDownloadJob(entry.job);
+        } else if (!datasetDownloadTerminal.has(entry.job.state)) {
+          entry.expired = true;
+          acceptDatasetDownloadJob({...entry.job, state: 'error', error: '下载任务已失效，请重新选择数据集下载。'});
+        }
       }
     }
     for (const job of result.jobs || []) {
