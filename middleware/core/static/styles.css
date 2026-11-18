@@ -1098,3 +1098,41 @@ body.marquee-selecting * {
   background-color: #e6f4ff;
 }
 
+
+/* Download job cards stay independent of dataset row refreshes and selection. */
+.dataset-download-panel {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 6; /* Toasts stay above this panel; native dialogs use the top layer. */
+  width: 480px;
+  max-width: calc(100% - 32px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  max-height: 45vh;
+  max-height: 45dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 6px 24px #18212d24;
+}
+.dataset-download-panel[hidden], #datasets.hidden .dataset-download-panel { display: none; }
+.dataset-download-panel h3 { margin: 0 0 5px; font-size: 14px; }
+.dataset-download-hint { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
+.dataset-download-jobs { display: grid; gap: 10px; }
+.dataset-download-job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 16px; padding: 10px; background: #f5f8fc; border-radius: 6px; font-size: 12px; }
+.dataset-download-name { overflow-wrap: anywhere; }
+.dataset-download-stage { color: var(--muted); text-align: right; }
+.dataset-download-job progress { grid-column: 1 / -1; display: block; width: 100%; height: 8px; accent-color: #1677ff; }
+.dataset-download-details, .dataset-download-current, .dataset-download-message { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.dataset-download-current { color: var(--muted); max-height: 3em; overflow: auto; }
+.dataset-download-message { color: var(--muted); }
+.dataset-download-job.failed .dataset-download-message { color: var(--red, #cf1322); }
+.dataset-download-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.dataset-download-job [hidden] { display: none; }
+@media (max-width: 680px) {
+  .dataset-download-job { grid-template-columns: minmax(0, 1fr); }
+  .dataset-download-stage { text-align: left; }
+}

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=28-dataset-floating-toolbar">
+  <link rel="stylesheet" href="/static/styles.css?v=29-dataset-download-jobs">
   <link rel="stylesheet" href="/static/diagnostic_logs.css?v=1">
 </head>
 <body>
@@ -180,6 +180,12 @@
           <button id="batchDownloadDatasets" type="button" disabled>批量下载</button>
           <button id="batchDeleteDatasets" type="button" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
         </div>
+
+        <section id="datasetDownloadPanel" class="dataset-download-panel" aria-label="数据集下载进度" hidden>
+          <h3>下载任务</h3>
+          <p class="dataset-download-hint">打包和传输均可取消。传输进度由服务器统计；保存结果请查看浏览器下载列表。</p>
+          <div id="datasetDownloadJobs" class="dataset-download-jobs"></div>
+        </section>
 
         <div id="replayControlPanel" class="replay-control-panel hidden">
           <div class="replay-panel-header">
@@ -477,6 +483,6 @@
   </dialog>
   <script src="/static/platform_panel.js?v=16-format-sync"></script>
   <script src="/static/diagnostic_logs.js?v=3-reliability"></script>
-  <script src="/static/app.js?v=logs-20261116"></script>
+  <script src="/static/app.js?v=download-jobs-20261118"></script>
 </body>
 </html>

@@ -1988,6 +1988,8 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/recording/status", get_recording_status)
     app.router.add_get("/api/recordings", get_recordings)
     app.router.add_post("/api/recordings/upload", import_mcap_file)
+    from .recording_downloads import register_download_routes
+    register_download_routes(app, lambda: runtime.recorder)
     app.router.add_get("/api/recordings/{filename}/download", download_recording)
     app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)
     app.router.add_delete("/api/recordings/{filename}", delete_recording)

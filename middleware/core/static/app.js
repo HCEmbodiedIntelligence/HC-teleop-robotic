@@ -127,7 +127,9 @@ async function api(url, options={}) {
     let payload;
     try {payload=JSON.parse(body);} catch(_) {}
     if(payload?.control_runtime)renderControlRuntime(payload.control_runtime);
-    throw new Error(payload?.control_runtime?.error||payload?.error||payload?.detail||body||`${response.status}`);
+    const error = new Error(payload?.control_runtime?.error||payload?.error||payload?.detail||body||`${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -1300,6 +1302,217 @@ let datasetPollTimer = null;
 let datasetFormat = 'mcap';
 const datasetFormatLabels = {mcap: 'MCAP', lerobot: 'LeRobot', bundle: 'MCAP＋MP4'};
 
+// Job metadata stays small; archives are streamed by the browser, never held in JS memory.
+const datasetDownloadJobs = new Map();
+const datasetDownloadStorageKey = 'dataset-download-jobs-v1';
+let datasetDownloadPollTimer = null;
+let datasetDownloadPolling = false;
+const datasetDownloadTerminal = new Set(['completed', 'cancelled', 'error']);
+
+function datasetDownloadBytes(value) {
+  let size = Math.max(0, Number(value) || 0), unit = 0;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+  return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
+function saveDatasetDownloadJobs() {
+  try {
+    sessionStorage.setItem(datasetDownloadStorageKey, JSON.stringify([...datasetDownloadJobs.values()].map(entry => ({
+      job: entry.job, filenames: entry.filenames, single: entry.single, downloadStarted: entry.downloadStarted, expired: entry.expired,
+    }))));
+  } catch (_) { /* Storage may be unavailable in private browsing. */ }
+}
+
+function renderDatasetDownloadJob(entry) {
+  const panel = $('#datasetDownloadPanel'), list = $('#datasetDownloadJobs');
+  if (!panel || !list) return;
+  panel.hidden = false;
+  if (!entry.elements) {
+    const card = document.createElement('article'); card.className = 'dataset-download-job';
+    const heading = document.createElement('strong'); heading.className = 'dataset-download-name';
+    const stage = document.createElement('span'); stage.className = 'dataset-download-stage';
+    stage.setAttribute('aria-live', 'polite'); stage.setAttribute('aria-atomic', 'true');
+    const progress = document.createElement('progress'); progress.max = 100;
+    progress.setAttribute('aria-label', '下载任务进度');
+    const details = document.createElement('span'); details.className = 'dataset-download-details';
+    const current = document.createElement('span'); current.className = 'dataset-download-current';
+    const message = document.createElement('span'); message.className = 'dataset-download-message';
+    message.setAttribute('role', 'status');
+    const actions = document.createElement('div'); actions.className = 'dataset-download-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn-sm';
+    cancel.onclick = () => cancelDatasetDownload(entry);
+    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn-sm';
+    retry.onclick = () => {
+      if (entry.job.state === 'ready') return launchDatasetDownload(entry, true);
+      return retryDatasetDownload(entry);
+    };
+    const dismiss = document.createElement('button'); dismiss.type = 'button'; dismiss.className = 'btn-sm';
+    dismiss.textContent = '收起';
+    dismiss.onclick = () => {
+      entry.frame?.remove(); card.remove(); datasetDownloadJobs.delete(entry.job.id);
+      panel.hidden = !datasetDownloadJobs.size; saveDatasetDownloadJobs();
+    };
+    actions.append(cancel, retry, dismiss);
+    card.append(heading, stage, progress, details, current, message, actions); list.prepend(card);
+    panel.scrollTop = 0; // Reveal the newest task inside the floating panel; never move the page.
+    entry.elements = {card, heading, stage, progress, details, current, message, cancel, retry, dismiss};
+  }
+  const job = entry.job, el = entry.elements;
+  const transfer = job.state === 'downloading' || job.state === 'completed';
+  const total = transfer ? Number(job.archive_size) || 0 : Number(job.bytes_total) || 0;
+  const done = transfer ? Number(job.bytes_sent) || 0 : Number(job.bytes_done) || 0;
+  const percent = Math.max(0, Math.min(100, transfer && total ? done / total * 100 : Number(job.percent) || 0));
+  const labels = {queued:'等待打包', scanning:'扫描文件', packing:'打包中', ready:'等待浏览器下载',
+    downloading:'传输到浏览器', completed:'服务器传输结束', cancelling:'正在取消', cancelled:'已取消', error:'下载失败'};
+  const stage = `${labels[job.state] || job.stage || '准备下载'}${job.stage && !['completed', 'cancelled', 'error'].includes(job.state) ? ` · ${job.stage}` : ''}`;
+  el.heading.textContent = job.filename || `${job.selection_count || entry.filenames?.length || 1} 个数据集`;
+  if (el.stage.textContent !== stage) el.stage.textContent = stage;
+  if (['queued', 'scanning'].includes(job.state)) el.progress.removeAttribute('value');
+  else el.progress.value = percent;
+  el.progress.setAttribute('aria-valuetext', `${labels[job.state] || '下载'} ${percent.toFixed(1)}%`);
+  el.details.textContent = `${percent.toFixed(1)}% · ${datasetDownloadBytes(done)} / ${total ? datasetDownloadBytes(total) : '待统计'} · ${job.files_done || 0} / ${job.files_total || 0} 个文件`;
+  el.current.textContent = job.current_file || '';
+  el.current.hidden = !job.current_file;
+  el.message.textContent = entry.requestError || job.error || (job.state === 'completed'
+    ? '服务器已完成发送，请在浏览器下载列表确认保存结果。'
+    : job.state === 'ready' && entry.downloadStarted ? '已请求浏览器下载；若未开始，请点击“重试下载”。' : '');
+  el.message.hidden = !el.message.textContent;
+  el.card.classList?.toggle('failed', Boolean(entry.requestError || job.state === 'error'));
+  el.cancel.hidden = datasetDownloadTerminal.has(job.state);
+  el.cancel.disabled = entry.cancelPending || job.state === 'cancelling';
+  el.cancel.textContent = el.cancel.disabled ? '正在取消…' : job.state === 'downloading' ? '取消传输' : '取消下载';
+  el.retry.hidden = !(job.state === 'ready' || (datasetDownloadTerminal.has(job.state) && !entry.expired));
+  el.retry.disabled = Boolean(entry.retryPending);
+  el.retry.textContent = ['ready', 'completed'].includes(job.state) ? '重试下载' : '重新打包';
+  el.dismiss.hidden = !datasetDownloadTerminal.has(job.state);
+}
+
+function launchDatasetDownload(entry, force = false) {
+  if (entry.cancelPending || !entry.job.download_url || (entry.downloadStarted && !force)) return;
+  // A hidden frame preserves native Content-Disposition downloads for multi-GB files.
+  // Do not infer completion from iframe load: only server byte counters describe transfer.
+  if (!entry.frame) {
+    entry.frame = document.createElement('iframe'); entry.frame.hidden = true;
+    entry.frame.title = '数据集文件下载'; document.body.append(entry.frame);
+  }
+  entry.downloadStarted = true; entry.requestError = '';
+  saveDatasetDownloadJobs();
+  entry.frame.src = entry.job.download_url;
+  renderDatasetDownloadJob(entry);
+  scheduleDatasetDownloadPolling();
+}
+
+function acceptDatasetDownloadJob(job, metadata = {}) {
+  if (!job?.id) return;
+  let entry = datasetDownloadJobs.get(job.id);
+  // A poll started before cancellation/completion must not revive the same task.
+  if (entry && datasetDownloadTerminal.has(entry.job.state) && !datasetDownloadTerminal.has(job.state)) return entry;
+  if (!entry) { entry = {job, ...metadata}; datasetDownloadJobs.set(job.id, entry); }
+  entry.job = job;
+  renderDatasetDownloadJob(entry);
+  saveDatasetDownloadJobs();
+  if (job.state === 'ready') launchDatasetDownload(entry);
+  return entry;
+}
+
+function scheduleDatasetDownloadPolling(delay = 500) {
+  if (datasetDownloadPollTimer !== null || typeof setTimeout === 'undefined') return;
+  if (![...datasetDownloadJobs.values()].some(entry => !datasetDownloadTerminal.has(entry.job.state))) return;
+  datasetDownloadPollTimer = setTimeout(() => {
+    datasetDownloadPollTimer = null; pollDatasetDownloadJobs();
+  }, delay);
+}
+
+async function pollDatasetDownloadJobs() {
+  if (datasetDownloadPolling) return;
+  datasetDownloadPolling = true;
+  try {
+    await Promise.all([...datasetDownloadJobs.values()].filter(entry => !datasetDownloadTerminal.has(entry.job.state)).map(async entry => {
+      try {
+        const result = await api(`/api/recordings/download-jobs/${encodeURIComponent(entry.job.id)}`);
+        entry.requestError = ''; acceptDatasetDownloadJob(result.job);
+      } catch (error) {
+        if (error.status === 404) {
+          entry.expired = true; entry.requestError = '';
+          acceptDatasetDownloadJob({...entry.job, state: 'error', error: '下载任务已失效，请重新选择数据集下载。'});
+        } else {
+          entry.requestError = `进度读取失败，将自动重试：${error.message}`; renderDatasetDownloadJob(entry);
+        }
+      }
+    }));
+  } finally { datasetDownloadPolling = false; scheduleDatasetDownloadPolling(); }
+}
+
+async function startDatasetDownload(filenames, single = false) {
+  if (!filenames?.length) return;
+  try {
+    const result = await api('/api/recordings/download-jobs', {
+      method: 'POST', body: JSON.stringify({filenames, single}),
+    });
+    if (!result.job?.id) throw new Error('服务器未返回下载任务');
+    acceptDatasetDownloadJob(result.job);
+    scheduleDatasetDownloadPolling();
+  } catch (error) {
+    acceptDatasetDownloadJob({id: `local-${Date.now()}`, state: 'error', error: error.message,
+      selection_count: filenames.length}, {filenames: [...filenames], single});
+    toast(`创建下载任务失败：${error.message}`, true);
+  }
+}
+
+async function retryDatasetDownload(entry) {
+  if (entry.retryPending) return;
+  // A create failure has no server job; only that small local entry keeps its selection.
+  if (entry.filenames?.length) return startDatasetDownload(entry.filenames, entry.single);
+  entry.retryPending = true; entry.requestError = ''; renderDatasetDownloadJob(entry);
+  try {
+    const result = await api(`/api/recordings/download-jobs/${encodeURIComponent(entry.job.id)}/retry`, {method: 'POST'});
+    if (!result.job?.id) throw new Error('服务器未返回下载任务');
+    acceptDatasetDownloadJob(result.job); scheduleDatasetDownloadPolling();
+  } catch (error) { entry.requestError = `重试失败：${error.message}`; }
+  finally { entry.retryPending = false; renderDatasetDownloadJob(entry); }
+}
+
+async function cancelDatasetDownload(entry) {
+  if (entry.cancelPending || datasetDownloadTerminal.has(entry.job.state)) return;
+  entry.cancelPending = true; entry.requestError = ''; renderDatasetDownloadJob(entry);
+  try {
+    const result = await api(`/api/recordings/download-jobs/${encodeURIComponent(entry.job.id)}/cancel`, {method: 'POST'});
+    // Stop this page's native request as well as the server packer/stream.
+    if (entry.frame) entry.frame.src = 'about:blank';
+    acceptDatasetDownloadJob(result.job);
+  } catch (error) { entry.requestError = `取消失败，请重试：${error.message}`; }
+  finally { entry.cancelPending = false; renderDatasetDownloadJob(entry); scheduleDatasetDownloadPolling(); }
+}
+
+async function restoreDatasetDownloadJobs() {
+  if (!$('#datasetDownloadPanel')) return;
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(datasetDownloadStorageKey) || '[]');
+    for (const entry of Array.isArray(stored) ? stored : []) {
+      // Wait for a fresh server snapshot before launching a restored ready job.
+      if (!entry.job?.id) continue;
+      datasetDownloadJobs.set(entry.job.id, entry); renderDatasetDownloadJob(entry);
+    }
+  } catch (_) {}
+  const restoredIds = new Set(datasetDownloadJobs.keys());
+  try {
+    const result = await api('/api/recordings/download-jobs');
+    const currentIds = new Set((result.jobs || []).map(job => job.id));
+    for (const id of restoredIds) {
+      const entry = datasetDownloadJobs.get(id);
+      if (entry && !entry.filenames?.length && !currentIds.has(entry.job.id)) {
+        entry.expired = true;
+        acceptDatasetDownloadJob({...entry.job, state: 'error', error: '下载任务已失效，请重新选择数据集下载。'});
+      }
+    }
+    for (const job of result.jobs || []) {
+      if (restoredIds.has(job.id) && datasetDownloadJobs.has(job.id)) acceptDatasetDownloadJob(job);
+    }
+  } catch (_) { /* Tracked jobs retry through the per-job polling endpoint. */ }
+  scheduleDatasetDownloadPolling();
+}
+
 function datasetPageVisible() {
   return typeof location !== 'undefined' && location.hash === '#datasets' && document.visibilityState === 'visible';
 }
@@ -1923,6 +2136,10 @@ async function loadDatasets() {
       } else {
         downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download?with_tags=1`;
         downloadLink.setAttribute('download', '');
+        downloadLink.onclick = event => {
+          event.preventDefault();
+          return startDatasetDownload([datasetIdentifier(file)], true);
+        };
       }
       downloadLink.textContent = '下载';
 
@@ -2184,6 +2401,7 @@ function bindSimulationControls() {
 }
 
 async function init() {
+  restoreDatasetDownloadJobs();
   bindInterventionControls();
   route();
   bindSimulationControls();
@@ -2401,11 +2619,7 @@ async function init() {
   if($('#batchDownloadDatasets')) {
     $('#batchDownloadDatasets').onclick = () => {
       const selected = $$('#datasetRows input[type=checkbox]:checked').map(cb => cb.dataset.filename);
-      if (!selected.length) return;
-      const form = document.createElement('form'); form.method = 'POST'; form.action = '/api/recordings/batch-download';
-      const input = document.createElement('input'); input.type = 'hidden'; input.name = 'filenames';
-      input.value = JSON.stringify(selected); form.append(input); document.body.append(form); form.submit(); form.remove();
-      toast(`正在打包下载 ${selected.length} 个数据集`);
+      return startDatasetDownload(selected, false);
     };
   }
   if($('#batchUploadDatasets')) {
