@@ -9,7 +9,9 @@ from urllib.parse import quote
 from aiohttp.test_utils import TestClient, TestServer
 from middleware.core.config import ConfigStore
 from middleware.core.topic_recorder import TopicRecorder
-from middleware.core.recording_datasets import archive_datasets, resolve_dataset
+from middleware.core.recording_datasets import (
+    archive_datasets, resolve_dataset, validate_download_selection, MAX_BATCH_DOWNLOAD_SELECTION,
+)
 
 
 def make_dataset(root, name='episode'):
@@ -43,6 +45,31 @@ class DatasetFilesTests(unittest.TestCase):
                         b'video payload')
             finally:
                 archive.unlink(missing_ok=True)
+
+    def test_archive_whole_collection_above_old_200_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            names = [f'capture_{index:04d}.mcap' for index in range(1508)]
+            for index, name in enumerate(names):
+                (root / name).write_bytes(f'original {index}'.encode())
+            archive = archive_datasets(root, names)
+            try:
+                with zipfile.ZipFile(archive) as output:
+                    self.assertEqual(output.namelist(), ['mcap/' + name for name in names])
+                    self.assertIsNone(output.testzip())
+                    self.assertEqual(output.read('mcap/' + names[-1]), b'original 1507')
+            finally:
+                archive.unlink(missing_ok=True)
+
+    def test_batch_download_limits_and_invalid_selections_are_explicit(self):
+        names = [f'capture_{index}.mcap' for index in range(MAX_BATCH_DOWNLOAD_SELECTION)]
+        self.assertEqual(validate_download_selection(names), names)
+        with self.assertRaisesRegex(ValueError, 'at most 10000 datasets'):
+            validate_download_selection(names + ['one_more.mcap'])
+        for selection in (None, 'capture.mcap', [], ['capture.mcap', 'capture.mcap'],
+                          [1], [{'file': 'capture.mcap'}]):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                validate_download_selection(selection)
 
     def test_list_and_delete_dataset_keeps_source_and_other_formats(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -128,7 +155,7 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(TopicRecorder, 'is_recording', return_value=True):
             response = await self.client.put('/api/config', json=config)
             self.assertEqual(response.status, 409)
-            self.assertEqual((await response.json())['code'], 'RECORDING_ACTIVE')
+            self.assertIn('请先停止录制', await response.text())
         self.assertEqual(ConfigStore(self.root/'middleware.yaml').load()['ros']['recording']['format'], original)
 
     async def test_list_zip_video_range_and_batch_delete(self):
@@ -172,6 +199,38 @@ class DatasetApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
             self.assertEqual(archive.read('mcap/capture.mcap'), b'mcap payload')
+
+    async def test_batch_download_over_200_works_for_json_and_form(self):
+        names = [f'capture_{index:03d}.mcap' for index in range(201)]
+        for index, name in enumerate(names):
+            (self.root / 'recordings' / name).write_bytes(f'payload {index}'.encode())
+        for body in ({'json': {'filenames': names}},
+                     {'data': {'filenames': json.dumps(names)}}):
+            with self.subTest(encoding=next(iter(body))):
+                response = await self.client.post('/api/recordings/batch-download', **body)
+                self.assertEqual(response.status, 200, await response.text() if response.status != 200 else '')
+                with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+                    self.assertEqual(len(archive.namelist()), 201)
+                    self.assertIsNone(archive.testzip())
+                    self.assertEqual(archive.read('mcap/' + names[-1]), b'payload 200')
+
+    async def test_batch_download_reports_new_bound_without_obscure_selection_error(self):
+        response = await self.client.post('/api/recordings/batch-download', json={
+            'filenames': [f'capture_{index}.mcap' for index in range(MAX_BATCH_DOWNLOAD_SELECTION + 1)]})
+        self.assertEqual(response.status, 400)
+        self.assertIn('at most 10000 datasets', await response.text())
+
+    async def test_batch_download_rejects_file_still_being_recorded(self):
+        response = await self.client.post('/api/recording/start', json={
+            'filename': 'active.mcap', 'force': True, 'selection': {'mode': 'local'}})
+        self.assertEqual(response.status, 200, await response.text())
+        try:
+            response = await self.client.post('/api/recordings/batch-download', json={
+                'filenames': ['active.mcap']})
+            self.assertEqual(response.status, 409)
+            self.assertIn('still being written', await response.text())
+        finally:
+            await self.client.post('/api/recording/stop')
 
     async def test_recording_list_filters_formats_and_compacts_rows(self):
         raw = self.root / 'recordings/capture.mcap'

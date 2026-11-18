@@ -11,6 +11,9 @@ from urllib.parse import quote
 from .takeover_log import takeover_file
 
 
+MAX_BATCH_DOWNLOAD_SELECTION = 10_000
+
+
 def resolve_dataset(directory: Path, identifier: str) -> Path:
     """Keep file IDs distinct from dataset IDs, rejecting traversal and symlinks."""
     prefix = next((p for p in ('lerobot:', 'bundle:') if identifier.startswith(p)), '')
@@ -98,12 +101,22 @@ def archive_dataset(target: Path) -> Path:
         raise
 
 
-def archive_datasets(directory: Path, identifiers: list[str]) -> Path:
-    """Create one collision-free ZIP for a validated mixed dataset selection."""
-    if (not isinstance(identifiers, list) or not identifiers or len(identifiers) > 200
-            or not all(isinstance(value, str) for value in identifiers)
+def validate_download_selection(identifiers: list[str]) -> list[str]:
+    """Bound request work while allowing whole recording collections to download."""
+    if not isinstance(identifiers, list) or not identifiers:
+        raise ValueError('invalid dataset selection')
+    if len(identifiers) > MAX_BATCH_DOWNLOAD_SELECTION:
+        raise ValueError(f'batch download supports at most {MAX_BATCH_DOWNLOAD_SELECTION} datasets; '
+                         'split the selection into smaller batches')
+    if (not all(isinstance(value, str) for value in identifiers)
             or len(set(identifiers)) != len(identifiers)):
         raise ValueError('invalid dataset selection')
+    return identifiers
+
+
+def archive_datasets(directory: Path, identifiers: list[str]) -> Path:
+    """Create one collision-free ZIP for a validated mixed dataset selection."""
+    identifiers = validate_download_selection(identifiers)
     targets = [(identifier, resolve_dataset(directory, identifier)) for identifier in identifiers]
     with tempfile.NamedTemporaryFile(prefix='hc-datasets-', suffix='.zip', delete=False) as handle:
         archive = Path(handle.name)

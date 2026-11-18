@@ -25,8 +25,8 @@ test('LeRobot list uses opaque identifier, ZIP download and details without ROS 
   assert.match(cells[6].textContent,/3 路相机.*15 FPS/);
   const actions=cells[9].children[0].children;
   assert.deepEqual(actions.map(el=>el.textContent),['详情','下载','选择任务后上传','删除']);
-  assert.equal(actions[1].href,'/api/recordings/lerobot%3Ateleop%20test/download');
-  assert.equal(actions[1].download,'teleop test.zip');
+  assert.equal(actions[1].href,'/api/recordings/lerobot%3Ateleop%20test/download?with_tags=1');
+  assert.equal(actions[1].download,''); // Server Content-Disposition selects the ZIP filename.
   await actions.find(el=>el.textContent==='删除').onclick();
   assert.equal(calls.find(call=>call.options?.method==='DELETE').url,'/api/recordings/lerobot%3Ateleop%20test');
 });
@@ -40,13 +40,13 @@ test('LeRobot details show aligned frame statistics, task, features and camera p
   assert.equal(fields['#datasetDetailVideos'].hidden,false);
   assert.equal(fields['#datasetDetailVideos'].children[1].src,dataset.videos[0].url);
 });
-test('MCAP keeps replay and plain file download',async()=>{
+test('MCAP keeps replay and a server-named download with optional tags',async()=>{
   const {ctx,fields}=setup([{filename:'test.mcap',format:'MCAP',message_count:12,channels:[{topic:'/clock'}]}]);
   await vm.runInContext('loadDatasets()',ctx);
   const actions=fields['#datasetRows'].children[0].children[9].children[0].children;
   assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','下载','选择任务后上传','删除']);
-  assert.equal(actions[2].href,'/api/recordings/test.mcap/download');
-  assert.equal(actions[2].download,'test.mcap');
+  assert.equal(actions[2].href,'/api/recordings/test.mcap/download?with_tags=1');
+  assert.equal(actions[2].download,''); // Tagged MCAP may be returned as a ZIP.
 });
 
 test('pending export appears immediately with stage, percentage and counters; operations disabled',async()=>{

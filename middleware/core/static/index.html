@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=27-upload-master">
+  <link rel="stylesheet" href="/static/styles.css?v=28-dataset-floating-toolbar">
   <link rel="stylesheet" href="/static/diagnostic_logs.css?v=1">
 </head>
 <body>
@@ -165,10 +165,6 @@
             <button id="importMcapBtn">导入 MCAP</button>
             <input type="file" id="importMcapInput" accept=".mcap" style="display:none;">
             <button id="refreshDatasets">刷新列表</button>
-            <button id="batchConvertLerobot" disabled>批量转为 LeRobot</button>
-            <button id="batchUploadDatasets" disabled>批量上传</button>
-            <button id="batchDownloadDatasets" disabled>批量下载</button>
-            <button id="batchDeleteDatasets" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
           </div>
         </div>
 
@@ -176,6 +172,13 @@
           <button type="button" class="active" data-dataset-format="mcap" role="tab" aria-selected="true">MCAP <span id="datasetMcapCount">0</span></button>
           <button type="button" data-dataset-format="lerobot" role="tab" aria-selected="false">LeRobot <span id="datasetLerobotCount">0</span></button>
           <button type="button" data-dataset-format="bundle" role="tab" aria-selected="false" hidden>MCAP＋MP4 <span id="datasetBundleCount">0</span></button>
+        </div>
+
+        <div class="dataset-batch-toolbar" role="group" aria-label="批量数据集操作">
+          <button id="batchConvertLerobot" type="button" disabled>批量转为 LeRobot</button>
+          <button id="batchUploadDatasets" type="button" disabled>批量上传</button>
+          <button id="batchDownloadDatasets" type="button" disabled>批量下载</button>
+          <button id="batchDeleteDatasets" type="button" class="danger" disabled>批量删除 (<span id="selectedDatasetCount">0</span>)</button>
         </div>
 
         <div id="replayControlPanel" class="replay-control-panel hidden">

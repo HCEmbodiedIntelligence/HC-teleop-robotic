@@ -773,6 +773,27 @@ td code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font
 .recording-readiness-banner { border: 0; border-left: 3px solid #bd9657; border-radius: 3px; padding: 10px 12px; }
 .readiness-icon { display: none; }
 .recording-actions, .dataset-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* Keep batch actions reachable while selecting rows far down a dataset list. */
+.dataset-batch-toolbar {
+  position: sticky;
+  top: 64px; /* Below the fixed 56px app header. */
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 4px 16px #0000000d;
+}
+@media (max-width: 680px) {
+  .dataset-batch-toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; }
+  .dataset-batch-toolbar button { min-width: 0; white-space: normal; }
+}
 .dataset-format-tabs { display: flex; gap: 4px; margin: 16px 0; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .dataset-format-tabs button { min-height: 32px; padding: 5px 13px; border-color: transparent; background: transparent; color: var(--muted); }
 .dataset-format-tabs button:hover { background: #f5f7fa; color: var(--text); }

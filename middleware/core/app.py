@@ -1707,7 +1707,7 @@ def create_app(store: ConfigStore) -> web.Application:
             return web.json_response({'ok': False, 'error': str(exc)}, status=400)
 
     async def batch_download_recordings(request: web.Request) -> web.StreamResponse:
-        from .recording_datasets import archive_datasets
+        from .recording_datasets import archive_datasets, validate_download_selection
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
         if request.content_type == 'application/json':
@@ -1720,6 +1720,10 @@ def create_app(store: ConfigStore) -> web.Application:
             except (TypeError, ValueError):
                 filenames = None
         try:
+            filenames = validate_download_selection(filenames)
+            if (runtime.recorder.is_recording() and runtime.recorder.path is not None
+                    and runtime.recorder.path.name in filenames):
+                raise web.HTTPConflict(text="recording is still being written")
             archive = await asyncio.to_thread(
                 archive_datasets, runtime.recorder.directory, filenames
             )
