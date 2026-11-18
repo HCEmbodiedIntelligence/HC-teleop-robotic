@@ -659,3 +659,148 @@ def test_reset_wait_logs_missing_feedback_instead_of_silent_zero_hz(rig):
     assert "feedback_received=0" in warning
     assert "output remains blocked" in warning
     solver.command_pub.publish.assert_not_called()
+
+
+def test_clutch_schmitt_hysteresis_and_stale_release(rig):
+    teleop, _ = rig
+    arm = teleop.arms['right']
+    for value, expected in [(.54, False), (.55, True), (.50, True), (.32549, True),
+                            (.31, True), (.30, False), (.5, False), (.56, True)]:
+        right_input(teleop, grip=value)
+        assert teleop._clutch_pressed(arm) is expected
+    assert not teleop._input_fresh(arm, arm.joy_stamp + 1.)
+    right_input(teleop, grip=.5)
+    assert not teleop._clutch_pressed(arm)
+
+
+def test_real_clutch_release_freezes_integrator_and_resume_needs_fresh_handshake(rig):
+    from std_msgs.msg import Header
+    teleop, solver = rig
+    teleop.enabled = True
+    teleop.controller_target_pub = Mock()
+    home = feedback(*rig)
+    teleop._joint_state_callback(home)
+    solver._joint_callback(home)
+    right_input(teleop)
+    teleop._control_tick()
+    assert teleop.arms['right'].active
+    solver._ee_callback(teleop.controller_target_pub.publish.call_args.args[0])
+    solver._tick()
+    # Simulate the pre-release integrator having an ordinary tracking lead.
+    solver.controller.command_q[solver.clutch_q_indices] += .1
+    right_input(teleop, grip=False)
+    teleop.solver_clutch_pub = Mock()
+    teleop._control_tick()
+    hold = teleop.solver_clutch_pub.publish.call_args.args[0]
+    assert hold.frame_id == 'hold'
+    solver._clutch_callback(hold)
+    frozen = solver.controller.command_q[solver.clutch_q_indices].copy()
+    for _ in range(5):
+        solver._tick()
+        assert np.allclose(solver.controller.command_q[solver.clutch_q_indices], frozen)
+    assert solver.command_pub.publish.call_args.args[0].header.frame_id == 'solver_clutch_hold'
+    # A real re-press requests an arm-scoped reset, with outputs still blocked.
+    right_input(teleop)
+    teleop._control_tick()
+    resume = teleop.solver_clutch_pub.publish.call_args.args[0]
+    assert resume.frame_id == 'resume' and teleop.solver_rearm.blocked
+    solver._clutch_callback(resume)
+    solver._joint_callback(home)  # Feedback predating re-press is rejected.
+    assert solver.clutch_reset_pending
+    fresh = feedback(*rig, offset=.02)
+    other_columns = [i for i in range(len(solver.controller.free_joint_names)) if i not in solver.clutch_columns]
+    other_indices = solver.controller.interface.q_indices[other_columns]
+    body_before = solver.controller.command_q[other_indices].copy()
+    teleop._joint_state_callback(fresh)
+    solver._joint_callback(fresh)
+    assert not solver.clutch_reset_pending
+    assert np.allclose(solver.controller.command_q[other_indices], body_before)
+    assert np.allclose(solver.controller.command_q[solver.clutch_q_indices], solver.controller.q[solver.clutch_q_indices])
+    ack = solver.reset_ack_pub.publish.call_args.args[0]
+    assert ack.frame_id == 'clutch'
+    teleop._solver_reset_ack_callback(ack)
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_SOLVER
+    held = solver.command_pub.publish.call_args.args[0]
+    held.header.stamp = solver.get_clock().now().to_msg()
+    teleop._generic_command_callback(held)
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_SOLVER
+    teleop._control_tick()
+    targets = teleop.controller_target_pub.publish.call_args.args[0]
+    assert solver._ee_callback(targets)
+    solver._tick()
+    first_output = solver.command_pub.publish.call_args.args[0]
+    measured = dict(zip(fresh.name, fresh.position))
+    first = dict(zip(first_output.name, first_output.position))
+    assert max(abs(first[n] - measured[n]) for n in teleop.arms['right'].joint_names) <= .00121
+    teleop._generic_command_callback(first_output)
+    teleop._control_tick()
+    assert not teleop.solver_rearm.blocked and teleop.arms['right'].active
+    # An old hold event must not undo the successful resume.
+    solver._clutch_callback(hold)
+    assert not solver.clutch_held
+
+
+def test_clutch_pending_reset_cannot_be_opened_by_nonclutch_ack(rig):
+    from std_msgs.msg import Header
+    teleop, solver = rig
+    teleop._clutch_resume_pending = True
+    teleop.solver_rearm.start_homing()
+    teleop.solver_rearm.homing_complete()
+    teleop.solver_rearm.observe_feedback()
+    teleop.solver_rearm.reset_published(1)
+    teleop._solver_reset_ack_callback(Header(stamp=solver.get_clock().now().to_msg()))
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_ACK
+
+
+def test_queued_vr_frame_does_not_refresh_input_age(rig):
+    from geometry_msgs.msg import PoseStamped
+    from sensor_msgs.msg import Joy
+    from builtin_interfaces.msg import Time
+    teleop, _ = rig
+    now = teleop.get_clock().now().nanoseconds
+    stamp = Time(sec=int((now-600_000_000)//1_000_000_000), nanosec=int((now-600_000_000)%1_000_000_000))
+    arm = teleop.arms['right']
+    arm.pose_stamp = arm.joy_stamp = 0.
+    from std_msgs.msg import Header
+    pose = PoseStamped(header=Header(stamp=stamp))
+    pose.pose.orientation.w = 1.
+    teleop._arm_pose_callback(arm, pose, sample_time=1.)
+    teleop._joy_callback(arm, Joy(header=pose.header, axes=[0., 1.]))
+    assert arm.pose_stamp == arm.joy_stamp == 0.
+
+
+def test_held_grip_after_input_timeout_is_not_an_automatic_resume(rig):
+    teleop, solver = rig
+    fresh = feedback(*rig)
+    teleop._joint_state_callback(fresh)
+    solver._joint_callback(fresh)
+    teleop.arms['right'].active = True
+    teleop.solver_clutch_pub = Mock()
+    teleop._update_solver_clutch(False, input_fresh=False)
+    assert teleop._clutch_solver_held
+    assert not teleop.solver_rearm.release_observed
+    teleop._update_solver_clutch(True, input_fresh=True)
+    assert teleop.solver_clutch_pub.publish.call_count == 1
+    assert teleop.solver_rearm.blocked and not teleop._clutch_resume_pending
+    teleop.solver_rearm.observe_clutch(False)  # A fresh real release.
+    teleop._update_solver_clutch(True, input_fresh=True)
+    assert teleop._clutch_resume_pending
+
+
+def test_hardware_loss_cancels_clutch_handshake_without_reopening_output(rig):
+    from std_msgs.msg import Bool, Header
+    teleop, solver = rig
+    teleop._clutch_solver_held = True
+    teleop._clutch_resume_pending = True
+    teleop.solver_clutch_pub = Mock()
+    teleop._hardware_ready_callback(Bool(data=False))
+    assert not teleop._clutch_solver_held and not teleop._clutch_resume_pending
+    assert teleop.solver_rearm.blocked and not teleop.hardware_ready
+    clear = teleop.solver_clutch_pub.publish.call_args.args[0]
+    assert clear.frame_id == 'clear'
+    # Delayed clutch ACK cannot satisfy a later ordinary/full reset.
+    teleop.solver_rearm.homing_complete()
+    teleop.solver_rearm.observe_feedback()
+    teleop.solver_rearm.reset_published(1)
+    teleop._solver_reset_ack_callback(Header(stamp=solver.get_clock().now().to_msg(), frame_id='clutch'))
+    assert teleop.solver_rearm.state == teleop.solver_rearm.WAIT_ACK

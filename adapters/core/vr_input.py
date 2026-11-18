@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 from geometry_msgs.msg import PoseStamped
@@ -12,6 +13,7 @@ class DecodedVrFrame:
     poses: dict[str, PoseStamped]
     inputs: dict[str, Joy]
     resume_requested: bool
+    sample_time: float | None = None
 
 
 def decode_vr_frame(payload: str) -> DecodedVrFrame | None:
@@ -26,6 +28,11 @@ def decode_vr_frame(payload: str) -> DecodedVrFrame | None:
         if not all(isinstance(item, dict) for item in (tracking, poses, inputs)):
             return None
 
+        received_ns = int(value.get("hc_received_ns", 0))
+        sample_time = value.get("vr_timestamp")
+        if received_ns < 0 or (sample_time is not None and not math.isfinite(float(sample_time))):
+            return None
+        sample_time = float(sample_time) if sample_time is not None else None
         decoded_poses: dict[str, PoseStamped] = {}
         for name in ("head", "left", "right"):
             source = poses.get(name)
@@ -38,6 +45,7 @@ def decode_vr_frame(payload: str) -> DecodedVrFrame | None:
             if not isinstance(quaternion, list) or len(quaternion) != 4:
                 continue
             result = PoseStamped()
+            result.header.stamp.sec, result.header.stamp.nanosec = divmod(received_ns, 1_000_000_000)
             (
                 result.pose.position.x,
                 result.pose.position.y,
@@ -69,6 +77,7 @@ def decode_vr_frame(payload: str) -> DecodedVrFrame | None:
                 side == "right" and ((pressed_mask & 1) or (held_mask & 1))
             )
             joy = Joy()
+            joy.header.stamp.sec, joy.header.stamp.nanosec = divmod(received_ns, 1_000_000_000)
             joy.axes = [
                 float(source.get("trigger", 0.0)),
                 float(source.get("grip", 0.0)),
@@ -81,6 +90,6 @@ def decode_vr_frame(payload: str) -> DecodedVrFrame | None:
                 int(bool(held_mask & (1 << index))) for index in range(11)
             ]
             decoded_inputs[side] = joy
-        return DecodedVrFrame(decoded_poses, decoded_inputs, resume_requested)
-    except (TypeError, ValueError, json.JSONDecodeError):
+        return DecodedVrFrame(decoded_poses, decoded_inputs, resume_requested, sample_time)
+    except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
         return None

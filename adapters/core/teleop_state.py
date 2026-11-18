@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from sensor_msgs.msg import Joy
+
+from .pose_prediction import BoundedPosePredictor
 
 
 @dataclass
@@ -21,6 +23,9 @@ class ArmRuntime:
     joy: Joy | None = None
     joy_stamp: float = 0.0
     active: bool = False
+    clutch_latched: bool = False
+    pose_source_ns: int = 0
+    predictor: BoundedPosePredictor = field(default_factory=BoundedPosePredictor)
     reference_vr: tuple[np.ndarray, np.ndarray] | None = None
     reference_axis_mapping: np.ndarray | None = None
     reference_local_ee: tuple[np.ndarray, np.ndarray] | None = None

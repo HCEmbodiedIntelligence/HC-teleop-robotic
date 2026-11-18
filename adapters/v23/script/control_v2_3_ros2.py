@@ -114,6 +114,10 @@ class ControllerNode(Node):
         self.failure_count = 0
         self.last_failure_log = 0.0
         self.reset_pending = False
+        self.clutch_held = False
+        self.clutch_reset_pending = False
+        self.clutch_event_ns = 0
+        self.clutch_feedback_cutoff_ns = 0
         self.feedback_received_total = 0
         self.last_feedback_receive_ns = 0
         self.last_feedback_source_ns = 0
@@ -137,6 +141,10 @@ class ControllerNode(Node):
         if teleop_config.get('control', {}).get('legacy_intervention', False):
             from adapters.core.v23_intervention import V23Intervention
             self.intervention = V23Intervention(self, teleop_config.get('grippers'))
+        arm_names = {name for arm in teleop_config.get("arms", {}).values() for name in arm.get("joint_names", [])}
+        self.clutch_columns = np.array([i for i, name in enumerate(self.controller.free_joint_names) if name in arm_names], dtype=int)
+        self.clutch_q_indices = self.controller.interface.q_indices[self.clutch_columns]
+        self.create_subscription(Header, "/control/solver/clutch", self._clutch_callback, feedback_reliable_qos)
         self.get_logger().info(
             "reconstructed controller_v2_3 started: "
             f"{len(self.controller.free_joint_names)} free joints, "
@@ -148,15 +156,45 @@ class ControllerNode(Node):
         if source not in {"vr", "motion", "exoskeleton"} or source == self.control_source:
             return
         self.control_source = source
+        self.clutch_held = False
+        self.clutch_reset_pending = False
         if self.intervention and self.intervention.active:
             return
         self._reset_references()
 
     def _reset_references(self) -> None:
+        self.clutch_held = False
+        self.clutch_reset_pending = False
         self.reset_pending = True
         self.reset_cutoff_ns = int(self.get_clock().now().nanoseconds)
+        self.clutch_event_ns = max(self.clutch_event_ns, self.reset_cutoff_ns)
         self.source_target_pending = True
         self.controller.targets.transforms.clear()
+
+    def _clutch_callback(self, message: Header) -> None:
+        if self.control_source != "vr" or (self.intervention and self.intervention.active):
+            return
+        stamp_ns = message.stamp.sec * 1_000_000_000 + message.stamp.nanosec
+        now_ns = int(self.get_clock().now().nanoseconds)
+        if message.frame_id not in {"hold", "resume", "clear"} or not -50_000_000 <= now_ns - stamp_ns <= 250_000_000:
+            return
+        if stamp_ns <= self.clutch_event_ns:
+            return
+        self.clutch_event_ns = stamp_ns
+        if message.frame_id == "clear":
+            self.clutch_held = False
+            self.clutch_reset_pending = False
+        elif message.frame_id == "hold":
+            self.clutch_held = True
+            self.clutch_reset_pending = False
+            self.controller.previous_velocity[self.clutch_columns] = 0.0
+        else:
+            self.clutch_held = True  # Keep holding until post-request feedback arrives.
+            self.clutch_reset_pending = True
+            self.clutch_feedback_cutoff_ns = now_ns
+            self.source_target_pending = True
+            self.source_target_cutoff_ns = now_ns
+        self.get_logger().info(f"arm clutch {message.frame_id}: event_ns={stamp_ns}, held={self.clutch_held}")
 
     def _joint_callback(self, message: JointState) -> None:
         self.feedback_received_total += 1
@@ -180,6 +218,8 @@ class ControllerNode(Node):
                 reason = "stale_or_future_feedback"
             elif resetting and stamp_ns <= self.reset_cutoff_ns:
                 reason = "before_reset_cutoff"
+            elif self.clutch_reset_pending and stamp_ns <= self.clutch_feedback_cutoff_ns:
+                reason = "before_clutch_cutoff"
             if reason:
                 self.feedback_rejections[reason] = self.feedback_rejections.get(reason, 0) + 1
                 now = time.monotonic()
@@ -204,6 +244,14 @@ class ControllerNode(Node):
                 self.get_logger().warning(
                     "retarget integrator reset to fresh joint feedback"
                 )
+            if self.clutch_reset_pending and not resetting:
+                self.controller.command_q[self.clutch_q_indices] = self.controller.q[self.clutch_q_indices]
+                self.controller.previous_velocity[self.clutch_columns] = 0.0
+                self.clutch_reset_pending = False
+                self.clutch_held = False
+                self.source_target_cutoff_ns = now_ns
+                self.reset_ack_pub.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="clutch"))
+                self.get_logger().info("arm clutch integrators reset to fresh feedback; waiting for new targets")
             if self.intervention:
                 self.intervention.feedback(message)
         except ValueError as exception:
@@ -308,7 +356,12 @@ class ControllerNode(Node):
                 owned.output.publish(message)
             return
         try:
+            held_q = self.controller.command_q[self.clutch_q_indices].copy() if self.clutch_held and not owned else None
             names, positions = self.controller.step()
+            if held_q is not None:
+                self.controller.command_q[self.clutch_q_indices] = held_q
+                self.controller.previous_velocity[self.clutch_columns] = 0.0
+                positions[self.clutch_columns] = held_q
         except RuntimeError:
             return
         except Exception as exception:
@@ -323,6 +376,8 @@ class ControllerNode(Node):
         self.failure_count = 0
         message = JointState()
         message.header.stamp = self.get_clock().now().to_msg()
+        if self.clutch_held and not owned:
+            message.header.frame_id = "solver_clutch_hold"
         message.name = list(names)
         message.position = [float(position) for position in positions]
         if owned:

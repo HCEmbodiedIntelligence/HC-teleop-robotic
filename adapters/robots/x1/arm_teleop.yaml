@@ -348,6 +348,10 @@ control:
   # Joy.axes[1] 是 Grip 离合；左右主摇杆 X（axes[2]）同时向外触发回零。
   clutch_axis: 1
   clutch_threshold: 0.55
+  clutch_release_threshold: 0.30
+  clutch_reset_on_release: true
+  pose_prediction_enabled: true
+  pose_prediction_horizon: 0.10
   home_gesture_axis: 2
   home_gesture_threshold: 0.70
   home_gesture_release_threshold: 0.25

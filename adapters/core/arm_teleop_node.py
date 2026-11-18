@@ -227,6 +227,8 @@ class RobotArmTeleopNode(Node):
         self._prev_left_grip = False
         self._prev_resume_requested = False
         self.solver_rearm = SolverRearmGate()
+        self._clutch_solver_held = False
+        self._clutch_resume_pending = False
         self.hardware_ready = False
         self.collision_enabled = bool(
             self.control.get("collision_avoidance_enabled", True)
@@ -434,6 +436,7 @@ class RobotArmTeleopNode(Node):
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
+        self.solver_clutch_pub = self.create_publisher(Header, "/control/solver/clutch", solver_sub_qos)
         self.solver_reset_ack_sub = None
         self.target_pub = self.create_publisher(
             PoseArray, self.control["target_pose_topic"], command_pub_qos
@@ -585,6 +588,13 @@ class RobotArmTeleopNode(Node):
         rate = float(self.config["control"].get("rate_hz", 0.0))
         if not math.isfinite(rate) or rate <= 0.0:
             raise ValueError("control.rate_hz must be positive")
+        press = float(self.config["control"].get("clutch_threshold", 0.55))
+        release = float(self.config["control"].get("clutch_release_threshold", press))
+        if not (math.isfinite(press) and math.isfinite(release) and 0 <= release <= press <= 1):
+            raise ValueError("clutch thresholds must satisfy 0 <= release <= press <= 1")
+        horizon = float(self.config["control"].get("pose_prediction_horizon", 0.10))
+        if not math.isfinite(horizon) or not 0 < horizon < 0.15:
+            raise ValueError("pose_prediction_horizon must be in (0, 0.15) seconds")
         vr_data_topic = self.config["control"].get("vr_data_topic", "/vrdata")
         if not isinstance(vr_data_topic, str) or not vr_data_topic.startswith("/"):
             raise ValueError("control.vr_data_topic must start with /")
@@ -865,11 +875,34 @@ class RobotArmTeleopNode(Node):
             return None
         return values[:3], values[3:] / norm
 
-    def _arm_pose_callback(self, arm: ArmRuntime, message: PoseStamped) -> None:
+    def _input_source_stamp(self, message, timeout: float) -> float | None:
+        now = self._monotonic()
+        stamp = message.header.stamp
+        source_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        if not source_ns:  # Typed legacy ROS inputs without a source timestamp.
+            return now
+        age = (self.get_clock().now().nanoseconds - source_ns) / 1e9
+        if not -0.05 <= age <= timeout:
+            return None
+        return now - max(0.0, age)
+
+    def _arm_pose_callback(self, arm: ArmRuntime, message: PoseStamped, *, sample_time=None) -> None:
         pose = self._read_pose(message)
-        if pose is not None:
-            arm.pose = pose
-            arm.pose_stamp = self._monotonic()
+        stamp = self._input_source_stamp(message, float(self.control["pose_timeout"]))
+        source_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+        if pose is None:
+            arm.pose = None
+            arm.pose_stamp = float("-inf")
+            arm.predictor.reset()
+            return
+        if stamp is None:
+            return
+        if source_ns and source_ns <= arm.pose_source_ns:
+            return
+        arm.pose_source_ns = source_ns
+        arm.pose = pose
+        arm.pose_stamp = stamp
+        arm.predictor.observe(pose, stamp, sample_time)
 
     def _base_pose_callback(self, message: PoseStamped) -> None:
         pose = self._read_pose(message)
@@ -918,8 +951,15 @@ class RobotArmTeleopNode(Node):
 
     def _joy_callback(self, arm: ArmRuntime, message: Joy) -> None:
         if all(math.isfinite(float(value)) for value in message.axes):
+            stamp = self._input_source_stamp(message, float(self.control["input_timeout"]))
+            if stamp is None:
+                return
+            old_ns = (arm.joy.header.stamp.sec * 1_000_000_000 + arm.joy.header.stamp.nanosec) if arm.joy else 0
+            new_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+            if new_ns and new_ns <= old_ns:
+                return
             arm.joy = message
-            arm.joy_stamp = self._monotonic()
+            arm.joy_stamp = stamp
 
     def _publish_hand_triggers(self, inputs: dict[str, Joy]) -> None:
         message = PoseArray()
@@ -962,7 +1002,11 @@ class RobotArmTeleopNode(Node):
         for side in ("left", "right"):
             pose = frame.poses.get(side)
             if pose is not None:
-                self._arm_pose_callback(self.arms[side], pose)
+                self._arm_pose_callback(self.arms[side], pose, sample_time=frame.sample_time)
+            else:
+                self.arms[side].pose = None
+                self.arms[side].pose_stamp = float("-inf")
+                self.arms[side].predictor.reset()
             joy = frame.inputs.get(side)
             if joy is not None:
                 self._joy_callback(self.arms[side], joy)
@@ -1016,6 +1060,7 @@ class RobotArmTeleopNode(Node):
         self.get_logger().info(f"control source changed to {source}; old VR state discarded")
 
     def _reset_control_references(self) -> None:
+        self._cancel_solver_clutch()
         with (getattr(self, "_command_state_lock", None) or nullcontext()):
             self._release_all(send_base_zero=True)
             self.arms["right"].joy = None  # A cached release cannot rearm the solver.
@@ -1095,7 +1140,10 @@ class RobotArmTeleopNode(Node):
             )
             if now_ns - last_retry_ns >= 500_000_000:
                 self._last_solver_reset_retry_ns = now_ns
-                self.solver_reset_pub.publish(Bool(data=True))
+                if self._clutch_resume_pending:
+                    self.solver_clutch_pub.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="resume"))
+                else:
+                    self.solver_reset_pub.publish(Bool(data=True))
 
     def _complete_feedback_fresh(self) -> bool:
         age_ns = self.get_clock().now().nanoseconds - self.joint_state_source_ns
@@ -1121,6 +1169,8 @@ class RobotArmTeleopNode(Node):
             self.solver_rearm.observe_solver_output(stamp_ns)
 
     def _solver_reset_ack_callback(self, message: Header) -> None:
+        if (message.frame_id == "clutch") != self._clutch_resume_pending:
+            return
         stamp_ns = int(message.stamp.sec) * 1_000_000_000 + int(
             message.stamp.nanosec
         )
@@ -1135,6 +1185,7 @@ class RobotArmTeleopNode(Node):
         self.hardware_ready = ready
 
         if not ready:
+            self._cancel_solver_clutch()
             if any(arm.active for arm in self.arms.values()) or self.body.active:
                 self._release_all(send_base_zero=True)
             if self.external_ik:
@@ -1249,7 +1300,8 @@ class RobotArmTeleopNode(Node):
                     int(message.header.stamp.sec) * 1_000_000_000
                     + int(message.header.stamp.nanosec)
                 )
-                if self.hardware_ready and self.solver_rearm.observe_solver_output(stamp_ns):
+                if (self.hardware_ready and message.header.frame_id != "solver_clutch_hold"
+                        and self.solver_rearm.observe_solver_output(stamp_ns)):
                     self.get_logger().info(
                         "fresh post-reset IK output received; release and press right Grip to resume"
                     )
@@ -1414,6 +1466,8 @@ class RobotArmTeleopNode(Node):
 
     def _release_arm(self, arm: ArmRuntime) -> None:
         arm.active = False
+        arm.clutch_latched = False
+        arm.predictor.reset()
         arm.reference_vr = None
         arm.reference_local_ee = None
         arm.target_local = None
@@ -1636,17 +1690,67 @@ class RobotArmTeleopNode(Node):
             )
 
     def _input_fresh(self, arm: ArmRuntime, now: float) -> bool:
-        return arm.joy is not None and now - arm.joy_stamp <= float(
-            self.control["input_timeout"]
-        )
+        fresh = arm.joy is not None and now - arm.joy_stamp <= float(self.control["input_timeout"])
+        if not fresh:
+            arm.clutch_latched = False
+            arm.predictor.reset()
+        return fresh
 
     def _clutch_pressed(self, arm: ArmRuntime) -> bool:
-        if arm.joy is None:
-            return False
         index = int(self.control["clutch_axis"])
-        return len(arm.joy.axes) > index and arm.joy.axes[index] >= float(
-            self.control["clutch_threshold"]
-        )
+        if arm.joy is None or len(arm.joy.axes) <= index:
+            arm.clutch_latched = False
+            return False
+        press = float(self.control["clutch_threshold"])
+        release = float(self.control.get("clutch_release_threshold", press))
+        value = float(arm.joy.axes[index])
+        if not math.isfinite(value):
+            arm.clutch_latched = False
+        elif arm.clutch_latched and release < press:
+            arm.clutch_latched = value > float(np.float32(release))
+        else:
+            arm.clutch_latched = value >= press
+        return arm.clutch_latched
+
+    def _cancel_solver_clutch(self) -> None:
+        if getattr(self, "_clutch_solver_held", False) or getattr(self, "_clutch_resume_pending", False):
+            self.solver_clutch_pub.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="clear"))
+        self._clutch_solver_held = False
+        self._clutch_resume_pending = False
+
+    def _update_solver_clutch(self, requested: bool, *, input_fresh: bool) -> None:
+        if self.backend != "v23" or not self.control.get("clutch_reset_on_release", False):
+            return
+        if not requested and (any(a.active for a in self.arms.values()) or self._clutch_resume_pending):
+            # Freeze only the arm integrators. Body/waist retain their own control.
+            with self._command_state_lock:
+                for arm in self.arms.values():
+                    self._release_arm(arm)
+                self.solver_rearm.start_homing()  # Block until an actual new press.
+                if input_fresh:
+                    self.solver_rearm.observe_clutch(False)
+                self._clutch_solver_held = True
+                self._clutch_resume_pending = False
+            self.solver_clutch_pub.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="hold"))
+            self.get_logger().info("right Grip released: arm integrators held; awaiting new press and feedback reset")
+        elif (requested and self._clutch_solver_held and self.solver_rearm.release_observed
+                and self._complete_feedback_fresh()):
+            # These targets must match the fresh measured anchor, not the pre-release pose.
+            for arm in self.arms.values():
+                arm.target_local = self._relative_pose(self._link_pose(arm.base_index), self._link_pose(arm.ee_index))
+                arm.predictor.reset()
+            with self._command_state_lock:
+                self.solver_rearm.homing_complete()
+                self.solver_rearm.observe_feedback()
+                cutoff = int(self.get_clock().now().nanoseconds)
+                self.solver_rearm.reset_published(cutoff)
+                self._last_solver_reset_retry_ns = cutoff
+                self._clutch_solver_held = False
+                self._clutch_resume_pending = True
+            self.solver_clutch_pub.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="resume"))
+            self.get_logger().info("right Grip re-pressed: awaiting fresh arm feedback, reset ACK and new IK output")
+        if self._clutch_resume_pending and not self.solver_rearm.blocked:
+            self._clutch_resume_pending = False
 
     def _update_waist_clutch(self, now: float) -> bool:
         left_input_fresh = self._input_fresh(self.arms["left"], now)
@@ -3215,6 +3319,7 @@ class RobotArmTeleopNode(Node):
                 arm.active = False
                 return
         arm.active = True
+        arm.predictor.reset()
         arm.reference_vr = arm.pose
         arm.target_local = self._relative_pose(
             self._link_pose(arm.base_index), self._link_pose(arm.ee_index)
@@ -3318,8 +3423,15 @@ class RobotArmTeleopNode(Node):
         assert arm.pose is not None
         assert arm.reference_vr is not None
         assert arm.reference_local_ee is not None
+        pose = arm.pose
+        if self.control.get("pose_prediction_enabled", False):
+            predicted = arm.predictor.predict(
+                self._monotonic(), horizon=float(self.control.get("pose_prediction_horizon", 0.10))
+            )
+            if predicted is not None:
+                pose = predicted
         raw_target_local = relative_target(
-            *arm.pose,
+            *pose,
             *arm.reference_vr,
             *arm.reference_local_ee,
             arm.reference_axis_mapping if arm.reference_axis_mapping is not None else self.control["axis_mapping"],
@@ -3422,6 +3534,7 @@ class RobotArmTeleopNode(Node):
         if self.backend == "motion":
             self._request_motion_home()
             return
+        self._cancel_solver_clutch()
         self._release_all(send_base_zero=True)
         self.solver_rearm.start_homing()
         self.base_zero_pending = False
@@ -3590,6 +3703,7 @@ class RobotArmTeleopNode(Node):
         arms_requested = right_input_fresh and self._clutch_pressed(
             self.arms["right"]
         )
+        self._update_solver_clutch(arms_requested, input_fresh=right_input_fresh)
         if self.solver_rearm.blocked:
             if right_input_fresh and self.solver_rearm.observe_clutch(arms_requested):
                 self.get_logger().info(
@@ -4081,6 +4195,8 @@ class RobotArmTeleopNode(Node):
                     getattr(self, '_command_state_lock', None),
                 ),
                 "rearm_state": self.solver_rearm.state,
+                "clutch_hold": self._clutch_solver_held,
+                "clutch_resume_pending": self._clutch_resume_pending,
                 "hardware_ready": self.hardware_ready,
             },
             "control_tick_timing": getattr(self, 'control_tick_metrics', None),
