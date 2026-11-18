@@ -9,6 +9,7 @@ import pytest
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Header, String
 from mcap.reader import make_reader
+from middleware.core.recording_cdr import read_event
 
 from tests.robot_api_fake_rig import FakeRig
 from tests.correction_recording_support import config as recording_config
@@ -139,8 +140,8 @@ def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_
                 observations = [msg.log_time for _, channel, msg in messages if channel.topic == '/observation/joint_states']
                 assert min(observations) < intervals[0]['start_ns']
                 assert max(observations) >= intervals[-1]['end_ns']
-                events = [json.loads(msg.data) for _, channel, msg in messages
-                          if channel.message_encoding == 'json' and channel.topic == '/events/control/intervention']
+                events = [read_event(msg.data, channel.message_encoding, schema.name if schema else '')
+                          for schema, channel, msg in messages if channel.topic == '/events/control/intervention']
                 assert sum(event['kind'] == 'manual_open' for event in events) == count+1
                 assert sum(event['kind'] == 'session_close' for event in events) == 1
                 return
@@ -151,7 +152,8 @@ def test_real_motion_switches_short_corrections_and_rejects_old_generations(tmp_
             assert all(job['quality']['action_received'] > 0 for job in recorder.corrections.jobs.values())
             for job in recorder.corrections.jobs.values():
                 with open(job['path'], 'rb') as stream:
-                    events = [json.loads(msg.data) for _, channel, msg in make_reader(stream).iter_messages()
+                    events = [read_event(msg.data, channel.message_encoding, schema.name if schema else '')
+                              for schema, channel, msg in make_reader(stream).iter_messages()
                               if channel.topic == '/events/control/action_evidence']
                 assert events and all(event['source'] == 'vr' and event['intervention'] for event in events)
                 assert len({event['intervention_id'] for event in events}) == 1

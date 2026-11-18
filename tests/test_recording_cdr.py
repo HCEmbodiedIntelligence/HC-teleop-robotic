@@ -10,7 +10,7 @@ from rclpy.serialization import deserialize_message, serialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from middleware.core.recording_cdr import read_joint_state, read_string, position_label
+from middleware.core.recording_cdr import read_joint_state, read_string, position_label, write_string, read_event
 
 
 @pytest.mark.parametrize('count', [0, 1, 7, 14, 27])
@@ -74,3 +74,31 @@ assert 'numpy' not in sys.modules
 assert 'rclpy' not in sys.modules
 '''
     subprocess.run([sys.executable, '-c', code, raw], check=True, timeout=10)
+
+
+@pytest.mark.parametrize('text', ['', 'ASCII', '中文与emoji🤖', 'x'*65537])
+def test_written_string_is_standard_ros_cdr(text):
+    raw = write_string(text)
+    assert deserialize_message(raw, String).data == text
+    assert read_string(raw) == text
+
+
+@pytest.mark.parametrize('encoding', ['json', 'cdr'])
+def test_event_reader_accepts_historical_json_and_ros_string(encoding):
+    payload = {'source': 'feedback_hold', 'sent_to_robot': False, '说明': '恢复'}
+    text = json.dumps(payload, ensure_ascii=False)
+    raw = text.encode() if encoding == 'json' else write_string(text)
+    assert read_event(raw, encoding, 'std_msgs/msg/String') == payload
+    with pytest.raises(ValueError):
+        read_event(raw, 'cdr', 'sensor_msgs/msg/JointState')
+
+
+def test_event_codec_never_initializes_ros_or_numpy():
+    code = """
+import sys
+from middleware.core.recording_cdr import write_string, read_event
+assert read_event(write_string('{"ok":true}'), 'cdr', 'std_msgs/msg/String') == {'ok': True}
+assert 'numpy' not in sys.modules
+assert 'rclpy' not in sys.modules
+"""
+    subprocess.run([sys.executable, '-c', code], check=True, timeout=10)

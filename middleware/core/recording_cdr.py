@@ -6,6 +6,7 @@ This module has no ROS context, publisher, or control-policy dependency.
 """
 from dataclasses import dataclass
 import struct
+import json
 
 
 class Reader:
@@ -56,6 +57,21 @@ class JointFields:
 
 def read_string(raw):
     return Reader(raw).string()
+
+
+def write_string(value):
+    """Encode a standard ROS2 String as little-endian CDR1 without ROS imports."""
+    encoded = value.encode('utf-8') + b'\0'
+    return b'\x00\x01\x00\x00' + struct.pack('<I', len(encoded)) + encoded
+
+
+def read_event(raw, message_encoding, schema_name=''):
+    """Read historical JSON events and standard String/CDR recording events."""
+    if message_encoding == 'json':
+        return json.loads(raw)
+    if message_encoding == 'cdr' and schema_name == 'std_msgs/msg/String':
+        return json.loads(read_string(raw))
+    raise ValueError('unsupported recording event encoding/schema')
 
 
 def read_joint_state(raw):

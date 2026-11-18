@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from mcap.reader import make_reader
+from middleware.core.recording_cdr import read_event
 from rclpy.serialization import serialize_message, deserialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
@@ -185,12 +186,16 @@ def test_actual_mcap_separates_label_clock_and_exact_publication_evidence(tmp_pa
         with path.open('rb') as stream:
             reader = make_reader(stream, validate_crcs=True)
             metadata = {m.name: m.metadata for m in reader.iter_metadata()}
+            summary = reader.get_summary()
+            assert all(schema.encoding == 'ros2msg' for schema in summary.schemas.values())
+            assert all(channel.message_encoding == 'cdr' for channel in summary.channels.values())
             rows = [(c.topic, m.data, m.log_time) for _, c, m in reader.iter_messages()]
         real = [(raw, stamp) for topic, raw, stamp in rows if topic == PUBLISHED_TOPIC]
         assert real == [(row['_raw'], row['stamp_ns']) for row in publications]
         labels = [stamp for topic, _, stamp in rows if topic == ACTION_TOPIC]
         assert labels == [now, now+10_000_000, now+40_000_000]
-        provenance = [json.loads(raw) for topic, raw, _ in rows if topic == PROVENANCE_TOPIC]
+        provenance = [read_event(raw, 'cdr', 'std_msgs/msg/String')
+                      for topic, raw, _ in rows if topic == PROVENANCE_TOPIC]
         assert len(provenance) == 4
         assert metadata['hc_teleop.capture_window']['action_at_publication'] == 'false'
         assert metadata['hc_teleop.capture_window']['real_publication_topic'] == PUBLISHED_TOPIC

@@ -14,6 +14,8 @@ import struct
 
 from mcap.reader import make_reader
 
+from middleware.core.recording_cdr import read_event
+
 ACTION = '/action/joint_states'
 PUBLISHED_ACTION = '/internal/recording/published_action'
 ACTION_PROVENANCE = '/events/recording/action_provenance'
@@ -67,7 +69,7 @@ def audit(path: str | Path, threshold_ms: float = 40.) -> dict:
         for schema, channel, message in reader.iter_messages(topics=TOPICS+(VR_TARGET, PUBLISHED_ACTION, ACTION_PROVENANCE), log_time_order=False):
             if channel.topic == ACTION_PROVENANCE:
                 try:
-                    value = json.loads(message.data)
+                    value = read_event(message.data, channel.message_encoding, schema.name if schema else '')
                     if (value.get('schema_version') != 'hc-action-provenance/v1'
                             or value.get('action_log_time_ns') != message.log_time
                             or value.get('source') not in {'published_action', 'feedback_hold'}

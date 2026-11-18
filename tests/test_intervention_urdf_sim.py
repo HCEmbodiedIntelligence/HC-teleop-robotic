@@ -21,6 +21,7 @@ from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import String
 from mcap.reader import make_reader
+from middleware.core.recording_cdr import read_event
 
 from tests.correction_recording_support import service as RecordingService
 from tests.robot_api_fake_rig import FakeRig
@@ -252,7 +253,8 @@ def test_urdf_simulation_interventions_and_correction_capture(profile_name, tmp_
             for job in recorder.corrections.jobs.values():
                 with open(job['path'], 'rb') as stream:
                     entries = list(make_reader(stream).iter_messages())
-                evidence = [json.loads(message.data) for _, channel, message in entries
+                evidence = [read_event(message.data, channel.message_encoding, schema.name if schema else '')
+                            for schema, channel, message in entries
                             if channel.topic == '/events/control/action_evidence']
                 frames = [deserialize_message(message.data, Image) for _, channel, message in entries if channel.topic == CAMERA]
                 assert evidence and all(event['source'] == 'vr' and event['intervention'] for event in evidence)

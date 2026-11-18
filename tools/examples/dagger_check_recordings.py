@@ -10,8 +10,10 @@ import statistics
 import sys
 
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(ROOT/'.deps'))
 from mcap.reader import make_reader
+from middleware.core.recording_cdr import read_event
 from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
@@ -34,13 +36,13 @@ def inspect(path):
         for schema,channel,message in make_reader(stream,validate_crcs=True).iter_messages(log_time_order=False):
             times[channel.topic].append(message.log_time)
             if channel.topic=='/events/recording/sample_provenance':
-                event=json.loads(message.data)
+                event=read_event(message.data,channel.message_encoding,schema.name if schema else '')
                 if 'topic' in event:
                     provenance[event['topic']].append(event)
                 else:
                     assert event.get('action_boundary')=='hc_final' and 'command_seq' in event
             if channel.topic=='/events/control/action_evidence':
-                evidence.append(json.loads(message.data))
+                evidence.append(read_event(message.data,channel.message_encoding,schema.name if schema else ''))
             if channel.topic in ('/action/joint_states','/observation/joint_states'):
                 data=deserialize_message(message.data,JointState)
                 assert len(data.name)==len(data.position) and len(set(data.name))==len(data.name)

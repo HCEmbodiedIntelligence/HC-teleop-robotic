@@ -155,7 +155,9 @@ class TopicRecorderTests(unittest.TestCase):
 
             with recorder.path.open("rb") as stream:
                 metadata = list(make_reader(stream).iter_metadata())
-            self.assertEqual(len(metadata), 1)
+            self.assertEqual(len(metadata), 2)
+            self.assertEqual(metadata[1].name, "hc_teleop.record_only")
+            self.assertEqual(metadata[1].metadata, {"topic": "/events"})
             self.assertEqual(metadata[0].name, "hc_teleop.session")
             self.assertEqual(metadata[0].metadata["profile_id"], "openarmx")
 
@@ -215,6 +217,47 @@ class TopicRecorderTests(unittest.TestCase):
             recorder.delete_recording("run_2.mcap")
             self.assertEqual(len(recorder.list_recordings()), 0)
             self.assertFalse((recorder.directory / ".run_2.mcap.mark.json").exists())
+
+    def test_all_event_and_provenance_channels_use_legacy_ros2_cdr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({"directory": "recordings"}, Path(directory))
+            raw = bytes(serialize_message(String(data="original ROS payload")))
+            stamp = 1_790_000_000_123_456_789
+            event_payload = {"source": "feedback_hold", "sent_to_robot": False,
+                             "description": "重新授权", "source_stamp_ns": stamp-10}
+            sample = {"role": "initial_observation", "topic": "/observation/joint_states"}
+            try:
+                recorder.start("legacy_encoding.mcap")
+                self.assertTrue(recorder.record({"kind": "ros_message", "topic": "/raw",
+                    "msg_type": "std_msgs/msg/String", "_raw": raw, "stamp_ns": stamp,
+                    "_provenance": sample}))
+                self.assertTrue(recorder.record({"topic": "/events/recording/action_provenance",
+                    "payload": event_payload, "stamp_ns": stamp+1}))
+                self.assertTrue(recorder.record({"topic": "/events/fallback", "kind": "custom",
+                    "data": "中文", "stamp_ns": stamp+2}))
+                result = recorder.stop()
+                self.assertIsNone(result["error"])
+                with recorder.path.open("rb") as stream:
+                    reader = make_reader(stream, validate_crcs=True)
+                    summary = reader.get_summary()
+                    rows = list(reader.iter_messages())
+                    metadata = list(reader.iter_metadata())
+                self.assertTrue(all(s.encoding == "ros2msg" for s in summary.schemas.values()))
+                self.assertTrue(all(c.message_encoding == "cdr" for c in summary.channels.values()))
+                self.assertEqual(len(summary.schemas), 1)
+                original = next(m for _, c, m in rows if c.topic == "/raw")
+                self.assertEqual(original.data, raw)
+                self.assertEqual((original.log_time, original.publish_time), (stamp, stamp))
+                events = {c.topic: (json.loads(deserialize_message(m.data, String).data), m)
+                          for _, c, m in rows if c.topic != "/raw"}
+                self.assertEqual(events["/events/recording/action_provenance"][0], event_payload)
+                self.assertEqual(events["/events/recording/sample_provenance"][0], sample)
+                self.assertEqual(events["/events/fallback"][0]["data"], "中文")
+                self.assertEqual(events["/events/recording/action_provenance"][1].publish_time, stamp+1)
+                record_only = {m.metadata["topic"] for m in metadata if m.name == "hc_teleop.record_only"}
+                self.assertTrue(set(events) <= record_only)
+            finally:
+                recorder.shutdown()
 
 
 if __name__ == "__main__":

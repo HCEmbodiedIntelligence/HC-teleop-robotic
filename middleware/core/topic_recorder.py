@@ -19,6 +19,7 @@ from mcap.well_known import MessageEncoding, SchemaEncoding
 from mcap.writer import Writer as McapWriter
 from .background_process import background_environment
 from .takeover_log import takeover_path
+from .recording_cdr import write_string
 from .x1_recording import ordinary_x1_capture
 from .capture_window import (
     AUDIT_METADATA, WINDOW_METADATA, CaptureAudit, CaptureWindow,
@@ -244,7 +245,7 @@ def _mcap_writer_process(
                         name=msg_type, encoding=SchemaEncoding.ROS2, data=_get_msg_def(msg_type))
                 channels[(topic, msg_type)] = writer.register_channel(
                     topic=topic, message_encoding=MessageEncoding.CDR, schema_id=schemas[msg_type])
-            def write_event(event):
+            def write_event(event, *, allow_nan=True):
                 topic = str(event.get("topic") or "/events")
                 msg_type = str(
                     event.get("msg_type") or "std_msgs/msg/String"
@@ -256,69 +257,47 @@ def _mcap_writer_process(
                     capture_audit.observe({**event, 'topic': ACTION_TOPIC}
                         if label_buffer is not None and topic == PUBLISHED_TOPIC else event)
 
-                if isinstance(raw_data, bytes):
-                    if ((not x1_capture and event.get('record_only')
-                            or label_buffer is not None and topic == ACTION_TOPIC)
-                            and topic not in record_only_topics):
-                        writer.add_metadata('hc_teleop.record_only', {'topic': topic})
-                        record_only_topics.add(topic)
-                    if msg_type not in schemas:
-                        schemas[msg_type] = writer.register_schema(
-                            name=msg_type,
-                            encoding=SchemaEncoding.ROS2,
-                            data=_get_msg_def(msg_type),
-                        )
-                    schema_id = schemas[msg_type]
-                    chan_key = (topic, msg_type)
-                    if chan_key not in channels:
-                        channels[chan_key] = writer.register_channel(
-                            topic=topic,
-                            message_encoding=MessageEncoding.CDR,
-                            schema_id=schema_id,
-                        )
-                    writer.add_message(
-                        channel_id=channels[chan_key],
-                        log_time=stamp_ns,
-                        data=raw_data,
-                        publish_time=stamp_ns,
-                    )
-                else:
+                if not isinstance(raw_data, bytes):
                     payload = event.get("payload")
                     if payload is None:
                         payload = {k:v for k,v in event.items() if not k.startswith('_')}
-                    json_bytes = json.dumps(
-                        payload,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    if "teleop_event" not in schemas:
-                        schemas["teleop_event"] = writer.register_schema(
-                            name="teleop_event",
-                            encoding=SchemaEncoding.JSONSchema,
-                            data=b"",
-                        )
-                    schema_id = schemas["teleop_event"]
-                    chan_key = (topic, "teleop_event")
-                    if chan_key not in channels:
-                        channels[chan_key] = writer.register_channel(
-                            topic=topic,
-                            message_encoding=MessageEncoding.JSON,
-                            schema_id=schema_id,
-                        )
-                    writer.add_message(
-                        channel_id=channels[chan_key],
-                        log_time=stamp_ns,
-                        data=json_bytes,
-                        publish_time=stamp_ns,
+                    raw_data = write_string(json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":"), allow_nan=allow_nan))
+                    msg_type = "std_msgs/msg/String"
+                    # Diagnostic events stay visible in standard ROS tools but
+                    # must never be replayed into a live control graph.
+                    if topic not in record_only_topics:
+                        writer.add_metadata('hc_teleop.record_only', {'topic': topic})
+                        record_only_topics.add(topic)
+                if ((not x1_capture and event.get('record_only')
+                        or label_buffer is not None and topic == ACTION_TOPIC)
+                        and topic not in record_only_topics):
+                    writer.add_metadata('hc_teleop.record_only', {'topic': topic})
+                    record_only_topics.add(topic)
+                if msg_type not in schemas:
+                    schemas[msg_type] = writer.register_schema(
+                        name=msg_type,
+                        encoding=SchemaEncoding.ROS2,
+                        data=_get_msg_def(msg_type),
                     )
+                schema_id = schemas[msg_type]
+                chan_key = (topic, msg_type)
+                if chan_key not in channels:
+                    channels[chan_key] = writer.register_channel(
+                        topic=topic,
+                        message_encoding=MessageEncoding.CDR,
+                        schema_id=schema_id,
+                    )
+                writer.add_message(
+                    channel_id=channels[chan_key],
+                    log_time=stamp_ns,
+                    data=raw_data,
+                    publish_time=stamp_ns,
+                )
                 provenance = event.get('_provenance')
                 if provenance and not x1_capture and recording_topics is None:
-                    key = ('/events/recording/sample_provenance', 'teleop_event')
-                    if key not in channels:
-                        channels[key] = writer.register_channel(topic=key[0], message_encoding=MessageEncoding.JSON,
-                            schema_id=writer.register_schema(name='hc-sample-provenance/v1', encoding=SchemaEncoding.JSONSchema, data=b''))
-                    writer.add_message(channel_id=channels[key], log_time=stamp_ns, publish_time=stamp_ns,
-                                       data=json.dumps(provenance, allow_nan=False).encode())
+                    write_event(dict(topic='/events/recording/sample_provenance',
+                                     stamp_ns=stamp_ns, payload=provenance), allow_nan=False)
 
             # Do not report a recording as active until the destination file
             # has actually been opened and the MCAP header has been written.

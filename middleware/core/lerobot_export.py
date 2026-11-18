@@ -193,6 +193,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
     from .topic_recorder import read_recording_metadata
+    from .recording_cdr import read_event
     metadata = read_recording_metadata(source)
     if metadata.get('capture_snapshot'):
         from humanoid_upload.capture_plan import validate_snapshot
@@ -254,8 +255,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             progress.update('读取 MCAP', 25 * message_index / max(1, message_total) if message_total else 0,
                             message_index, message_total, '条消息')
             topic = channel.topic
-            if channel.message_encoding == 'json' and topic in ('/events/control/intervention', '/events/recording/sample_provenance'):
-                event = json.loads(message.data)
+            if topic in ('/events/control/intervention', '/events/recording/sample_provenance'):
+                event = read_event(message.data, channel.message_encoding, schema.name if schema else '')
                 if event.get('kind') == 'session_close' and event.get('capture_mode') == 'full_session':
                     session = session or event
                 elif event.get('kind') == 'manual_close' and event.get('capture_mode') != 'full_session':

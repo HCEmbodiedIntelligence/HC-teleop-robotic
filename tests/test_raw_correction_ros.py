@@ -10,6 +10,7 @@ from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import Image, JointState
 from mcap.reader import make_reader
+from middleware.core.recording_cdr import read_event
 from rclpy.serialization import deserialize_message
 
 from middleware.core.control_ownership import ControlToken
@@ -101,7 +102,8 @@ def test_raw_short_corrections_preserve_images_actions_and_unbound_download(tmp_
             depths = [deserialize_message(msg.data, Image) for _, channel, msg in messages
                       if channel.topic == '/test/raw/depth']
             assert depths and all(bytes(image.data) == bytes([232, 3]*256) for image in depths)
-            evidence = [json.loads(msg.data) for _, channel, msg in messages
+            evidence = [read_event(msg.data, channel.message_encoding, schema.name if schema else '')
+                        for schema, channel, msg in messages
                         if channel.topic == '/events/control/action_evidence']
             assert evidence and all(event['intervention_id'] == job['metadata']['intervention_id'] for event in evidence)
             from middleware.core.recording_datasets import archive_dataset

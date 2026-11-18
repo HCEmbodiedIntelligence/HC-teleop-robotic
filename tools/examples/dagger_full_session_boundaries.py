@@ -41,19 +41,24 @@ def full_session(s):
     s.wait(exported,45,'full-session sidecar')
     path,metadata=found[0]
     mcap=path.with_suffix('').with_suffix('.mcap')
+    sys.path.insert(0,str(ROOT))
     sys.path.insert(0,str(ROOT/'.deps'))
     from mcap.reader import make_reader
+    from middleware.core.recording_cdr import read_event
     from rclpy.serialization import deserialize_message
     from sensor_msgs.msg import JointState
     from geometry_msgs.msg import PoseStamped
-    from std_msgs.msg import String
     events=[]; control_events=[]; evidence=[]; actions={}; observations=[]; base_observations=[]; ages=[]
     with mcap.open('rb') as stream:
-        for _,channel,message in make_reader(stream,validate_crcs=True).iter_messages(log_time_order=False):
+        for schema,channel,message in make_reader(stream,validate_crcs=True).iter_messages(log_time_order=False):
             if channel.topic=='/events/control/intervention':
-                if channel.message_encoding=='json': events.append(json.loads(message.data))
-                else: control_events.append(json.loads(deserialize_message(message.data,String).data))
-            elif channel.topic=='/events/control/action_evidence': evidence.append(json.loads(message.data))
+                event=read_event(message.data,channel.message_encoding,schema.name if schema else '')
+                # Recorder boundaries and live ownership events now share the
+                # same ROS String/CDR encoding; distinguish their semantics.
+                if event.get('schema')=='hc-control-event/v1': control_events.append(event)
+                else: events.append(event)
+            elif channel.topic=='/events/control/action_evidence':
+                evidence.append(read_event(message.data,channel.message_encoding,schema.name if schema else ''))
             elif channel.topic in ('/action/joint_states','/observation/joint_states'):
                 value=deserialize_message(message.data,JointState)
                 stamp=value.header.stamp.sec*10**9+value.header.stamp.nanosec
