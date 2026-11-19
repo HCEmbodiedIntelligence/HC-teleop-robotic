@@ -53,7 +53,7 @@ class Node:
 @pytest.fixture
 def metadata(monkeypatch):
     monkeypatch.setenv('HC_RUNTIME_MODE', 'simulation')
-    monkeypatch.setenv('HC_CONTROL_BACKEND', 'v23')
+    monkeypatch.setenv('HC_CONTROL_BACKEND', 'motion')
     monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
     monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
     return CameraMetadata(Node(), load_camera_metadata(PROFILE_CONFIG, ROOT / 'middleware'))
@@ -188,6 +188,7 @@ def test_legacy_messages_remain_authoritative_without_duplicate_fallback(metadat
 
 def test_unified_public_head_names_map_back_to_model(monkeypatch, metadata):
     monkeypatch.setenv('HC_CONTROL_BACKEND', 'motion')
+    monkeypatch.setenv('HC_UNIFIED_ROBOT_API', '1')
     config = load_camera_metadata(PROFILE_CONFIG, ROOT / 'middleware')
     unified = CameraMetadata(Node(), config)
     unified.joint_state(joints(names=['head_joint_1', 'head_joint_2']))

@@ -6,12 +6,15 @@ managed: true
 imported_at: '2026-11-04T02:09:52.274955+00:00'
 robot_name: HC_REALMAN
 urdf: urdf/hc_realman.urdf
-primary_config: controller_v23.yml
+primary_config: arm_teleop.yaml
 config_files:
 - middleware.yaml
 - arm_teleop.yaml
-- controller_v23.yml
 - vr_configs.yml
+- motion/motion.yaml
+- motion/sdk.yaml
+- motion/channels.yaml
+- motion/tools.yaml
 link_count: 49
 joint_count: 48
 movable_joint_count: 33

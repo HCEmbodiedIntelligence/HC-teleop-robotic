@@ -1,3 +1,5 @@
+> 注：本文件为 2026-10-22 分支合并历史对照记录。当前 `feat/amd-motion` 分支（`x86-64 / amd64`）已正式移除原 `v23` 控制器并更新 `humanoid_motion_server` 运动学 SDK（子模块已更新至其 `main` 分支），统一使用 `motion` 后端；最新说明请看根目录 [README.md](../README.md) 与 [MOTION.md](MOTION.md)。
+
 # main / humanoid 功能对照与合并范围
 
 2026-10-22 核对的版本：main 最终纳入 `aa5ab9b`（初次核对为 `692749f`），humanoid

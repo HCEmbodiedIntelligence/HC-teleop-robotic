@@ -26,12 +26,24 @@ def local_robot(config, config_dir):
     path = root / profile_id
     try:
         profile = yaml.safe_load((path / 'profile.yaml').read_text())
-        controller_name = profile.get('primary_config', 'controller_v23.yml')
-        controller = yaml.safe_load((path / controller_name).read_text())
+        controller_name = profile.get('primary_config', 'arm_teleop.yaml')
+        controller = yaml.safe_load((path / controller_name).read_text()) or {}
+        if isinstance(controller.get('model'), dict) and controller['model'].get('free_joints'):
+            model_info = controller.get('model', {})
+        else:
+            arms = controller.get('arms', {}) if isinstance(controller, dict) else {}
+            model_info = {
+                'urdf': profile.get('urdf', ''),
+                'free_joints': [
+                    name
+                    for side in ('right', 'left')
+                    for name in arms.get(side, {}).get('joint_names', [])
+                ],
+            }
         # Fingerprint the hardware model and selected profile, excluding connection
         # settings, camera rates and other operational preferences.
         hardware = {'profile_id': profile_id, 'robot_name': profile.get('robot_name'),
-                    'model': controller.get('model', {})}
+                    'model': model_info}
         urdf = path / profile.get('urdf', '')
         if urdf.is_file():
             hardware['urdf_sha256'] = hashlib.sha256(urdf.read_bytes()).hexdigest()

@@ -617,10 +617,10 @@ function renderTeleopStatus(event) {
     const value=JSON.parse(event.payload?.data||'{}');
     const names={hold:'保持',base_waist:'底盘 + 腰部',arms_grippers:'双臂 + 夹爪',both:'全部并发',homing:'双臂 + 腰部回零'};
     const rearmNames={wait_feedback:'等待回零反馈',wait_reset:'准备复位 IK',wait_ack:'等待 IK 复位确认',wait_solver:'等待复位后的新 IK 解',wait_release:'请松开右 Grip',wait_press:'请重新按下右 Grip'};
-    const external=value.backend==='generic'||value.backend==='v23';
+    const external=value.backend==='generic'||value.backend==='motion';
     const solver=value.generic_controller||{};
     const healthy=solver.solver_fresh&&solver.command_fresh;
-    const backendLabel=value.backend==='motion'?'Motion':value.backend==='v23'?'重构 v2.3':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
+    const backendLabel=value.backend==='motion'?'Motion':value.backend==='generic'?'原版通用 IK':'旧版 PyBullet IK';
     const modeName=value.mode==='ik_rearming'?(rearmNames[solver.rearm_state]||'IK 重新武装'):(names[value.mode]||value.mode);
     setText('#teleopMode',value.enabled?modeName:'已停用');
     setText('#teleopBackend',external?`${backendLabel}${healthy?' 正常':' 未响应'}`:backendLabel);

@@ -10,18 +10,19 @@ git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motio
 ./bootstrap_colcon.sh test
 ```
 
-依赖安装和 SDK 版本以 `src/humanoid_motion_server` 的说明为准。当前子模块固定 RoboManip 二进制及依赖版本，构建会校验哈希和 `/usr/local` 依赖来源；ROS 自带的同名库不能替代。构建目录为 `build_motion/`、`install_motion/`、`log_motion/`，可分别用 `HC_MOTION_BUILD`、`HC_MOTION_INSTALL`、`HC_MOTION_LOG` 指定。
+依赖安装和 SDK 版本以 [`src/humanoid_motion_server/README.md`](../src/humanoid_motion_server/README.md) 为准。当前子模块固定 `vendor/robo_manip/`（`librobo_manip.so`、`libmotion_control.so`、`liblibplaco.so` 及头文件），构建会校验 `SHA256SUMS` 与固定依赖版本；ROS 自带的同名库不能替代。依赖目录支持 `HUMANOID_MOTION_SDK_DEPS_PREFIX`、仓库 `.sdk_deps` 或 `/usr/local`。构建目录为 `build_motion/`、`install_motion/`、`log_motion/`，可分别用 `HC_MOTION_BUILD`、`HC_MOTION_INSTALL`、`HC_MOTION_LOG` 指定。
 
 ## 控制模式
 
-X1、OpenArmX 默认沿用 main 的 v23 控制，原生关节名与硬件话题不变。统一 API 与 Motion 通过同一个显式后端选择启用：
+当前所有内置机型（`x1`、`openarmx`、`HC_REALMAN`）已移除原 `v23` 后端，统一默认使用 `control.backend: motion`（由 `StandardMotionTeleopBridge` 对接 `humanoid_motion_control_node` 完成双臂 `ServoP` QP Servo IK 与 RTC 平滑）：
 
 ```bash
-HC_CONTROL_BACKEND=motion ./run.sh sim
-HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
+./run.sh sim             # 完整仿真（含 PyBullet GUI 窗口）
+./run.sh sim --headless  # 无窗口仿真（可在网页按需打开三维视图）
+ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
-也可在机型 `arm_teleop.yaml` 中设置 `control.backend: motion`。环境变量优先。中间件、仿真、控制器必须从同一个入口和后端选择启动，切换前停止原进程。仿真继续使用 main 的本机隔离 ROS 域；真机模式禁止网页另起仿真。
+如需启用统一机器人公共 API（`UnifiedMotionTeleopBridge`），可为整套进程设置 `HC_UNIFIED_ROBOT_API=1`（或配置 `control.unified_api: true`）。中间件、仿真、控制器必须从同一个入口和后端选择启动，切换前停止原进程。仿真继续使用本机隔离 ROS 域；真机模式禁止网页另起仿真。
 
 统一模式下，驱动使用 `/internal/robot/joint_states` 与 `/internal/robot/joint_commands`；公共 API 负责名称与单位转换，在线能力发布到 `/status/robot/info`。在网页选择 Move / Servo 后还需显式恢复输出。VR、程序与外骨骼共用命令选择器；切源、反馈过期、ready 失效或停止会撤销旧许可。
 

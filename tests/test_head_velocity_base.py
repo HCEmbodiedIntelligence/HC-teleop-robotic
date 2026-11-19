@@ -29,7 +29,7 @@ def test_launch_mode_selects_real_velocity_or_simulated_pose(mode, expected):
             os.environ.pop('HC_TELEOP_MODE', None)
             if mode is not None:
                 os.environ['HC_TELEOP_MODE'] = mode
-            node = RobotArmTeleopNode(str(CONFIG), backend='v23')
+            node = RobotArmTeleopNode(str(CONFIG), backend='motion')
         try:
             assert node.head_base_mode == expected
             assert (node.head_base_follower is None) == (expected == 'planar_velocity')
@@ -149,7 +149,7 @@ def test_unknown_configured_mode_is_rejected_in_all_launch_modes(tmp_path, mode)
     try:
         with patch.dict(os.environ, {'HC_TELEOP_MODE': mode}):
             with pytest.raises(ValueError, match='teleop_mode'):
-                node.__init__(str(path), backend='v23')
+                node.__init__(str(path), backend='motion')
     finally:
         node.destroy_node()
         rclpy.shutdown()

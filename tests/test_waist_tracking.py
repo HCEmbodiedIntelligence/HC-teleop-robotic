@@ -38,7 +38,7 @@ class WaistTrackingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             test_path = Path(directory) / "arm_teleop.yaml"
             test_path.write_text(yaml.safe_dump(config))
-            return RobotArmTeleopNode(str(test_path), backend="v23")
+            return RobotArmTeleopNode(str(test_path), backend="motion")
 
     def test_sim_unconstrained_3dof_head_tracking(self):
         """Test unconstrained 1:1 head target mapping and 3-DOF sagittal tracking in simulation mode."""

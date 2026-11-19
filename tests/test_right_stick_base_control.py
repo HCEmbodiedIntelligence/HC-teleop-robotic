@@ -58,7 +58,7 @@ class RightStickBaseControlTests(unittest.TestCase):
             legacy_path = Path(temporary_directory) / "arm_teleop.yaml"
             legacy_path.write_text(yaml.safe_dump(config))
             with patch.dict(os.environ, {"HC_TELEOP_MODE": "sim"}):
-                node = RobotArmTeleopNode(str(legacy_path), backend="v23")
+                node = RobotArmTeleopNode(str(legacy_path), backend="motion")
         try:
             self.assertIsNone(node.head_base_follower)
             self.assertTrue({"leg_1", "leg_2", "zhi"}.isdisjoint(node.controlled_names))

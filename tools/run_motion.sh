@@ -16,6 +16,12 @@ source "${MOTION_INSTALL}/setup.bash"
 set -u
 export PATH="/usr/bin:${PATH}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-14}"
+if [[ -d "${PROJECT_ROOT}/.sdk_deps/lib" ]]; then
+  export LD_LIBRARY_PATH="${PROJECT_ROOT}/.sdk_deps/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+if [[ -f "${PROJECT_ROOT}/.sdk_deps/lib/libruckig.so" ]]; then
+  export LD_PRELOAD="${PROJECT_ROOT}/.sdk_deps/lib/libruckig.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
 # The unified SDK runtime verifies its own pinned dependency provenance.
 ARGS=()
 if [[ "${1:-}" == --profile ]]; then
@@ -24,10 +30,28 @@ if [[ "${1:-}" == --profile ]]; then
 else
   PROFILE="$(/usr/bin/python3 "${PROJECT_ROOT}/middleware/profile_cli.py" profile-dir)"
 fi
-RUNTIME_DIR="${HC_ROBOT_API_RUNTIME_DIR:-$(mktemp -d /tmp/hc-robot-api.XXXXXX)}"
-/usr/bin/python3 "${PROJECT_ROOT}/middleware/profile_cli.py" generate --profile "${PROFILE}" --output "${RUNTIME_DIR}" >&2
 URDF="$(/usr/bin/python3 -c 'import sys,yaml; from pathlib import Path; p=Path(sys.argv[1]); print((p/yaml.safe_load((p/"arm_teleop.yaml").read_text())["robot"]["urdf_path"]).resolve())' "${PROFILE}")"
-ARGS=("params_file:=${RUNTIME_DIR}/motion.yaml" "channel_config_file:=${RUNTIME_DIR}/channels.yaml"
-      "sdk_config_file:=${RUNTIME_DIR}/sdk.yaml" "tool_config_file:=${PROFILE}/motion/tools.yaml" "urdf_file:=${URDF}"
-      "robot_api_file:=${RUNTIME_DIR}/robot_api.resolved.yaml" "joint_state_endpoint:=/internal/robot/joint_states")
+if PYTHONPATH="${PROJECT_ROOT}" /usr/bin/python3 -c 'import sys; from adapters.core.runtime_config import unified_profile; sys.exit(0 if unified_profile(sys.argv[1]) else 1)' "${PROFILE}"; then
+  RUNTIME_DIR="${HC_ROBOT_API_RUNTIME_DIR:-$(mktemp -d /tmp/hc-robot-api.XXXXXX)}"
+  /usr/bin/python3 "${PROJECT_ROOT}/middleware/profile_cli.py" generate --profile "${PROFILE}" --output "${RUNTIME_DIR}" >&2
+  ARGS=("params_file:=${RUNTIME_DIR}/motion.yaml" "channel_config_file:=${RUNTIME_DIR}/channels.yaml"
+        "sdk_config_file:=${RUNTIME_DIR}/sdk.yaml" "tool_config_file:=${PROFILE}/motion/tools.yaml" "urdf_file:=${URDF}"
+        "robot_api_file:=${RUNTIME_DIR}/robot_api.resolved.yaml" "joint_state_endpoint:=/internal/robot/joint_states")
+else
+  RUNTIME_DIR="${HC_ROBOT_API_RUNTIME_DIR:-$(mktemp -d /tmp/hc-motion.XXXXXX)}"
+  /usr/bin/python3 -c '
+import sys, yaml
+from pathlib import Path
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+data = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
+params = data.get("humanoid_motion_control", {}).get("ros__parameters", {})
+if isinstance(params, dict):
+    params.pop("output_permit_topic", None)
+dst.parent.mkdir(parents=True, exist_ok=True)
+dst.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+' "${PROFILE}/motion/motion.yaml" "${RUNTIME_DIR}/motion.yaml"
+  ARGS=("params_file:=${RUNTIME_DIR}/motion.yaml" "channel_config_file:=${PROFILE}/motion/channels.yaml"
+        "sdk_config_file:=${PROFILE}/motion/sdk.yaml" "tool_config_file:=${PROFILE}/motion/tools.yaml" "urdf_file:=${URDF}"
+        "joint_state_endpoint:=/observation/joint_states" "joint_command_endpoint:=/control/motion/joint_targets")
+fi
 exec ros2 launch "${PROJECT_ROOT}/tools/motion.launch.py" "${ARGS[@]}" "$@"

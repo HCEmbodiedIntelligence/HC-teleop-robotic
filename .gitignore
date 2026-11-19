@@ -49,5 +49,6 @@ install_motion
 log_motion/
 /log/
 .deps
+.sdk_deps
 .venv-lerobot
 *.so

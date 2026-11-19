@@ -73,7 +73,11 @@ def main() -> None:
             return
         paths = {
             "profile-dir": profile_dir,
-            "controller": profile_dir / "controller_v23.yml",
+            "controller": (
+                profile_dir / "motion" / "motion.yaml"
+                if (profile_dir / "motion" / "motion.yaml").is_file()
+                else profile_dir / "arm_teleop.yaml"
+            ),
             "teleop": profile_dir / "arm_teleop.yaml",
             "simulation": (
                 profile_dir / "arm_teleop.yaml"

@@ -127,13 +127,14 @@ def test_manual_producer_uses_standard_mapping_without_changing_fingers():
     from adapters.core.intervention import InterventionTeleop
     r = Rig(); b = r.boundary; manual(r)
     now = time.monotonic()
-    node = SimpleNamespace(backend='v23', config=b.teleop, control=b.teleop['control'],
+    node = SimpleNamespace(backend='motion', config=b.teleop, control=b.teleop['control'],
         homing=False, last_command={}, joint_state={},
         arms={s:SimpleNamespace(active=True, reference_vr=object(), reference_local_ee=object()) for s in b.hands},
         _update_arm_target=Mock(), _publish_target_poses=Mock(), _publish_status=Mock(),
         get_clock=lambda:SimpleNamespace(now=lambda:Time(nanoseconds=time.time_ns())))
     node._gripper_position = MethodType(RobotArmTeleopNode._gripper_position, node)
     owner = InterventionTeleop.__new__(InterventionTeleop)
+    owner.legacy_mode = True
     owner.node=node; owner.token=r.control.token; owner.granted=owner.valid=True
     owner.input=SimpleNamespace(pressed=True); owner.last_input=owner.permit_time=now
     owner.last_hand_step=now-.01; owner.triggers={'right':.8, 'left':.2}

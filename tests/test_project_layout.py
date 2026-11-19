@@ -17,7 +17,6 @@ class ProjectLayoutTests(unittest.TestCase):
             "middleware/core",
             "adapters/core",
             "adapters/nodes",
-            "adapters/v23",
             "adapters/robots/x1",
             "interfaces",
             "simulation",
@@ -25,11 +24,13 @@ class ProjectLayoutTests(unittest.TestCase):
             self.assertTrue((self.root / relative).is_dir(), relative)
         for obsolete in (
             "adapter",
+            "adapters/v23",
             "hc_teleop_adapter",
             "hc_teleop_middleware",
             "robot_configs",
             "scripts",
             "vendor",
+            "run_generic_controller.sh",
         ):
             self.assertFalse((self.root / obsolete).exists(), obsolete)
 
@@ -37,7 +38,7 @@ class ProjectLayoutTests(unittest.TestCase):
         runtime_files = [
             self.root / "adapters/start.sh",
             self.root / "middleware/start.sh",
-            self.root / "run_generic_controller.sh",
+            self.root / "tools/run_motion.sh",
         ]
         text = "\n".join(path.read_text(encoding="utf-8") for path in runtime_files)
         self.assertNotIn("hc_io_suit", text)

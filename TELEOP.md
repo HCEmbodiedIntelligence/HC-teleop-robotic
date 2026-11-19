@@ -1,6 +1,6 @@
-# HC-TJ VR 遥操作（仿真第一阶段）
+# HC-TJ VR 遥操作
 
-本系统读取中间件发布的头显、左右手柄位姿和 `Joy` 输入，默认使用重构的 ControllerV23 任务/限位差分 IK 生成关节目标。VR 节点只负责坐标映射、离合、底盘、夹爪和网页状态；重构后端负责双臂/腰部的 FrameTask、限位求解及 Pinocchio 积分。当前交付默认只用于 PyBullet 仿真。
+本系统读取中间件发布的头显、左右手柄位姿和 `Joy` 输入，默认使用 `motion` 控制后端：双臂逆运动学（`qp_servo` / `placo`）与实时关节滤波（RTC）由 ROS 2 包 `humanoid_motion_server`（`humanoid_motion_control_node`）求解，VR 控制节点（`RobotArmTeleopNode`）负责坐标映射、离合、底盘、腰部 IK（仅配置了 `body.waist_joint_names` 的机型）、夹爪和网页状态，并经 `StandardMotionTeleopBridge` 与 Motion 节点闭环对接（原 `v23` 后端与 `adapters/v23/` 已移除）。
 
 ## 离合状态机
 
@@ -57,49 +57,52 @@ Joy.axes = [
 例如，`stick_x_axis: 2`、`stick_y_axis: 3` 表示底盘使用主摇杆的
 X/Y 分量；`clutch_axis: 1` 表示 Grip 是离合输入。
 
-双臂末端目标带位置/姿态死区和低通滤波，用于抑制静止手柄追踪噪声；v2.3 每周期求解带速度及一步关节位置边界的加权最小二乘，再通过 Pinocchio `integrate()` 生成小步关节命令。
+双臂末端目标带位置/姿态死区、低通滤波及末端限速，用于抑制静止手柄追踪噪声与突变阶跃；随后经 `StandardMotionTeleopBridge` 转发到 `humanoid_motion_control_node` 的 `servo_p` 通道，在 SDK（`qp_servo` / `placo` + 最终关节 RTC）中求解关节命令并按模型限位输出。
 
-v2.3 的 URDF、任务权重和速度限制来自 `adapters/robots/<机器人名>/controller_v23.yml`，关节位置限制来自 URDF。逆运动学控制器位于 `adapters/v23/`。
+Motion 的通道与运动学参数位于 `adapters/robots/<机器人名>/motion/{motion.yaml,sdk.yaml,channels.yaml}`，遥操作映射与体/手参数位于 `adapters/robots/<机器人名>/arm_teleop.yaml`。桥接与控制源码位于 `adapters/nodes/` 与 `adapters/core/`，Motion ROS 2 包位于 `src/humanoid_motion_interfaces` 与 `src/humanoid_motion_server`。
 
-双臂末端目标统一保存在胸部 `zhi_Link` 坐标系中。腰部运动时，末端目标会随躯干整体运动，不会反向补偿成世界坐标不动。
+双臂末端目标统一保存在胸部参考坐标系（如 X1 为 `zhi_Link`）中。腰部运动时，末端目标会随躯干整体运动，不会反向补偿成世界坐标不动。
 
-`/action/ee_poses` 与 `/observation/ee_poses` 都使用胸部坐标，供仿真 marker 和诊断直接比较。VR 节点另将目标转换到左右肩基，并通过 `/control/solver/ee_targets` 送入控制器；显示和 IK 坐标不能混用。
+`/action/ee_poses` 与 `/observation/ee_poses` 都使用机身参考坐标（如 `zhi_Link`），供仿真 marker、Web 3D 视图和 Motion `servo_p` 桥接消费。
 
 ## 启动
 
-首次安装仿真依赖：
+首次安装 Python 依赖与编译 Motion ROS 2 包：
 
 ```bash
-cd /home/maple/test/HC-teleop-robotic
 ./install.sh
+./install.sh --camera   # 需启用 WebRTC 视频推流时安装 av/aiortc/pyrealsense2
+git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
+./bootstrap_colcon.sh build
 ```
 
-默认一条命令启动网页、VR 自动发现、IK/控制和 HC-TJ 图形仿真：
+命令行启动完整网页、VR 自动发现、Motion 逆解/控制和 PyBullet 图形仿真窗口：
 
 ```bash
 ./run.sh sim
 ```
 
-没有图形显示时：
+无显示器或只使用网页端三维仿真视图时（不弹出独立 PyBullet GUI 窗口）：
 
 ```bash
-./run.sh --headless
+./run.sh sim --headless
 ```
 
-脚本读取 `middleware/config.yaml` 中 `robot_profiles.active` 指向的 Dashboard 当前配置。HC 通用格式导入会在 `adapters/robots/<配置ID>/` 生成仿真、遥操作和 v2.3 控制器所需文件；网页切换配置后需要退出并重新启动。
+也可直接运行 `./run.sh`（默认仅启动中间件，在网页“系统配置 → PyBullet 仿真”按需无窗口启动仿真与 VR 控制，并可开启“显示三维仿真视图”）。
+
+脚本读取 `middleware/config.yaml` 中 `robot_profiles.active` 指向的 Dashboard 当前配置；网页切换配置后需要退出并重新启动。
 
 连接真机时，本仓库只启动通用遥操作部分，硬件由 `HC_X1` 独立启动：
 
 ```bash
-cd /home/maple/test/HC-teleop-robotic
-./run.sh teleop
+ROS_DOMAIN_ID=14 ./run.sh teleop
 
 # 另一个终端
-cd /home/maple/test/HC_X1
+cd ~/HC_X1
 ./start.sh
 ```
 
-根目录只保留 `run.sh` 产品入口，不提供单独启动 PyBullet 的模式。旧 `--robot/--v23/--generic/--legacy/--sim-only` 重复路径已经移除。
+根目录只保留 `run.sh` 产品入口，旧 `--robot/--v23/--generic/--legacy/--sim-only` 与 `run_generic_controller.sh` 均已移除。
 
 两边必须使用相同的 `ROS_DOMAIN_ID`。启动后松开两个 Grip；准备好再按对应离合。
 
@@ -121,7 +124,7 @@ cd /home/maple/test/HC_X1
 - `/control/exoskeleton/joint_states`（外骨骼 `sensor_msgs/msg/JointState` 输入）
 - `/control/source`（当前控制源，`std_msgs/msg/String`，瞬态本地持久化；值为 `vr` 或 `exoskeleton`）
 - `/action/joint_states`（中间件选择后的唯一标准机器人命令）
-- `/control/solver/joint_targets`（v2.3 或原版 PID 的内部输出，由 VR 适配器合并夹爪）
+- `/control/solver/joint_targets`（Motion 桥接经过限流与许可过滤后的内部双臂关节输出，由 VR 适配器合并夹爪/腰/头）
 - `/action/base/command`
 - `/action/ee_poses`
 - `/control/solver/ee_targets`（内部肩基任务目标）

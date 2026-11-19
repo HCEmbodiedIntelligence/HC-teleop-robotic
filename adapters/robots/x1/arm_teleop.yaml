@@ -1,5 +1,5 @@
 # X1 的 VR 遥操作适配配置：描述模型、双臂/腰部/夹爪、输入映射和安全限制。
-# ControllerV23 的任务权重与关节速度上限在 controller_v23.yml 中配置。
+# Motion IK 求解器与轨迹限幅参数在 motion/motion.yaml 与 motion/sdk.yaml 中配置。
 robot:
   # URDF 路径以及模型根节点在世界坐标系中的位姿；四元数顺序为 XYZW。
   urdf_path: urdf/hc_tj_robot.urdf
@@ -324,8 +324,8 @@ grippers:
     - 0.05
     - 2.5
 control:
-  # 默认使用 ControllerV23；Motion 可通过 HC_CONTROL_BACKEND 显式启用。
-  backend: v23
+  # 默认使用 humanoid_motion_server 求解双臂；可通过 HC_CONTROL_BACKEND 显式切换。
+  backend: motion
   legacy_intervention: true
   enabled_on_start: true
   home_on_start: true

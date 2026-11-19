@@ -31,6 +31,10 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.profiles = RobotProfileManager(root / 'profiles')
         for name in ('test_bot', 'other_bot'):
             self.profiles.import_profile(name, name, 'robot.urdf', URDF, 'vr_configs.yml', io_yaml())
+            motion_dir = root / 'profiles' / name / 'motion'
+            motion_dir.mkdir(exist_ok=True)
+            for fname in ('motion.yaml', 'sdk.yaml', 'channels.yaml', 'tools.yaml'):
+                (motion_dir / fname).write_text('{}\n')
         self.service = SimulationService(self.store, self.profiles)
         self.env = patch.dict(os.environ)
         self.env.start()

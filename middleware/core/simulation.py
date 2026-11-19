@@ -81,7 +81,7 @@ class SimulationService:
             reason = '当前机器人包缺少 arm_teleop.yaml 或 vr_configs.yml，无法启动 PyBullet。'
         logs = list(self.logs)
         if self.state == 'failed' and self.log_dir:
-            for name in ('v23_solver.log', 'teleop_controller.log'):
+            for name in ('motion_solver.log', 'motion_bridge.log', 'teleop_controller.log'):
                 try:
                     with (self.log_dir / name).open('rb') as stream:
                         stream.seek(0, 2)
@@ -159,8 +159,13 @@ class SimulationService:
             urdf.relative_to(profile.resolve())
             UrdfModel(urdf.read_bytes())
             if options['with_control']:
-                from adapters.core.runtime_config import unified_profile
-                files = ('arm_teleop.yaml', 'robot_api.yaml', 'motion/motion.yaml', 'motion/sdk.yaml', 'motion/channels.yaml', 'motion/tools.yaml') if unified_profile(profile) else ('controller_v23.yml','arm_teleop.yaml')
+                from adapters.core.runtime_config import backend as resolve_backend, unified_profile
+                arm_cfg = yaml.safe_load((profile / 'arm_teleop.yaml').read_text()) or {}
+                ctrl_backend = resolve_backend(arm_cfg, os.environ.get('HC_CONTROL_BACKEND'))
+                if unified_profile(profile):
+                    files = ('arm_teleop.yaml', 'robot_api.yaml', 'motion/motion.yaml', 'motion/sdk.yaml', 'motion/channels.yaml', 'motion/tools.yaml')
+                else:
+                    files = ('arm_teleop.yaml', 'motion/motion.yaml', 'motion/sdk.yaml', 'motion/channels.yaml', 'motion/tools.yaml')
                 for filename in files:
                     if not (profile / filename).is_file():
                         raise SimulationError(f'当前机器人包缺少 {filename}')

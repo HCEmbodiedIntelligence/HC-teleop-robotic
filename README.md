@@ -2,18 +2,19 @@
 
 # HC Teleop
 
-一个与机器人后端无关的通用遥操作栈：接收 PICO 位姿和手柄数据，通过单一 `/vrdata` 发布到 ROS 2，并提供机器人导入、话题录制、状态监控、Pinocchio IK 和遥操作控制。
+一个与机器人后端无关的通用遥操作栈：接收 PICO 位姿和手柄数据，通过单一 `/vrdata` 发布到 ROS 2，并提供机器人导入、话题录制、状态监控、基于 `humanoid_motion_server` / `humanoid_motion_interfaces` 的双臂运动学求解（`Motion`）和全身遥操作控制。
 
 ## 代码分层
 
-产品现在分为通用软件和机型硬件两个独立仓库。本仓库只包含通用软件：
+产品现在分为通用软件和机型硬件两个独立仓库。本仓库主要包含通用软件及嵌入式 Motion 子模块：
 
 | 部分 | 目录 | 职责 | 独立启动 |
 | --- | --- | --- | --- |
 | 中间件 | `middleware/` | `core/` 中的前端、配置导入、VR 网关、录制与回放，以及 `config.yaml` 系统配置 | `./middleware/start.sh` |
-| 通用控制/解算 | `adapters/` | VR 控制、Pinocchio v2.3 逆解，以及 `robots/<机器人ID>/` 中由网页导入的 URDF/mesh/参数 | `./adapters/start.sh` |
+| 通用控制/桥接 | `adapters/` | VR 相对映射、离合/底盘/腰/头控制、`StandardMotionTeleopBridge` 桥接，以及 `robots/<机器人ID>/` 参数与 URDF/mesh | `./adapters/start.sh` |
+| Motion 运动学包 | `src/humanoid_motion_interfaces`、`src/humanoid_motion_server` | ROS 2 接口与双臂 IK（`qp_servo` / `placo`）、`ServoP/ServoJ/MoveJ` 及最终关节 RTC（`vendor/robo_manip`） | `./tools/run_motion.sh` |
 
-真机入口 `./run.sh teleop` 会同时启动上面两部分，不判断也不要求真机在线；仿真入口 `./run.sh sim` 还会启动 PyBullet。X1 相机、机械臂、底盘、腰部和灵巧手驱动已独立为同级仓库 `HC_X1`。本仓库不再依赖或 source `hc_io_suit`，停止通用入口也不会启动、停止或清理硬件。新机型接入见 [硬件适配项目接入指南](docs/HARDWARE_ADAPTER_GUIDE.md)。
+真机入口 `./run.sh teleop` 会同时启动中间件、通用控制/桥接和 Motion 运动学节点，不判断也不要求真机在线；仿真入口 `./run.sh sim` 还会启动 PyBullet（无 `--headless` 时弹出本地 PyBullet 窗口）。X1 相机、机械臂、底盘、腰部和灵巧手驱动已独立为同级仓库 `HC_X1`。本仓库不再依赖或 source `hc_io_suit`，停止通用入口也不会启动、停止或清理硬件。新机型接入见 [硬件适配项目接入指南](docs/HARDWARE_ADAPTER_GUIDE.md)。
 
 统一入口默认读取 `middleware/config.yaml` 中的 ROS Domain；显式 `ROS_DOMAIN_ID` 优先。仿真或硬件适配项目必须使用相同的 Domain。
 
@@ -29,20 +30,28 @@
 
 ## 快速开始
 
-系统中的 ROS 2 Humble 使用 Python 3.10，而当前用户默认 `python3` 可能是 3.13。安装脚本会明确使用 `/usr/bin/python3`，将网页依赖安装在项目内的 `.deps`，并继续使用系统 ROS 包：
+系统中的 ROS 2 Humble 使用 Python 3.10，而当前用户默认 `python3` 可能是 3.13。安装脚本会明确使用 `/usr/bin/python3`，将网页和桥接依赖安装在项目内的 `.deps`，并继续使用系统 ROS 包；双臂 Motion 运动学 ROS 2 包编译在 `build_motion/` 与 `install_motion/`：
 
 ```bash
-cd /home/maple/test/HC-teleop-robotic
-chmod +x install.sh run.sh
+chmod +x install.sh run.sh bootstrap_colcon.sh
+
+# 1. 安装中间件与仿真基础 Python 依赖（写入 .deps）
 ./install.sh
-./run.sh middleware
-```
-
-然后访问 `http://<机器人IP>:7876/dashboard/#config`。当前机器人包的 `middleware.yaml` 提供相机、订阅话题、安全和 VR 超时配置。需要启用 WebRTC 服务时安装可选依赖：
-
-```bash
+# 2. 需要头显相机推流 / WebRTC（av、aiortc、pyrealsense2）时安装：
 ./install.sh --camera
+
+# 3. 拉取并编译 Motion ROS 2 运动学包（humanoid_motion_interfaces + humanoid_motion_server）
+git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
+# 若目标机未把固定 SDK C++ 依赖装入 /usr/local，需准备 .sdk_deps 或设置 HUMANOID_MOTION_SDK_DEPS_PREFIX
+./bootstrap_colcon.sh build
+
+# 4. 启动 Dashboard + VR 网关（推荐网页模式，按需开启无窗口 PyBullet 与网页三维视图）
+./run.sh
 ```
+
+> 说明：原 `v23` 控制器（`adapters/v23/`、`hc-teleop-controller` Conda 环境及 `run_generic_controller.sh`）已在本版本移除，当前统一使用 `motion` 后端。Motion SDK 依赖与编译说明见 [`src/humanoid_motion_server/README.md`](src/humanoid_motion_server/README.md) 与 [Motion 工作区](docs/MOTION.md)。
+
+然后访问 `http://<机器人IP>:7876/dashboard/#config`。当前机器人包的 `middleware.yaml` 提供相机、订阅话题、安全和 VR 超时配置。
 
 接真机时只需额外启动硬件适配项目：
 
@@ -51,20 +60,9 @@ chmod +x install.sh run.sh
 cd ~/HC_X1
 ROS_DOMAIN_ID=14 ./start.sh
 
-# 通用系统：中间件、ZIP/URDF 配置、逆解、控制和录制
+# 通用系统：中间件、ZIP/URDF 配置、Motion 逆解、控制桥接和录制
 cd ~/HC-teleop-robotic
 ROS_DOMAIN_ID=14 ./run.sh teleop
-```
-
-Jetson 首次部署时，先安装 Conda，再运行 `./install.sh`。默认 Conda 路径为
-`~/miniconda3/bin/conda`；其他安装位置通过 `CONDA_BIN` 指定。安装脚本会创建
-独立的 `~/miniconda3/envs/hc-teleop-controller` 环境，提供带 CasADi 绑定的
-Pinocchio 3.7 和 CasADi 3.7；系统 Python 中只有 Pinocchio 并不足以启动逆解。
-自定义环境位置时，安装和运行都需要设置相同的 `HC_CONTROLLER_PREFIX`。
-安装完成后先执行以下只读检查：
-
-```bash
-./run_generic_controller.sh --check
 ```
 
 同时将 `HC_X1` 更新到提供 `/action`、`/observation`、`/control`、`/status`
@@ -138,12 +136,12 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 
 “系统配置”页顶部提供 HC 机器人配置工作流：选择已导入机器人、导入新配置、应用配置。导入时同时选择一个 URDF 和一个 YAML，配置 ID 只能使用字母、数字、点、下划线或短横线。文件会保存到 `adapters/robots/<配置ID>/`，X1 的内置资料位于 `adapters/robots/x1/`。
 
-支持两种 YAML：
+支持导入配置：
 
-- HC 通用 `vr_configs.yml`：包含 `urdf_path`、`arms`、`controller_indices`，可选 `folding_waist`。导入器会校验所有 joint/link 索引，并生成标准接口的 `controller_v23.yml`；双臂配置还会生成 `arm_teleop.yaml`。
-- 重构控制器 `controller_v23.yml`：包含 `model.free_joints`、`task` 和 `limit`。导入器会校验 URDF 关节与任务 link，并统一 ROS 话题和 URDF 相对路径。该格式只提供 IK 控制配置，不包含 HC PyBullet 仿真所需的 `vr_configs.yml`。
+- 标准控制配置 `arm_teleop.yaml` 与 `motion/{motion.yaml,sdk.yaml,channels.yaml}`：当前内置机型（`x1`、`openarmx`、`HC_REALMAN`）均使用该格式，默认配置 `control.backend: motion`。
+- 兼容旧版 `vr_configs.yml` / `controller_v23.yml` ZIP：导入器会校验 URDF 关节与任务 link，自动规范化 ROS 话题和 URDF 相对路径，并将控制配置输出为 `motion` 后端（不再生成旧版 `controller_v23.yml`）。
 
-完整统一 API 的 ZIP 还包含 `robot_api.yaml` 和 `motion/` 配置，引用现有分组和 home；只导入上述旧格式不会自动获得统一 Servo 能力，列表会显示缺少的配置。点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。重启中间件、控制和硬件适配器以一致加载新 profile；显式 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 优先于配置文件。统一 API 的启动和迁移步骤见 [对外接口说明](docs/ROBOT_PUBLIC_API.md)。
+完整统一 API 的 ZIP 还包含 `robot_api.yaml` 和 `motion/` 配置，引用现有分组和 home；只导入旧格式不会自动获得统一 Servo 能力，列表会显示缺少的配置。点击“应用配置”会写入 `middleware/config.yaml` 的 `robot_profiles.active` 并立即下发软件停止。重启中间件、控制和硬件适配器以一致加载新 profile；显式 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 优先于配置文件。统一 API 的启动和迁移步骤见 [对外接口说明](docs/ROBOT_PUBLIC_API.md)。
 
 导入接口对齐当前遥操作链路的标准话题：`/observation/joint_states`、`/control/solver/joint_targets`、`/action/joint_states`、`/control/solver/ee_targets`、`/action/ee_poses`、`/observation/ee_poses`、`/status/solver/joint_states` 和 `/action/base/command`。状态监控页可在 VR 与外骨骼控制源之间切换，并实时显示命令、反馈关节角和误差。
 
@@ -153,7 +151,7 @@ X1 真机目前仅提供底盘速度接口，未提供有效的 `/observation/ba
 
 ### 自动上传到数据平台
 
-`main` 保留平台任务、共享采集方案、持久上传队列、分片续传、重试/取消和处理状态面板，并整合 Motion 与统一机器人 API。默认仍为 v23；网页三维仿真、ROS 域隔离和机器人包配置保持可用。录制支持 MCAP、MCAP＋独立 RGB MP4 原始包、LeRobot 和双格式；深度消息在 MCAP 中原样保留。标注、裁剪、审计和恢复工具由数据平台负责，不在机器人侧重复提供。
+本分支保留平台任务、共享采集方案、持久上传队列、分片续传、重试/取消和处理状态面板，并默认使用 Motion 运动学与统一机器人 API；网页三维仿真、ROS 域隔离和机器人包配置保持可用。录制支持 MCAP、MCAP＋独立 RGB MP4 原始包、LeRobot 和双格式；深度消息在 MCAP 中原样保留。标注、裁剪、审计和恢复工具由数据平台负责，不在机器人侧重复提供。
 
 现有部署先运行 `./install.sh --upload`。新版上传管理页支持粘贴平台一次性连接链接、按名称选择任务，并独立选择上传格式。下列 YAML 绑定方式用于兼容旧部署：
 
@@ -303,9 +301,11 @@ ROS 转发到 VR 的 UDP 消息是 UTF-8 JSON，最大为一个 UDP 数据报。
 ## 验证
 
 ```bash
-/usr/bin/python3 -m unittest discover -s tests -v
+./bootstrap_colcon.sh test
+source /opt/ros/humble/setup.bash && source install_motion/setup.bash
+PYTHONPATH="$PWD:$PWD/upload_client:$PWD/.deps:$PYTHONPATH" /usr/bin/python3 -m pytest tests/test_motion_teleop_e2e_ros.py -v
 /usr/bin/python3 -m compileall -q middleware adapters
-bash -n run.sh middleware/start.sh adapters/start.sh
+bash -n run.sh middleware/start.sh adapters/start.sh tools/run_motion.sh
 ```
 
 ## HC-TJ 机械臂仿真遥操作
@@ -317,17 +317,16 @@ VR 到 HC-TJ 双臂、腰部、底盘和夹爪的离合控制见 [TELEOP.md](TEL
 ```bash
 ./install.sh --sim
 
-# 一条命令启动 VR 自动发现、Dashboard、IK/控制和 PyBullet
+# 一条命令启动 VR 自动发现、Dashboard、Motion 逆解/控制和独立 PyBullet GUI 窗口
 ./run.sh sim
 
-# 无显示器环境
-./run.sh --headless
+# 无显示器或仅用网页三维仿真视图时（以 DIRECT 无窗口模式运行 PyBullet）
+./run.sh sim --headless
 ```
 
-普通 `./install.sh` 已同时安装 PyBullet shadow model 依赖，并创建与开发板一致的
-`hc-teleop-controller` Conda 环境（Pinocchio 3.7 + CasADi 3.7）；`--sim` 作为兼容选项保留。
-默认启动已完成数值验证的重构 v2.3 后端。
-根目录不再保留旧的分段启动脚本，也不提供单独 PyBullet 产品模式。真机统一使用 `./run.sh teleop` 并在 `HC_X1` 仓库启动硬件；仿真统一使用 `./run.sh sim`。旧 `--robot`、`--generic`、`--legacy` 和 `--sim-only` 选项均已移除。
+普通 `./install.sh` 已同时安装 PyBullet shadow model 依赖（用于遥操作控制节点的正运动学、`x1` 腰部 DLS 逆解、可选碰撞校验及无窗口仿真）。
+默认并唯一支持的控制后端为 `motion`（双臂逆解与实时关节平滑由 `humanoid_motion_interfaces` + `humanoid_motion_server` 提供）；原 `hc-teleop-controller` Conda 环境与 `v23` 控制器已移除。
+根目录不再保留旧的分段启动脚本，也不提供单独 PyBullet 产品模式。真机统一使用 `./run.sh teleop` 并在 `HC_X1` 仓库启动硬件；仿真统一使用 `./run.sh sim`（独立窗口）或 `./run.sh`（网页按需启动无窗口仿真＋三维视图）。旧 `--robot`、`--generic`、`--legacy` 和 `--sim-only` 选项均已移除。
 
 仿真启动时会自动以 30 Hz 将手柄位姿、目标/实际末端位姿、关节命令/反馈和离合状态写入 `runtime/teleop_logs/`。复现抖动时按住右 Grip 并尽量保持双手静止 5–10 秒，退出仿真后分析对应日志：
 
@@ -347,13 +346,19 @@ X1 默认开启 `body.head_pose_base.enabled`：按住左 Grip 时记录头显�
 
 X1 的 `./run.sh sim` 和 `./run.sh teleop` 共用 `arm_teleop.yaml` 中唯一的 `body` 配置。摇杆轴、方向、头显跟随、脖子与腰部参数不再随运行模式覆盖。`body.enabled` 和 `body.waist_joint_names` 统一决定是否启用腰部；当前默认开启，关节为 `[leg_1, leg_2, zhi]`，采用高度/俯仰双自由度控制。修改后重启控制器；从网页启动的仿真需点击“重启仿真”。仿真按时间积分速度命令，200 ms 未收到新底盘命令即停止。
 
-机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标先在胸部坐标系生成，再转换到左右肩部任务坐标交给 v2.3 求解器；腰部运动不会改变这项视觉/手柄约定。
+机械臂只使用手柄相对位姿增量：当前 VR 数据协议中手柄 `+Z` 向前，对应胸部 `zhi_Link` 的 `+X` 向前。目标在机身参考坐标系下生成，并经 `StandardMotionTeleopBridge` 转换至 Motion `servo_p` 求解；腰部运动不会改变这项视觉/手柄约定。
 
-X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TARGET`（橙色标签、长坐标轴），橙色连线表示位置误差。实际位姿由关节反馈和 `camera_head` FK 得到，目标是头显输入映射到腰部升降/俯仰后对应的机器人头部位姿，并非 VR 房间中的原始绝对位置。松开左 Grip 或停用控制时目标回到实际位姿；数据断流 0.5 s 后隐藏标记。话题 `/status/head/tracking_poses` 使用 `geometry_msgs/msg/PoseArray`，顺序为 `[actual, target]`，`header.frame_id=robot_base` 表示 PyBullet 模型根部位姿坐标系。需要带 GUI 启动仿真才能看到标记。
+X1 仿真头部显示 `HEAD ACTUAL`（青色标签、短坐标轴）与 `HEAD TARGET`（橙色标签、长坐标轴），橙色连线表示位置误差。实际位姿由关节反馈和 `camera_head` FK 得到，目标是头显输入映射到腰部升降/俯仰后对应的机器人头部位姿，并非 VR 房间中的原始绝对位置。松开左 Grip 或停用控制时目标回到实际位姿；数据断流 0.5 s 后隐藏标记。话题 `/status/head/tracking_poses` 使用 `geometry_msgs/msg/PoseArray`，顺序为 `[actual, target]`，`header.frame_id=robot_base` 表示 PyBullet 模型根部位姿坐标系。需要带 GUI 启动仿真（或打开网页三维仿真视图）才能看到标记。
 
-默认链路为 `controller_target_ee_poses → ControllerV23 → FrameTask/AxisTask/JointTask → solve_ik → 速度及一步位置限位 → Pinocchio integrate → joint_cmd_arm → VR 适配器/夹爪合并 → joint_cmd_vr → Command Mux → joint_cmd`。`target_ee_poses` 和 `actual_ee_poses` 专供仿真显示/诊断，始终使用胸部 `zhi_Link` 坐标，使 marker 与法兰直观对应；内部控制目标才转换为左右肩基坐标。源码位于 `adapters/v23/`，X1 参数位于 `adapters/robots/x1/controller_v23.yml`。
+默认遥操作链路为：
+1. `RobotArmTeleopNode`（`adapters/core/arm_teleop_node.py`）：维护本地 PyBullet `DIRECT` 模型完成实时 FK、手柄相对位姿滤波/限速，发布 `/action/ee_poses`；若机型配置了 `body.waist_joint_names`（如 X1），同步在 Python 层解算腰部 DLS IK、颈部与底盘命令。
+2. `StandardMotionTeleopBridge`（`adapters/nodes/standard_motion_teleop.py`）：将 `/action/ee_poses`（及回零关节目标）转发到 `/control/motion/{left,right}_arm/servo_p`（或 `servo_j`），并校验硬件就绪、离合与复位栅栏。
+3. `humanoid_motion_control_node`（`src/humanoid_motion_server`）：调用 RoboManip SDK（`qp_servo` / `placo` + RTC）求解双臂关节角并输出 `/control/motion/joint_targets`。
+4. 合并与路由：经 `/control/solver/joint_targets` 回到 `RobotArmTeleopNode` 合并腰/头/灵巧手辅助关节 -> `/control/vr/joint_states` -> Command Mux -> `/action/joint_states`。
 
-新机器人优先从网页或 CLI 导入包含 URDF、YAML、Mesh 和 `arm_teleop.yaml` 的 ZIP 压缩包；也可手工在 `adapters/robots/<机器人名>/` 配置这些文件。默认选择来自 `middleware/config.yaml`，`HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 仍可作为启动时覆盖项。
+`adapters/robots/<机器人名>/motion/{motion.yaml,sdk.yaml,channels.yaml}` 存放 Motion 后端与 SDK 参数，`adapters/robots/<机器人名>/arm_teleop.yaml` 存放 VR 映射、腰/头/底盘/夹爪参数。
+
+新机器人优先从网页或 CLI 导入包含 URDF、YAML、Mesh 和 `arm_teleop.yaml` 的 ZIP 压缩包；也可手工在 `adapters/robots/<机器人名>/` 配置这些文件与 `motion/` 目录。默认选择来自 `middleware/config.yaml`，`HC_ROBOT_NAME` 与 `HC_ROBOT_CONFIG_ROOT` 仍可作为启动时覆盖项。
 
 X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；低头/抬头的俯仰旋转控制腰部俯仰（`pitch_source: orientation`）。水平位移交给底盘，不再重复驱动腰部。按住左 Grip 时建立参考，松开再按可重新定中心。
 
@@ -363,19 +368,19 @@ X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；
 
 ## Motion 与统一机器人 API
 
-默认配置沿用 v23 与原生关节名。启用 Motion 前先构建两个子模块，并使硬件适配器切换到统一 API 的 internal 接口。完整启动、名称契约和使能规则见 [Motion 工作区](docs/MOTION.md) 与 [机器人公共 API](docs/ROBOT_PUBLIC_API.md)。
+当前 `x1`、`openarmx`、`HC_REALMAN` 均默认配置为 `control.backend: motion`（原 `v23` 已移除）。构建好两个子模块后即可直接运行；完整启动、名称契约和使能规则见 [Motion 工作区](docs/MOTION.md) 与 [机器人公共 API](docs/ROBOT_PUBLIC_API.md)。
 
 ```bash
 git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
 ./bootstrap_colcon.sh build
-HC_CONTROL_BACKEND=motion ./run.sh sim
-# 硬件适配器已按统一 API 配置后：
-HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
+./run.sh sim
+# 硬件适配器启动后：
+ROS_DOMAIN_ID=14 ./run.sh teleop
 ```
 
-`HC_CONTROL_BACKEND=motion` 同时决定中间件公共名称转换、遥操控制链和仿真话题；切换后端需停止旧入口再重新启动。旧配置不带统一 API 文件时继续支持 v23。双方功能清单及本次合并范围见 [分支整合说明](docs/MAIN_HUMANOID_INTEGRATION.md)。
+如需对外提供 `hc-robot-api/v1` 统一公共关节名称（`left_joint_1…N`、`right_joint_1…N`），可在环境启用 `HC_UNIFIED_ROBOT_API=1` 并让硬件适配器切换到统一 `internal` 接口；切换配置需停止旧入口再重新启动。历史整合背景见 [分支整合说明](docs/MAIN_HUMANOID_INTEGRATION.md)。
 
-DAgger 人工接管与纠正采集已从本地工作恢复：Motion 模式下握住右 Grip 接管，正常松手交还程序，每段纠正独立保存并沿用 main 的任务和上传流程。配置及使用见 [DAgger 说明](docs/DAGGER.md)。
+DAgger 人工接管与纠正采集：Motion 模式下握住右 Grip 接管，正常松手交还程序，每段纠正独立保存并沿用平台任务和上传流程。配置及使用见 [DAgger 说明](docs/DAGGER.md)。
 
 
 ### 视频与无线链路优化

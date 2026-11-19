@@ -21,7 +21,7 @@ from middleware.core.control_ownership import ControlOwnership
 from middleware.core.intervention_api import register_intervention_routes
 from middleware.core.legacy_control import LegacyTopicControl
 from middleware.core.ros_bridge import RosBridge
-from adapters.core.v23_intervention import V23Intervention
+from adapters.core.motion_intervention import MotionIntervention
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -267,7 +267,7 @@ def test_v23_revoke_ack_waits_for_measured_reset_and_old_pose_is_rejected():
     node=Mock()
     node.controller.free_joint_names=['axis']
     node.get_clock.return_value.now.side_effect=lambda: SimpleNamespace(nanoseconds=time.time_ns())
-    solver=V23Intervention(node)
+    solver=MotionIntervention(node)
     control=ControlOwnership(recording_enabled=False, required_peers=('solver','teleop'))
     for peer in control.required_peers:control.peer(peer,peer)
     control.enable()

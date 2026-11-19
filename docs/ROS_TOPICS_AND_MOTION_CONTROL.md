@@ -120,7 +120,7 @@ ros2 topic echo /observation/cameras/head/extrinsics --once --qos-reliability re
 | ServoJ：连续关节目标 | `/control/motion/left_arm/servo_j` | `/control/motion/right_arm/servo_j` | Topic：`sensor_msgs/msg/JointState` |
 | ServoP：连续末端位姿目标 | `/control/motion/left_arm/servo_p` | `/control/motion/right_arm/servo_p` | Topic：`geometry_msgs/msg/PoseStamped` |
 
-Motion 模式的关节名：`left_joint_1..7`、`right_joint_1..7`；默认 v23 反馈仍是 `Joint1_L..7_L`、`Joint1_R..7_R`。位姿位置用 **m**，姿态用四元数 **x/y/z/w**；X1 的 `frame_id` 是 `zhi_Link`。
+启用统一 API（`HC_UNIFIED_ROBOT_API=1`）时关节名：`left_joint_1..7`、`right_joint_1..7`；普通 `motion` 模式下的反馈与配置保持各机型原生关节名（如 X1 为 `Joint1_L..7_L`、`Joint1_R..7_R`）。位姿位置用 **m**，姿态用四元数 **x/y/z/w**；X1 的 `frame_id` 是 `zhi_Link`。
 
 直接使用现有 [robot_api_demo.py](../examples/robot_api_demo.py)，目标都从当前反馈计算：
 

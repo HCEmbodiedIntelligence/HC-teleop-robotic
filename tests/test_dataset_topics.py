@@ -142,12 +142,13 @@ def test_no_projection_subscribes_to_its_own_output():
     assert not ({topic for topic, callback in b.subscriptions} & set(b.publishers))
 
 
-@pytest.mark.parametrize('backend', ['v23', 'motion'])
-def test_groups_follow_every_bundled_profile(backend, monkeypatch):
+@pytest.mark.parametrize('unified', ['0', '1'])
+def test_groups_follow_every_bundled_profile(unified, monkeypatch):
     from pathlib import Path
     import yaml
     from middleware.core.dataset_topics import load_joint_groups
-    monkeypatch.setenv('HC_CONTROL_BACKEND', backend)
+    monkeypatch.setenv('HC_CONTROL_BACKEND', 'motion')
+    monkeypatch.setenv('HC_UNIFIED_ROBOT_API', unified)
     monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
     monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
     root = Path(__file__).parents[1]
@@ -160,7 +161,7 @@ def test_groups_follow_every_bundled_profile(backend, monkeypatch):
         source = yaml.safe_load((root / 'adapters/robots' / profile / 'arm_teleop.yaml').read_text())
         for side in ('left', 'right'):
             expected = source['arms'][side]['joint_names']
-            if backend == 'motion':
+            if unified == '1' and (root / 'adapters/robots' / profile / 'robot_api.yaml').is_file():
                 expected = [f'{side}_joint_{i}' for i in range(1,len(expected)+1)]
             assert groups[side + '_arm'] == expected
         assert bool(groups.get('waist')) == bool(source.get('body', {}).get('waist_joint_names'))

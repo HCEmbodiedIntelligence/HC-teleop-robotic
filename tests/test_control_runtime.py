@@ -15,7 +15,7 @@ class ControlRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
         for folder in ("middleware", "adapters/robots/x1", "tools/runtime"):
             (self.root / folder).mkdir(parents=True)
-        (self.root / "adapters/robots/x1/arm_teleop.yaml").write_text("control:\n  backend: v23\n")
+        (self.root / "adapters/robots/x1/arm_teleop.yaml").write_text("control:\n  backend: motion\n")
         shutil.copy(Path(__file__).resolve().parents[1] / "tools/runtime/process_supervisor.py",
                     self.root / "tools/runtime/process_supervisor.py")
         self.env = patch.dict(os.environ, {"HC_MANAGED_CONTROL": "1", "HC_CONTROL_LOG_DIR": str(self.root / "logs"),
@@ -29,7 +29,8 @@ import json, os, pathlib, signal, sys, time
 p=pathlib.Path(sys.argv[sys.argv.index('--log-dir')+1])
 (p/'environment.json').write_text(json.dumps(dict(os.environ)))
 (p/'teleop_controller.log').write_text('HC-TJ teleop ready: disabled')
-(p/'v23_solver.log').write_text('reconstructed controller_v2_3 started:')
+(p/'motion_solver.log').write_text('unified motion control ready: 10 channels at 100.0 Hz')
+(p/'motion_bridge.log').write_text('motion teleop bridge started: 14 arm joints')
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True: time.sleep(.05)
 ''')
@@ -85,10 +86,24 @@ while True: time.sleep(.05)
         self.assertIsNone(self.manager.process)
 
     async def test_unsupported_backend_cannot_report_false_readiness(self):
-        (self.root / "adapters/robots/x1/arm_teleop.yaml").write_text("control:\n  backend: motion\n")
+        (self.root / "adapters/robots/x1/arm_teleop.yaml").write_text("control:\n  backend: invalid_backend\n")
         await self.manager.start(self.config)
         self.assertEqual(self.manager.status()["state"], "failed")
         self.assertIsNone(self.manager.process)
+
+    async def test_motion_backend_waits_for_solver_bridge_and_teleop_readiness(self):
+        (self.root / "adapters/robots/x1/arm_teleop.yaml").write_text("control:\n  backend: motion\n")
+        self.write_launcher('''
+import pathlib, signal, sys, time
+p=pathlib.Path(sys.argv[sys.argv.index('--log-dir')+1])
+(p/'teleop_controller.log').write_text('HC-TJ teleop ready: disabled')
+(p/'motion_solver.log').write_text('unified motion control ready: 10 channels at 100.0 Hz')
+(p/'motion_bridge.log').write_text('motion teleop bridge started: 14 arm joints')
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True: time.sleep(.05)
+''')
+        await self.manager.start(self.config, timeout=3)
+        self.assertEqual(self.manager.status()["state"], "running")
 
 
 if __name__ == '__main__':

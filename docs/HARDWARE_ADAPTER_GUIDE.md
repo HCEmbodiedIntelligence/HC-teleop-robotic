@@ -6,7 +6,7 @@
 
 硬件项目负责启动相机、机械臂、腰部、底盘和灵巧手驱动；把厂商私有状态规范化为 `/observation/*`、`/action/*`、`/status/*`、`/control/*`；把标准命令转换成厂商命令；实现固定频率、限速/限加速度、超时保持、单发布者检查和硬件急停。
 
-通用项目负责 Dashboard、PICO/VR 数据、机器人 ZIP 导入、Pinocchio 逆解、遥操作逻辑、标准命令生成和 MCAP 录制。通用项目不得 source 硬件工作空间，也不得引用厂商 SDK 路径。
+通用项目负责 Dashboard、PICO/VR 数据、机器人 ZIP 导入、Motion 运动学求解（`humanoid_motion_server`）、遥操作逻辑、标准命令生成和 MCAP 录制。通用项目不得 source 硬件工作空间，也不得引用厂商 SDK 路径。
 
 ## 2. 标准 ROS 2 契约
 
@@ -25,7 +25,7 @@ ROS Domain 默认是 14。硬件项目和通用项目必须设置相同的 `ROS_
 2. 驱动可以保留内部私有命名空间；新增一个 `standard_adapter` 节点完成私有话题与 新的标准话题 的转换。
 3. 为关节命令建立独立固定频率执行节点。逆解回调、相机回调和话题桥不能直接向伺服驱动发布。
 4. 加入单发布者检查、反馈同步、输入超时、速度/加速度限制以及真实硬件急停联锁。
-5. 准备机器人 ZIP：`profile.yaml`、URDF、全部 mesh、`controller_v23.yml` 和 `arm_teleop.yaml`。在 Dashboard 导入并应用。
+5. 准备机器人 ZIP：`profile.yaml`、URDF、全部 mesh、`arm_teleop.yaml` 以及 `motion/{motion.yaml,sdk.yaml,channels.yaml}`。在 Dashboard 导入并应用。
 6. 分别启动硬件项目和通用项目，并按下面的验收项检查。
 
 ## 4. 启动与验收

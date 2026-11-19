@@ -13,15 +13,15 @@ humanoid_motion_control:
     stopped_velocity_tolerance_rad_s: 0.02
     cartesian_position_tolerance_m: 0.005
     cartesian_orientation_tolerance_rad: 0.02
-    joint_max_velocity_rad_s: 0.6
-    joint_max_acceleration_rad_s2: 2.4
-    joint_max_jerk_rad_s3: 9.6
-    cartesian_max_linear_velocity_m_s: 0.1
-    cartesian_max_linear_acceleration_m_s2: 0.3
-    cartesian_max_linear_jerk_m_s3: 1.5
-    cartesian_max_angular_velocity_rad_s: 0.5
-    cartesian_max_angular_acceleration_rad_s2: 2.0
-    cartesian_max_angular_jerk_rad_s3: 10.0
+    joint_max_velocity_rad_s: 2.27
+    joint_max_acceleration_rad_s2: 20.0
+    joint_max_jerk_rad_s3: 200.0
+    cartesian_max_linear_velocity_m_s: 1.0
+    cartesian_max_linear_acceleration_m_s2: 8.0
+    cartesian_max_linear_jerk_m_s3: 80.0
+    cartesian_max_angular_velocity_rad_s: 4.0
+    cartesian_max_angular_acceleration_rad_s2: 30.0
+    cartesian_max_angular_jerk_rad_s3: 300.0
     joint_group_names:
     - left_arm
     - right_arm

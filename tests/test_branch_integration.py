@@ -38,6 +38,7 @@ def test_startup_profile_override_loads_its_camera_and_recording_settings(tmp_pa
 @pytest.mark.parametrize('robot', ['x1', 'openarmx'])
 def test_legacy_default_and_explicit_motion_use_matching_recording_names(robot, monkeypatch):
     monkeypatch.delenv('HC_CONTROL_BACKEND', raising=False)
+    monkeypatch.delenv('HC_UNIFIED_ROBOT_API', raising=False)
     monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
     monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
     config = validate_config({'robot_profiles': {'root': str(ROOT/'adapters/robots'), 'active': robot}})
@@ -47,6 +48,7 @@ def test_legacy_default_and_explicit_motion_use_matching_recording_names(robot, 
     legacy = runtime._load_session_profile_metadata()
     assert 'robot_api_schema' not in legacy
     monkeypatch.setenv('HC_CONTROL_BACKEND', 'motion')
+    monkeypatch.setenv('HC_UNIFIED_ROBOT_API', '1')
     assert unified_profile(profile)
     public = runtime._load_session_profile_metadata()
     assert public['robot_api_schema'] == 'hc-robot-api/v1'

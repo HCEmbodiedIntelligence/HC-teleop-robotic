@@ -1,8 +1,8 @@
-"""Actual v23 reset acknowledgements and generation-tagged IK output.
+"""Motion backend reset acknowledgements and generation-tagged IK output.
 
-ControllerNode uses a single-threaded executor: reset, target acceptance and IK
-cannot interleave. A late computed result retains its old authority token and
-is rejected by the middleware's final gate after a revoke.
+StandardMotionTeleopBridge uses a single-threaded executor: reset, target
+acceptance and solver commands cannot interleave. A late result retains its
+old authority token and is rejected by the middleware's final gate after revoke.
 """
 import json
 import math
@@ -12,12 +12,13 @@ import uuid
 from middleware.core.control_ownership import ControlToken
 
 
-class V23Intervention:
-    def __init__(self, node, grippers=None):
+class MotionIntervention:
+    def __init__(self, node, grippers=None, *, expected_pose_frame: str = 'generic_task_bases'):
         from geometry_msgs.msg import PoseArray
         from sensor_msgs.msg import JointState
         from std_msgs.msg import Header, String
         self.node = node
+        self.expected_pose_frame = expected_pose_frame
         self.instance = uuid.uuid4().hex
         self.active = False
         self.token = None
@@ -53,9 +54,9 @@ class V23Intervention:
             key, phase, instance, _ = message.frame_id.split('#')
             token = ControlToken.from_key(key)
             stamp = message.stamp.sec*1_000_000_000 + message.stamp.nanosec
-            if instance != self.instance or phase not in ('revoke','grant','off') or stamp <= self.permit_stamp or not self.fresh(stamp):
+            if instance != self.instance or phase not in ('revoke', 'grant', 'off') or stamp <= self.permit_stamp or not self.fresh(stamp):
                 return
-            if phase == 'grant' and (token != self.token or self.phase not in ('revoke','grant') or not self.ready):
+            if phase == 'grant' and (token != self.token or self.phase not in ('revoke', 'grant') or not self.ready):
                 return
             changed = (token, phase) != (self.token, self.phase)
             self.permit_stamp, self.permit_time = stamp, time.monotonic()
@@ -110,8 +111,9 @@ class V23Intervention:
                     or key != self.token.key() or frame != 'home'
                     or stamp <= max(self.cutoff, self.target_stamp) or not self.fresh(stamp)
                     or time.monotonic()-self.permit_time > .3
+                    or not message.name
                     or len(message.name) != len(message.position) or len(set(message.name)) != len(message.name)
-                    or not set(self.node.controller.free_joint_names) <= set(message.name)
+                    or not (set(message.name) & set(self.node.controller.free_joint_names))
                     or not all(math.isfinite(v) for v in message.position)):
                 return
             if not self.homing:
@@ -160,7 +162,7 @@ class V23Intervention:
             key, frame = message.header.frame_id.split('#', 1)
             stamp = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
             if (not self.active or not self.ready or self.phase != 'grant' or self.token.source != 'vr'
-                    or key != self.token.key() or frame != 'generic_task_bases'
+                    or key != self.token.key() or frame != self.expected_pose_frame
                     or stamp <= max(self.cutoff, self.target_stamp) or not self.fresh(stamp)
                     or time.monotonic()-self.permit_time > .3):
                 return
@@ -181,7 +183,7 @@ class V23Intervention:
     def heartbeat(self):
         from std_msgs.msg import String
         if self.active and self.phase == 'grant' and time.monotonic()-self.permit_time > .3:
-            self.error = 'v23 control permit expired'
+            self.error = 'motion control permit expired'
         self.ack_pub.publish(String(data=json.dumps(dict(participant='solver', instance=self.instance,
             stamp_ns=self.node.get_clock().now().nanoseconds,
             token=self.token.key() if self.token and self.ready else '', phase=self.phase,

@@ -6,9 +6,9 @@ import yaml
 
 
 def backend(config, override=None):
-    value = override or config.get('control', {}).get('backend', 'v23')
-    if value not in {'v23', 'motion'}:
-        raise ValueError('control backend must be v23 or motion')
+    value = override or config.get('control', {}).get('backend', 'motion')
+    if value != 'motion':
+        raise ValueError('control backend must be motion')
     return value
 
 
@@ -17,7 +17,14 @@ def unified_profile(profile_dir):
     profile = Path(profile_dir)
     teleop = profile / 'arm_teleop.yaml'
     config = (yaml.safe_load(teleop.read_text()) or {}) if teleop.is_file() else {}
-    return (profile / 'robot_api.yaml').is_file() and backend(config, os.environ.get('HC_CONTROL_BACKEND')) == 'motion'
+    unified_enabled = os.environ.get('HC_UNIFIED_ROBOT_API', '0') == '1' or bool(
+        config.get('control', {}).get('unified_api', False)
+    )
+    return (
+        unified_enabled
+        and (profile / 'robot_api.yaml').is_file()
+        and backend(config, os.environ.get('HC_CONTROL_BACKEND')) == 'motion'
+    )
 
 
 def main():

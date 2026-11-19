@@ -13,6 +13,13 @@ source /opt/ros/humble/setup.bash
 set -u
 export PATH="/usr/bin:${PATH}"
 export COLCON_DEFAULTS_FILE="${PROJECT_ROOT}/colcon_defaults.yaml"
+if [[ -d "${PROJECT_ROOT}/.sdk_deps/lib" ]]; then
+  export HUMANOID_MOTION_SDK_DEPS_PREFIX="${HUMANOID_MOTION_SDK_DEPS_PREFIX:-${PROJECT_ROOT}/.sdk_deps}"
+  export LD_LIBRARY_PATH="${HUMANOID_MOTION_SDK_DEPS_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+  if [[ -f "${HUMANOID_MOTION_SDK_DEPS_PREFIX}/lib/libruckig.so" ]]; then
+    export LD_PRELOAD="${HUMANOID_MOTION_SDK_DEPS_PREFIX}/lib/libruckig.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+  fi
+fi
 PACKAGES=(humanoid_motion_interfaces humanoid_motion_server)
 SOURCE="${PROJECT_ROOT}/src/humanoid_motion_server"
 if [[ ! -f "${SOURCE}/package.xml" || ! -f "${PROJECT_ROOT}/src/humanoid_motion_interfaces/package.xml" ]]; then

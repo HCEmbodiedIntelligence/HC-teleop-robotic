@@ -29,9 +29,8 @@ HC 不再生成 `/hc_teleop/joint_states` 和相机别名。网关与 HC 必须�
 ## 使用
 
 需要带统一 Robot API 的机器人配置，以及已构建的 Motion 后端和 VR 接收器。
-按 [统一接口说明](ROBOT_PUBLIC_API.md) 准备依赖；启动时显式设置
-`HC_CONTROL_BACKEND=motion`，例如 `HC_CONTROL_BACKEND=motion ./run.sh sim`。
-默认 v23 及原来的普通录制、回放、任务选择和上传流程继续保留。
+按 [统一接口说明](ROBOT_PUBLIC_API.md) 准备依赖；如需使用统一 API 方式启动，设置
+`HC_UNIFIED_ROBOT_API=1`（或配置 `control.unified_api: true`），当前默认后端已统一为 `motion`（原 `v23` 后端已移除），普通录制、回放、任务选择和上传流程继续保留。
 
 1. 在“话题录制”中选择观测关节、相机等来源及保存格式，在“上传管理”中选择任务或本地保存。
 2. 在概览的“人工干预与纠正采集”中开启会话。保持有效跟踪，松开右 Grip，等待采集资源就绪。

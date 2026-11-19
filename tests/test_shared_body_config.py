@@ -19,7 +19,7 @@ def test_sim_and_teleop_load_the_same_body_parameters():
     try:
         for mode in ('sim', 'teleop'):
             with patch.dict(os.environ, {'HC_TELEOP_MODE': mode, 'HC_RUNTIME_MODE': 'simulation' if mode == 'sim' else 'teleop'}):
-                node = RobotArmTeleopNode(str(path), backend='v23')
+                node = RobotArmTeleopNode(str(path), backend='motion')
             try:
                 assert node.body_config == config['body']
                 assert node.body.joint_names == config['body']['waist_joint_names']

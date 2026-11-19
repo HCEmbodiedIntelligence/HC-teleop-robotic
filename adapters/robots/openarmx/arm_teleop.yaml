@@ -1,5 +1,5 @@
 # OpenArmX V10 双臂的 VR 遥操作适配配置。
-# ControllerV23 的任务权重与关节速度上限在 controller_v23.yml 中配置。
+# Motion IK 求解器与轨迹限幅参数在 motion/motion.yaml 与 motion/sdk.yaml 中配置。
 robot:
   # URDF 路径以及固定底座在世界坐标系中的位姿；四元数顺序为 XYZW。
   urdf_path: urdf/openarmx_robot.urdf
@@ -107,8 +107,8 @@ grippers:
     finger_open: [0.044]
     finger_closed: [0.0]
 control:
-  # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
-  backend: v23
+  # 使用外部 humanoid_motion_server 求解双臂；启动即使能，控制循环为 100 Hz。
+  backend: motion
   enabled_on_start: true
   rate_hz: 100.0
   # VR 输入、关节反馈、内部命令、求解器复位和状态监控话题。

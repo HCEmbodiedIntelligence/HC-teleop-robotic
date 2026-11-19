@@ -178,22 +178,31 @@ def profile_settings(path):
     return names, bases.pop(), endpoints, control
 
 
-def main():
+def main(argv=None):
+    import argparse
     import os
     import sys
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
+    from adapters.core.runtime_config import unified_profile
     from middleware.core.robot_api import selected_profile
     import yaml
-    config = os.environ.get('HC_ARM_TELEOP_CONFIG')
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', help='path to arm_teleop.yaml')
+    args, _ = parser.parse_known_args(argv)
+    config = args.config or os.environ.get('HC_ARM_TELEOP_CONFIG')
     if config:
         profile = Path(config).resolve().parent
     else:
-        middleware_config = root / 'middleware/config.yaml'
+        middleware_config = Path(os.environ.get('HC_MIDDLEWARE_CONFIG', str(root / 'middleware/config.yaml')))
         profile = selected_profile(yaml.safe_load(middleware_config.read_text()), middleware_config.parent)
-    from adapters.nodes.unified_motion_teleop import main as run
+    if unified_profile(profile):
+        from adapters.nodes.unified_motion_teleop import main as run
+    else:
+        from adapters.nodes.standard_motion_teleop import main as run
     run(profile)
 
 

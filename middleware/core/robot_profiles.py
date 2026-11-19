@@ -435,7 +435,7 @@ def _generate_arm_teleop_config(
         grippers[side]["finger_joint_names"] = []
         grippers[side]["finger_open"] = []
         grippers[side]["finger_closed"] = []
-    result["control"]["backend"] = "v23"
+    result["control"]["backend"] = "motion"
     return result
 
 
@@ -800,7 +800,7 @@ class RobotProfileManager:
                     _teleop, controller, io_config, summary = _normalize_teleop(
                         profile_id, teleop_data, model, rel_urdf
                     )
-                    if not controller_path.is_file():
+                    if not (path / "motion" / "motion.yaml").is_file() and not controller_path.is_file():
                         controller_path.write_text(
                             yaml.safe_dump(controller, allow_unicode=True, sort_keys=False),
                             encoding="utf-8",
@@ -842,7 +842,7 @@ class RobotProfileManager:
             except Exception:
                 pass
 
-        if vr_path.is_file() and not metadata_path.is_file():
+        if not (path / "motion" / "motion.yaml").is_file() and vr_path.is_file() and not metadata_path.is_file():
             try:
                 io_data = _load_yaml(vr_path.read_bytes())
                 if isinstance(io_data, dict) and "arms" in io_data:

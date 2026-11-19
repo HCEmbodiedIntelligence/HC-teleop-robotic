@@ -37,7 +37,12 @@ planning:
   sample_period_sec: 0.01
   limit_scale: 1.0
   ik:
-    solver: placo
+    solver: qp_servo
+    qp_servo:
+      gain: 1.0              # 遥操跟踪增益
+      joint_v_max_deg: 90.0  # 关节速度约束
+      damping: 0.002         # 奇异阻尼
+      iterations: 1
     placo:
       max_iterations: 1000
       position_tolerance: 1.0
@@ -97,15 +102,17 @@ rmp:
       - 140.0
       cartesian_max_linear_velocity: 100.0
 rtc:
-  max_velocity: 35.0
-  max_acceleration: 140.0
-  max_jerk: 560.0
-  cartesian_max_linear_velocity: 100.0
-  cartesian_max_linear_acceleration: 300.0
-  cartesian_max_linear_jerk: 1500.0
-  cartesian_max_angular_velocity: 0.5
-  cartesian_max_angular_acceleration: 2.0
-  cartesian_max_angular_jerk: 10.0
+  input_cutoff_hz: 100.0
+  output_rate_hz: 100.0
+  max_velocity: 90.0
+  max_acceleration: 900.0
+  max_jerk: 0.0
+  cartesian_max_linear_velocity: 1000.0
+  cartesian_max_linear_acceleration: 8000.0
+  cartesian_max_linear_jerk: 0.0
+  cartesian_max_angular_velocity: 4.0
+  cartesian_max_angular_acceleration: 30.0
+  cartesian_max_angular_jerk: 0.0
   cartesian_mode: smooth_xyz
 execution:
   driver: mock

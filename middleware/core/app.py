@@ -138,13 +138,26 @@ class MiddlewareRuntime:
             )
             metadata["robot_name"] = str(profile.get("robot_name") or profile_id)
             controller_name = str(
-                profile.get("primary_config") or "controller_v23.yml"
+                profile.get("primary_config") or "arm_teleop.yaml"
             )
             metadata["controller_config"] = controller_name
-            controller = yaml.safe_load(
+            primary = yaml.safe_load(
                 (profile_dir / controller_name).read_text(encoding="utf-8")
             ) or {}
-            free_joints = controller.get("model", {}).get("free_joints", [])
+            free_joints = primary.get("model", {}).get("free_joints", [])
+            if not (isinstance(free_joints, list) and free_joints):
+                teleop_cfg = (
+                    primary
+                    if isinstance(primary.get("arms"), dict)
+                    else yaml.safe_load((profile_dir / "arm_teleop.yaml").read_text(encoding="utf-8")) or {}
+                )
+                free_joints = [
+                    name
+                    for side in ("right", "left")
+                    for name in teleop_cfg.get("arms", {}).get(side, {}).get("joint_names", [])
+                ]
+                if (profile_dir / "motion/motion.yaml").is_file():
+                    metadata["controller_config"] = "motion/motion.yaml"
             if isinstance(free_joints, list):
                 metadata["free_joints"] = json.dumps(
                     [str(name) for name in free_joints],

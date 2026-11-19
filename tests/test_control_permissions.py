@@ -61,8 +61,10 @@ def test_invalid_headers(stamp):
 
 
 def test_profile_backend_override_and_single_arm_cache():
-    assert backend({'control': {'backend': 'v23'}}) == 'v23'
-    assert backend({'control': {'backend': 'v23'}}, 'motion') == 'motion'
+    assert backend({'control': {'backend': 'motion'}}) == 'motion'
+    assert backend({'control': {}}, 'motion') == 'motion'
+    with pytest.raises(ValueError):
+        backend({}, 'v23')
     with pytest.raises(ValueError):
         backend({}, 'unknown')
     cache = MotionCache({'arm': ('axis_1', 'axis_2')})

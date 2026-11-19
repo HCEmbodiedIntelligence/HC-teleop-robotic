@@ -64,7 +64,6 @@ ROBOT_NAME="$(basename -- "${PROFILE_DIR}")"
 export HC_ROBOT_CONFIG_ROOT="${ROBOT_CONFIG_ROOT}"
 export HC_ROBOT_NAME="${ROBOT_NAME}"
 PROFILE_DIR="${ROBOT_CONFIG_ROOT}/${ROBOT_NAME}"
-CONTROLLER_YML="${HC_CONTROLLER_CONFIG:-${PROFILE_DIR}/controller_v23.yml}"
 ARM_CONFIG="${HC_ARM_TELEOP_CONFIG:-${PROFILE_DIR}/arm_teleop.yaml}"
 CONTROL_BACKEND="$(/usr/bin/python3 -m adapters.core.runtime_config backend "${ARM_CONFIG}")"
 if [[ -f "${PROFILE_DIR}/robot_api.yaml" && "${CONTROL_BACKEND}" == motion ]]; then
@@ -74,42 +73,20 @@ if [[ -f "${PROFILE_DIR}/robot_api.yaml" && "${CONTROL_BACKEND}" == motion ]]; t
 fi
 export HC_ARM_TELEOP_CONFIG="${ARM_CONFIG}"
 MOTION_INSTALL="${HC_MOTION_INSTALL:-${PROJECT_ROOT}/install_motion}"
-V23_SCRIPT="${PROJECT_ROOT}/adapters/v23/script/control_v2_3_ros2.py"
-CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
-CONTROLLER_COMMAND=()
 
-REQUIRED=("${ARM_CONFIG}")
-[[ "${CONTROL_BACKEND}" == motion ]] || REQUIRED+=("${V23_SCRIPT}" "${CONTROLLER_YML}")
-for required in "${REQUIRED[@]}"; do
-  if [[ ! -f "${required}" ]]; then err "缺少机器人配置或程序: ${required}"; exit 2; fi
-done
+if [[ ! -f "${ARM_CONFIG}" ]]; then err "缺少机器人配置文件: ${ARM_CONFIG}"; exit 2; fi
 if ! /usr/bin/python3 -c 'import numpy, pybullet, rclpy, yaml' 2>/dev/null; then
   err "系统 Python 缺少遥操作运行依赖（numpy/pybullet/rclpy/yaml）"
   err "请运行 ${PROJECT_ROOT}/install.sh"
   exit 2
 fi
 
-if [[ "${CONTROL_BACKEND}" == motion ]]; then
-  [[ -f "${MOTION_INSTALL}/setup.bash" ]] || { err "请先运行 ./bootstrap_colcon.sh build"; exit 2; }
-  for file in motion.yaml sdk.yaml channels.yaml tools.yaml; do
-    [[ -f "${PROFILE_DIR}/motion/${file}" ]] || { err "当前机器人缺少 motion/${file}"; exit 2; }
-  done
-  CONTROLLER_COMMAND=("${PROJECT_ROOT}/tools/run_motion.sh" --profile "${PROFILE_DIR}")
-elif [[ "${CONTROL_BACKEND}" != v23 ]]; then
-  err "HC_CONTROL_BACKEND 必须是 motion 或 v23"; exit 2
-elif [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
-  export HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}"
-  "${PROJECT_ROOT}/run_generic_controller.sh" --check
-  CONTROLLER_COMMAND=("${PROJECT_ROOT}/run_generic_controller.sh" v23)
-else
-  if ! /usr/bin/python3 -c 'import numpy, pinocchio, rclpy, yaml' 2>/dev/null; then
-    err "系统 Python 缺少 Pinocchio 控制依赖，且未找到 ${CONTROLLER_PREFIX}"
-    err "请运行 ${PROJECT_ROOT}/install.sh 或设置 HC_CONTROLLER_PREFIX"
-    exit 2
-  fi
-  warn "未找到独立控制器环境，使用系统 ROS 2 Python/Pinocchio"
-  CONTROLLER_COMMAND=(/usr/bin/python3 -u "${V23_SCRIPT}" "${CONTROLLER_YML}")
-fi
+[[ "${CONTROL_BACKEND}" == motion ]] || { err "HC_CONTROL_BACKEND 必须是 motion"; exit 2; }
+[[ -f "${MOTION_INSTALL}/setup.bash" ]] || { err "请先运行 ./bootstrap_colcon.sh build"; exit 2; }
+for file in motion.yaml sdk.yaml channels.yaml tools.yaml; do
+  [[ -f "${PROFILE_DIR}/motion/${file}" ]] || { err "当前机器人缺少 motion/${file}"; exit 2; }
+done
+CONTROLLER_COMMAND=("${PROJECT_ROOT}/tools/run_motion.sh" --profile "${PROFILE_DIR}")
 
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 log "机器人配置: ${ROBOT_NAME} (${PROFILE_DIR})"
@@ -118,14 +95,12 @@ setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --
   >"${LOG_DIR}/${CONTROL_BACKEND}_solver.log" 2>&1 &
 PIDS+=("$!")
 sleep 1
-if [[ "${CONTROL_BACKEND}" == motion ]]; then
-  set +u
-  source "${MOTION_INSTALL}/setup.bash"
-  set -u
-  setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/motion_teleop_bridge.py" \
-    >"${LOG_DIR}/motion_bridge.log" 2>&1 &
-  PIDS+=("$!")
-fi
+set +u
+source "${MOTION_INSTALL}/setup.bash"
+set -u
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/motion_teleop_bridge.py" --config "${ARM_CONFIG}" \
+  >"${LOG_DIR}/motion_bridge.log" 2>&1 &
+PIDS+=("$!")
 
 log "启动 VR 到标准机器人接口控制节点..."
 setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py" \

@@ -15,19 +15,19 @@ PROFILE = ROOT / "adapters" / "robots" / "openarmx"
 
 class OpenArmXProfileTests(unittest.TestCase):
     def test_profile_joint_order_and_standard_topics(self):
-        controller = yaml.safe_load(
-            (PROFILE / "controller_v23.yml").read_text(encoding="utf-8")
-        )
+        motion = yaml.safe_load(
+            (PROFILE / "motion" / "motion.yaml").read_text(encoding="utf-8")
+        )["humanoid_motion_control"]["ros__parameters"]
         teleop = yaml.safe_load(
             (PROFILE / "arm_teleop.yaml").read_text(encoding="utf-8")
         )
-        expected = (
+        expected = set(
             teleop["arms"]["right"]["joint_names"]
             + teleop["arms"]["left"]["joint_names"]
         )
-        self.assertEqual(controller["model"]["free_joints"], expected)
+        self.assertEqual(set(motion["groups.whole_body"]), expected)
         self.assertEqual(
-            controller["ros_interface"]["sub_topic"]["joint_state"],
+            motion["joint_state_endpoint"],
             "/observation/joint_states",
         )
         self.assertEqual(

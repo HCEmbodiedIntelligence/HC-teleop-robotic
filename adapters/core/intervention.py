@@ -74,7 +74,8 @@ class InterventionTeleop:
         self.triggers = {}
         self.ack_pub = node.create_publisher(String, '/status/control/ack', 100)
         self.input_pub = node.create_publisher(String, '/events/teleop/clutch', 100)
-        if node.backend == 'v23':
+        self.legacy_mode = not getattr(node, 'unified_motion', False)
+        if self.legacy_mode:
             self.record_action_pose = node.create_publisher(PoseArray, '/internal/recording/action/ee_poses', 10)
         self.pose_pub = node.create_publisher(PoseArray, '/internal/vr/owned_poses', 1)
         self.aux_pub = node.create_publisher(JointState, '/internal/vr/aux_joint_targets', 1)
@@ -86,7 +87,7 @@ class InterventionTeleop:
         self.hand_feedback = {}
         self.hand_commands = {}
         self.last_hand_step = 0.0
-        if node.backend == 'v23':
+        if self.legacy_mode:
             from rclpy.qos import qos_profile_sensor_data
             node.create_subscription(JointState, '/observation/hands/joint_states', self.hands, qos_profile_sensor_data)
             for side in ('right', 'left'):
@@ -225,7 +226,7 @@ class InterventionTeleop:
                 now-node.joint_state_stamp > min(.2, node.control['joint_state_timeout'])):
             raise ValueError('fresh tracked controllers and measured feedback required')
         node._sync_model()
-        if node.backend == 'v23':
+        if self.legacy_mode:
             for name, (q, stamp) in self.hand_feedback.items():
                 if now-stamp <= .25:
                     node.joint_state[name] = q
@@ -237,7 +238,7 @@ class InterventionTeleop:
                 raise ValueError('relative arm reference unavailable')
         # These actuators have measured feedback and a checked final routing
         # path. A hand without that capability stays held; no guessed position.
-        if node.backend == 'v23' or node.robot_api.driver['kind'] == 'openarmx_hc_robot_adapter':
+        if self.legacy_mode or node.robot_api.driver['kind'] == 'openarmx_hc_robot_adapter':
             for side, cfg in node.config['grippers'].items():
                 if side not in ('left', 'right'):
                     continue
@@ -247,7 +248,7 @@ class InterventionTeleop:
                     q = node.joint_state[name]
                     opened, closed = cfg['finger_open'][index], cfg['finger_closed'][index]
                     previous = q
-                    if node.backend == 'v23':
+                    if self.legacy_mode:
                         measured = self.hand_feedback.get(name)
                         if not measured or now-measured[1] > .25:
                             continue
@@ -265,7 +266,7 @@ class InterventionTeleop:
 
     def can_home(self):
         now = time.monotonic()
-        return (self.node.backend == 'v23' and self.active and self.granted
+        return (self.legacy_mode and self.active and self.granted
                 and self.phase == 'grant' and self.token.source == 'vr'
                 and self.valid and self.input.pressed and now-self.last_input <= .3
                 and now-self.permit_time <= .3 and self.node.hardware_ready)
@@ -287,7 +288,7 @@ class InterventionTeleop:
                 now-self.last_input > .3 or now-self.permit_time > .3):
             node._publish_status(now, feedback_fresh)
             return
-        if node.homing and node.backend == 'v23':
+        if node.homing and self.legacy_mode:
             command = dict(node.joint_state)
             node._update_homing(command)
             if not node._collision_command_allowed(command, now):
@@ -312,10 +313,10 @@ class InterventionTeleop:
             return
         for arm in node.arms.values():
             node._update_arm_target(arm)
-        if node.backend != 'v23':
+        if not self.legacy_mode:
             node._publish_target_poses()
         values = {}
-        if node.backend == 'v23':
+        if self.legacy_mode:
             # Use elapsed time: dropped control ticks must not slow a fresh
             # trigger indefinitely or allow a large step after a stall.
             dt = max(0., min(.05, now-self.last_hand_step))
@@ -329,7 +330,7 @@ class InterventionTeleop:
                 continue
             # X1 uses the same absolute trigger mapping as ordinary VR teleop.
             # Preserve the relative mapping on other backends.
-            if node.backend == 'v23':
+            if self.legacy_mode:
                 desired = opened+self.triggers[side]*(closed-opened)
             else:
                 desired = initial+(self.triggers[side]-trigger)*(closed-opened)
@@ -337,7 +338,7 @@ class InterventionTeleop:
             reference[3] = max(previous-step, min(previous+step, desired))
             values[name] = reference[3]
         if values:
-            if node.backend == 'v23':
+            if self.legacy_mode:
                 auxiliary = {}
                 for side in ('right', 'left'):
                     cfg = node.config['grippers'][side]
@@ -358,11 +359,11 @@ class InterventionTeleop:
             msg = JointState(name=list(values), position=list(values.values()))
             msg.header.stamp = node.get_clock().now().to_msg()
             msg.header.frame_id = self.token.key()+'#'
-            if node.backend == 'v23':
+            if self.legacy_mode:
                 self.owned_pub.publish(msg)
             else:
                 self.aux_pub.publish(msg)
-        if node.backend == 'v23':
+        if self.legacy_mode:
             node._publish_target_poses()
         node._publish_status(now, feedback_fresh)
 

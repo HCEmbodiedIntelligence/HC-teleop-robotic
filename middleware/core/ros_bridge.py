@@ -1298,8 +1298,11 @@ class RosBridge:
                         *,
                         source: str = source,
                     ) -> None:
-                        if self._legacy_enabled and source == "motion":
-                            return  # Program input is exclusively the own topic adapter.
+                        if source == "motion" and (
+                            self._legacy_enabled
+                            or (self._public_api is None and self._command_source != "motion")
+                        ):
+                            return  # Internal motion solver targets are forwarded via MotionTeleopBridge -> /control/vr/joint_states.
                         self.forward_live_command(source, message, output_publisher.publish)
 
                     subscriptions.append(

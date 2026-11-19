@@ -43,9 +43,9 @@ class ControlRuntime:
                 root = self.config_path.parent / root
             profile = root.resolve() / self.profile_id
             arm = yaml.safe_load((profile / "arm_teleop.yaml").read_text())
-            backend = arm.get("control", {}).get("backend", "v23")
-            if backend != "v23":
-                raise ValueError(f"网页自动重启尚不支持 {backend} 后端；请使用 HC_MANAGED_CONTROL=0 手动启动入口")
+            backend = os.environ.get("HC_CONTROL_BACKEND") or arm.get("control", {}).get("backend", "motion")
+            if backend != "motion":
+                raise ValueError(f"网页自动重启只支持 motion 后端，收到: {backend}")
             base_log = Path(os.environ.get("HC_CONTROL_LOG_DIR", str(self.project / "runtime/control_logs")))
             self.log_dir = base_log / f"reload_{time.time_ns()}"
             self.log_dir.mkdir(parents=True, mode=0o700)
@@ -70,7 +70,13 @@ class ControlRuntime:
                 teleop_log = self.log_dir / "teleop_controller.log"
                 solver_log = self.log_dir / f"{backend}_solver.log"
                 teleop_ready = teleop_log.exists() and "HC-TJ teleop ready:" in teleop_log.read_text(errors="replace")
-                solver_ready = solver_log.exists() and "reconstructed controller_v2_3 started:" in solver_log.read_text(errors="replace")
+                bridge_log = self.log_dir / "motion_bridge.log"
+                solver_ready = (
+                    solver_log.exists()
+                    and "unified motion control ready:" in solver_log.read_text(errors="replace")
+                    and bridge_log.exists()
+                    and "motion teleop bridge started:" in bridge_log.read_text(errors="replace")
+                )
                 if teleop_ready and solver_ready:
                     self.state = "running"
                     return

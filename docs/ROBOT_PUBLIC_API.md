@@ -1,6 +1,6 @@
 # 第三方机械臂控制与订阅接口
 
-显式启用 `HC_CONTROL_BACKEND=motion` 时，本仓库提供 `hc-robot-api/v1`。默认 v23 模式沿用原生名称与接口，不发布统一 API 能力。OpenArmX、X1 的统一模式均使用 Motion；算法客户端在线获取本机能力，无需机型参数或厂商 SDK。机械臂名称为 `left_joint_1…N`、`right_joint_1…N`，数量和限位由 profile 决定。专用六轴测试模型验证了动态 DOF。
+配置 `HC_UNIFIED_ROBOT_API=1`（或 `control.unified_api: true`）且使用 `motion` 后端时，本仓库对外提供 `hc-robot-api/v1`。普通默认模式则直接使用内置机型的原生关节名与 `/action`、`/observation` 标准接口（原 `v23` 后端已移除）。OpenArmX、X1 的统一模式均使用 Motion；算法客户端在线获取本机能力，无需机型参数或厂商 SDK。机械臂名称为 `left_joint_1…N`、`right_joint_1…N`，数量和限位由 profile 决定。专用六轴测试模型验证了动态 DOF。
 
 humanoid 分支的历史软件验收使用实际 Motion/IK/最终 RTC、HC 中间件、实际适配器和假硬件闭环。详细结论、失败及复测日志见工作区 [本次验收报告](../../../reports/unified-robot-api-20261015-165101/RESULT.md)。没有连接真实电机或 CAN；没有运行 Isaac 图形仿真、跨电脑 DDS 或外部 X1 真机驱动。
 
@@ -94,7 +94,7 @@ VR 映射位姿 ─独立 VR 来源检查─┘
 
 统一解析器为 `middleware/core/robot_api.py`。`robot_api.yaml` 引用 `arm_teleop.yaml` 的 arms/body 有序分组和 `robot.initial_joints`，结合 URDF 及 Motion 限位解析；不维护第二套模型或 home。Motion/SDK 分组必须一致，不支持的配置在启动前拒绝。
 
-导出的完整 profile ZIP 保留 `robot_api.yaml`、Motion 配置和资源；导入时重新校验。只含 URDF/旧 VR 配置的历史 profile 保留旧能力，但明确标记统一 API 不可用及原因。OpenArmX、X1 的统一模式要求 Motion；显式使用 v23 时整条链恢复为旧接口模式，不声明统一 API 能力。
+导出的完整 profile ZIP 保留 `robot_api.yaml`、Motion 配置和资源；导入时重新校验。只含 URDF/旧 VR 配置的历史 profile 仍可通过导入器兼容运行 `motion` 基础遥操作，但会明确标记统一 API 不可用及原因。OpenArmX、X1 的统一模式要求配置 `robot_api.yaml` 并启用统一 API；未启用时不声明统一 API 能力。
 
 各入口共同遵循 `HC_ROBOT_NAME`、`HC_ROBOT_CONFIG_ROOT` 优先于配置文件；配置中的相对 root 相对配置文件目录解析。运行时固定所选 profile。切换／修改配置应停止旧输出，并一致重启中间件、Motion、遥操作和硬件适配器；不能在旧控制器仍运行时只换能力描述。
 

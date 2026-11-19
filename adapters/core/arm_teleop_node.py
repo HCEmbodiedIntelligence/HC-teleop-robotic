@@ -177,12 +177,14 @@ class RobotArmTeleopNode(Node):
         # Simulation and external drivers share the same body parameters.
         self.control = self.config.get("control", {})
         self.body_config = self.config.get("body", {})
-        self.backend = str(backend or self.control.get("backend", "v23")).lower()
-        if self.backend not in {"v23", "generic", "motion", "legacy"}:
-            raise ValueError("control.backend must be v23, generic, motion or legacy")
-        self.external_ik = self.backend in {"v23", "generic", "motion"}
+        self.backend = str(backend or self.control.get("backend", "motion")).lower()
+        if self.backend not in {"motion", "generic", "legacy"}:
+            raise ValueError("control.backend must be motion, generic or legacy")
+        self.external_ik = self.backend in {"motion", "generic"}
+        from .runtime_config import unified_profile
+        self.unified_motion = self.backend == "motion" and unified_profile(self.config_path.parent)
         self.robot_api = None
-        if self.backend == "motion":
+        if self.unified_motion:
             from middleware.core.robot_api import RobotApiProfile, INTERNAL_STATE
             self.robot_api = RobotApiProfile(self.config_path.parent)
             self.control["joint_state_topic"] = INTERNAL_STATE
@@ -386,7 +388,7 @@ class RobotArmTeleopNode(Node):
         self.base_pose_frame = ""
         self.head_base_state = "idle"
 
-        if self.collision_enabled and self.backend != "motion":
+        if self.collision_enabled and not self.unified_motion:
             self._initialize_collision_safety()
         self.zeros = [0.0] * len(self.dof_joint_indices)
         self.controlled_names = (
@@ -420,7 +422,7 @@ class RobotArmTeleopNode(Node):
         self.command_pub = cmd_node.create_publisher(
             JointState, self.control["command_topic"], command_pub_qos
         )
-        if self.backend == "motion":
+        if self.unified_motion:
             self.motion_home_pub = self.create_publisher(Header, "/internal/vr/home", 1)
             self.motion_home_cancel_pub = self.create_publisher(Bool, "/internal/vr/home_cancel", 1)
             self.create_subscription(String, "/internal/vr/home_result", self._motion_home_result, 1)
@@ -486,7 +488,7 @@ class RobotArmTeleopNode(Node):
         self.finger_pubs = {
             side: self.create_publisher(
                 JointState, (f"/control/vr/{side}_hand/joint_states"
-                    if self.backend == "v23" and self.control.get("legacy_intervention", False)
+                    if not self.unified_motion and self.control.get("legacy_intervention", False)
                     else self.config["grippers"][side]["finger_topic"]), 10
             )
             for side in ("left", "right")
@@ -499,8 +501,8 @@ class RobotArmTeleopNode(Node):
             self.control["joint_state_topic"],
             self._joint_state_callback,
             qos_profile_sensor_data
-            if self.backend == "motion"
-            else (solver_sub_qos if self.backend in {"v23", "generic"} else latest_reliable_qos),
+            if self.unified_motion
+            else (solver_sub_qos if self.external_ik else latest_reliable_qos),
         )
         if self.external_ik:
             self.create_subscription(
@@ -563,7 +565,7 @@ class RobotArmTeleopNode(Node):
             1.0 / float(self.control["rate_hz"]), self._control_tick
         )
         self.intervention = None
-        if self.backend == 'motion' or (self.backend == 'v23' and self.control.get('legacy_intervention', False)):
+        if self.unified_motion or (not self.unified_motion and self.control.get('legacy_intervention', False)):
             from .intervention import InterventionTeleop
             self.intervention = InterventionTeleop(self)
         self.get_logger().info(
@@ -574,7 +576,7 @@ class RobotArmTeleopNode(Node):
         from middleware.core.qos_event_observer import QosEventObserver
         observed_nodes = [self, self._command_node] if self._command_node is not None else [self]
         self._qos_event_observer = QosEventObserver(observed_nodes, enabled=(
-            None if self.backend == 'v23' and self.config_path.parent.name == 'x1' else False))
+            None if not self.unified_motion and self.config_path.parent.name == 'x1' else False))
         self._qos_event_observer.start()
 
     def _validate_config(self) -> None:
@@ -1081,7 +1083,7 @@ class RobotArmTeleopNode(Node):
         if len(message.name) != len(message.position) or len(set(message.name)) != len(message.name):
             return
         stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
-        if self.backend in {"v23", "generic"}:
+        if self.external_ik and not self.unified_motion:
             now_ns = self.get_clock().now().nanoseconds
             if (not -50_000_000 <= now_ns - stamp_ns <= 250_000_000
                     or stamp_ns <= self.joint_state_source_ns <= now_ns + 50_000_000):
@@ -1112,7 +1114,7 @@ class RobotArmTeleopNode(Node):
             self._ensure_generic_targets()
             with state_lock:
                 self.source_feedback_pending = False
-            if (self.enabled and self.control_source == "vr" and self.backend in {"v23", "generic"}
+            if (self.enabled and self.control_source == "vr" and self.external_ik and not self.unified_motion
                     and not (self.intervention and self.intervention.active)):
                 # Hold the arms at measured positions while waiting for the IK reset/Grip.
                 names = self.arms["right"].joint_names + self.arms["left"].joint_names
@@ -1164,7 +1166,7 @@ class RobotArmTeleopNode(Node):
             return
         self.solver_stamp = self._monotonic()
         self.solver_message_count += 1
-        if self.backend == "motion" and self.hardware_ready:
+        if self.unified_motion and self.hardware_ready:
             stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
             self.solver_rearm.observe_solver_output(stamp_ns)
 
@@ -1278,7 +1280,7 @@ class RobotArmTeleopNode(Node):
                 return 'source_not_vr'
             if self.source_feedback_pending:
                 return 'source_feedback_pending'
-            if self.backend == "motion":
+            if self.unified_motion:
                 return 'motion_backend'  # Shared RTC output goes directly to the selected boundary.
             if len(message.name) != len(message.position):
                 return 'length_mismatch'
@@ -1422,13 +1424,13 @@ class RobotArmTeleopNode(Node):
             response.success = False
             response.message = "home requires ordinary VR mode and fresh post-switch feedback"
             return response
-        if self.backend == "motion":
+        if self.unified_motion:
             response.success = self._request_motion_home()
             response.message = "MoveJ home requested" if response.success else "enable VR and hardware before home"
             return response
         self.enabled = True
         self.stop_reason = ""
-        if self.backend in {"generic", "v23"}:
+        if self.external_ik:
             self._set_generic_home_targets()
         else:
             self._start_homing()
@@ -1443,12 +1445,12 @@ class RobotArmTeleopNode(Node):
             self.get_logger().warning("home ignored: ordinary VR mode and fresh post-switch feedback required")
             return
         if message.data:
-            if self.backend == "motion":
+            if self.unified_motion:
                 self._request_motion_home()
                 return
             self.enabled = True
             self.stop_reason = ""
-            if self.backend in {"generic", "v23"}:
+            if self.external_ik:
                 self._set_generic_home_targets()
             else:
                 self._start_homing()
@@ -1545,7 +1547,7 @@ class RobotArmTeleopNode(Node):
     def _check_initial_homing(self) -> None:
         if self.initial_homing_done:
             return
-        if self.backend == "motion":
+        if self.unified_motion:
             # Enabling hardware never implicitly starts a MoveJ.
             self.initial_homing_done = True
             return
@@ -1565,7 +1567,7 @@ class RobotArmTeleopNode(Node):
             self.get_logger().info(
                 "joint feedback deviates from initial_joints on startup; triggering initial homing"
             )
-            if self.backend in {"generic", "v23"}:
+            if self.external_ik:
                 self._set_generic_home_targets()
             else:
                 self._start_homing()
@@ -1719,7 +1721,7 @@ class RobotArmTeleopNode(Node):
         self._clutch_resume_pending = False
 
     def _update_solver_clutch(self, requested: bool, *, input_fresh: bool) -> None:
-        if self.backend != "v23" or not self.control.get("clutch_reset_on_release", False):
+        if self.unified_motion or not self.external_ik or not self.control.get("clutch_reset_on_release", False):
             return
         if not requested and (any(a.active for a in self.arms.values()) or self._clutch_resume_pending):
             # Freeze only the arm integrators. Body/waist retain their own control.
@@ -3531,7 +3533,7 @@ class RobotArmTeleopNode(Node):
 
     def _set_generic_home_targets(self) -> None:
         """Capture the configured arm and waist home as Cartesian tasks."""
-        if self.backend == "motion":
+        if self.unified_motion:
             self._request_motion_home()
             return
         self._cancel_solver_clutch()
@@ -3649,7 +3651,7 @@ class RobotArmTeleopNode(Node):
     ) -> None:
         if not self.enabled or command is None:
             if self.homing:
-                if self.backend == "motion":
+                if self.unified_motion:
                     self.motion_home_cancel_pub.publish(Bool(data=True))
                 self.solver_rearm.homing_complete()
             self.homing = False
@@ -3662,7 +3664,7 @@ class RobotArmTeleopNode(Node):
         if self._home_gesture_triggered(now):
             self._set_generic_home_targets()
         if self.homing:
-            if self.backend == "motion":
+            if self.unified_motion:
                 self._motion_home_tick(now, feedback_fresh)
                 return
             self._update_homing(command)
@@ -3804,7 +3806,7 @@ class RobotArmTeleopNode(Node):
         # 灵巧手指令始终常驻下发，食指扳机按压即可实时连续开合（无需持续按住 Grip 离合）
         self._publish_generic_grippers(now)
 
-        if self.backend == "motion":
+        if self.unified_motion:
             self._publish_motion_aux()
 
         # Always publish all three finite tasks. The copied solver otherwise sees
@@ -3879,7 +3881,7 @@ class RobotArmTeleopNode(Node):
             self._publish_status(now, feedback_fresh)
             return
         if self.external_ik:
-            if self.backend != "motion" and self.enabled and not self.homing and not self._ensure_vr_feedback():
+            if not self.unified_motion and self.enabled and not self.homing and not self._ensure_vr_feedback():
                 return
             self._generic_control_tick(now, feedback_fresh, command)
             return
@@ -4075,7 +4077,7 @@ class RobotArmTeleopNode(Node):
                     target_world,
                 )
 
-            # Do not impose an artificial Cartesian reach limit here.  The v23
+            # Do not impose an artificial Cartesian reach limit here.  The
             # solver already enforces the robot's real joint limits and applies
             # singularity damping; clipping this target used to create a false
             # wall at 0.62-0.65 m and made otherwise reachable poses impossible.
@@ -4088,8 +4090,9 @@ class RobotArmTeleopNode(Node):
             )
             controller_message.poses.append(self._pose_from_tuple(torso[0], torso[1]))
         if getattr(self, 'intervention', None) and self.intervention.active:
-            if self.backend == "v23":
-                self.intervention.poses(controller_message, action_pose=message)
+            if not self.unified_motion:
+                target_msg = message if self.backend == "motion" else controller_message
+                self.intervention.poses(target_msg, action_pose=message)
             else:
                 self.intervention.poses(message)
             return

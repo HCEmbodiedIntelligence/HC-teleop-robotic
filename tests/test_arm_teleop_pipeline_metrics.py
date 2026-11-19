@@ -19,7 +19,8 @@ def command(value=.2):
 
 def node_for():
     return SimpleNamespace(generic_command_pipeline=teleop._generic_pipeline_metrics(),
-        intervention=None, control_source='vr', source_feedback_pending=False, backend='v23',
+        intervention=None, control_source='vr', source_feedback_pending=False, backend='motion',
+        unified_motion=False,
         enabled=True, hardware_ready=True, homing=False, generic_command_stamp=0.,
         generic_command_count=0, generic_aux_command={},
         solver_rearm=SimpleNamespace(blocked=False),
@@ -35,7 +36,7 @@ def node_for():
     ('intervention_active', {'intervention': SimpleNamespace(active=True)}),
     ('source_not_vr', {'control_source': 'motion'}),
     ('source_feedback_pending', {'source_feedback_pending': True}),
-    ('motion_backend', {'backend': 'motion'}),
+    ('motion_backend', {'unified_motion': True}),
     ('disabled', {'enabled': False}),
     ('hardware_not_ready', {'hardware_ready': False}),
     ('homing', {'homing': True}),
@@ -174,7 +175,7 @@ def test_command_node_isolates_forwarding_and_concurrent_aux_snapshot(monkeypatc
     node = None
     try:
         cmd_node = rclpy.create_node('test_cmd_node_isolated', enable_rosout=False, start_parameter_services=False)
-        node = teleop.RobotArmTeleopNode(str(cfg), backend='v23', command_node=cmd_node)
+        node = teleop.RobotArmTeleopNode(str(cfg), backend='motion', command_node=cmd_node)
         assert node._command_node is cmd_node
         assert any(s.topic_name == node.control.get('generic_command_topic', '/control/solver/joint_targets')
                    for s in cmd_node.subscriptions)
