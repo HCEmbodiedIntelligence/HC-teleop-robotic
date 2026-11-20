@@ -9,13 +9,63 @@ import threading
 import time
 import traceback
 from collections import Counter, deque
+from dataclasses import dataclass
 from typing import Any, Callable
 
+from .control_ownership import ControlToken
 from .protocol import envelope
 from .replay_alignment import HandAlignmentTrack, ReplayAlignmentPlanner
 
 
 EventCallback = Callable[[dict[str, Any], list[str]], None]
+
+@dataclass
+class _GripReturnHold:
+    token: ControlToken
+    output_epoch: int
+    deadline_ns: int
+    positions: dict[str, float]
+    mode: str = 'return'
+    next_send_ns: int = 0
+    sent: bool = False
+
+
+_HANDOVER_HOLD_SPEC = {
+    'return': dict(
+        attr='_return_hold',
+        begin_state='RETURNING',
+        states=frozenset({'RETURNING', 'AUTO'}),
+        source='motion',
+        frame_id='hc-dagger/return-hold',
+        open_event='grip_return_hold_open',
+        close_event='grip_return_hold_closed',
+        close_reason='first model arm command published',
+        require_grip=False,
+        fault_on_deadline=True,
+        deadline_reason='Grip return timed out waiting for the first model arm command',
+        feedback_fault='Grip return hold requires fresh arm feedback',
+        pose_fault='Grip return hold pose is outside the joint limits',
+        stale_fault='Grip return hold feedback stale or outside the arm safety envelope',
+    ),
+    'takeover': dict(
+        attr='_takeover_hold',
+        begin_state='TAKEOVER',
+        states=frozenset({'TAKEOVER', 'MANUAL'}),
+        source='vr',
+        frame_id='hc-dagger/takeover-hold',
+        open_event='grip_takeover_hold_open',
+        close_event='grip_takeover_hold_closed',
+        close_reason='first manual arm command published',
+        require_grip=True,
+        fault_on_deadline=False,
+        deadline_reason='Grip takeover timed out waiting for the first manual arm command',
+        feedback_fault='Grip takeover hold requires fresh arm feedback',
+        pose_fault='Grip takeover hold pose is outside the joint limits',
+        stale_fault='Grip takeover hold feedback stale or outside the arm safety envelope',
+    ),
+}
+_HOLD_ATTR_BY_SOURCE = {'motion': '_return_hold', 'vr': '_takeover_hold'}
+
 
 DEFAULT_TOPIC_STANDARDS: dict[str, dict[str, float]] = {
     "/status/hardware/ready": {"target_hz": 100.0, "min_hz": 10.0},
@@ -185,6 +235,7 @@ class RosBridge:
         self._actor_thread_ident = None
         self._actor_dispatching = False
         self._actor_dispatch_epoch = None
+        self._actor_dispatch_gripper_revision = None
         self._actor_pumping = False
         self._actor_callback_count = 0
         self._actor_targets = {}
@@ -223,6 +274,8 @@ class RosBridge:
         self._command_contention_last_ns = 0
         self._contention_thread = None
         self._boundary = None
+        self._return_hold = None
+        self._takeover_hold = None
         self._permit_sender = None
         self._action_sink = lambda evidence: None
         from .control_ownership import ControlOwnership
@@ -230,7 +283,9 @@ class RosBridge:
             lock=self._lock, ros_clock=lambda: int(self._ros_now() * 1e9),
             revoke=self._ownership_revoke, permit=self._ownership_permit,
             required_peers=("solver", "teleop") if self._legacy_enabled else ("motion", "teleop"),
-            recording_enabled=config.get("intervention", {}).get("automatic_recording", True))
+            recording_enabled=config.get("intervention", {}).get("automatic_recording", True),
+            right_gripper_override=self._legacy_enabled, begin_return_hold=self._begin_return_hold,
+            begin_takeover_hold=self._begin_takeover_hold)
         self._trackers: dict[str, TopicHealthTracker] = {}
         mux_config = config.get("command_mux", {})
         self._mux_enabled = bool(mux_config.get("enabled", True))
@@ -729,6 +784,8 @@ class RosBridge:
             self._actor_replay.clear()
 
     def _revoke_locked(self, *, keep_replay: bool = False) -> None:
+        self._return_hold = None
+        self._takeover_hold = None
         self._replay_home_available = False
         self._clear_replay_alignment_locked("replay alignment aborted by safety or revoke")
         if not keep_replay:
@@ -746,6 +803,107 @@ class RosBridge:
     def _ownership_revoke(self):
         self._command_output_enabled = False
         self._revoke_locked()
+
+    def _begin_handover_hold(self, mode):
+        """Latch one fresh measured arm pose across a DAgger ownership handover."""
+        owner, boundary = self.ownership, self._boundary
+        spec = _HANDOVER_HOLD_SPEC[mode]
+        if (not self._legacy_enabled or boundary is None or not owner.dagger_enabled
+                or self._actor_output_blocked() or not self._ready_locked(time.monotonic())
+                or owner.state != spec['begin_state'] or not owner._input_fresh()
+                or (spec['require_grip'] and not owner.gripped)):
+            return
+        if not boundary.feedback_fresh():
+            owner.fault(spec['feedback_fault'])
+            return
+        positions = {name: boundary.positions[name] for name in boundary.arms}
+        if not boundary.return_hold_valid(positions):
+            owner.fault(spec['pose_fault'])
+            return
+        setattr(self, spec['attr'], _GripReturnHold(
+            owner.token, self._output_epoch, owner.deadline_ns, positions, mode=mode))
+
+    def _begin_return_hold(self):
+        """Latch one fresh measured arm pose after a normal DAgger release."""
+        self._begin_handover_hold('return')
+
+    def _begin_takeover_hold(self):
+        """Latch one fresh measured arm pose after a DAgger manual takeover request."""
+        self._begin_handover_hold('takeover')
+
+    def _return_hold_allowed_locked(self, hold):
+        """Authorize only the locally latched pose, for this handover's epoch."""
+        owner, boundary = self.ownership, self._boundary
+        spec = _HANDOVER_HOLD_SPEC[hold.mode]
+        attr = spec['attr']
+        if (hold is not getattr(self, attr) or self._stop.is_set()
+                or hold.token != owner.token or hold.output_epoch != self._output_epoch
+                or owner.state not in spec['states'] or not owner.dagger_enabled
+                or self._replay_active or self._actor_output_blocked()
+                or not self._ready_locked(time.monotonic())):
+            return False
+        if owner.clock() >= hold.deadline_ns:
+            if spec['fault_on_deadline'] or owner.state == spec['begin_state']:
+                owner.fault(spec['deadline_reason'])
+            else:
+                setattr(self, attr, None)
+                if hold.sent:
+                    owner._event(spec['close_event'], end_reason=spec['deadline_reason'])
+            return False
+        if (not owner._input_fresh() or (spec['require_grip'] and not owner.gripped) or any(
+                owner.clock()-owner.peer_times.get(peer, 0) > owner.input_timeout_ns
+                for peer in owner.required_peers)):
+            setattr(self, attr, None)
+            return False
+        if not boundary.return_hold_valid(hold.positions):
+            owner.fault(spec['stale_fault'])
+            return False
+        return True
+
+    def _tick_handover_hold(self, attr):
+        """Feed the existing smoother at 50 Hz across handover until first arm command."""
+        hold = getattr(self, attr)
+        if hold is None or self.ownership.clock() < hold.next_send_ns:
+            return
+        boundary = self._boundary
+        spec = _HANDOVER_HOLD_SPEC[hold.mode]
+        message = boundary.return_hold_message(hold.positions, frame_id=spec['frame_id'])
+        send, wire_cdr = boundary.prepare_publication(message, boundary.output.publish)
+        capture = getattr(self, '_publication_capture', None)
+        ticket = capture.reserve() if capture is not None else None
+        published_ns = published_mono = None
+        try:
+            with self._lock:
+                if not self._return_hold_allowed_locked(hold) or self.ownership.clock() < hold.next_send_ns:
+                    return
+                send(message)
+                published_ns, published_mono = time.time_ns(), time.monotonic()
+                hold.next_send_ns = self.ownership.clock() + 19_000_000
+                boundary._arm_published()
+                self._mux_channel_forwarded['arms'] += 1
+                self._mux_channel_forwarded_times['arms'].append(published_mono)
+                if not hold.sent:
+                    hold.sent = True
+                    self.ownership._event(spec['open_event'])
+        finally:
+            self._complete_publication_capture(
+                capture,
+                ticket,
+                message if published_ns is not None else None,
+                wire_cdr if published_ns is not None else None,
+                published_ns,
+                published_mono,
+            )
+
+    def _tick_return_hold(self):
+        self._tick_handover_hold('_return_hold')
+
+    def _tick_takeover_hold(self):
+        self._tick_handover_hold('_takeover_hold')
+
+    def _tick_handover_holds(self):
+        self._tick_return_hold()
+        self._tick_takeover_hold()
 
     def _ownership_permit(self, token, phase, cutoff_ns, active):
         if not active:
@@ -846,14 +1004,16 @@ class RosBridge:
                 or type(value['stamp_ns']) is not int or value['stamp_ns'] <= 0):
             raise ValueError('invalid semantic input identity, sequence or timestamp')
         before_lock_ns = time.monotonic_ns()
+        gripper_target = None
         with self._lock:
             acquired_ns = time.monotonic_ns()
             control = self.ownership
             pause = value.get('pause_requested') is True
             resume = value.get('resume_requested') is True
+            trigger = value.get('right_gripper_trigger')
             accepted = control.input(device_instance=value['device_instance'], sequence=value['sequence'],
                 valid=value['valid'] is True, gripped=value['gripped'] is True, stamp_ns=value['stamp_ns'],
-                pause_requested=pause, resume_requested=resume)
+                pause_requested=pause, resume_requested=resume, right_gripper_trigger=trigger)
             if callback_entry_ns is not None:
                 control.input_diagnostics.update(
                     callback_entry_source_ns=value['stamp_ns'],
@@ -867,7 +1027,13 @@ class RosBridge:
                     # Hardware recovery only returns to HOLD. A subsequent
                     # released-then-pressed A is needed to start AUTO.
                     self.recover_intervention()
-            return accepted
+            if (accepted and self._legacy_enabled and control.right_gripper_token is not None
+                    and self._boundary is not None
+                    and value['stamp_ns'] > control.right_gripper_cutoff_ns):
+                gripper_target = (trigger, value['stamp_ns'], control.right_gripper_token)
+        if gripper_target is not None:
+            self._boundary.send_right_gripper(*gripper_target)
+        return accepted
 
     def _ready_locked(self, now: float) -> bool:
         if self._hardware_ready and now - self._hardware_ready_last > self._ready_timeout:
@@ -923,6 +1089,10 @@ class RosBridge:
         planner = self._replay_alignment
         if planner is not None:
             wait_sec = planner.wait_sec(time.monotonic(), wait_sec)
+        for attr in ('_return_hold', '_takeover_hold'):
+            hold = getattr(self, attr)
+            if hold is not None:
+                wait_sec = min(wait_sec, max(0.0, (hold.next_send_ns - self.ownership.clock()) * 1e-9))
         for index in range(32):
             before = self._actor_callback_count
             executor.spin_once(timeout_sec=wait_sec if index == 0 else 0.)
@@ -939,290 +1109,16 @@ class RosBridge:
         self._mux_channel_received[channel] += 1
         self._mux_channel_received_times[channel].append(now)
 
-    def _queue_actor_target(self, source, message, publish, token):
-        # Fixed source/channel keys prevent arbitrary identities from growing a
-        # queue or an unselected producer from evicting the selected source.
-        if source not in self._mux_received:
-            return False
-        now = time.monotonic()
-        channel = self._command_channel(getattr(message, 'name', ()))
-        with self._lock:
-            self._count_live_input_locked(source, channel, now)
-        try:
-            target = _copy_actor_message(message)
-            names = tuple(target.name)
-            stamp = target.header.stamp.sec + target.header.stamp.nanosec * 1e-9
-            valid = (bool(names) and len(names) == len(target.position)
-                     and len(set(names)) == len(names) and all(names)
-                     and all(math.isfinite(float(v)) for v in target.position)
-                     and math.isfinite(stamp) and stamp > 0
-                     and -.05 <= self._ros_now()-stamp <= .3)
-        except (AttributeError, TypeError, ValueError):
-            return False
-        key = source, channel
-        stream = (source, names) if self._legacy_enabled else source
-        with self._lock:
-            self._actor_counts['offered'] += 1
-            pending = self._actor_targets.get(key)
-            if (not valid or self._stop.is_set() or not self._ready_locked(time.monotonic())
-                    or not self._command_output_enabled or self._actor_output_blocked() or self._replay_active
-                    or self._command_source != source
-                    or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
-                    or (pending is not None and stamp <= pending[0])
-                    or (self.ownership.active and not self.ownership.allows(token))):
-                self._actor_counts['discarded'] += 1
+    def _live_target_allowed_locked(self, source, channel, token, stamp):
+        owner = self.ownership
+        if self._legacy_enabled and channel == 'right_hand' and owner.state == 'AUTO':
+            if stamp <= owner.right_gripper_cutoff_ns * 1e-9:
                 return False
-            if pending is not None:
-                self._actor_counts['coalesced'] += 1
-            self._actor_targets[key] = stamp, self._output_epoch, target, publish, token
-            self._actor_callback_count += 1
-            return True
-
-    def _drain_actor_targets(self):
-        if not self._control_actor_mode:
-            return
-        with self._lock:
-            if not self._actor_targets or self._stop.is_set():
-                return
-            ready = []
-            for source in ('vr', 'exoskeleton', 'motion'):
-                for channel in self.COMMAND_CHANNELS:
-                    pending = self._actor_targets.pop((source, channel), None)
-                    if pending is not None and pending[1] == self._output_epoch:
-                        ready.append((source, pending))
-        for source, pending in ready:
-            with self._lock:
-                if pending[1] != self._output_epoch or self._stop.is_set():
-                    continue
-            _, _, target, publish, token = pending
-            self._actor_dispatching = True
-            self._actor_dispatch_epoch = pending[1]
-            try:
-                self.forward_live_command(source, target, publish, token)
-            finally:
-                self._actor_dispatching = False
-                self._actor_dispatch_epoch = None
-
-    def forward_live_command(self, source: str, message: Any, publish: Callable, token=None) -> bool:
-        if (self._control_actor_mode and not (self._actor_dispatching
-                and self._actor_thread_ident == threading.get_ident())):
-            return self._queue_actor_target(source, message, publish, token)
-        # Sample one in eight callbacks. Clock/serialization waits need wall
-        # and thread CPU time to distinguish native/GIL waiting from compute.
-        # Aggregation happens after all final-send locks have been released.
-        self._command_timing_sequence += 1
-        if self._command_timing_sequence % 8 != 1:
-            return self._forward_live_command(source, message, publish, token)
-        started = time.monotonic_ns(), time.thread_time_ns()
-        timing = {'_previous': started}
-        boundary = self._boundary
-        channel = ('arms' if boundary is not None and
-                   set(getattr(message, 'name', ())).intersection(getattr(boundary, 'arms', ())) else 'hands')
-        try:
-            return self._forward_live_command(source, message, publish, token, timing=timing)
-        finally:
-            finished = time.monotonic_ns(), time.thread_time_ns()
-            timing.pop('_previous', None)
-            timing['total'] = dict(wall_ms=(finished[0]-started[0])/1e6,
-                                   cpu_ms=(finished[1]-started[1])/1e6)
-            with self._callback_timing_lock:
-                for stage, elapsed in timing.items():
-                    # Preserve aggregate API keys and expose independent arm/
-                    # hand samples; their callbacks have different rates.
-                    for key in (source+':'+stage, source+':'+channel+':'+stage):
-                        value = self._command_stage_timings.setdefault(key, dict(samples=0, max_ms=0., max_cpu_ms=0.))
-                        value.update(samples=value['samples']+1, last_ms=elapsed['wall_ms'],
-                                     last_cpu_ms=elapsed['cpu_ms'],
-                                     max_ms=max(value['max_ms'], elapsed['wall_ms']),
-                                     max_cpu_ms=max(value['max_cpu_ms'], elapsed['cpu_ms']))
-                if timing['total']['wall_ms'] >= 10.:
-                    self._slow_command_stages.append(dict(source=source, channel=channel,
-                        stamp_ns=time.time_ns(), stages=timing))
-
-    @staticmethod
-    def _command_checkpoint(timing, stage):
-        if timing is not None:
-            now = time.monotonic_ns(), time.thread_time_ns()
-            previous = timing['_previous']
-            timing[stage] = dict(wall_ms=(now[0]-previous[0])/1e6,
-                                 cpu_ms=(now[1]-previous[1])/1e6)
-            timing['_previous'] = now
-
-    @staticmethod
-    def _command_instant(timing):
-        # Reading two integer clocks is the only diagnostic work performed
-        # inside the final gate. Formatting/aggregation remains outside it.
-        return (time.monotonic_ns(), time.thread_time_ns()) if timing is not None else None
-
-    @staticmethod
-    def _command_interval(timing, stage, before, after):
-        if timing is not None and before is not None and after is not None:
-            timing[stage] = dict(wall_ms=(after[0]-before[0])/1e6,
-                                 cpu_ms=(after[1]-before[1])/1e6)
-
-    def _count_telemetry_message(self):
-        # This statistic has no authority meaning. A dashboard callback must
-        # never wait for or occupy the final actuator gate just to count it.
-        with self._telemetry_count_lock:
-            self._telemetry_messages += 1
-
-    def _command_channel(self, names):
-        """Classify a stable joint layout once, independently of control policy."""
-        if self._command_channel_boundary is not self._boundary:
-            self._command_channel_boundary = self._boundary
-            self._command_channel_cache.clear()
-        try:
-            key = names if isinstance(names, tuple) else tuple(names or ())
-            cached = self._command_channel_cache.get(key)
-            if cached is not None:
-                return cached
-            boundary = self._boundary
-            arms, hands = getattr(boundary, 'arms', ()), getattr(boundary, 'hands', {})
-            if not isinstance(arms, (tuple, list, set, frozenset)):
-                arms = ()
-            if not isinstance(hands, dict):
-                hands = {}
-            if any(name in arms for name in key):
-                channel = 'arms'
-            else:
-                sides = [side for side in ('right', 'left')
-                         if any(name in hands.get(side, ()) for name in key)]
-                channel = sides[0]+'_hand' if len(sides) == 1 else 'other'
-            # Command layouts are few and fixed. Unknown layouts must not
-            # turn malformed traffic into an unbounded diagnostic cache.
-            if len(self._command_channel_cache) < 64:
-                self._command_channel_cache[key] = channel
-            return channel
-        except (TypeError, ValueError):
-            return 'other'
-
-    def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
-        """Keep authority across slow conversion and recheck at actuator send."""
-        self._actor_checkpoint(allow_snapshot=False)
-        now = time.monotonic()
-        stream = source
-        try:
-            names, positions = message.name, message.position
-            stream = (source, tuple(names)) if self._legacy_enabled else source
-            stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
-            valid = (bool(names) and len(names) == len(positions)
-                     and len(set(names)) == len(names) and all(names)
-                     and all(math.isfinite(float(v)) for v in positions)
-                     and math.isfinite(stamp) and stamp > 0
-                     and -.05 <= self._ros_now() - stamp <= .3)
-            if valid and self._public_api is not None:
-                # Only validation is needed here; copying an entire ROS message
-                # just to discard the converted result adds control latency.
-                self._public_api.convert(message.name, message.position,
-                                         message.velocity, message.effort, to_model=True)
-        except (AttributeError, TypeError, ValueError):
-            valid, stamp = False, 0.0
-        channel = self._command_channel(stream[1] if isinstance(stream, tuple)
-                                        else getattr(message, 'name', ()))
-        initial_attempt = self._command_instant(timing)
-        with self._lock:
-            initial_acquired = self._command_instant(timing)
-            if not self._control_actor_mode:
-                self._count_live_input_locked(source, channel, now)
-            ready = self._ready_locked(now)
-            receipt_epoch_changed = (self._control_actor_mode
-                and self._actor_dispatch_epoch != self._output_epoch)
-            if (not valid or receipt_epoch_changed
-                    or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
-                    or not ready or not self._command_output_enabled or self._actor_output_blocked()
-                    or self._replay_active or self._command_source != source
-                    or (self.ownership.active and not self.ownership.allows(token))):
-                self._mux_rejected += 1
-                reason = ('invalid_target' if not valid else
-                    'receipt_epoch_changed' if receipt_epoch_changed else
-                    'stale_or_reordered' if stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0)) else
-                    'hardware_not_ready' if not ready else 'output_closed' if not self._command_output_enabled else
-                    'replay_active' if self._replay_active else 'source_mismatch' if self._command_source != source else 'ownership_denied')
-                self._mux_rejection_reasons[source+':'+reason] += 1
-                return False
-            epoch = self._output_epoch
-        self._command_interval(timing, 'initial_lock_wait', initial_attempt, initial_acquired)
-        self._command_checkpoint(timing, 'initial_gate')
-        prepared = self._boundary.prepare(message) if self._boundary else message
-        self._command_checkpoint(timing, 'prepare')
-        send, wire_cdr = publish, None
-        prepare_publication = getattr(self._boundary, 'prepare_publication', None)
-        if self._legacy_enabled and prepared is not None and callable(prepare_publication):
-            try:
-                send, wire_cdr = prepare_publication(prepared[0], publish)
-            except Exception as exc:
-                self._boundary.reject('command serialization failed: '+str(exc))
-                prepared = None
-        self._command_checkpoint(timing, 'prepare_publication')
-        # A slow collision/serialization step must not delay a newly arrived
-        # revoke. Reuse the host pump and original freshness/watchdog checks.
-        self._actor_checkpoint(allow_snapshot=False)
-        capture = getattr(self, '_publication_capture', None)
-        arm_target = (self._legacy_enabled and self._boundary and prepared is not None
-                      and set(prepared[0].name).intersection(self._boundary.arms))
-        ticket = capture.reserve() if capture is not None and arm_target else None
-        self._command_checkpoint(timing, 'capture_reserve')
-        published, publication_ns, publication_monotonic = None, None, None
-        evidence = None
-        send_attempt = self._command_instant(timing)
-        send_acquired = commit_done = publish_done = None
-        try:
-            with self._lock:
-                send_acquired = self._command_instant(timing)
-                if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
-                        or self._actor_output_blocked()
-                        or (self._control_actor_mode and (self._stop.is_set() or
-                            self._actor_targets.get((source, channel), (0,))[0] > stamp))
-                        or not self._ready_locked(time.monotonic()) or self._command_source != source
-                        or self._replay_active or stamp <= self._source_stamps.get(stream, 0)
-                        or (self.ownership.active and not self.ownership.allows(token))):
-                    self._mux_rejected += 1
-                    self._mux_rejection_reasons[source+(':boundary_rejected' if prepared is None else ':authority_changed_during_prepare')] += 1
-                    return False
-                if self._boundary and not (self._boundary.commit(prepared, intervention=True)
-                        if self.ownership.active else self._boundary.commit(prepared)):
-                    self._mux_rejected += 1
-                    self._mux_rejection_reasons[source+':commit_rejected'] += 1
-                    return False
-                self._source_stamps[stream] = stamp
-                if self._legacy_enabled and self._boundary:
-                    message = prepared[0]
-                commit_done = self._command_instant(timing)
-                send(message)
-                publish_done = self._command_instant(timing)
-                published, publication_ns = message, time.time_ns()
-                publication_monotonic = time.monotonic()
-                if self.ownership.active:
-                    evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9))
-                    if evidence is not None:
-                        # This exact integer stamp links evidence to the original
-                        # action in a continuous recording without guessing age.
-                        evidence['command_stamp_ns'] = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
-                        if not self._control_actor_mode:
-                            self._action_sink(evidence)
-                self._mux_forwarded += 1
-                self._mux_forwarded_times.append(time.monotonic())
-                self._mux_channel_forwarded[channel] += 1
-                self._mux_channel_forwarded_times[channel].append(publication_monotonic)
-                return True
-        finally:
-            # No snapshot copy, serialization, queue IPC or capture bookkeeping
-            # executes while holding the final send/authority lock.
-            released = self._command_instant(timing)
-            self._command_interval(timing, 'send_lock_wait', send_attempt, send_acquired)
-            self._command_interval(timing, 'commit_validate', send_acquired, commit_done)
-            self._command_interval(timing, 'dds_publish', commit_done, publish_done)
-            self._command_interval(timing, 'send_accounting', publish_done, released)
-            self._command_checkpoint(timing, 'commit_publish')
-            self._complete_publication_capture(
-                capture, ticket, published, wire_cdr, publication_ns, publication_monotonic
-            )
-            self._command_checkpoint(timing, 'capture_complete')
-            if self._control_actor_mode and evidence is not None:
-                # The host supplies a bounded, nonblocking FIFO ingress. Keep
-                # action evidence before any subsequent manual-close hook, but
-                # never invoke this ingress while holding the final send gate.
-                self._action_sink(evidence)
+            if owner.right_gripper_source != 'motion':
+                return (self._command_source == 'motion' and source == 'vr'
+                        and token is not None and token == owner.right_gripper_token
+                        and owner.dagger_enabled and owner._input_fresh())
+        return self._command_source == source and (not owner.active or owner.allows(token))
 
     @staticmethod
     def _complete_publication_capture(
@@ -1235,7 +1131,7 @@ class RosBridge:
     ) -> None:
         if ticket is None or capture is None:
             return
-        if published is not None and wire_cdr is not None:
+        if publication_ns is not None and wire_cdr is not None:
             capture.complete(
                 ticket,
                 serialized_cdr=wire_cdr,
@@ -1420,6 +1316,314 @@ class RosBridge:
                 epoch=planner.epoch,
                 convert_public=False,
             )
+
+    def _queue_actor_target(self, source, message, publish, token):
+        # Fixed source/channel keys prevent arbitrary identities from growing a
+        # queue or an unselected producer from evicting the selected source.
+        if source not in self._mux_received:
+            return False
+        now = time.monotonic()
+        channel = self._command_channel(getattr(message, 'name', ()))
+        with self._lock:
+            self._count_live_input_locked(source, channel, now)
+        try:
+            target = _copy_actor_message(message)
+            names = tuple(target.name)
+            stamp = target.header.stamp.sec + target.header.stamp.nanosec * 1e-9
+            valid = (bool(names) and len(names) == len(target.position)
+                     and len(set(names)) == len(names) and all(names)
+                     and all(math.isfinite(float(v)) for v in target.position)
+                     and math.isfinite(stamp) and stamp > 0
+                     and -.05 <= self._ros_now()-stamp <= .3)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        key = source, channel
+        stream = (source, names) if self._legacy_enabled else source
+        with self._lock:
+            self._actor_counts['offered'] += 1
+            revision = self.ownership.right_gripper_revision if channel == 'right_hand' else None
+            pending = self._actor_targets.get(key)
+            if pending is not None and pending[5] != revision:
+                pending = None
+            if (not valid or self._stop.is_set() or not self._ready_locked(time.monotonic())
+                    or not self._command_output_enabled or self._actor_output_blocked() or self._replay_active
+                    or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
+                    or (pending is not None and stamp <= pending[0])
+                    or not self._live_target_allowed_locked(source, channel, token, stamp)):
+                self._actor_counts['discarded'] += 1
+                return False
+            if pending is not None:
+                self._actor_counts['coalesced'] += 1
+            self._actor_targets[key] = stamp, self._output_epoch, target, publish, token, revision
+            self._actor_callback_count += 1
+            return True
+
+    def _drain_actor_targets(self):
+        if not self._control_actor_mode:
+            return
+        with self._lock:
+            if not self._actor_targets or self._stop.is_set():
+                return
+            ready = []
+            for source in ('vr', 'exoskeleton', 'motion'):
+                for channel in self.COMMAND_CHANNELS:
+                    pending = self._actor_targets.pop((source, channel), None)
+                    if pending is not None and pending[1] == self._output_epoch:
+                        ready.append((source, pending))
+        for source, pending in ready:
+            with self._lock:
+                if pending[1] != self._output_epoch or self._stop.is_set():
+                    continue
+            _, _, target, publish, token, revision = pending
+            self._actor_dispatching = True
+            self._actor_dispatch_epoch = pending[1]
+            self._actor_dispatch_gripper_revision = revision
+            try:
+                self.forward_live_command(source, target, publish, token)
+            finally:
+                self._actor_dispatching = False
+                self._actor_dispatch_epoch = None
+                self._actor_dispatch_gripper_revision = None
+
+    def forward_live_command(self, source: str, message: Any, publish: Callable, token=None) -> bool:
+        if (self._control_actor_mode and not (self._actor_dispatching
+                and self._actor_thread_ident == threading.get_ident())):
+            return self._queue_actor_target(source, message, publish, token)
+        # Sample one in eight callbacks. Clock/serialization waits need wall
+        # and thread CPU time to distinguish native/GIL waiting from compute.
+        # Aggregation happens after all final-send locks have been released.
+        self._command_timing_sequence += 1
+        if self._command_timing_sequence % 8 != 1:
+            return self._forward_live_command(source, message, publish, token)
+        started = time.monotonic_ns(), time.thread_time_ns()
+        timing = {'_previous': started}
+        boundary = self._boundary
+        channel = ('arms' if boundary is not None and
+                   set(getattr(message, 'name', ())).intersection(getattr(boundary, 'arms', ())) else 'hands')
+        try:
+            return self._forward_live_command(source, message, publish, token, timing=timing)
+        finally:
+            finished = time.monotonic_ns(), time.thread_time_ns()
+            timing.pop('_previous', None)
+            timing['total'] = dict(wall_ms=(finished[0]-started[0])/1e6,
+                                   cpu_ms=(finished[1]-started[1])/1e6)
+            with self._callback_timing_lock:
+                for stage, elapsed in timing.items():
+                    # Preserve aggregate API keys and expose independent arm/
+                    # hand samples; their callbacks have different rates.
+                    for key in (source+':'+stage, source+':'+channel+':'+stage):
+                        value = self._command_stage_timings.setdefault(key, dict(samples=0, max_ms=0., max_cpu_ms=0.))
+                        value.update(samples=value['samples']+1, last_ms=elapsed['wall_ms'],
+                                     last_cpu_ms=elapsed['cpu_ms'],
+                                     max_ms=max(value['max_ms'], elapsed['wall_ms']),
+                                     max_cpu_ms=max(value['max_cpu_ms'], elapsed['cpu_ms']))
+                if timing['total']['wall_ms'] >= 10.:
+                    self._slow_command_stages.append(dict(source=source, channel=channel,
+                        stamp_ns=time.time_ns(), stages=timing))
+
+    @staticmethod
+    def _command_checkpoint(timing, stage):
+        if timing is not None:
+            now = time.monotonic_ns(), time.thread_time_ns()
+            previous = timing['_previous']
+            timing[stage] = dict(wall_ms=(now[0]-previous[0])/1e6,
+                                 cpu_ms=(now[1]-previous[1])/1e6)
+            timing['_previous'] = now
+
+    @staticmethod
+    def _command_instant(timing):
+        # Reading two integer clocks is the only diagnostic work performed
+        # inside the final gate. Formatting/aggregation remains outside it.
+        return (time.monotonic_ns(), time.thread_time_ns()) if timing is not None else None
+
+    @staticmethod
+    def _command_interval(timing, stage, before, after):
+        if timing is not None and before is not None and after is not None:
+            timing[stage] = dict(wall_ms=(after[0]-before[0])/1e6,
+                                 cpu_ms=(after[1]-before[1])/1e6)
+
+    def _count_telemetry_message(self):
+        # This statistic has no authority meaning. A dashboard callback must
+        # never wait for or occupy the final actuator gate just to count it.
+        with self._telemetry_count_lock:
+            self._telemetry_messages += 1
+
+    def _command_channel(self, names):
+        """Classify a stable joint layout once, independently of control policy."""
+        if self._command_channel_boundary is not self._boundary:
+            self._command_channel_boundary = self._boundary
+            self._command_channel_cache.clear()
+        try:
+            key = names if isinstance(names, tuple) else tuple(names or ())
+            cached = self._command_channel_cache.get(key)
+            if cached is not None:
+                return cached
+            boundary = self._boundary
+            arms, hands = getattr(boundary, 'arms', ()), getattr(boundary, 'hands', {})
+            if not isinstance(arms, (tuple, list, set, frozenset)):
+                arms = ()
+            if not isinstance(hands, dict):
+                hands = {}
+            if any(name in arms for name in key):
+                channel = 'arms'
+            else:
+                sides = [side for side in ('right', 'left')
+                         if any(name in hands.get(side, ()) for name in key)]
+                channel = sides[0]+'_hand' if len(sides) == 1 else 'other'
+            # Command layouts are few and fixed. Unknown layouts must not
+            # turn malformed traffic into an unbounded diagnostic cache.
+            if len(self._command_channel_cache) < 64:
+                self._command_channel_cache[key] = channel
+            return channel
+        except (TypeError, ValueError):
+            return 'other'
+
+    def _forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, timing=None) -> bool:
+        """Keep authority across slow conversion and recheck at actuator send."""
+        self._actor_checkpoint(allow_snapshot=False)
+        now = time.monotonic()
+        stream = source
+        try:
+            names, positions = message.name, message.position
+            stream = (source, tuple(names)) if self._legacy_enabled else source
+            stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+            valid = (bool(names) and len(names) == len(positions)
+                     and len(set(names)) == len(names) and all(names)
+                     and all(math.isfinite(float(v)) for v in positions)
+                     and math.isfinite(stamp) and stamp > 0
+                     and -.05 <= self._ros_now() - stamp <= .3)
+            if valid and self._public_api is not None:
+                # Only validation is needed here; copying an entire ROS message
+                # just to discard the converted result adds control latency.
+                self._public_api.convert(message.name, message.position,
+                                         message.velocity, message.effort, to_model=True)
+        except (AttributeError, TypeError, ValueError):
+            valid, stamp = False, 0.0
+        channel = self._command_channel(stream[1] if isinstance(stream, tuple)
+                                        else getattr(message, 'name', ()))
+        initial_attempt = self._command_instant(timing)
+        with self._lock:
+            initial_acquired = self._command_instant(timing)
+            if not self._control_actor_mode:
+                self._count_live_input_locked(source, channel, now)
+            ready = self._ready_locked(now)
+            revision = self.ownership.right_gripper_revision if channel == 'right_hand' else None
+            receipt_epoch_changed = (self._control_actor_mode
+                and (self._actor_dispatch_epoch != self._output_epoch
+                     or self._actor_dispatch_gripper_revision != revision))
+            if (not valid or receipt_epoch_changed
+                    or stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0))
+                    or not ready or not self._command_output_enabled or self._actor_output_blocked()
+                    or self._replay_active
+                    or not self._live_target_allowed_locked(source, channel, token, stamp)):
+                self._mux_rejected += 1
+                reason = ('invalid_target' if not valid else
+                    'receipt_epoch_changed' if receipt_epoch_changed else
+                    'stale_or_reordered' if stamp <= max(self._source_cutoff, self._source_stamps.get(stream, 0)) else
+                    'hardware_not_ready' if not ready else 'output_closed' if not self._command_output_enabled else
+                    'replay_active' if self._replay_active else 'source_mismatch' if self._command_source != source else 'ownership_denied')
+                self._mux_rejection_reasons[source+':'+reason] += 1
+                return False
+            epoch = self._output_epoch
+        self._command_interval(timing, 'initial_lock_wait', initial_attempt, initial_acquired)
+        self._command_checkpoint(timing, 'initial_gate')
+        prepared = self._boundary.prepare(message) if self._boundary else message
+        self._command_checkpoint(timing, 'prepare')
+        send, wire_cdr = publish, None
+        prepare_publication = getattr(self._boundary, 'prepare_publication', None)
+        if self._legacy_enabled and prepared is not None and callable(prepare_publication):
+            try:
+                send, wire_cdr = prepare_publication(prepared[0], publish)
+            except Exception as exc:
+                self._boundary.reject('command serialization failed: '+str(exc))
+                prepared = None
+        self._command_checkpoint(timing, 'prepare_publication')
+        # A slow collision/serialization step must not delay a newly arrived
+        # revoke. Reuse the host pump and original freshness/watchdog checks.
+        self._actor_checkpoint(allow_snapshot=False)
+        capture = getattr(self, '_publication_capture', None)
+        arm_target = (self._legacy_enabled and self._boundary and prepared is not None
+                      and set(prepared[0].name).intersection(self._boundary.arms))
+        ticket = capture.reserve() if capture is not None and arm_target else None
+        self._command_checkpoint(timing, 'capture_reserve')
+        published, publication_ns, publication_monotonic = None, None, None
+        evidence = None
+        send_attempt = self._command_instant(timing)
+        send_acquired = commit_done = publish_done = None
+        try:
+            with self._lock:
+                send_acquired = self._command_instant(timing)
+                if (prepared is None or epoch != self._output_epoch or not self._command_output_enabled
+                        or self._actor_output_blocked()
+                        or (self._control_actor_mode and (self._stop.is_set() or
+                            self._actor_targets.get((source, channel), (0,))[0] > stamp))
+                        or (revision is not None and revision != self.ownership.right_gripper_revision)
+                        or not self._ready_locked(time.monotonic())
+                        or self._replay_active or stamp <= self._source_stamps.get(stream, 0)
+                        or not self._live_target_allowed_locked(source, channel, token, stamp)):
+                    self._mux_rejected += 1
+                    self._mux_rejection_reasons[source+(':boundary_rejected' if prepared is None else ':authority_changed_during_prepare')] += 1
+                    return False
+                hold_attr = _HOLD_ATTR_BY_SOURCE.get(source)
+                hold = getattr(self, hold_attr) if hold_attr is not None else None
+                closes_hold = (
+                    hold is not None and hold.token == token and arm_target
+                    and source == _HANDOVER_HOLD_SPEC[hold.mode]['source']
+                )
+                if (closes_hold and _HANDOVER_HOLD_SPEC[hold.mode]['fault_on_deadline']
+                        and self.ownership.clock() >= hold.deadline_ns):
+                    self.ownership.fault(_HANDOVER_HOLD_SPEC[hold.mode]['deadline_reason'])
+                    return False
+                if self._boundary and not (self._boundary.commit(prepared, intervention=True)
+                        if self.ownership.active else self._boundary.commit(prepared)):
+                    self._mux_rejected += 1
+                    self._mux_rejection_reasons[source+':commit_rejected'] += 1
+                    return False
+                self._source_stamps[stream] = stamp
+                if self._legacy_enabled and self._boundary:
+                    message = prepared[0]
+                commit_done = self._command_instant(timing)
+                send(message)
+                if closes_hold:
+                    setattr(self, hold_attr, None)
+                    if hold.sent:
+                        spec = _HANDOVER_HOLD_SPEC[hold.mode]
+                        self.ownership._event(spec['close_event'], end_reason=spec['close_reason'])
+                publish_done = self._command_instant(timing)
+                published, publication_ns = message, time.time_ns()
+                publication_monotonic = time.monotonic()
+                if self.ownership.active and token != self.ownership.right_gripper_token:
+                    evidence = self.ownership.sent(token, message, int(self._ros_now()*1e9),
+                                                   arm_command=not self._legacy_enabled or arm_target)
+                    if evidence is not None:
+                        # This exact integer stamp links evidence to the original
+                        # action in a continuous recording without guessing age.
+                        evidence['command_stamp_ns'] = message.header.stamp.sec*1_000_000_000 + message.header.stamp.nanosec
+                        if not self._control_actor_mode:
+                            self._action_sink(evidence)
+                self._mux_forwarded += 1
+                self._mux_forwarded_times.append(time.monotonic())
+                self._mux_channel_forwarded[channel] += 1
+                self._mux_channel_forwarded_times[channel].append(publication_monotonic)
+                return True
+        finally:
+            # No snapshot copy, serialization, queue IPC or capture bookkeeping
+            # executes while holding the final send/authority lock.
+            released = self._command_instant(timing)
+            self._command_interval(timing, 'send_lock_wait', send_attempt, send_acquired)
+            self._command_interval(timing, 'commit_validate', send_acquired, commit_done)
+            self._command_interval(timing, 'dds_publish', commit_done, publish_done)
+            self._command_interval(timing, 'send_accounting', publish_done, released)
+            self._command_checkpoint(timing, 'commit_publish')
+            self._complete_publication_capture(
+                capture, ticket, published, wire_cdr, publication_ns, publication_monotonic
+            )
+            self._command_checkpoint(timing, 'capture_complete')
+            if self._control_actor_mode and evidence is not None:
+                # The host supplies a bounded, nonblocking FIFO ingress. Keep
+                # action evidence before any subsequent manual-close hook, but
+                # never invoke this ingress while holding the final send gate.
+                self._action_sink(evidence)
 
     def _enqueue(self, command: str, data: Any) -> bool:
         item = (command, data)
@@ -1861,6 +2065,7 @@ class RosBridge:
                     if self._stop.is_set():
                         break
                     self._actor_flush_commands()
+                    self._tick_handover_holds()
                     self._tick_replay_alignment(node, publishers, get_message)
                     # Drain a bounded batch of ready callbacks before sending
                     # latest channel targets. No nested spin inside preparation.
@@ -1869,6 +2074,7 @@ class RosBridge:
                         break
                     self._actor_flush_commands()
                     self._drain_actor_targets()
+                    self._tick_handover_holds()
                     self._tick_replay_alignment(node, publishers, get_message)
                     if not self._actor_targets:
                         self._actor_checkpoint(allow_snapshot=True)
@@ -2181,6 +2387,7 @@ class RosBridge:
                     # Normal handover fences Motion and this final sender.
                     # Hardware enable is a separate explicit safety operation;
                     # toggling it here would latch a driver stop on every Grip.
+            self._tick_handover_holds()
         event_cursor = 0
         state_last = 0.
         state_sequence = -1

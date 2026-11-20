@@ -4,6 +4,7 @@ import copy
 import json
 import math
 from pathlib import Path
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -87,6 +88,250 @@ class Rig:
             self.bridge._command_source = self.control.token.source
             self.bridge._source_cutoff = self.control.cutoff_ns*1e-9
             self.bridge._command_output_enabled = True
+
+    def trigger(self, sequence, value, *, grip=False, valid=True):
+        return self.bridge.receive_intervention_input(dict(
+            device_instance='vr', sequence=sequence, valid=valid,
+            gripped=grip, right_gripper_trigger=value, stamp_ns=time.time_ns()))
+
+
+@pytest.mark.parametrize('actor', [False, True])
+def test_right_trigger_interrupts_only_the_right_hand(actor):
+    rig = Rig()
+    owner, boundary = rig.control, rig.boundary
+    if actor:
+        rig.bridge._control_actor_mode = True
+        rig.bridge._actor_thread_ident = threading.get_ident()
+    original_token, output_epoch = owner.token, rig.bridge._output_epoch
+    right = dict(zip(boundary.hands['right'], boundary.right_gripper['finger_closed']))
+    left = {name: boundary.positions[name] for name in boundary.hands['left']}
+    arm = boundary.arms[0]
+
+    rig.trigger(2, 1.)
+    assert owner.right_gripper_source == 'motion'  # Requires a fresh release.
+    rig.trigger(3, 0.)
+    rig.trigger(4, .8)
+    assert owner.right_gripper_source == 'vr'
+    rig.trigger(5, .8)
+    rig.bridge._drain_actor_targets()
+    right_topic = '/action/right_hand/joint_states'
+    assert [topic for topic, _ in rig.wire] == [right_topic]
+    _, command = rig.wire[-1]
+    assert command.name[-1] == 'R_ban'
+    assert command.position[-1] == 1.
+    assert max(abs(value-boundary.positions[name])
+               for name, value in zip(command.name[:-1], command.position)) <= .035+1e-9
+
+    boundary.program(message(right), 'right')
+    boundary.program(message(left), 'left')
+    rig.bridge._drain_actor_targets()
+    boundary.program(message({arm: boundary.positions[arm], 'R_ban': 1.5, 'L_ban': .2}), 'arms')
+    rig.bridge._drain_actor_targets()
+    assert [topic for topic, _ in rig.wire] == [
+        right_topic, '/action/left_hand/joint_states', '/action/joint_states']
+    _, command = rig.wire[-1]
+    labels = dict(zip(command.name, command.position))
+    assert labels['R_ban'] == boundary.right_gripper_position < .1
+    assert labels['L_ban'] == .2
+    rig.trigger(6, .08)
+    assert owner.right_gripper_source == 'vr'  # Hysteresis.
+    rig.bridge._drain_actor_targets()
+    _, previous = rig.wire[-1]
+
+    rig.trigger(7, 0.)
+    assert owner.right_gripper_source == 'motion'
+    boundary.program(message(right), 'right')
+    rig.bridge._drain_actor_targets()
+    assert rig.wire[-1][0] == right_topic
+    assert max(abs(a-b) for a,b in zip(previous.position, rig.wire[-1][1].position)) <= .175+1e-9
+    assert owner.state == 'AUTO' and owner.token == original_token
+    assert rig.bridge._output_epoch == output_epoch
+
+
+def test_right_gripper_cutoff_rejects_inflight_model_frame_after_handoff():
+    rig = Rig()
+    boundary = rig.boundary
+    right = {name: boundary.positions[name] for name in boundary.hands['right']}
+    command = message(right, time.time_ns()+20_000_000)
+    prepare = boundary.prepare
+
+    def switch_hand_while_preparing(target):
+        rig.trigger(2, 0.)
+        rig.trigger(3, .8)
+        rig.trigger(4, 0.)
+        return prepare(target)
+
+    with patch.object(boundary, 'prepare', side_effect=switch_hand_while_preparing):
+        boundary.program(command, 'right')
+    assert rig.control.state == 'AUTO' and rig.control.right_gripper_source == 'motion'
+    assert not rig.wire
+    boundary.program(message(right), 'right')
+    assert [topic for topic, _ in rig.wire] == ['/action/right_hand/joint_states']
+
+
+def test_actor_discards_right_hand_queued_before_two_handoffs():
+    rig = Rig()
+    bridge, boundary = rig.bridge, rig.boundary
+    bridge._control_actor_mode = True
+    bridge._actor_thread_ident = threading.get_ident()
+    right = {name: boundary.positions[name] for name in boundary.hands['right']}
+    boundary.program(message(right, time.time_ns()+20_000_000), 'right')
+    assert ('motion', 'right_hand') in bridge._actor_targets
+    rig.trigger(2, 0.)
+    rig.trigger(3, .8)
+    rig.trigger(4, 0.)
+    bridge._drain_actor_targets()
+    assert not rig.wire
+    boundary.program(message(right), 'right')
+    bridge._drain_actor_targets()
+    assert [topic for topic, _ in rig.wire] == ['/action/right_hand/joint_states']
+
+
+def test_right_gripper_input_loss_waits_for_release_and_full_grip_still_works():
+    rig = Rig()
+    owner, boundary = rig.control, rig.boundary
+    right = {name: boundary.positions[name] for name in boundary.hands['right']}
+    arm = boundary.arms[0]
+    rig.trigger(2, 0.)
+    rig.trigger(3, .8)
+    rig.trigger(4, .8, valid=False)
+    assert owner.state == 'AUTO' and owner.right_gripper_source == 'hold'
+    rig.trigger(5, .8)
+    boundary.program(message(right), 'right')
+    boundary.program(message({arm: boundary.positions[arm]}), 'arms')
+    assert [topic for topic, _ in rig.wire] == ['/action/joint_states']
+    rig.trigger(6, 0.)
+    rig.trigger(7, .8)
+    rig.trigger(8, .8, grip=True)
+    assert owner.state == 'TAKEOVER' and owner.right_gripper_token is None
+    rig.advance()
+    rig.advance()
+    assert owner.state == 'MANUAL'
+    boundary.receive_owned(message(right), owner.token)
+    assert rig.wire[-1][0] == '/action/right_hand/joint_states'
+    rig.trigger(9, .8)
+    assert owner.state == 'RETURNING'
+    rig.advance()
+    rig.advance()
+    assert owner.state == 'AUTO' and owner.right_gripper_source == 'vr'
+    rig.trigger(10, .8)
+    assert rig.wire[-1][0] == '/action/right_hand/joint_states'
+
+
+def test_grip_return_keeps_a_fixed_arm_target_until_the_first_safe_model_arm_send():
+    rig = Rig()
+    owner, bridge, boundary = rig.control, rig.bridge, rig.boundary
+    clock = [owner.clock()]
+    owner.clock = lambda: clock[0]
+    rig.trigger(2, 0., grip=True)
+    rig.advance()
+    rig.advance()
+    rig.trigger(3, 0.)
+    assert owner.state == 'RETURNING' and not bridge._command_output_enabled
+    bridge._tick_return_hold()
+    tag = 'hc-dagger/return-hold'
+    assert rig.wire[-1][1].header.frame_id == tag
+    anchor = dict(bridge._return_hold.positions)
+    rig.advance()
+    rig.advance()
+    assert owner.state == 'AUTO'
+    for sequence in range(4, 42):
+        clock[0] += 20_000_000
+        rig.trigger(sequence, 0.)
+        for peer in owner.required_peers:
+            owner.peer(peer, peer)
+        bridge._tick_return_hold()
+        assert rig.wire[-1][1].header.frame_id == tag
+        names, values = rig.wire[-1][1].name, rig.wire[-1][1].position
+        assert {n: q for n, q in zip(names, values) if n in anchor} == anchor
+
+    right = {name: boundary.positions[name] for name in boundary.hands['right']}
+    boundary.program(message(right), 'right')
+    assert bridge._return_hold is not None
+    assert 'open_to_first_final_command_ns' not in owner.metrics[-1]
+    arm = boundary.arms[0]
+    boundary.program(message({arm: boundary.positions[arm]+.4}), 'arms')
+    assert 'target too far' in boundary.last_rejection
+    assert bridge._return_hold is not None
+
+    boundary.positions[arm] += .025
+    boundary.program(message({arm: boundary.positions[arm]+.020}), 'arms')
+    assert bridge._return_hold is None
+    assert 'open_to_first_final_command_ns' in owner.metrics[-1]
+    _, first = rig.wire[-1]
+    assert first.position[first.name.index(arm)] == pytest.approx(anchor[arm]+.0025)
+    count = len(rig.wire)
+    clock[0] += 30_000_000
+    bridge._tick_return_hold()
+    assert len(rig.wire) == count
+
+
+@pytest.mark.parametrize('case', ['pause', 'regrip', 'timeout', 'input_lost', 'tracking', 'feedback_stale'])
+def test_grip_return_hold_closes_on_stop_timeout_or_loss(case):
+    rig = Rig()
+    owner, bridge, boundary = rig.control, rig.bridge, rig.boundary
+    clock = [owner.clock()]
+    owner.clock = lambda: clock[0]
+    rig.trigger(2, 0., grip=True)
+    rig.advance()
+    rig.advance()
+    rig.trigger(3, 0.)
+    bridge._tick_return_hold()
+    count = len(rig.wire)
+    clock[0] += 20_000_000
+    if case == 'pause':
+        owner.hold()
+    elif case == 'regrip':
+        rig.trigger(4, 0., grip=True)
+    elif case == 'timeout':
+        rig.advance()
+        rig.advance()
+        clock[0] = bridge._return_hold.deadline_ns
+    elif case == 'input_lost':
+        owner.input_lost('headset lost')
+    elif case == 'tracking':
+        boundary.positions[boundary.arms[0]] += .31
+    else:
+        boundary.sample_ns[boundary.arms[0]] -= 300_000_000
+    bridge._tick_return_hold()
+    assert len(rig.wire) == count
+    assert bridge._return_hold is None
+    if case in {'timeout', 'feedback_stale', 'tracking'}:
+        assert owner.state == 'FAULT'
+
+
+@pytest.mark.parametrize('held_trigger', [0., .5])
+def test_grip_handback_seeds_right_hand_after_first_auto_arm_frame(held_trigger):
+    rig = Rig()
+    owner, boundary = rig.control, rig.boundary
+    names = boundary.hands['right']
+    closed = dict(zip(names, boundary.right_gripper['finger_closed']))
+    opened = dict(zip(names, boundary.right_gripper['finger_open']))
+    rig.trigger(2, 0.)
+    rig.trigger(3, .8, grip=True)
+    rig.advance()
+    rig.advance()
+    boundary.receive_owned(message(closed), owner.token)
+    topic, last_manual = rig.wire[-1]
+    assert topic == '/action/right_hand/joint_states'
+
+    rig.trigger(4, held_trigger)
+    rig.advance()
+    rig.advance()
+    arm = boundary.arms[0]
+    boundary.program(message({arm: boundary.positions[arm]}), 'arms')
+    assert rig.wire[-1][0] == '/action/joint_states'
+    for name in names:
+        boundary.received[name] = time.monotonic()-1
+    if held_trigger:
+        rig.trigger(5, held_trigger)
+    else:
+        boundary.program(message(opened), 'right')
+    topic, first_auto = rig.wire[-1]
+    assert topic == '/action/right_hand/joint_states'
+    step = .01 * boundary.teleop['grippers']['max_velocity']
+    assert max(abs(a-b) for a,b in zip(last_manual.position, first_auto.position)) <= step+1e-9
+    assert any(abs(a-b) >= step-1e-9 for a,b in zip(last_manual.position, first_auto.position))
 
 
 @pytest.mark.parametrize('case', ['valid', 'missing_feedback', 'revoked_during_prepare'])
@@ -525,3 +770,103 @@ def test_final_commit_uses_new_clock_and_rejects_elapsed_command():
         nanoseconds=b.stamp(msg)+300_000_000)
     assert not b.commit(prepared)
     assert b.last_rejection == 'commit freshness or authority changed'
+
+
+def test_grip_takeover_keeps_a_fixed_arm_target_until_the_first_manual_arm_send():
+    rig = Rig()
+    owner, bridge, boundary = rig.control, rig.bridge, rig.boundary
+    clock = [owner.clock()]
+    owner.clock = lambda: clock[0]
+    evidences = []
+    bridge._action_sink = evidences.append
+
+    rig.trigger(2, 0., grip=True)
+    assert owner.state == 'TAKEOVER' and not bridge._command_output_enabled
+    assert bridge._takeover_hold is not None
+    anchor = dict(bridge._takeover_hold.positions)
+    bridge._tick_takeover_hold()
+    tag = 'hc-dagger/takeover-hold'
+    assert rig.wire[-1][1].header.frame_id == tag
+    assert any(e['kind'] == 'grip_takeover_hold_open' for e in owner.events)
+    assert not evidences
+
+    rig.advance()
+    assert owner.state == 'TAKEOVER' and owner.phase == 'grant'
+    clock[0] += 20_000_000
+    rig.trigger(3, 0., grip=True)
+    for peer in owner.required_peers:
+        owner.peer(peer, peer)
+    bridge._tick_takeover_hold()
+    assert rig.wire[-1][1].header.frame_id == tag
+
+    rig.advance()
+    assert owner.state == 'MANUAL'
+    for sequence in range(4, 15):
+        clock[0] += 20_000_000
+        rig.trigger(sequence, 0., grip=True)
+        for peer in owner.required_peers:
+            owner.peer(peer, peer)
+        bridge._tick_takeover_hold()
+        assert rig.wire[-1][1].header.frame_id == tag
+        names, values = rig.wire[-1][1].name, rig.wire[-1][1].position
+        assert {n: q for n, q in zip(names, values) if n in anchor} == anchor
+
+    right = {name: boundary.positions[name] for name in boundary.hands['right']}
+    boundary.receive_owned(message(right), owner.token)
+    assert bridge._takeover_hold is not None
+    assert len(evidences) == 1 and evidences[0]['command_seq'] == 1
+
+    arm = boundary.arms[0]
+    boundary.receive_owned(message({arm: boundary.positions[arm] + .02}), owner.token)
+    assert bridge._takeover_hold is None
+    assert any(e['kind'] == 'grip_takeover_hold_closed' for e in owner.events)
+    assert len(evidences) == 2 and evidences[-1]['command_seq'] == 2
+    count = len(rig.wire)
+    clock[0] += 30_000_000
+    bridge._tick_takeover_hold()
+    assert len(rig.wire) == count
+
+
+@pytest.mark.parametrize(
+    'case',
+    ['release', 'pause', 'input_lost', 'tracking', 'feedback_stale', 'manual_deadline'],
+)
+def test_grip_takeover_hold_closes_on_release_pause_loss_or_timeout(case):
+    rig = Rig()
+    owner, bridge, boundary = rig.control, rig.bridge, rig.boundary
+    clock = [owner.clock()]
+    owner.clock = lambda: clock[0]
+
+    rig.trigger(2, 0., grip=True)
+    bridge._tick_takeover_hold()
+    count = len(rig.wire)
+    clock[0] += 20_000_000
+    if case == 'release':
+        rig.trigger(3, 0., grip=False)
+    elif case == 'pause':
+        owner.hold()
+    elif case == 'input_lost':
+        owner.input_lost('headset lost')
+    elif case == 'tracking':
+        boundary.positions[boundary.arms[0]] += .31
+    elif case == 'feedback_stale':
+        boundary.sample_ns[boundary.arms[0]] -= 300_000_000
+    else:
+        rig.advance()
+        rig.advance()
+        assert owner.state == 'MANUAL'
+        clock[0] = bridge._takeover_hold.deadline_ns
+
+    bridge._tick_takeover_hold()
+    assert len(rig.wire) == count
+    assert bridge._takeover_hold is None
+    if case == 'release':
+        assert owner.state == 'RETURNING' and bridge._return_hold is not None
+        bridge._tick_return_hold()
+        assert len(rig.wire) == count + 1
+        assert rig.wire[-1][1].header.frame_id == 'hc-dagger/return-hold'
+    elif case == 'manual_deadline':
+        assert owner.state == 'MANUAL'
+        assert any(e['kind'] == 'grip_takeover_hold_closed' for e in owner.events)
+    elif case in {'tracking', 'feedback_stale', 'input_lost'}:
+        assert owner.state == 'FAULT'

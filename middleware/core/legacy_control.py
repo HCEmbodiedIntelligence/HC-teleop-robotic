@@ -42,6 +42,9 @@ class LegacyTopicControl:
         self.home_joints = self.feedback_order + tuple(self.teleop['body'].get('neck_joint_names', []))
         self.hands = {side: tuple(self.teleop['grippers'][side]['finger_joint_names']) for side in ('right','left')}
         self.hand_names = set().union(*map(set, self.hands.values()))
+        self.right_gripper = self.teleop['grippers']['right']
+        self.right_gripper_commands = {}
+        self.right_gripper_position = None
         self.sim_joints = {self.teleop['grippers'][side]['sim_joint'] for side in self.hands
                            if self.teleop['grippers'][side].get('sim_joint')}
         # The dataset layout includes configured model joints even when their
@@ -128,9 +131,38 @@ class LegacyTopicControl:
         marker = self.teleop['grippers'][side].get('binary_state_joint')
         return self.hands[side] + ((marker,) if marker else ())
 
+    def send_right_gripper(self, trigger, stamp_ns, token):
+        """Route the right trigger through the normal slew and final hand gate."""
+        from sensor_msgs.msg import JointState
+        cfg = self.right_gripper
+        target = JointState(name=list(self.hand_fields('right')), position=[
+            opened + trigger * (closed-opened)
+            for opened, closed in zip(cfg['finger_open'], cfg['finger_closed'])
+        ])
+        if cfg.get('binary_state_joint'):
+            target.position.append(float(trigger >= self.teleop['grippers'].get('binary_trigger_threshold', .5)))
+        target.header.stamp.sec, target.header.stamp.nanosec = divmod(stamp_ns, 1_000_000_000)
+        self.bridge.forward_live_command('vr', target, self.publish_selected, token)
+
     def clock_now_ns(self):
         reader = getattr(self, '_clock', None)
         return reader.now_ns() if reader is not None else self.node.get_clock().now().nanoseconds
+
+    def return_hold_valid(self, positions):
+        """Recheck the fixed measured pose against the current arm envelope."""
+        return self.feedback_fresh() and all(
+            self.limits[name][0] <= position <= self.limits[name][1]
+            and abs(position-self.positions[name]) <= self.max_error
+            for name, position in positions.items()
+        )
+
+    def return_hold_message(self, positions, *, frame_id='hc-dagger/return-hold'):
+        from sensor_msgs.msg import JointState
+        target = JointState(name=list(self.arm_fields), position=[
+            positions.get(name, math.nan) for name in self.arm_fields])
+        target.header.stamp.sec, target.header.stamp.nanosec = divmod(self.clock_now_ns(), 1_000_000_000)
+        target.header.frame_id = frame_id
+        return target
 
     @staticmethod
     def stamp(message):
@@ -325,6 +357,13 @@ class LegacyTopicControl:
                         raise ValueError(f'joint limit: {name} target={value:.6f} range=[{lo:.6f},{hi:.6f}]')
                 generation = self.bridge.ownership.token
                 active = self.bridge.ownership.active
+                owner = self.bridge.ownership
+                hand_override = owner.state == 'AUTO' and owner.right_gripper_source != 'motion'
+                if hand_override and hand is None and self.right_gripper['sim_joint'] in labels:
+                    marker = self.right_gripper['sim_joint']
+                    labels.pop(marker)
+                    if self.right_gripper_position is not None:
+                        labels[marker] = self.right_gripper_position
                 if active:
                     allowed = set(self.home_joints) | self.hand_names
                     if not set(values) <= allowed:
@@ -334,12 +373,27 @@ class LegacyTopicControl:
                 # ownership fencing must not turn it into a second trajectory
                 # limiter after the normal teleoperation controller.
                 if active and generation.source == 'motion':
+                    hold = self.bridge._return_hold
                     for name, value in values.items():
                         if name in self.waist:
                             continue  # Preserve supplied waist commands; do not apply hand slew.
                         if name in self.arms and abs(value-self.positions[name]) > self.max_error:
                             raise ValueError(f'target too far from measured position: {name} target={value:.6f} measured={self.positions[name]:.6f} error={abs(value-self.positions[name]):.6f} limit={self.max_error:.6f}')
                         reference = self.positions[name] if name in self.arms else value
+                        if (name in self.arms and hold is not None and hold.sent
+                                and hold.token == generation and owner.clock() < hold.deadline_ns
+                                and abs(hold.positions[name]-reference) <= self.max_error):
+                            reference = hold.positions[name]
+                        if owner.dagger_enabled and hand == 'right' and (
+                                generation != self.generation or name not in self.last_command):
+                            last = self.right_gripper_commands.get(name)
+                            if last is not None and now-last[1] <= self.max_age:
+                                reference = last[0]
+                            elif self.fresh((name,), now=now, wall_ns=wall_ns):
+                                lo, hi = self.limits[name]
+                                reference = min(hi, max(lo, self.positions[name]))
+                            elif hand_override or last is not None:
+                                raise ValueError('right gripper seed missing or stale: '+name)
                         previous = self.last_command.get(name, reference) if generation == self.generation else reference
                         dt = min(.05, max(.001, now-self.command_time.get(name, now-.01))) if generation == self.generation else .01
                         speed = self.arm_velocity if name in self.arms else float(self.teleop['grippers']['max_velocity'])
@@ -410,10 +464,12 @@ class LegacyTopicControl:
                 not isinstance(message, publisher.msg_type)):
             return publish, None
         raw = self._serialize_message(message)
-        def send(_message):
+        def send(target):
             publisher.publish(raw)
             if track_arm:
                 self._arm_published()
+            elif publisher is self.hand_pubs['right']:
+                self._right_gripper_published(target)
         return send, raw
 
     def _select_publisher(self, message):
@@ -428,6 +484,22 @@ class LegacyTopicControl:
         publisher.publish(message)
         if track_arm:
             self._arm_published()
+        elif publisher is self.hand_pubs['right']:
+            self._right_gripper_published(message)
+
+    def _right_gripper_published(self, message):
+        """Keep a published hand seed across changes of the arm owner."""
+        now = time.monotonic()
+        right = self.hands['right']
+        self.right_gripper_commands.update((name, (value, now))
+            for name, value in zip(message.name, message.position) if name in right)
+        fractions = [(self.right_gripper_commands[name][0]-opened)/(closed-opened)
+            for name, opened, closed in zip(right, self.right_gripper['finger_open'],
+                                             self.right_gripper['finger_closed'])
+            if closed != opened and name in self.right_gripper_commands]
+        if fractions:
+            closure = min(1., max(0., sorted(fractions)[len(fractions)//2]))
+            self.right_gripper_position = closure * self.right_gripper['sim_closed_position']
 
     def _arm_published(self):
         now = time.monotonic()

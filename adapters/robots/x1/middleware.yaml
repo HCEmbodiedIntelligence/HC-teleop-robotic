@@ -385,7 +385,7 @@ ros:
   intervention:
     legacy_topics: true
     automatic_recording: false
-    max_arm_velocity_rad_s: 0.25
+    max_arm_velocity_rad_s: 1.0
     max_target_error_rad: 0.3
 vr:
   pose_timeout_ms: 600

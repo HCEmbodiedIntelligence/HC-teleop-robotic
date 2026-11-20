@@ -41,12 +41,16 @@ class ControlOwnership:
                  revoke=lambda: None, permit=lambda *args: None,
                  open_segment=lambda *args: None, close_segment=lambda *args: None,
                  emit=lambda event: None, transition_timeout_sec=2., input_timeout_sec=.3,
-                 required_peers=('motion', 'teleop'), recording_enabled=True):
+                 required_peers=('motion', 'teleop'), recording_enabled=True,
+                 right_gripper_override=False, begin_return_hold=lambda: None,
+                 begin_takeover_hold=lambda: None):
         self.lock = lock or threading.RLock()
         self.required_peers = frozenset(required_peers)
         self.recording_enabled = bool(recording_enabled)
         self.clock, self.ros_clock = clock, ros_clock
         self.revoke, self.permit = revoke, permit
+        self.begin_return_hold = begin_return_hold
+        self.begin_takeover_hold = begin_takeover_hold
         self.open_segment, self.close_segment, self.emit = open_segment, close_segment, emit
         self.manual_changed = lambda token, stamp, reason: None
         self.dagger_changed = lambda enabled: None
@@ -77,6 +81,13 @@ class ControlOwnership:
         self.preparing_capture = False
         self.dagger_enabled = False
         self.input_ready_stamp_ns = 0
+        self.right_gripper_override = right_gripper_override
+        self.right_gripper_source = 'motion'
+        self.right_gripper_revision = 0
+        self.right_gripper_cutoff_ns = 0
+        self.right_gripper_token = None
+        self.right_gripper_armed = False
+        self.right_gripper_trigger = None
         self.input_diagnostics = dict(received=0, accepted=0, rejected=0,
                                       last_rejection='', last_loss_reason='')
         self.capture_ready = lambda: False
@@ -112,6 +123,9 @@ class ControlOwnership:
     def _invalidate(self, state, source='', reason='', *, cause_event_id=None):
         # This hook closes the final gate before any capture or peer work.
         self.revoke()
+        self.right_gripper_armed = False
+        self.right_gripper_trigger = None
+        self._set_right_gripper_source('motion', reason)
         if self.state == 'MANUAL':
             self.manual_changed(None, self.ros_clock(), reason)
         self._close(reason)
@@ -129,7 +143,38 @@ class ControlOwnership:
     def _set_dagger_enabled(self, enabled):
         if self.dagger_enabled != bool(enabled):
             self.dagger_enabled = bool(enabled)
+            self.right_gripper_armed = False
+            self.right_gripper_trigger = None
+            self._set_right_gripper_source('motion', 'DAgger mode changed')
             self.dagger_changed(self.dagger_enabled)
+
+    def _set_right_gripper_source(self, source, reason):
+        if source == self.right_gripper_source:
+            return
+        self.right_gripper_source = source
+        self.right_gripper_revision += 1
+        self.right_gripper_cutoff_ns = self.ros_clock()
+        self.right_gripper_token = (
+            ControlToken(self.instance, self.session, self.epoch, 'vr', uuid.uuid4().hex)
+            if source == 'vr' else None
+        )
+        self._event('right_gripper_source_changed', channel='right_hand',
+                    hand_source=source, hand_reason=reason,
+                    hand_intervention_id=(self.right_gripper_token.intervention_id
+                                          if self.right_gripper_token else ''))
+
+    def _observe_right_gripper(self, trigger):
+        if not (self.right_gripper_override and self.dagger_enabled and self.state == 'AUTO'):
+            return
+        if type(trigger) not in (int, float) or not 0 <= trigger <= 1:
+            self.right_gripper_armed = False
+            if self.right_gripper_source == 'vr':
+                self._set_right_gripper_source('hold', 'right trigger unavailable')
+        elif trigger <= .05:
+            self.right_gripper_armed = True
+            self._set_right_gripper_source('motion', 'right trigger released')
+        elif self.right_gripper_armed and trigger >= .10:
+            self._set_right_gripper_source('vr', 'right trigger pressed')
 
     def enable(self, *, preparing_capture=False, dagger_enabled=True):
         with self.lock:
@@ -210,6 +255,7 @@ class ControlOwnership:
             self.resume_auto = self.state == 'AUTO' or (self.state == 'RETURNING' and self.resume_auto)
             self.release_ns = None
             self._invalidate('TAKEOVER', 'vr', 'manual request')
+            self.begin_takeover_hold()
             return True
 
     def release(self):
@@ -219,6 +265,7 @@ class ControlOwnership:
             self.release_ns = self.clock()
             if self.resume_auto:
                 self._invalidate('RETURNING', 'motion', 'normal release')
+                self.begin_return_hold()
             else:
                 self._invalidate('HOLD', reason='released into explicit hold')
             return True
@@ -265,6 +312,10 @@ class ControlOwnership:
         """Disarm manual input; only an active manual handover/output must stop."""
         with self.lock:
             self.input_valid = self.input_armed = self.gripped = False
+            self.right_gripper_armed = False
+            self.right_gripper_trigger = None
+            if self.right_gripper_source == 'vr':
+                self._set_right_gripper_source('hold', reason)
             self.input_ready_stamp_ns = self.ros_clock()
             self.input_diagnostics.update(last_loss_reason=reason,
                                           last_loss_stamp_ns=self.input_ready_stamp_ns)
@@ -288,7 +339,7 @@ class ControlOwnership:
         return False
 
     def input(self, *, device_instance, sequence, valid, gripped, stamp_ns,
-              pause_requested=False, resume_requested=False):
+              pause_requested=False, resume_requested=False, right_gripper_trigger=None):
         """Accept a semantic sample, with pause taking priority over Grip.
 
         Return True only for a fresh valid sample. The caller may dispatch an
@@ -345,9 +396,17 @@ class ControlOwnership:
             if not gripped:
                 self.input_armed = True
                 if previous and self.active and not resume_requested:
+                    was_manual = self.state == 'MANUAL'
                     self.release()
+                    if was_manual and self.state == 'RETURNING':
+                        # The hand was already manual under Grip. A held trigger
+                        # can keep the hand when only the arms return to AUTO.
+                        self.right_gripper_armed = True
             elif not previous and self.input_armed and self.active and not resume_requested:
                 self.takeover()
+            self.right_gripper_trigger = right_gripper_trigger
+            if not gripped and not resume_requested:
+                self._observe_right_gripper(right_gripper_trigger)
             self.input_diagnostics['accepted'] += 1
             self.input_diagnostics['last_accepted_source_ns'] = stamp_ns
             return True
@@ -411,6 +470,8 @@ class ControlOwnership:
                 self.state = 'MANUAL' if self.state == 'TAKEOVER' else 'AUTO'
                 if self.state == 'MANUAL':
                     self.manual_changed(self.token, self.ros_clock(), '')
+                elif self._input_fresh() and not self.gripped:
+                    self._observe_right_gripper(self.right_gripper_trigger)
                 self._event('permission_open')
                 if self.state == 'AUTO' and self.release_ns is not None:
                     metric = dict(release_to_open_ns=self.clock()-self.release_ns,
@@ -442,12 +503,13 @@ class ControlOwnership:
                 ((self.state == 'AUTO' and token.source == 'motion') or
                  (self.dagger_enabled and self.state == 'MANUAL' and token.source == 'vr' and self.gripped and self._input_fresh())))
 
-    def sent(self, token, target, stamp_ns):
+    def sent(self, token, target, stamp_ns, *, arm_command=True):
         """Invoked only after hardware publication, under the final gate lock."""
         if not self.allows(token):
             raise OwnershipConflict('command does not own the final output')
         if token.source != 'vr':
-            if self.pending_auto_metric is not None and self.pending_auto_metric['epoch'] == token.epoch:
+            if (arm_command and self.pending_auto_metric is not None
+                    and self.pending_auto_metric['epoch'] == token.epoch):
                 self.pending_auto_metric['open_to_first_final_command_ns'] = max(0, stamp_ns-self.pending_auto_metric['stamp_ns'])
                 self.pending_auto_metric = None
             return None
@@ -484,6 +546,8 @@ class ControlOwnership:
         with self.lock:
             return dict(state=self.state, phase=self.phase, reason=self.reason,
                         dagger_enabled=self.dagger_enabled,
+                        right_gripper_source=(self.right_gripper_source if self.state == 'AUTO'
+                                              else 'vr' if self.state == 'MANUAL' else 'hold'),
                         recent_events=list(self.events)[-16:],
                         **asdict(self.token), input_valid=self.input_valid,
                         input_armed=self.input_armed, gripped=self.gripped,

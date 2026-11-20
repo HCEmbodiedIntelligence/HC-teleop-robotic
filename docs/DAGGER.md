@@ -20,6 +20,15 @@ HC 不再生成 `/hc_teleop/joint_states` 和相机别名。网关与 HC 必须�
 自动启动服务不会自动开启 DAgger 会话、恢复 FAULT 或授予 AUTO。
 模型仍可独立推理；动作必须在 Dashboard 开启会话并点击“开始程序”后才允许下发。
 
+X1 开启 DAgger 后，握住右 Grip 可接管手臂和夹爪。模型处于 AUTO 时，
+松开 Grip、只扣右手食指扳机，可单独接管右夹爪，手臂和左夹爪由模型控制。
+松开扳机后，右夹爪按手部限速交回模型。右夹爪单独接管期间如果输入中断，
+右夹爪保持最后下发的目标，收到有效的扳机释放信号后才交回模型。
+控制状态中的 `right_gripper_source` 和 `right_gripper_source_changed` 事件可用于核对交权。
+正常握住或松开 Grip 触发接管/交还后，X1 会在现有交接窗口内保持一次锁存的实测手臂位置，
+直到首条通过安全校验的手动/模型手臂命令下发。MCAP 中该期间的保持帧在
+`/action/joint_states` 上分别以 `header.frame_id = hc-dagger/takeover-hold` 与 `hc-dagger/return-hold` 标记。
+
 以下统一 Robot API / Motion 说明对应其他部署路径。
 
 2026-10-22：从本地未上传的 humanoid 工作恢复到 main。父仓库来源为

@@ -154,6 +154,7 @@ class InterventionTeleop:
             self.input_pub.publish(String(data=json.dumps(dict(
                 device_instance=self.input_instance, sequence=self.input_sequence, source_sequence=value['sequence'], stamp_ns=stamp,
                 valid=self.valid, gripped=sample[1],
+                right_gripper_trigger=self.triggers.get('right'),
                 pause_requested=pause, resume_requested=resume))))
         except (KeyError, ValueError, TypeError):
             self.valid = False
@@ -252,10 +253,10 @@ class InterventionTeleop:
                         if not measured or now-measured[1] > .25:
                             continue
                         q = previous = measured[0]
-                        # A measured finger can lie outside the calibrated command
-                        # interval. Prefer a fresh, legal final command as slew seed
-                        # in that case. All generated commands still pass HC checks.
+                        # Seed the slew inside the calibrated command interval.
+                        # An axis whose endpoints coincide has one legal target.
                         lo, hi = sorted((opened, closed))
+                        previous = min(hi, max(lo, q))
                         sent = self.hand_commands.get(name)
                         if not lo <= q <= hi and sent and lo <= sent[0] <= hi:
                             age = (node.get_clock().now().nanoseconds-sent[1])*1e-9

@@ -122,26 +122,32 @@ def test_actual_gateway_outputs_standard_fields(monkeypatch):
     assert all(not m.header.frame_id for m in emitted.values())
 
 
-def test_manual_producer_uses_standard_mapping_without_changing_fingers():
+@pytest.mark.parametrize('fixed_axis_drift', [0., .06])
+def test_manual_producer_uses_standard_mapping_without_changing_fingers(fixed_axis_drift):
     from adapters.core.arm_teleop_node import RobotArmTeleopNode
     from adapters.core.intervention import InterventionTeleop
     r = Rig(); b = r.boundary; manual(r)
     now = time.monotonic()
     node = SimpleNamespace(backend='v23', config=b.teleop, control=b.teleop['control'],
-        homing=False, last_command={}, joint_state={},
-        arms={s:SimpleNamespace(active=True, reference_vr=object(), reference_local_ee=object()) for s in b.hands},
+        homing=False, last_command={}, joint_state={}, joint_state_stamp=now,
+        arms={s:SimpleNamespace(active=True, reference_vr=object(), reference_local_ee=object(),
+                                pose=object(), pose_stamp=now) for s in b.hands},
+        _sync_model=Mock(), _engage_arm=Mock(),
         _update_arm_target=Mock(), _publish_target_poses=Mock(), _publish_status=Mock(),
         get_clock=lambda:SimpleNamespace(now=lambda:Time(nanoseconds=time.time_ns())))
     node._gripper_position = MethodType(RobotArmTeleopNode._gripper_position, node)
     owner = InterventionTeleop.__new__(InterventionTeleop)
     owner.node=node; owner.token=r.control.token; owner.granted=owner.valid=True
     owner.input=SimpleNamespace(pressed=True); owner.last_input=owner.permit_time=now
-    owner.last_hand_step=now-.01; owner.triggers={'right':.8, 'left':.2}
-    owner.grippers={}
+    owner.triggers={'right':.8, 'left':.2}
+    owner.grippers={}; owner.hand_commands={}; owner.hand_feedback={}
     for side in b.hands:
         cfg=b.teleop['grippers'][side]
         for n, opened, closed in zip(cfg['finger_joint_names'], cfg['finger_open'], cfg['finger_closed']):
-            owner.grippers[n]=[side,owner.triggers[side],opened,opened,opened,closed]
+            q = opened+fixed_axis_drift if opened == closed else opened
+            owner.hand_feedback[n] = q, now
+    owner.anchor()
+    owner.last_hand_step=now-.01
     owner.aux_pub=Mock(); owner.owned_pub=Mock()
     owner.tick(now, True)
     aux=owner.aux_pub.publish.call_args.args[0]
@@ -161,7 +167,7 @@ def test_hardware_smoother_excludes_only_virtual_grippers(monkeypatch):
         pytest.skip('HC_X1_ROOT required for actual hardware boundary')
     monkeypatch.syspath_prepend(root)
     from hc_x1.joint_command_smoother import JointCommandSmootherNode
-    fake=SimpleNamespace(hardware_ready=True)
+    fake=SimpleNamespace(hardware_ready=True, disabled_joint_names=set(), holding_gap=False)
     target=message({'Joint1_R':.2,'R_ban':.8,'Joint1_L':-.3,'L_ban':.4,'leg_1':.1})
     JointCommandSmootherNode._target_callback(fake,target)
     assert fake.target_names == ['Joint1_R','Joint1_L','leg_1']

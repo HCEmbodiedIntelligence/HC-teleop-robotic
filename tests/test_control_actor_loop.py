@@ -609,3 +609,75 @@ def test_actor_checkpoint_separates_hot_path_from_snapshot_and_copies_joint_stat
 
     ingress = _RecordingIngress(resources=(), finish=threading.Event())
     assert callable(ingress._enqueue_record)
+
+
+def test_actor_handover_holds_keep_cadence_and_publication_capture_across_takeover_and_return():
+    rig = actor(Rig())
+    bridge, control, boundary = rig.bridge, rig.control, rig.boundary
+    clock = [control.clock()]
+    control.clock = lambda: clock[0]
+
+    captured = []
+    ticket_seq = [0]
+    def reserve():
+        ticket_seq[0] += 1
+        return ticket_seq[0]
+    def complete(ticket, message=None, serialized_cdr=None, publication_ns=None, publication_monotonic=None):
+        if publication_ns is not None:
+            captured.append((ticket, message, serialized_cdr, publication_ns))
+    bridge._publication_capture = SimpleNamespace(reserve=reserve, complete=complete)
+    bridge._actor_wake = lambda: None
+    orig_prepare_pub = boundary.prepare_publication
+    def prepare_with_cdr(msg, publish):
+        send, cdr = orig_prepare_pub(msg, publish)
+        if cdr is None:
+            cdr = serialize_message(msg)
+        return send, cdr
+    boundary.prepare_publication = prepare_with_cdr
+
+    # AUTO -> TAKEOVER: takeover-hold ticks under capped actor wait and captures CDR frames.
+    assert rig.trigger(2, 0., grip=True)
+    assert bridge._takeover_hold is not None
+    timeouts = []
+    bridge._tick_handover_holds()
+    assert len(captured) == 1 and captured[-1][2] is not None and captured[-1][1] is None
+    assert rig.wire[-1][1].header.frame_id == 'hc-dagger/takeover-hold'
+
+    # While next_send_ns is 5 ms away, actor spin timeout is capped to 5 ms (< 10 ms idle).
+    clock[0] += 14_000_000
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=lambda timeout_sec=0.0: timeouts.append(timeout_sec)))
+    assert timeouts[-1] == pytest.approx(0.005, abs=1e-6)
+
+    clock[0] += 5_000_000
+    bridge._tick_handover_holds()
+    assert len(captured) == 2 and captured[-1][2] is not None
+
+    # MANUAL opens -> first VR arm command through actor target queue closes takeover hold.
+    rig.advance(); rig.advance()
+    assert control.state == 'MANUAL'
+    assert bridge.forward_live_command('vr', arm_target(rig), boundary.publish_selected, control.token)
+    bridge._drain_actor_targets()
+    assert bridge._takeover_hold is None
+    assert len(captured) == 3
+
+    # MANUAL -> RETURNING -> AUTO: return-hold ticks and captures CDR until first motion arm cmd.
+    assert rig.trigger(3, 0., grip=False)
+    assert control.state == 'RETURNING' and bridge._return_hold is not None
+    bridge._tick_handover_holds()
+    assert len(captured) == 4 and captured[-1][2] is not None and captured[-1][1] is None
+    assert rig.wire[-1][1].header.frame_id == 'hc-dagger/return-hold'
+
+    clock[0] += 15_000_000
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=lambda timeout_sec=0.0: timeouts.append(timeout_sec)))
+    assert timeouts[-1] == pytest.approx(0.004, abs=1e-6)
+
+    rig.advance(); rig.advance()
+    assert control.state == 'AUTO'
+    assert bridge.forward_live_command('motion', arm_target(rig), boundary.publish_selected, control.token)
+    bridge._drain_actor_targets()
+    assert bridge._return_hold is None
+    assert len(captured) == 5
+
+    # Once both holds closed, actor spin timeout returns to the standard 10 ms wake timeout.
+    bridge._spin_actor_callbacks(SimpleNamespace(spin_once=lambda timeout_sec=0.0: timeouts.append(timeout_sec)))
+    assert timeouts[-1] == pytest.approx(0.01, abs=1e-6)
