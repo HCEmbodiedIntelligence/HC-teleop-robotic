@@ -457,21 +457,26 @@ dialog form{padding:22px}
 .recording-readiness-banner.error{border-color:#ffccc7;
   background:#fff2f0;
   color:#cf1322}
-.replay-control-panel{background:#fafafa;
-  border:1px solid #f0f0f0;
-  border-radius:6px;
-  padding:14px;
-  margin-bottom:18px}
+.replay-control-panel{background:var(--panel);
+  border:1px solid #e8e8e8;
+  border-radius:8px;
+  padding:12px;
+  box-shadow:0 4px 16px #0000000d}
 .replay-panel-header{display:flex;
   align-items:center;
   justify-content:space-between;
+  flex-wrap:wrap;
   gap:12px;
   margin-bottom:12px}
 .replay-title-group{display:flex;
   align-items:center;
+  min-width:0;
+  flex-wrap:wrap;
   gap:10px}
+#replayFileName{min-width:0;color:var(--cyan);font-family:monospace;overflow-wrap:anywhere}
+.replay-actions{display:flex;gap:8px;flex-wrap:wrap}
 .replay-progress-bar-wrap{height:8px;
-  background:#fafafa;
+  background:#e6edf6;
   border-radius:4px;
   overflow:hidden;
   margin-bottom:10px}
@@ -773,17 +778,21 @@ td code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font
 .recording-readiness-banner { border: 0; border-left: 3px solid #bd9657; border-radius: 3px; padding: 10px 12px; }
 .readiness-icon { display: none; }
 .recording-actions, .dataset-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* Keep batch actions reachable while selecting rows far down a dataset list. */
-.dataset-batch-toolbar {
+/* Stack both controls on the same sticky edge while the dataset list scrolls. */
+.dataset-sticky-tools {
   position: sticky;
   top: 64px; /* Below the fixed 56px app header. */
   z-index: 4;
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+.dataset-batch-toolbar {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 0 0 16px;
   padding: 12px;
   border: 1px solid #e8e8e8;
   border-radius: 8px;

@@ -447,14 +447,14 @@ let safetyOutputEnabled=null;
 let safetyRequestPending=false;
 let safetyStatusReceivedAt=0;
 
-function renderSafetyButton(ros) {
+function renderSafetyButton(ros, replayWaiting = false) {
   const button=$('#stopButton');
   if(!button)return;
   const enabled=ros?.command_mux?.output_enabled;
   safetyOutputEnabled=ros?.state==='running'&&typeof enabled==='boolean'?enabled:null;
   safetyStatusReceivedAt=Date.now();
   button.disabled=safetyRequestPending||safetyOutputEnabled===null;
-  button.textContent=safetyRequestPending?'正在处理…':safetyOutputEnabled===null?'急停状态未知':safetyOutputEnabled?'急停':'解除急停';
+  button.textContent=safetyRequestPending?'正在处理…':safetyOutputEnabled===null?'急停状态未知':safetyOutputEnabled?'急停':replayWaiting?'恢复遥操作':'解除急停';
   button.className=safetyOutputEnabled===false?'primary':'danger';
   button.title='状态来自中间件命令输出开关，不代表实体硬件急停按钮状态';
 }
@@ -494,7 +494,7 @@ function renderStatus(data) {
   renderCommandMux(ros);
   renderControlPipeline(ros);
   renderIntervention(ros.ownership, (data.recording?.status||data.recording)?.corrections);
-  renderSafetyButton(ros);
+  renderSafetyButton(ros, data.replay?.requires_reset && data.safety_stop_active === false);
   setState('#vrState', vr.state);
   setText('#vrMeta',vr.timeout ? '位姿流已超时' : `v${vr.protocol_version||'--'} · ${vr.received||0} 包`);
   renderCameraStatus(cam,ros.topic_health||{});
@@ -544,30 +544,60 @@ function renderStatus(data) {
     }
   }
   const replay = data.replay || {};
-  const isReplaying = Boolean(replay.is_active || replay.state === 'playing' || replay.state === 'paused');
+  const isReplaying = replay.state === 'playing' || replay.state === 'paused';
   const replayNeedsReset = Boolean(replay.requires_reset);
+  const replayHomeAvailable = replay.home_available ?? replayNeedsReset;
   const replayPanel = $('#replayControlPanel');
   if (replayPanel) {
-    if (isReplaying || replayNeedsReset) {
+    if (isReplaying || replayHomeAvailable) {
       replayPanel.classList.remove('hidden');
       if ($('#replayStatusBadge')) {
-        $('#replayStatusBadge').className = replayNeedsReset ? 'recording-badge' : (replay.state === 'paused' ? 'recording-badge' : 'recording-badge active');
-        $('#replayStatusText').textContent = replayNeedsReset
-          ? (replay.state === 'error' ? '重放异常 · 请按 A 恢复' : '重放结束 · 请按 A 恢复遥操作')
-          : (replay.state === 'paused' ? '已暂停' : '正在重放');
+        $('#replayStatusBadge').className = replay.state === 'playing' ? 'recording-badge active' : 'recording-badge';
+        const replayLabels = {
+          playing: '正在重放', paused: '已暂停', error: '重放异常',
+          stopped: '重放已停止', completed: '重放完成', idle: '已恢复遥操作',
+        };
+        $('#replayStatusText').textContent = (replay.state === 'playing' && replay.aligning)
+          ? '对齐起始位姿…'
+          : (replayLabels[replay.state] || '');
       }
       if ($('#replayFileName')) $('#replayFileName').textContent = replay.filename || '';
       if ($('#pauseResumeReplayBtn')) {
         $('#pauseResumeReplayBtn').textContent = replay.state === 'paused' ? '▶️ 继续' : '⏸️ 暂停';
-        $('#pauseResumeReplayBtn').disabled = replayNeedsReset;
+        $('#pauseResumeReplayBtn').disabled = !isReplaying;
       }
-      if ($('#stopReplayBtn')) $('#stopReplayBtn').disabled = replayNeedsReset;
+      if ($('#stopReplayBtn')) $('#stopReplayBtn').disabled = !isReplaying;
+      const home = $('#replayHomeBtn');
+      if (home) {
+        home.hidden = !replayHomeAvailable;
+        home.disabled = isReplaying || Boolean(data.safety_stop_active) || home.dataset.pending === 'true';
+      }
+      const homeHint = $('#replayHomeHint');
+      if (homeHint) {
+        homeHint.hidden = !replayHomeAvailable || !data.safety_stop_active;
+      }
       if ($('#replayProgressBar')) $('#replayProgressBar').style.width = `${replay.progress || 0}%`;
+      $('#replayProgress')?.setAttribute('aria-valuenow', replay.progress || 0);
       if ($('#replayProgressText')) $('#replayProgressText').textContent = `${(replay.progress || 0).toFixed(1)}%`;
       if ($('#replayTimeText')) $('#replayTimeText').textContent = `${(replay.current_time_sec || 0).toFixed(1)}s / ${(replay.duration_sec || 0).toFixed(1)}s`;
       if ($('#replayMsgText')) $('#replayMsgText').textContent = `${(replay.current_message || 0).toLocaleString()} / ${(replay.total_messages || 0).toLocaleString()}`;
-      if ($('#replaySpeedSelect')) $('#replaySpeedSelect').value = String(replay.speed || 1.0);
-      if ($('#replayLoopToggle')) $('#replayLoopToggle').checked = Boolean(replay.loop);
+      const speedSelect = $('#replaySpeedSelect');
+      if (speedSelect) {
+        const speed = Number(replay.speed) || 1;
+        speedSelect.querySelector('[data-custom-speed]')?.remove();
+        let option = Array.from(speedSelect.options).find(item => Number(item.value) === speed);
+        if (!option) {
+          option = new Option(`${speed}x`, String(speed));
+          option.dataset.customSpeed = '';
+          speedSelect.add(option);
+        }
+        speedSelect.value = option.value;
+        speedSelect.disabled = !isReplaying;
+      }
+      if ($('#replayLoopToggle')) {
+        $('#replayLoopToggle').checked = Boolean(replay.loop);
+        $('#replayLoopToggle').disabled = !isReplaying;
+      }
     } else {
       replayPanel.classList.add('hidden');
     }
@@ -2729,6 +2759,25 @@ async function init() {
         renderStatus(await api('/api/status'));
       } catch (err) {
         toast(`停止失败：${err.message}`, true);
+      }
+    };
+  }
+
+  const replayHomeBtn = $('#replayHomeBtn');
+  if (replayHomeBtn) {
+    replayHomeBtn.onclick = async () => {
+      if (replayHomeBtn.disabled || !window.confirm('请确认机器人周围安全。执行后机器人将回到配置的初始位姿。')) return;
+      replayHomeBtn.dataset.pending = 'true';
+      replayHomeBtn.disabled = true;
+      try {
+        await api('/api/replay/home', {method: 'POST'});
+        toast('回初始位姿指令已提交');
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        delete replayHomeBtn.dataset.pending;
+        replayHomeBtn.disabled = false;
+        try { renderStatus(await api('/api/status')); } catch (_) {}
       }
     };
   }

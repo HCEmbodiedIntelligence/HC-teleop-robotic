@@ -280,6 +280,41 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop_data["replay"]["state"], "stopped")
         self.assertTrue(stop_data["replay"]["requires_reset"])
 
+    async def test_replay_home_endpoint_requires_reset_and_consumes_it(self):
+        from middleware.core.ros_bridge import RosBridge
+
+        await self.client.post("/api/recording/start", json={
+            "filename": "replay_home.mcap", "force": True, "selection": {"mode": "local"},
+        })
+        await self.client.post("/api/recording/stop")
+        status = RosBridge.status
+        with (
+            patch.object(RosBridge, "status", lambda bridge: {**status(bridge), "state": "running"}),
+            patch.object(RosBridge, "request_replay_home", return_value=True) as home,
+        ):
+            response = await self.client.post("/api/replay/home")
+            self.assertEqual(response.status, 409)
+            home.assert_not_called()
+
+            started = await self.client.post("/api/replay/start", json={"filename": "replay_home.mcap"})
+            self.assertEqual(started.status, 200, await started.text())
+            await self.client.post("/api/replay/stop")
+            await self.client.post("/api/safety/stop", json={"reason": "test safety stop"})
+            response = await self.client.post("/api/replay/home")
+            self.assertEqual(response.status, 409)
+            home.assert_not_called()
+            resumed = await self.client.post("/api/safety/resume")
+            self.assertEqual(resumed.status, 202, await resumed.text())
+            state = await (await self.client.get("/api/replay/status")).json()
+            self.assertFalse(state["requires_reset"])
+            self.assertTrue(state["home_available"])
+            response = await self.client.post("/api/replay/home")
+            self.assertEqual(response.status, 202, await response.text())
+            result = await response.json()
+            self.assertTrue(result["accepted"])
+            self.assertFalse(result["replay"]["requires_reset"])
+            home.assert_called_once_with(output_resumed=True)
+
 
 if __name__ == "__main__":
     unittest.main()

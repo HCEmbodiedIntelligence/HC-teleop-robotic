@@ -99,8 +99,10 @@ class FakeBridge:
         self._command_output_enabled = False
         self._revoke_locked()
 
-    def _revoke_locked(self):
+    def _revoke_locked(self, *, keep_replay=False):
         self._output_epoch += 1
+        if not keep_replay:
+            self._replay_active = False
 
     def status(self):
         return dict(state='running', ownership=self.ownership.snapshot(),

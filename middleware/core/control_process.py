@@ -20,9 +20,11 @@ from types import SimpleNamespace
 
 
 _HOOKS = {'manual_changed', 'dagger_changed', 'open_segment', 'close_segment', 'capture_ready'}
-_BRIDGE_METHODS = {'publish', 'publish_raw', 'request_manual_home', 'begin_replay',
+_BRIDGE_METHODS = {'publish', 'publish_raw', 'request_manual_home', 'request_replay_home', 'begin_replay',
                    'end_replay', 'emergency_stop', 'set_control_source',
-                   'set_command_output_enabled', 'recover_intervention', 'control_ready'}
+                   'set_command_output_enabled', 'recover_intervention', 'control_ready',
+                   'start_replay_alignment', 'replay_alignment_status',
+                   'pause_replay_alignment', 'resume_replay_alignment', 'cancel_replay_alignment'}
 _OWNER_METHODS = {'enable', 'disable', 'start_model', 'set_dagger', 'start_auto',
                   'takeover', 'release', 'hold', 'fault', 'recover', 'input_lost',
                   'finish_capture_preparation'}
@@ -203,8 +205,8 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
         bridge._observer_ros_publish = observer_ros_publish
     original_revoke = bridge._revoke_locked
 
-    def revoke():
-        original_revoke()
+    def revoke(*, keep_replay=False):
+        original_revoke(keep_replay=keep_replay)
         with channels['core_epoch'].get_lock():
             channels['core_epoch'].value = bridge._output_epoch
 
@@ -412,7 +414,8 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
             return getattr(owner, method)(*args, **kwargs)
         if op not in _BRIDGE_METHODS:
             raise ValueError('unsupported control operation')
-        positive = (op in {'begin_replay', 'recover_intervention', 'set_control_source'} or
+        positive = (op in {'begin_replay', 'request_replay_home', 'recover_intervention',
+                           'set_control_source', 'start_replay_alignment', 'resume_replay_alignment'} or
                     op == 'set_command_output_enabled' and args[0])
         data_request = op in {'publish', 'publish_raw'}
         if positive or data_request:
@@ -437,7 +440,10 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
         parent_gen = _generation(channels['parent_generation'])
         if parent_gen != seen_parent or parent_gen > applied_parent and bridge._command_output_enabled:
             bridge._command_output_enabled = False
-            bridge._revoke_locked()
+            # Until the operation is dispatched, the fence blocks all output.
+            # Preserve the replay flag so a normal end can grant homing. A
+            # safety stop or source/ownership change clears it on dispatch.
+            bridge._revoke_locked(keep_replay=True)
             seen_parent = parent_gen
         return not bridge._stop.is_set()
 
@@ -489,6 +495,34 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
                         channels['failure_stop'].set()
             if allow_snapshot:
                 update_snapshot()
+            # Drain non-blocking replay commands off the dedicated replay queue so
+            # high-rate action streams never block TopicPlayer or starve urgent RPCs.
+            replay_channel = channels.get('replay')
+            if replay_channel is not None:
+                replay_reader = getattr(replay_channel, '_reader', None)
+                replay_ready = True
+                if replay_reader is not None:
+                    try:
+                        replay_ready = bool(replay_reader.poll(0))
+                    except (OSError, ValueError):
+                        replay_ready = True
+                if replay_ready:
+                    replay_deadline = time.monotonic() + .002
+                    for _ in range(32):
+                        if time.monotonic() >= replay_deadline:
+                            break
+                        try:
+                            replay_item = replay_channel.get_nowait()
+                        except queue.Empty:
+                            break
+                        expected = replay_item.get('fence')
+                        if expected is None or tuple(expected) != fence() or authority_blocked():
+                            counters['stale_queued_commands'] += 1
+                            continue
+                        try:
+                            bridge.publish_raw(replay_item['topic'], replay_item['msg_type'], replay_item['raw_data'])
+                        except Exception:
+                            pass
         finally:
             pumping = False
             ipc_drained.set()
@@ -501,8 +535,9 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
             return
         poller = select.poll()
         queue_fds = set()
-        for source in ('urgent', 'requests'):
-            reader = getattr(channels[source], '_reader', None)
+        for source in ('urgent', 'requests', 'replay'):
+            chan = channels.get(source)
+            reader = getattr(chan, '_reader', None) if chan is not None else None
             fd = reader.fileno() if reader is not None and hasattr(reader, 'fileno') else None
             if isinstance(fd, int):
                 poller.register(fd, select.POLLIN)
@@ -623,8 +658,9 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
                     pass
         # Log/UI snapshots are explicitly disposable. A paused parent observer
         # must not hold process exit in multiprocessing's feeder finalizer.
-        for name in ('observers', 'observer_ros', 'status'):
-            channels[name].cancel_join_thread()
+        for name in ('observers', 'observer_ros', 'status', 'replay'):
+            if name in channels:
+                channels[name].cancel_join_thread()
 
 
 class CoreProcessClient:
@@ -637,7 +673,7 @@ class CoreProcessClient:
         self.context = mp.get_context('spawn')
         self.boot = uuid.uuid4().hex
         self.channels = {name: self.context.Queue(maxsize=size) for name, size in
-                         [('requests', 64), ('urgent', 16), ('replies', 64),
+                         [('requests', 64), ('urgent', 16), ('replay', 256), ('replies', 64),
                           ('status', 2), ('observers', 256), ('observer_ros', 256), ('hooks', 2048), ('hook_replies', 8)]}
         self.channels.update(boot=self.boot, parent_pid=os.getpid(),
             parent_generation=self.context.Value('Q', 0), core_epoch=self.context.Value('q', -1),
@@ -829,6 +865,18 @@ class CoreProcessClient:
             return True
         except queue.Full:
             self._failed('control administrative queue full')
+            return False
+
+    def submit_replay_raw(self, topic, msg_type, raw_data, *, expected_fence=None):
+        """Queue a fenced replay packet without blocking the player thread on an RPC reply."""
+        if self.process is None or not self.process.is_alive() or self._failure:
+            self._failed('control process unavailable; explicit restart required')
+            return False
+        fence = tuple(expected_fence) if expected_fence is not None else self.authorization_fence()
+        try:
+            self.channels['replay'].put_nowait(dict(topic=topic, msg_type=msg_type, raw_data=raw_data, fence=fence))
+            return True
+        except queue.Full:
             return False
 
     def _receive(self):
@@ -1218,8 +1266,27 @@ class IsolatedRosBridge:
 
     def publish_raw(self, topic, msg_type, raw_data, *, expected_fence=None):
         if str(topic).startswith(_CONTROL_PREFIXES) or str(topic) == '/io_teleop/joint_cmd':
-            return self._client.call('publish_raw', topic, msg_type, raw_data, expected_fence=expected_fence)
+            if expected_fence is not None:
+                return self._client.call('publish_raw', topic, msg_type, raw_data, expected_fence=expected_fence)
+            return self._client.submit_replay_raw(topic, msg_type, raw_data)
         return self._telemetry.publish_raw(topic, msg_type, raw_data)
+
+    supports_replay_alignment = True
+
+    def start_replay_alignment(self, arm_raw, hand_raws=None, *, expected_fence=None):
+        return self._client.call('start_replay_alignment', arm_raw, hand_raws, expected_fence=expected_fence)
+
+    def replay_alignment_status(self):
+        return self._client.call('replay_alignment_status')
+
+    def pause_replay_alignment(self):
+        return self._client.call('pause_replay_alignment')
+
+    def resume_replay_alignment(self):
+        return self._client.call('resume_replay_alignment')
+
+    def cancel_replay_alignment(self):
+        return self._client.call('cancel_replay_alignment')
 
     def emergency_stop(self, topic, reason):
         generation = self._client.revoke_intent()
@@ -1246,6 +1313,10 @@ class IsolatedRosBridge:
 
     def begin_replay(self):
         return self._client.call('begin_replay')
+
+    def request_replay_home(self, *, output_resumed, expected_fence):
+        return self._client.call('request_replay_home', output_resumed=output_resumed,
+                                 expected_fence=expected_fence)
 
     def end_replay(self, require_reset=True):
         generation = self._client.revoke_intent()

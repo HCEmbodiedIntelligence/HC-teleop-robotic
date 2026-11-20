@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from middleware.core.ros_bridge import RosBridge
 
@@ -23,6 +24,8 @@ class ReplaySafetyTests(unittest.TestCase):
             },
             lambda _event, _outputs: None,
         )
+        self.bridge._replay_home_publisher = Mock()
+        self.bridge._replay_home_publisher.get_subscription_count.return_value = 1
 
     def test_final_command_rejects_generic_publish(self):
         self.assertFalse(
@@ -82,6 +85,56 @@ class ReplaySafetyTests(unittest.TestCase):
                 b"{}",
             )
         )
+
+    def test_return_home_requires_completed_replay_and_dispatches_once(self):
+        self.bridge.receive_hardware_ready(True)
+        with self.assertRaises(ValueError):
+            self.bridge.request_replay_home()
+        self.assertTrue(self.bridge.begin_replay())
+        with self.assertRaises(ValueError):
+            self.bridge.request_replay_home()
+        self.bridge.end_replay()
+        self.assertTrue(self.bridge.request_replay_home())
+        with self.assertRaises(ValueError):
+            self.bridge.request_replay_home()
+        publisher = Mock()
+        with patch.object(self.bridge, '_publisher', return_value=publisher) as lookup:
+            self.bridge._drain_commands(Mock(), {}, Mock(), Mock())
+        lookup.assert_called_once()
+        self.assertEqual(lookup.call_args.args[2], '/teleop/arm/home')
+        self.assertTrue(publisher.publish.call_args.args[0].data)
+        self.assertTrue(self.bridge.status()['command_mux']['output_enabled'])
+
+    def test_emergency_stop_fences_queued_replay_home(self):
+        self.bridge.receive_hardware_ready(True)
+        self.assertTrue(self.bridge.begin_replay())
+        self.bridge.end_replay()
+        self.assertTrue(self.bridge.request_replay_home())
+        self.bridge.emergency_stop('/control/emergency_stop', 'test stop')
+        with patch.object(self.bridge, '_publisher', return_value=Mock()) as lookup:
+            self.bridge._drain_commands(Mock(), {}, Mock(), Mock())
+        self.assertNotIn('/teleop/arm/home', [call.args[2] for call in lookup.call_args_list])
+        self.assertFalse(self.bridge.status()['command_mux']['output_enabled'])
+
+    def test_replay_home_rejects_hardware_not_ready(self):
+        self.bridge.receive_hardware_ready(True)
+        self.assertTrue(self.bridge.begin_replay())
+        self.bridge.end_replay()
+        self.bridge.receive_hardware_ready(False)
+        with self.assertRaises(ValueError):
+            self.bridge.request_replay_home()
+        self.assertTrue(self.bridge._commands.empty())
+
+    def test_replay_home_waits_for_subscriber_without_consuming_request(self):
+        self.bridge.receive_hardware_ready(True)
+        self.assertTrue(self.bridge.begin_replay())
+        self.bridge.end_replay()
+        count = self.bridge._replay_home_publisher.get_subscription_count
+        count.return_value = 0
+        with self.assertRaisesRegex(ValueError, '节点尚未连接'):
+            self.bridge.request_replay_home()
+        count.return_value = 1
+        self.assertTrue(self.bridge.request_replay_home())
 
     def test_raw_replay_cannot_impersonate_feedback_safety_or_solver(self):
         self.bridge.receive_hardware_ready(True)

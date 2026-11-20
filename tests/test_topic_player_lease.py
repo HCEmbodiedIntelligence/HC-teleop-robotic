@@ -39,9 +39,15 @@ def test_stop_reset_refuses_new_producer_until_old_provider_returns(tmp_path):
         assert entered.wait(1.)
         old_thread = player._thread
         old_stop = player._stop_event
-        player.stop()
+        stopped = player.stop()
+        assert not stopped['is_active']
+        assert stopped['home_available']
+        assert old_thread.is_alive()
         assert old_stop.is_set()
         player.acknowledge_reset()
+        home = MagicMock(return_value=True)
+        assert not player.return_home(home)['home_available']
+        home.assert_called_once_with(True)
         with pytest.raises(RuntimeError, match='already active'):
             player.play('second.mcap', speed=10., mode='raw')
         assert old_stop.is_set()

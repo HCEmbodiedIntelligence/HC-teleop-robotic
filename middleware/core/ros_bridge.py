@@ -12,6 +12,7 @@ from collections import Counter, deque
 from typing import Any, Callable
 
 from .protocol import envelope
+from .replay_alignment import HandAlignmentTrack, ReplayAlignmentPlanner
 
 
 EventCallback = Callable[[dict[str, Any], list[str]], None]
@@ -167,6 +168,7 @@ class TopicHealthTracker:
 class RosBridge:
     """Run rclpy in its own thread and expose thread-safe bridge operations."""
     COMMAND_CHANNELS = ('arms', 'right_hand', 'left_hand', 'other')
+    supports_replay_alignment = True
 
     def __init__(
         self,
@@ -233,6 +235,7 @@ class RosBridge:
         mux_config = config.get("command_mux", {})
         self._mux_enabled = bool(mux_config.get("enabled", True))
         self._command_source = str(mux_config.get("source", "vr"))
+        self._mux_output_topic = str(mux_config.get("output_topic", "/action/joint_states"))
         self._command_output_enabled = True
         self._hardware_ready = False
         self._hardware_ready_last = -math.inf
@@ -246,6 +249,14 @@ class RosBridge:
         self._output_epoch = 0
         self._hardware_enable_sent_epoch = None
         self._replay_active = False
+        self._replay_home_available = False
+        self._replay_home_publisher = None
+        self._replay_alignment: ReplayAlignmentPlanner | None = None
+        self._replay_alignment_status: dict[str, Any] = {
+            "state": "idle",
+            "error": "",
+            "max_diff_rad": 0.0,
+        }
         self._mux_received = {"vr": 0, "exoskeleton": 0, "motion": 0}
         self._mux_last_received = {"vr": 0.0, "exoskeleton": 0.0, "motion": 0.0}
         self._mux_received_times = {
@@ -463,17 +474,211 @@ class RosBridge:
                     or not self._ready_locked(time.monotonic())):
                 return False
             self._actor_targets.clear()
+            self._replay_home_available = False
             self._replay_active = True
             return True
 
     def end_replay(self, require_reset: bool = True) -> None:
         with self._lock:
+            can_return_home = self._replay_active and require_reset and self._ready_locked(time.monotonic())
             self._revoke_locked()
             self._replay_active = False
             if require_reset:
                 # A deliberate dashboard/VR resume is required before any live
                 # source can regain ownership of the actuator topic.
                 self._command_output_enabled = False
+            self._replay_home_available = can_return_home
+
+    def _clear_replay_alignment_locked(self, reason: str = "") -> None:
+        planner = self._replay_alignment
+        self._replay_alignment = None
+        if planner is not None and planner.state in {"aligning", "paused"}:
+            if reason:
+                planner.abort(reason)
+            self._replay_alignment_status = planner.status_dict()
+
+    def start_replay_alignment(
+        self,
+        arm_raw: bytes,
+        hand_raws: dict[str, bytes] | None = None,
+    ) -> dict[str, Any]:
+        """Validate first replay pose and start smooth alignment if not already there."""
+        with self._lock:
+            epoch = self._output_epoch
+            if not self._replay_allowed_locked(epoch):
+                raise ValueError("replay output is not active or hardware is not ready")
+            boundary = self._boundary
+            legacy = self._legacy_enabled
+        if not legacy or boundary is None:
+            with self._lock:
+                self._replay_alignment = None
+                self._replay_alignment_status = {"state": "aligned", "error": "", "max_diff_rad": 0.0}
+                return dict(self._replay_alignment_status)
+
+        from rclpy.serialization import deserialize_message
+        from sensor_msgs.msg import JointState
+
+        arm_msg = deserialize_message(arm_raw, JointState)
+        if self._public_api is not None:
+            self._public_api.convert_message(arm_msg, to_model=True)
+
+        wall_ns = boundary.clock_now_ns()
+        with self._lock:
+            last_stamp = max((boundary.last_command_stamp.get(n, 0) for n in boundary.limits), default=0)
+        stamp_ns = max(wall_ns, last_stamp + 1)
+        arm_msg.header.stamp.sec, arm_msg.header.stamp.nanosec = divmod(stamp_ns, 1_000_000_000)
+        prepared_arm = boundary.prepare(arm_msg)
+        if prepared_arm is None:
+            raise ValueError(f"replay initial pose rejected: {boundary.last_rejection or 'invalid pose'}")
+        arm_target_msg = prepared_arm[0]
+        arm_names = tuple(arm_target_msg.name)
+        goal_positions = {name: float(pos) for name, pos in zip(arm_target_msg.name, arm_target_msg.position)}
+
+        control = boundary.teleop.get("control", {})
+        configured_home = control.get("home_joint_names")
+        candidates = list(configured_home) if configured_home is not None else list(boundary.arms)
+        align_joints = tuple(
+            n for n in candidates if n in goal_positions and math.isfinite(goal_positions[n])
+        )
+        if not align_joints:
+            align_joints = tuple(
+                n for n in boundary.arms if n in goal_positions and math.isfinite(goal_positions[n])
+            )
+
+        hand_tracks: dict[str, HandAlignmentTrack] = {}
+        grippers = boundary.teleop.get("grippers", {})
+        topic_to_side = {
+            str(grippers[s]["finger_topic"]): s
+            for s in boundary.hands
+            if s in grippers and "finger_topic" in grippers[s]
+        }
+        for h_topic, h_raw in (hand_raws or {}).items():
+            side = topic_to_side.get(str(h_topic))
+            if side is None:
+                continue
+            h_msg = deserialize_message(h_raw, JointState)
+            if self._public_api is not None:
+                self._public_api.convert_message(h_msg, to_model=True)
+            h_msg.header.stamp.sec, h_msg.header.stamp.nanosec = divmod(stamp_ns, 1_000_000_000)
+            prepared_hand = boundary.prepare(h_msg)
+            if prepared_hand is None:
+                raise ValueError(
+                    f"replay initial {side} hand pose rejected: {boundary.last_rejection or 'invalid pose'}"
+                )
+            hand_target = prepared_hand[0]
+            h_names = tuple(hand_target.name)
+            hand_set = set(boundary.hands[side])
+            h_goal: dict[str, float] = {}
+            h_extras: dict[str, float] = {}
+            for name, pos in zip(h_names, hand_target.position):
+                val = float(pos)
+                if name in hand_set and math.isfinite(val):
+                    h_goal[name] = val
+                else:
+                    h_extras[name] = val
+            with self._lock:
+                h_cur = {}
+                for name, g_val in h_goal.items():
+                    last_cmd = boundary.last_command.get(name)
+                    if last_cmd is not None and math.isfinite(float(last_cmd)):
+                        h_cur[name] = float(last_cmd)
+                    elif name in boundary.positions and boundary.fresh((name,), now=time.monotonic(), wall_ns=boundary.clock_now_ns()):
+                        h_cur[name] = float(boundary.positions[name])
+                    else:
+                        h_cur[name] = g_val
+            hand_tracks[side] = HandAlignmentTrack(
+                side=side,
+                topic=str(h_topic),
+                joint_names=h_names,
+                goal=h_goal,
+                current=h_cur,
+                extras=h_extras,
+            )
+
+        now_mono = time.monotonic()
+        with self._lock:
+            if not self._replay_allowed_locked(epoch):
+                raise ValueError("replay output revoked while preparing alignment")
+            if not boundary.fresh(set(align_joints), now=now_mono, wall_ns=boundary.clock_now_ns()):
+                raise ValueError("required feedback missing/stale for replay alignment")
+            start_positions = {n: float(boundary.positions[n]) for n in align_joints}
+            home_vel = float(control.get("home_joint_velocity", 0.5))
+            home_acc = float(control.get("home_joint_acceleration", 1.0))
+            settle_tol = float(control.get("home_tolerance", 0.05))
+            planner = ReplayAlignmentPlanner(
+                epoch=epoch,
+                arm_topic=self._mux_output_topic,
+                arm_joint_names=arm_names,
+                goal_positions=goal_positions,
+                align_joints=align_joints,
+                start_positions=start_positions,
+                hand_tracks=hand_tracks,
+                max_velocity=min(home_vel, 0.5),
+                max_acceleration=min(home_acc, 1.0),
+                hand_velocity=min(float(grippers.get("max_velocity", 3.5)), 2.5),
+                start_tolerance=min(settle_tol, 0.03),
+                settle_tolerance=settle_tol,
+                max_tracking_error=boundary.max_error,
+                settle_timeout=float(control.get("home_feedback_timeout", 2.0)),
+                now_mono=now_mono,
+            )
+            self._replay_alignment_status = planner.status_dict()
+            self._replay_alignment = None if planner.state == "aligned" else planner
+            wake = self._actor_wake if self._replay_alignment is not None else None
+        if callable(wake):
+            wake()
+        return dict(self._replay_alignment_status)
+
+    def replay_alignment_status(self) -> dict[str, Any]:
+        with self._lock:
+            if self._replay_alignment is not None:
+                return self._replay_alignment.status_dict()
+            return dict(self._replay_alignment_status)
+
+    def pause_replay_alignment(self) -> dict[str, Any]:
+        with self._lock:
+            if self._replay_alignment is not None:
+                self._replay_alignment.pause()
+                self._replay_alignment_status = self._replay_alignment.status_dict()
+            return dict(self._replay_alignment_status)
+
+    def resume_replay_alignment(self) -> dict[str, Any]:
+        with self._lock:
+            if self._replay_alignment is not None:
+                self._replay_alignment.resume(time.monotonic())
+                self._replay_alignment_status = self._replay_alignment.status_dict()
+                wake = self._actor_wake
+            else:
+                wake = None
+        if callable(wake):
+            wake()
+        return dict(self._replay_alignment_status)
+
+    def cancel_replay_alignment(self) -> dict[str, Any]:
+        with self._lock:
+            self._clear_replay_alignment_locked("replay alignment cancelled")
+            return dict(self._replay_alignment_status)
+
+    def _replay_home_allowed_locked(self, *, output_resumed: bool) -> bool:
+        return (not self._stop.is_set() and not self._actor_output_blocked()
+                and not self._replay_active and not self.ownership.active
+                and self._command_output_enabled == output_resumed and self._command_source == 'vr'
+                and self._ready_locked(time.monotonic())
+                and (not self._legacy_enabled or self._boundary is not None and self._boundary.feedback_fresh()))
+
+    def request_replay_home(self, *, output_resumed: bool = False) -> bool:
+        """Queue the VR home action after replay under the current output fence."""
+        with self._lock:
+            if not self._replay_home_allowed_locked(output_resumed=output_resumed):
+                raise ValueError('回初始位姿需要 VR/IK 控制源、可用的控制权限和新鲜的硬件反馈')
+            if not output_resumed and not self._replay_home_available:
+                raise ValueError('回放已结束，请先人工恢复控制，再回初始位姿')
+            if self._replay_home_publisher is None or not self._replay_home_publisher.get_subscription_count():
+                raise ValueError('回零控制节点尚未连接，请稍后重试')
+            if not self._enqueue('replay_home', (self._output_epoch, output_resumed)):
+                return False
+            self._replay_home_available = False
+            return True
 
     def _is_final_joint_command(self, topic: str) -> bool:
         mux_config = self.config.get("command_mux", {})
@@ -523,7 +728,11 @@ class RosBridge:
             self._actor_targets.clear()
             self._actor_replay.clear()
 
-    def _revoke_locked(self) -> None:
+    def _revoke_locked(self, *, keep_replay: bool = False) -> None:
+        self._replay_home_available = False
+        self._clear_replay_alignment_locked("replay alignment aborted by safety or revoke")
+        if not keep_replay:
+            self._replay_active = False
         self._source_cutoff = self._ros_now()
         self._output_epoch += 1
         if self._control_actor_mode:
@@ -711,6 +920,9 @@ class RosBridge:
         # before any queued DDS output or target is drained.
         urgent = getattr(self, '_actor_urgent_check', None)
         wait_sec = .01 if callable(getattr(self, '_actor_wake', None)) else .001
+        planner = self._replay_alignment
+        if planner is not None:
+            wait_sec = planner.wait_sec(time.monotonic(), wait_sec)
         for index in range(32):
             before = self._actor_callback_count
             executor.spin_once(timeout_sec=wait_sec if index == 0 else 0.)
@@ -1002,19 +1214,212 @@ class RosBridge:
             self._command_interval(timing, 'dds_publish', commit_done, publish_done)
             self._command_interval(timing, 'send_accounting', publish_done, released)
             self._command_checkpoint(timing, 'commit_publish')
-            if ticket is not None:
-                if published is not None and wire_cdr is not None:
-                    capture.complete(ticket, serialized_cdr=wire_cdr,
-                        publication_ns=publication_ns, publication_monotonic=publication_monotonic)
-                else:
-                    capture.complete(ticket, published, publication_ns=publication_ns,
-                                     publication_monotonic=publication_monotonic)
+            self._complete_publication_capture(
+                capture, ticket, published, wire_cdr, publication_ns, publication_monotonic
+            )
             self._command_checkpoint(timing, 'capture_complete')
             if self._control_actor_mode and evidence is not None:
                 # The host supplies a bounded, nonblocking FIFO ingress. Keep
                 # action evidence before any subsequent manual-close hook, but
                 # never invoke this ingress while holding the final send gate.
                 self._action_sink(evidence)
+
+    @staticmethod
+    def _complete_publication_capture(
+        capture: Any,
+        ticket: Any,
+        published: Any,
+        wire_cdr: bytes | None,
+        publication_ns: int | None,
+        publication_monotonic: float | None,
+    ) -> None:
+        if ticket is None or capture is None:
+            return
+        if published is not None and wire_cdr is not None:
+            capture.complete(
+                ticket,
+                serialized_cdr=wire_cdr,
+                publication_ns=publication_ns,
+                publication_monotonic=publication_monotonic,
+            )
+        else:
+            capture.complete(
+                ticket,
+                published,
+                publication_ns=publication_ns,
+                publication_monotonic=publication_monotonic,
+            )
+
+    def _record_forwarded_metrics_locked(self, message: Any, publication_monotonic: float) -> None:
+        channel = self._command_channel(getattr(message, 'name', ()))
+        self._mux_forwarded += 1
+        self._mux_forwarded_times.append(publication_monotonic)
+        self._mux_channel_forwarded[channel] += 1
+        self._mux_channel_forwarded_times[channel].append(publication_monotonic)
+
+    def _select_replay_publisher(
+        self,
+        node: Any,
+        publishers: dict[tuple[str, str], Any],
+        topic: str,
+        msg_type_name: str,
+        message_type: Any,
+    ) -> Any:
+        boundary = self._boundary
+        if self._legacy_enabled and boundary is not None:
+            if topic == self._mux_output_topic and getattr(boundary, 'output', None) is not None:
+                return boundary.output
+            hand_pubs = getattr(boundary, 'hand_pubs', None)
+            grippers = getattr(boundary, 'teleop', {}).get('grippers', {})
+            if isinstance(hand_pubs, dict):
+                for side in boundary.hands:
+                    cfg = grippers.get(side)
+                    if isinstance(cfg, dict) and str(cfg.get('finger_topic', '')) == str(topic) and hand_pubs.get(side) is not None:
+                        return hand_pubs[side]
+        return self._publisher(node, publishers, topic, msg_type_name, message_type)
+
+    def _publish_replay_joint_message(
+        self,
+        node: Any,
+        publishers: dict[tuple[str, str], Any],
+        topic: str,
+        msg_type_name: str,
+        message_type: Any,
+        message: Any,
+        *,
+        epoch: int,
+        convert_public: bool = True,
+    ) -> bool:
+        if convert_public and self._public_api is not None:
+            self._public_api.convert_message(message, to_model=True)
+        boundary = self._boundary
+        if node is not None:
+            clock_now = node.get_clock().now()
+            if hasattr(clock_now, 'to_msg'):
+                message.header.stamp = clock_now.to_msg()
+            else:
+                ns = int(getattr(clock_now, 'nanoseconds', time.time_ns()))
+                message.header.stamp.sec, message.header.stamp.nanosec = divmod(ns, 1_000_000_000)
+        elif boundary is not None:
+            wall_ns = boundary.clock_now_ns()
+            with self._lock:
+                last_stamp = max((boundary.last_command_stamp.get(n, 0) for n in boundary.limits), default=0)
+            stamp_ns = max(wall_ns, last_stamp + 1)
+            message.header.stamp.sec, message.header.stamp.nanosec = divmod(stamp_ns, 1_000_000_000)
+
+        publisher = self._select_replay_publisher(node, publishers, topic, msg_type_name, message_type)
+        prepared = boundary.prepare(message) if boundary else message
+        out_msg = (prepared[0] if (self._legacy_enabled and boundary is not None) else prepared) if prepared is not None else None
+
+        send, wire_cdr = publisher.publish, None
+        prepare_publication = getattr(boundary, 'prepare_publication', None)
+        if self._legacy_enabled and out_msg is not None and callable(prepare_publication):
+            try:
+                send, wire_cdr = prepare_publication(out_msg, publisher.publish)
+            except Exception as exc:
+                boundary.reject('command serialization failed: ' + str(exc))
+                prepared = out_msg = None
+
+        capture = getattr(self, '_publication_capture', None)
+        capture_target = (
+            capture is not None
+            and out_msg is not None
+            and (
+                str(topic) == getattr(capture, 'TOPIC', '/action/joint_states')
+                or (
+                    self._legacy_enabled
+                    and boundary is not None
+                    and bool(set(getattr(out_msg, 'name', ())).intersection(boundary.arms))
+                )
+            )
+        )
+        if capture_target and wire_cdr is None:
+            try:
+                from rclpy.serialization import serialize_message
+                wire_cdr = serialize_message(out_msg)
+            except Exception:
+                wire_cdr = None
+
+        self._actor_checkpoint(allow_snapshot=False)
+        ticket = capture.reserve() if capture_target else None
+        published, publication_ns, publication_monotonic = None, None, None
+        try:
+            with self._lock:
+                if prepared is None or not self._replay_allowed_locked(epoch):
+                    return False
+                if boundary and not boundary.commit(prepared):
+                    return False
+                send(out_msg)
+                published = out_msg
+                publication_ns = time.time_ns()
+                publication_monotonic = time.monotonic()
+                self._record_forwarded_metrics_locked(out_msg, publication_monotonic)
+                return True
+        finally:
+            self._complete_publication_capture(
+                capture, ticket, published, wire_cdr, publication_ns, publication_monotonic
+            )
+
+    def _tick_replay_alignment(
+        self,
+        node: Any,
+        publishers: dict[tuple[str, str], Any],
+        get_message: Callable[[str], Any] | None = None,
+    ) -> None:
+        with self._lock:
+            planner = self._replay_alignment
+            if planner is None:
+                return
+            boundary = self._boundary
+            now_mono = time.monotonic()
+            measured = dict(boundary.positions) if boundary is not None else {}
+            feedback_fresh = bool(
+                boundary is not None
+                and boundary.fresh(set(planner.align_joints), now=now_mono, wall_ns=boundary.clock_now_ns())
+            )
+            replay_allowed = self._replay_allowed_locked(planner.epoch)
+            result = planner.step(
+                now_mono,
+                measured,
+                feedback_fresh=feedback_fresh,
+                replay_allowed=replay_allowed,
+            )
+            self._replay_alignment_status = planner.status_dict()
+            if planner.state in {"aligned", "error"}:
+                self._replay_alignment = None
+        if not result.get("publish"):
+            return
+        from sensor_msgs.msg import JointState
+
+        arm_msg = JointState(
+            name=list(planner.arm_joint_names),
+            position=[float(v) for v in result["arm_positions"]],
+        )
+        self._publish_replay_joint_message(
+            node,
+            publishers,
+            planner.arm_topic,
+            "sensor_msgs/msg/JointState",
+            JointState,
+            arm_msg,
+            epoch=planner.epoch,
+            convert_public=False,
+        )
+        for hand_topic, (hand_names, hand_pos) in result.get("hand_commands", {}).items():
+            hand_msg = JointState(
+                name=list(hand_names),
+                position=[float(v) for v in hand_pos],
+            )
+            self._publish_replay_joint_message(
+                node,
+                publishers,
+                hand_topic,
+                "sensor_msgs/msg/JointState",
+                JointState,
+                hand_msg,
+                epoch=planner.epoch,
+                convert_public=False,
+            )
 
     def _enqueue(self, command: str, data: Any) -> bool:
         item = (command, data)
@@ -1195,6 +1600,10 @@ class RosBridge:
             if self._mux_enabled:
                 from sensor_msgs.msg import JointState
                 from std_msgs.msg import Bool, String
+
+                # Discover the home subscriber before a one-shot request arrives.
+                self._replay_home_publisher = self._publisher(
+                    node, publishers, '/teleop/arm/home', 'std_msgs/msg/Bool', Bool)
 
                 hardware_ready_topic = str(
                     mux_config.get(
@@ -1452,6 +1861,7 @@ class RosBridge:
                     if self._stop.is_set():
                         break
                     self._actor_flush_commands()
+                    self._tick_replay_alignment(node, publishers, get_message)
                     # Drain a bounded batch of ready callbacks before sending
                     # latest channel targets. No nested spin inside preparation.
                     self._spin_actor_callbacks(executor)
@@ -1459,6 +1869,7 @@ class RosBridge:
                         break
                     self._actor_flush_commands()
                     self._drain_actor_targets()
+                    self._tick_replay_alignment(node, publishers, get_message)
                     if not self._actor_targets:
                         self._actor_checkpoint(allow_snapshot=True)
             else:
@@ -1503,6 +1914,7 @@ class RosBridge:
                 while not self._stop.is_set():
                     # Wake on enqueue: a fixed sleep added up to 10 ms to every /vrdata frame.
                     self._drain_commands(node, publishers, get_message, set_message_fields, wait=0.01)
+                    self._tick_replay_alignment(node, publishers, get_message)
                     now = time.monotonic()
                     if now - last_discovery >= 2.0:
                         if dataset_process is not None:
@@ -1914,7 +2326,7 @@ class RosBridge:
         if (self._control_actor_mode and
                 self._actor_thread_ident != threading.get_ident()):
             raise RuntimeError('control DDS commands must be drained by the actor thread')
-        for index in range(8 if self._control_actor_mode else 100):
+        for index in range(16 if self._control_actor_mode else 100):
             try:
                 if self._control_actor_mode and self._actor_urgent:
                     item = self._actor_urgent.popleft()
@@ -1947,6 +2359,16 @@ class RosBridge:
                         message = Header(stamp=node.get_clock().now().to_msg(), frame_id=args.key())
                         self._publisher(node, publishers, '/internal/vr/home_request',
                                         'std_msgs/msg/Header', Header).publish(message)
+                elif command == 'replay_home':
+                    with self._lock:
+                        epoch, output_resumed = args
+                        if epoch != self._output_epoch or not self._replay_home_allowed_locked(
+                                output_resumed=output_resumed):
+                            continue
+                        from std_msgs.msg import Bool
+                        self._publisher(node, publishers, '/teleop/arm/home',
+                                        'std_msgs/msg/Bool', Bool).publish(Bool(data=True))
+                        self._command_output_enabled = True
                 elif command == 'ownership_recover':
                     with self._lock:
                         if args != getattr(self, '_recovery', None) or args[0] != self.ownership.token:
@@ -1984,30 +2406,24 @@ class RosBridge:
                             if not self._replay_allowed_locked(args[3]):
                                 continue
                     message_type = get_message(msg_type_name)
-                    publisher = self._publisher(
-                        node, publishers, topic, msg_type_name, message_type
-                    )
                     from rclpy.serialization import deserialize_message
 
                     message = deserialize_message(raw_bytes, message_type)
                     if command == "replay_raw":
-                        if self._public_api is not None:
-                            self._public_api.convert_message(message, to_model=True)
-                        # This is a new actuator command, even for a legacy MCAP.
-                        message.header.stamp = node.get_clock().now().to_msg()
-                        boundary = self._boundary
-                        prepared = boundary.prepare(message) if boundary else message
-                        self._actor_checkpoint()
-                        with self._lock:
-                            if prepared is None or not self._replay_allowed_locked(args[3]):
-                                continue
-                            if boundary:
-                                if not boundary.commit(prepared):
-                                    continue
-                                if self._legacy_enabled:
-                                    message = prepared[0]
-                            publisher.publish(message)
+                        self._publish_replay_joint_message(
+                            node,
+                            publishers,
+                            topic,
+                            msg_type_name,
+                            message_type,
+                            message,
+                            epoch=args[3],
+                            convert_public=True,
+                        )
                     else:
+                        publisher = self._publisher(
+                            node, publishers, topic, msg_type_name, message_type
+                        )
                         self._actor_checkpoint()
                         if self._actor_queue_item_allowed(item):
                             publisher.publish(message)

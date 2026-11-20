@@ -50,16 +50,19 @@ class TopicPlayer:
         self._progress = 0.0
         self._error: str | None = None
         self._requires_reset = False
+        self._home_available = False
+        self._aligning = False
         self._replay_interlock_armed = False
         self._recorded_profile_id = ""
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            is_active = self._thread is not None and self._thread.is_alive()
             return {
                 "state": self._state,
-                "is_active": is_active,
+                "is_active": self._state in {"playing", "paused"},
+                "aligning": self._aligning,
                 "requires_reset": self._requires_reset,
+                "home_available": self._home_available,
                 "filename": self._filename,
                 "speed": self._speed,
                 "loop": self._loop,
@@ -127,7 +130,6 @@ class TopicPlayer:
             self._recorded_profile_id = recorded_profile
             self._speed = max(0.1, min(10.0, float(speed)))
             self._loop = bool(loop)
-            self._state = "playing"
             self._requires_reset = False
             self._error = None
             self._current_time_sec = 0.0
@@ -237,6 +239,9 @@ class TopicPlayer:
             if ros is not None and hasattr(ros, "publish"):
                 ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
 
+            self._home_available = False
+            self._aligning = False
+            self._state = "playing"
             # A worker owns these events for its entire lifetime. A new play
             # can never clear the cancellation token of an earlier producer.
             self._stop_event = threading.Event()
@@ -292,6 +297,8 @@ class TopicPlayer:
             self._state = "stopped" if needs_reset and require_reset else "idle"
             self._requires_reset = bool(require_reset and needs_reset)
             self._release_replay_interlock(require_reset=self._requires_reset)
+            if was_active:
+                self._home_available = self._requires_reset
             status = self.status()
         if was_active or was_waiting_for_reset:
             self._notify_state("replay_stopped")
@@ -308,9 +315,26 @@ class TopicPlayer:
             self._notify_state("replay_reset")
         return status
 
+    def return_home(self, request_home: Callable[[bool], bool]) -> dict[str, Any]:
+        """Keep the home action available through an explicit output resume."""
+        with self._lock:
+            if self._state in {"playing", "paused"} or self._replay_interlock_armed:
+                raise ValueError("请先结束或停止回放")
+            if not self._home_available:
+                raise ValueError("当前没有待回初始位姿的回放")
+            if not request_home(not self._requires_reset):
+                raise ValueError("回初始位姿请求未被控制进程接受")
+            self._requires_reset = False
+            self._home_available = False
+            self._state = "idle"
+            status = self.status()
+        self._notify_state("replay_home_requested")
+        return status
+
     def _stop_locked(self) -> None:
         self._stop_event.set()
         self._pause_event.set()
+        self._aligning = False
         self._play_generation += 1
         # Keep the actual worker reference until it exits. play() refuses a
         # second producer while an old reader/provider call is still blocked.
@@ -327,6 +351,80 @@ class TopicPlayer:
     def _replay_current(self, generation, stop_event):
         with self._lock:
             return generation == self._play_generation and not stop_event.is_set()
+
+    def _align_to_start(
+        self,
+        reader: Any,
+        source_topics: list[str],
+        channels: dict[int, tuple[str, str]],
+        ros: Any,
+        generation: int,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ) -> None:
+        """Smoothly move arms/hands to replay frame 0 before starting replay timing."""
+        arm_raw: bytes | None = None
+        hand_raws: dict[str, bytes] = {}
+        want_hands = {
+            t for t, _ in channels.values()
+            if t in {"/action/left_hand/joint_states", "/action/right_hand/joint_states"}
+        }
+        first_log_time: int | None = None
+        for _schema, channel, message in reader.iter_messages(topics=source_topics):
+            if stop_event.is_set() or not self._replay_current(generation, stop_event):
+                return
+            chan_info = channels.get(channel.id)
+            if chan_info is None:
+                continue
+            if first_log_time is None:
+                first_log_time = message.log_time
+            t_topic = chan_info[0]
+            if t_topic == "/action/joint_states" and arm_raw is None:
+                arm_raw = message.data
+            elif t_topic in want_hands and t_topic not in hand_raws:
+                hand_raws[t_topic] = message.data
+            if arm_raw is not None and (not want_hands or len(hand_raws) == len(want_hands)):
+                break
+            if (
+                first_log_time is not None
+                and arm_raw is not None
+                and message.log_time - first_log_time > 500_000_000
+            ):
+                break
+        if arm_raw is None:
+            return
+        result = ros.start_replay_alignment(arm_raw, hand_raws)
+        if not isinstance(result, dict) or result.get("state") != "aligning":
+            return
+        with self._lock:
+            if not self._replay_current(generation, stop_event):
+                return
+            self._aligning = True
+        self._notify_state("replay_aligning")
+        was_paused = False
+        try:
+            while not stop_event.is_set():
+                if not self._replay_current(generation, stop_event):
+                    return
+                is_paused = not pause_event.is_set()
+                if is_paused and not was_paused:
+                    ros.pause_replay_alignment()
+                    was_paused = True
+                elif not is_paused and was_paused:
+                    ros.resume_replay_alignment()
+                    was_paused = False
+                status = ros.replay_alignment_status()
+                state_val = status.get("state") if isinstance(status, dict) else "aligned"
+                if state_val == "aligned":
+                    break
+                if state_val in {"error", "aborted"}:
+                    raise RuntimeError(status.get("error") or "replay alignment failed")
+                stop_event.wait(0.015)
+        finally:
+            with self._lock:
+                self._aligning = False
+        if not stop_event.is_set() and self._replay_current(generation, stop_event):
+            self._notify_state("replay_aligned")
 
     def _run(self, target_path: Path, stop_event, pause_event, generation) -> None:
         try:
@@ -384,16 +482,51 @@ class TopicPlayer:
                             '/status/base',
                             '/vrdata',
                         ))
-                    channels = {
-                        c_id: (c.topic, schemas.get(c.schema_id, "std_msgs/msg/String"))
-                        for c_id, c in summary.channels.items()
-                        if (c.topic not in record_only or (
-                            c.topic == "/observation/joint_states"
-                            and self._topic_remap.get(c.topic) == "/action/joint_states"
-                        ))
-                        and "/msg/" in schemas.get(c.schema_id, "std_msgs/msg/String")
-                        and (not getattr(c, "message_encoding", "") or c.message_encoding == "cdr")
-                    }
+                    with self._lock:
+                        remap = dict(self._topic_remap)
+                        selected = set(self._selected_topics)
+
+                    channels: dict[int, tuple[str, str]] = {}
+                    source_topics_set: set[str] = set()
+                    selected_total = 0
+                    msg_counts = getattr(stats, "channel_message_counts", None) or {}
+                    for c_id, c in summary.channels.items():
+                        msg_type = schemas.get(c.schema_id, "std_msgs/msg/String")
+                        if not (
+                            (
+                                c.topic not in record_only
+                                or (
+                                    c.topic == "/observation/joint_states"
+                                    and remap.get(c.topic) == "/action/joint_states"
+                                )
+                            )
+                            and "/msg/" in msg_type
+                            and (not getattr(c, "message_encoding", "") or c.message_encoding == "cdr")
+                        ):
+                            continue
+                        target_topic = remap.get(c.topic, c.topic)
+                        # Check the destination after remapping: a bag must
+                        # never impersonate feedback, safety or solver nodes.
+                        if live_x1 and target_topic not in {
+                            "/action/joint_states",
+                            "/action/base/command",
+                            "/action/hands/joint_targets",
+                            "/action/left_hand/joint_states",
+                            "/action/right_hand/joint_states",
+                        }:
+                            continue
+                        if not selected or (c.topic in selected) or (target_topic in selected):
+                            channels[c_id] = (target_topic, msg_type)
+                            source_topics_set.add(c.topic)
+                            selected_total += int(msg_counts.get(c_id, 0))
+
+                    source_topics = sorted(source_topics_set)
+                    if not source_topics:
+                        total_msgs = 0
+                    elif selected_total > 0 or msg_counts:
+                        total_msgs = selected_total
+                    else:
+                        total_msgs = stats.message_count
 
                     with self._lock:
                         if not self._replay_current(generation, stop_event):
@@ -401,13 +534,41 @@ class TopicPlayer:
                         self._total_messages = total_msgs
                         self._duration_sec = duration_sec
 
+                    if (
+                        source_topics
+                        and any(t == "/action/joint_states" for t, _ in channels.values())
+                    ):
+                        ros = self._get_ros()
+                        if not self._replay_current(generation, stop_event):
+                            return
+                        if ros is not None and getattr(ros, "supports_replay_alignment", False) is True:
+                            self._align_to_start(
+                                reader,
+                                source_topics,
+                                channels,
+                                ros,
+                                generation,
+                                stop_event,
+                                pause_event,
+                            )
+                            if stop_event.is_set() or not self._replay_current(generation, stop_event):
+                                return
+
                     t0_log: int | None = None
+                    bag_t0_log: int | None = None
+                    prev_msg_log: int | None = None
                     t0_mono = time.monotonic()
+                    active_speed = self._speed
                     msg_idx = 0
 
-                    for schema, channel, message in reader.iter_messages():
+                    msg_iter = reader.iter_messages(topics=source_topics) if source_topics else ()
+                    for schema, channel, message in msg_iter:
                         if stop_event.is_set():
                             break
+
+                        chan_info = channels.get(channel.id)
+                        if chan_info is None:
+                            continue
 
                         if not pause_event.is_set():
                             pause_start = time.monotonic()
@@ -415,57 +576,56 @@ class TopicPlayer:
                             if stop_event.is_set():
                                 break
                             pause_duration = time.monotonic() - pause_start
-                            t0_mono += pause_duration
+                            if t0_log is not None:
+                                t0_mono += pause_duration
 
-                        if t0_log is None:
-                            t0_log = message.log_time
-                            t0_mono = time.monotonic()
-
-                        log_offset = (message.log_time - t0_log) / 1e9
                         with self._lock:
                             current_speed = self._speed
 
-                        target_mono = t0_mono + (log_offset / current_speed if current_speed > 0 else 0)
-                        now = time.monotonic()
-                        if target_mono > now:
-                            sleep_duration = target_mono - now
-                            while sleep_duration > 0 and not stop_event.is_set() and pause_event.is_set():
-                                chunk = min(sleep_duration, 0.02)
-                                time.sleep(chunk)
-                                sleep_duration -= chunk
+                        if t0_log is None:
+                            t0_log = message.log_time
+                            bag_t0_log = message.log_time
+                            t0_mono = time.monotonic()
+                            active_speed = current_speed
+                        elif current_speed != active_speed:
+                            now_anchor = time.monotonic()
+                            t0_log = prev_msg_log if prev_msg_log is not None else message.log_time
+                            t0_mono = now_anchor
+                            active_speed = current_speed
+
+                        prev_msg_log = message.log_time
+                        log_offset = (message.log_time - t0_log) / 1e9
+                        target_mono = t0_mono + (log_offset / active_speed if active_speed > 0 else 0.0)
+
+                        while not stop_event.is_set():
+                            if not pause_event.is_set():
+                                pause_start = time.monotonic()
+                                pause_event.wait()
+                                if stop_event.is_set():
+                                    break
+                                pause_duration = time.monotonic() - pause_start
+                                t0_mono += pause_duration
+                                target_mono += pause_duration
+                            remaining = target_mono - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            stop_event.wait(min(remaining, 0.02))
 
                         if stop_event.is_set():
                             break
 
-                        chan_info = channels.get(channel.id)
-                        if chan_info:
-                            orig_topic, msg_type = chan_info
-                            with self._lock:
-                                remap = dict(self._topic_remap)
-                                selected = set(self._selected_topics)
-
-                            target_topic = remap.get(orig_topic, orig_topic)
-                            # Check the destination after remapping: a bag must
-                            # never impersonate feedback, safety or solver nodes.
-                            if live_x1 and target_topic not in {
-                                "/action/joint_states", "/action/base/command",
-                                "/action/hands/joint_targets",
-                                "/action/left_hand/joint_states",
-                                "/action/right_hand/joint_states",
-                            }:
-                                continue
-                            if not selected or (orig_topic in selected) or (target_topic in selected):
-                                ros = self._get_ros()
-                                # The provider may have waited while stop/reset
-                                # revoked this producer. Recheck its own lease,
-                                # never acquire a new replay's current fence.
-                                if not self._replay_current(generation, stop_event):
-                                    return
-                                if ros is not None and hasattr(ros, "publish_raw"):
-                                    ros.publish_raw(target_topic, msg_type, message.data)
+                        target_topic, msg_type = chan_info
+                        ros = self._get_ros()
+                        # The provider may have waited while stop/reset
+                        # revoked this producer. Recheck its own lease,
+                        # never acquire a new replay's current fence.
+                        if not self._replay_current(generation, stop_event):
+                            return
+                        if ros is not None and hasattr(ros, "publish_raw"):
+                            ros.publish_raw(target_topic, msg_type, message.data)
 
                         msg_idx += 1
-                        cur_time = log_offset
+                        cur_time = (message.log_time - bag_t0_log) / 1e9 if bag_t0_log is not None else 0.0
                         progress = (msg_idx / total_msgs * 100.0) if total_msgs > 0 else 0.0
 
                         if msg_idx % 10 == 0 or msg_idx == total_msgs:
@@ -489,6 +649,7 @@ class TopicPlayer:
                     self._progress = 100.0
                     self._requires_reset = True
                     self._release_replay_interlock(require_reset=True)
+                    self._home_available = True
             if self._replay_current(generation, stop_event):
                 self._notify_state("replay_completed")
         except Exception as exc:
@@ -500,4 +661,5 @@ class TopicPlayer:
                 self._error = str(exc)
                 self._requires_reset = True
                 self._release_replay_interlock(require_reset=True)
+                self._home_available = True
             self._notify_state("replay_error")

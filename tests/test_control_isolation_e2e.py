@@ -74,6 +74,8 @@ class LoopbackRobot:
         self.hand_sources = {side:publisher(JointState, '/control/vr/'+side+'_hand/joint_states')
                              for side in self.hands}
         self.actual = []
+        self.homes = []
+        self.node.create_subscription(Bool, '/teleop/arm/home', self.homes.append, 10)
         self.subscription = self.node.create_subscription(
             JointState, '/action/joint_states',
             lambda raw:self.actual.append((time.monotonic_ns(), bytes(raw))), 1000, raw=True)
@@ -121,6 +123,43 @@ def config():
             'legacy_control_profile':str(ROOT/'adapters/robots/x1'),
             'intervention':{'automatic_recording':False},
             'dataset_topics':{'enabled':False}, 'subscriptions':[]}
+
+
+def test_replay_home_is_available_after_normal_parent_revoke_but_not_after_estop(loopback):
+    from middleware.core.control_process import IsolatedRosBridge
+
+    client = CoreProcessClient(config())
+    proxy = IsolatedRosBridge.__new__(IsolatedRosBridge)
+    proxy._client = client
+    try:
+        client.start()
+        wait_until(lambda:client.snapshot().get('control_ready'))
+        wait_until(lambda:loopback.node.count_publishers('/teleop/arm/home') == 1)
+        client.call('set_command_output_enabled', True)
+        assert proxy.begin_replay()
+        stale = client.authorization_fence()
+        proxy.end_replay()
+        with pytest.raises(ValueError, match='authorization revoked'):
+            proxy.request_replay_home(output_resumed=False, expected_fence=stale)
+        assert proxy.request_replay_home(
+            output_resumed=False, expected_fence=client.authorization_fence())
+        wait_until(lambda:len(loopback.homes) == 1)
+        assert loopback.homes[0].data is True
+
+        assert proxy.begin_replay()
+        proxy.emergency_stop('/control/emergency_stop', 'test estop during replay')
+        proxy.end_replay()
+        with pytest.raises(ValueError, match='先人工恢复'):
+            proxy.request_replay_home(
+                output_resumed=False, expected_fence=client.authorization_fence())
+        assert len(loopback.homes) == 1
+
+        proxy.resume_output('/control/emergency_stop', expected_fence=client.authorization_fence())
+        assert proxy.request_replay_home(
+            output_resumed=True, expected_fence=client.authorization_fence())
+        wait_until(lambda:len(loopback.homes) == 2)
+    finally:
+        client.stop()
 
 
 def test_observer_and_recording_stall_do_not_block_actual_control(loopback, tmp_path):

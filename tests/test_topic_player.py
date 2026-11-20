@@ -108,6 +108,26 @@ class TopicPlayerTests(unittest.TestCase):
         for topic, msg_type, raw in self.published_messages:
             self.assertEqual(topic, "/control/solver/target_joint")
 
+    def test_return_home_retries_rejected_request_and_clears_reset_once(self) -> None:
+        request_home = MagicMock(return_value=False)
+        with self.assertRaises(ValueError):
+            self.player.return_home(request_home)
+        request_home.assert_not_called()
+        self.player.play("test_recording.mcap", speed=10.0, mode="raw")
+        self.player._thread.join(timeout=1.)
+        self.assertTrue(self.player.status()["requires_reset"])
+        with self.assertRaises(ValueError):
+            self.player.return_home(request_home)
+        request_home.assert_called_once_with(False)
+        self.assertTrue(self.player.status()["requires_reset"])
+        self.assertTrue(self.player.acknowledge_reset()["home_available"])
+        request_home.return_value = True
+        self.assertFalse(self.player.return_home(request_home)["home_available"])
+        request_home.assert_called_with(True)
+        with self.assertRaises(ValueError):
+            self.player.return_home(request_home)
+        self.assertEqual(request_home.call_count, 2)
+
     def test_player_pause_resume_and_stop(self) -> None:
         self.player.play("test_recording.mcap", speed=0.1)
         time.sleep(0.05)

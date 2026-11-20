@@ -976,6 +976,7 @@ class MiddlewareRuntime:
             "replay_completed": "重放完成；请按 A 恢复遥操作",
             "replay_error": "重放异常；请按 A 恢复遥操作",
             "replay_reset": "已恢复实时遥操作",
+            "replay_home_requested": "回初始位姿指令已提交",
         }
         payload = {
             **status,
@@ -1028,6 +1029,7 @@ class MiddlewareRuntime:
             "control_backend": os.environ.get("HC_CONTROL_BACKEND") or None,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
+            "safety_stop_active": bool(self._safety_reason),
             "ros": ros_status,
             "recording_executor": recording_executor_status,
             "vr": self.vr.status() if self.vr else {"state": "stopped"},
@@ -1789,6 +1791,32 @@ def create_app(store: ConfigStore) -> web.Application:
         status = await asyncio.to_thread(runtime.player.stop)
         return web.json_response({"ok": True, "replay": status})
 
+    async def replay_home(_request: web.Request) -> web.Response:
+        ros = runtime.ros
+        if runtime.player is None or ros is None or ros.status().get("state") != "running":
+            raise web.HTTPServiceUnavailable(text="回放或 ROS 控制进程尚未就绪")
+        if os.environ.get("HC_CONTROL_BACKEND") == "motion":
+            raise web.HTTPConflict(text="当前 Motion 后端请使用现有的回零流程")
+        control_status = runtime.control_runtime.status()
+        if runtime._safety_reason:
+            raise web.HTTPConflict(text="安全停机仍有效，请先人工恢复控制")
+        if runtime._stopping or runtime.control_runtime.enabled and control_status["state"] != "running":
+            raise web.HTTPConflict(text="控制进程尚未就绪")
+        isolated = getattr(ros, 'isolated_control_process', False) is True
+        fence = ros.authorization_fence() if isolated else None
+
+        def request_home(output_resumed):
+            if runtime._stopping or runtime._safety_reason:
+                raise ValueError("安全停机仍有效")
+            options = {"expected_fence": fence} if isolated else {}
+            return ros.request_replay_home(output_resumed=output_resumed, **options)
+
+        try:
+            status = await asyncio.to_thread(runtime.player.return_home, request_home)
+        except (ValueError, RuntimeError) as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        return web.json_response({"accepted": True, "replay": status}, status=202)
+
     async def get_replay_status(_request: web.Request) -> web.Response:
         if runtime.player is None:
             return web.json_response({"state": "idle", "is_active": False})
@@ -2000,6 +2028,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/replay/pause", pause_replay)
     app.router.add_post("/api/replay/resume", resume_replay)
     app.router.add_post("/api/replay/stop", stop_replay)
+    app.router.add_post("/api/replay/home", replay_home)
     app.router.add_get("/api/replay/status", get_replay_status)
     app.router.add_get("/ws", websocket)
     app.router.add_post("/api/webrtc/offer", webrtc_offer)
