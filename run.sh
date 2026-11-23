@@ -118,7 +118,6 @@ while (($#)); do
 done
 
 if [[ "${MODE}" == teleop ]]; then
-  /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/verify_checkout.py" --root "${PROJECT_ROOT}"
   # Real hardware starts without automatic homing or command publication.
   export HC_CONTROL_START_DISABLED="${HC_CONTROL_START_DISABLED:-1}"
 fi

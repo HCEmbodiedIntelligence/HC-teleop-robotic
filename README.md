@@ -361,23 +361,6 @@ X1 头显位移映射：原始 VR `+Y` 控制腰部升高、`-Y` 控制降低；
 
 相机 WebRTC 仅在收到新图像后发送，不再以固定 30 FPS 重发缓存图像或占位图。视频时间戳使用图像到达中间件的单调时钟（压缩图像在解码前记录），因此表示实际接收节奏而非传感器硬件曝光时间；不直接使用可能暂停/回退的 ROS 仿真时间。编码较慢时只取最新帧，允许丢帧但不补帧；源断流时等待恢复。修改后重启中间件并让头显重新连接。
 
-## Motion 与统一机器人 API
-
-默认配置沿用 v23 与原生关节名。启用 Motion 前先构建两个子模块，并使硬件适配器切换到统一 API 的 internal 接口。完整启动、名称契约和使能规则见 [Motion 工作区](docs/MOTION.md) 与 [机器人公共 API](docs/ROBOT_PUBLIC_API.md)。
-
-```bash
-git submodule update --init -- src/humanoid_motion_interfaces src/humanoid_motion_server
-./bootstrap_colcon.sh build
-HC_CONTROL_BACKEND=motion ./run.sh sim
-# 硬件适配器已按统一 API 配置后：
-HC_CONTROL_BACKEND=motion ROS_DOMAIN_ID=14 ./run.sh teleop
-```
-
-`HC_CONTROL_BACKEND=motion` 同时决定中间件公共名称转换、遥操控制链和仿真话题；切换后端需停止旧入口再重新启动。旧配置不带统一 API 文件时继续支持 v23。双方功能清单及本次合并范围见 [分支整合说明](docs/MAIN_HUMANOID_INTEGRATION.md)。
-
-DAgger 人工接管与纠正采集已从本地工作恢复：Motion 模式下握住右 Grip 接管，正常松手交还程序，每段纠正独立保存并沿用 main 的任务和上传流程。配置及使用见 [DAgger 说明](docs/DAGGER.md)。
-
-
 ### 视频与无线链路优化
 
 视频保留默认 x264，可在 Dashboard 选择自动 NVENC 探测并在失败时回退；码率反馈通过限频重配置实际应用，H.264/RTX 在发送与头显端共同协商。`run.sh` 启动前默认生成只读 Wi-Fi 预检报告，DSCP 默认关闭，需按相同负载做 A/B 验证。已提供默认关闭的 VP8 + RED/ULPFEC，可在相机配置中显式启用；当前头显 M116 不支持 H.264 + ULPFEC，硬编与本版 FEC 使用不同模式。聚合丢包反馈不足以决定冗余策略。

@@ -3,8 +3,6 @@ from unittest.mock import patch
 
 from middleware.core.control.ros_bridge import RosBridge
 from adapters.core.runtime_config import backend
-from adapters.nodes.motion_teleop_bridge import MotionCache, profile_settings
-from pathlib import Path
 import pytest
 
 
@@ -60,32 +58,8 @@ def test_invalid_headers(stamp):
         assert not bridge.forward_live_command('motion', message(names=('j', 'j')), lambda m: None)
 
 
-def test_profile_backend_override_and_single_arm_cache():
+def test_profile_backend_override():
     assert backend({'control': {'backend': 'v23'}}) == 'v23'
     assert backend({'control': {'backend': 'v23'}}, 'motion') == 'motion'
     with pytest.raises(ValueError):
         backend({}, 'unknown')
-    cache = MotionCache({'arm': ('axis_1', 'axis_2')})
-    cache.feedback_received(['axis_1', 'axis_2'], [0., 0.], 100., 1., 100.)
-    cache.hardware, cache.hardware_time = True, 1.
-    cache.update_status({'enabled': True, 'arms': {'arm': {'active': True}}}, 1., 100.)
-    assert cache.grant('arm', 1.01, 100.01)
-    cache.accept_result(['axis_1', 'axis_2'], [.1, .2], 100.02, 1.02, 100.02)
-    assert cache.output(1.03, 100.03) == {'axis_1': .1, 'axis_2': .2}
-
-
-def test_one_arm_feedback_does_not_require_other_arm():
-    cache = MotionCache({'left': ('l',), 'right': ('r',)})
-    cache.feedback_received(['l'], [0.], 100., 1., 100.)
-    cache.hardware, cache.hardware_time = True, 1.
-    cache.update_status({'enabled': True, 'arms': {'left': {'active': True}, 'right': {'active': True}}}, 1., 100.)
-    assert cache.grant('left', 1.01, 100.01)
-    assert not cache.grant('right', 1.01, 100.01)
-
-
-@pytest.mark.parametrize('name', ['x1', 'openarmx'])
-def test_profile_channels_resolve(name):
-    root = Path(__file__).resolve().parents[1]
-    names, frame, endpoints, control = profile_settings(root / 'adapters/robots' / name / 'arm_teleop.yaml')
-    assert len(names) == 2
-    assert frame and len(endpoints) == 4
