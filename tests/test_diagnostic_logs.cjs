@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {JSDOM} = require('jsdom');
-const {mount} = require('../middleware/core/static/diagnostic_logs.js');
+const {mount, watchBadge, cleanDisplayMessage, explainEntry, collapseEntries, buildDiagnosis, sourceLabel} = require('../middleware/core/static/diagnostic_logs.js');
 
 const response = body => ({ok: true, json: async () => body});
 const entry = (id, message = 'entry ' + id, level = 'info') => ({
@@ -158,4 +158,185 @@ test('first entry request failures remain visible after resolving the initial se
     assert.equal(error.hidden, false);
     assert.match(error.textContent, /HTTP 503/);
   } finally { h.close(); }
+});
+
+test('diagnosis summary, readable labels, prefix cleanup, and duplicate folding simplify noisy logs', async () => {
+  const marvin = (id, ts) => ({
+    id, level: 'warning', source: 'hardware/upper_body', subsystem: 'hardware', kind: 'saved_log',
+    time: `2026-11-23T06:33:${String(ts).padStart(2, '0')}.000Z`,
+    message: `[hc_tj_marvin_bridge_node-1] [WARN] [17954155${ts}.119133303] [hc_tj_marvin_bridge]: Marvin SDK 上一帧仍待发送，本帧不追加，等待下一条实时目标`
+  });
+  const vrErr1 = {
+    id: 10, level: 'error', source: 'vr_gateway', subsystem: 'middleware', kind: 'vr_input_fault',
+    time: '2026-11-23T06:32:03.000Z', message: 'no VR pose data for 612 ms'
+  };
+  const vrErr2 = {
+    id: 12, level: 'error', source: 'vr_gateway', subsystem: 'middleware', kind: 'vr_input_fault',
+    time: '2026-11-23T06:32:05.000Z', message: 'no VR pose data for 609 ms'
+  };
+  const teleopEcho = {
+    id: 13, level: 'error', source: 'control/teleop_controller', subsystem: 'control', kind: 'saved_log',
+    time: '2026-11-23T06:32:05.010Z', message: '[ERROR] [1795415525.010] [hc_robot_vr_teleop]: Teleop disabled by emergency stop'
+  };
+  assert.equal(sourceLabel('hardware/upper_body'), '双臂驱动 (Marvin)');
+  assert.equal(cleanDisplayMessage(marvin(1, 10).message).text, 'Marvin SDK 上一帧仍待发送，本帧不追加，等待下一条实时目标');
+  assert.match(explainEntry(vrErr1).title, /VR 位姿数据断流/);
+
+  const folded = collapseEntries([marvin(3, 12), marvin(2, 11), marvin(1, 10)]);
+  assert.equal(folded.length, 1);
+  assert.equal(folded[0].count, 3);
+  assert.equal(folded[0].entry.id, 3);
+
+  const diag = buildDiagnosis([
+    {id: 'i1', title: 'no VR pose data for 612 ms', root_message: 'no VR pose data for 612 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr1.time, relation: 'explicit', root_cause_id: 10, chain: [vrErr1]},
+    {id: 'i2', title: 'no VR pose data for 609 ms', root_message: 'no VR pose data for 609 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr2.time, relation: 'explicit', root_cause_id: 12, chain: [vrErr2]},
+  ], [teleopEcho, vrErr2, vrErr1], [
+    {subsystem: 'middleware', state: 'error', errors: 2, warnings: 0, recent_errors: 2, total: 10, latest_error: vrErr2, sources: {vr_gateway: {errors: 2, warnings: 0}}},
+    {subsystem: 'hardware', state: 'warning', errors: 0, warnings: 3, recent_errors: 0, total: 3, latest_error: null, latest_warning: marvin(3, 12), sources: {'hardware/upper_body': {errors: 0, warnings: 3}}},
+  ]);
+  // Two VR pose timeouts fold into 1 primary fault; downstream teleop emergency-stop echo is suppressed from primary list.
+  assert.equal(diag.length, 1);
+  assert.equal(diag[0].count, 2);
+  assert.equal(diag[0].source, 'vr_gateway');
+
+  const h = harness(params => Promise.resolve(response(page(params.get('session'), [marvin(3, 12), marvin(2, 11), marvin(1, 10)], {
+    priority_entries: [vrErr2],
+    incidents: [{id: 'i2', title: 'no VR pose data for 609 ms', root_message: 'no VR pose data for 609 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr2.time, relation: 'explicit', root_cause_id: 12, chain: [vrErr2]}],
+    summary: [
+      {subsystem: 'middleware', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 10, latest_error: vrErr2, sources: {vr_gateway: {errors: 1, warnings: 0}}},
+      {subsystem: 'hardware', state: 'warning', errors: 0, warnings: 3, recent_errors: 0, total: 3, latest_error: null, latest_warning: marvin(3, 12), sources: {'hardware/upper_body': {errors: 0, warnings: 3}}},
+    ]
+  }))));
+  try {
+    await settle();
+    // Default view requests warning-and-above to filter out noisy info chatter.
+    assert.equal(h.requests[0].searchParams.get('level'), 'warning');
+    // 3 duplicate Marvin warnings collapse into 1 list item + 1 VR error = 2 rows.
+    const rows = h.root.querySelectorAll('.diagnostic-log-list > li');
+    assert.equal(rows.length, 2);
+    assert.ok(h.root.querySelector('.diagnostic-log-repeat').textContent.includes('重复 3 次'));
+    // Top diagnosis clearly names the module and Chinese cause.
+    const diagText = h.root.querySelector('.diagnostic-log-diagnosis').textContent;
+    assert.ok(diagText.includes('VR 头显网关'));
+    assert.ok(diagText.includes('VR 位姿数据断流'));
+    // Clicking "查看相关报错" switches level to error and subsystem to middleware.
+    h.root.querySelector('.diagnostic-log-diag-jump').click();
+    await settle();
+    assert.equal(h.requests[1].searchParams.get('level'), 'error');
+    assert.equal(h.requests[1].searchParams.get('subsystem'), 'middleware');
+  } finally { h.close(); }
+});
+
+test('inference faults, boundary rejections, and velocity clipping translate cleanly', () => {
+  assert.equal(sourceLabel('inference/holobrain_hc_tj_async_client'), '推理客户端 (HoloBrain)');
+  const jump = explainEntry({
+    kind: 'inference_fault',
+    message: 'inference/protocol failure: first action jumps 0.021554 rad from feedback; limit is 0.020000 rad; joint=Joint7_R target_rad=-0.107931 feedback_rad=-0.086377'
+  });
+  assert.match(jump.title, /推理首帧动作跳变超限.*Joint7_R.*0\.022 rad > 上限 0\.020 rad/);
+
+  const rej = explainEntry({
+    kind: 'control_diagnostic',
+    message: 'control command rejected (4x): target too far from measured position: Joint3_R target=1.200000 measured=0.700000 error=0.500000 limit=0.300000'
+  });
+  assert.match(rej.title, /目标关节角偏离当前位置过大.*Joint3_R.*0\.500 rad > 上限 0\.300 rad/);
+
+  const clip = explainEntry({
+    kind: 'control_clip',
+    message: 'arm velocity clipped (3x): Joint7_R requested=-0.0660 sent=-0.0676 delta=+0.0016 rad (limit=1 rad/s)'
+  });
+  assert.match(clip.title, /中间件双臂速度限幅已截断动作.*Joint7_R.*1 rad\/s/);
+});
+
+test('clearing focus errors removes them from top diagnosis/alarm/incidents/badge while keeping them in the lower log list', async () => {
+  const err1 = {
+    id: 10, level: 'error', source: 'inference/holobrain_hc_tj_async_client', subsystem: 'inference',
+    kind: 'inference_fault', time: '2026-11-23T07:01:00.000Z',
+    message: 'inference/protocol failure: first action jumps 0.021554 rad from feedback; limit is 0.020000 rad; joint=Joint7_R'
+  };
+  const err2 = {
+    id: 12, level: 'error', source: 'vr_gateway', subsystem: 'middleware',
+    kind: 'vr_input_fault', time: '2026-11-23T07:01:05.000Z',
+    message: 'head tracking invalid'
+  };
+  const err3 = {
+    id: 25, level: 'error', source: 'inference/holobrain_hc_tj_async_client', subsystem: 'inference',
+    kind: 'inference_fault', time: '2026-11-23T07:02:00.000Z',
+    message: 'inference/protocol failure: first action jumps 0.050000 rad from feedback; limit is 0.020000 rad; joint=Joint3_R'
+  };
+  const inc1 = {id: 'inc-1', title: err1.message, root_message: err1.message, source: err1.source, subsystem: 'inference', time: err1.time, relation: 'explicit', root_cause_id: 10, chain: [err1]};
+  const inc2 = {id: 'inc-2', title: err2.message, root_message: err2.message, source: err2.source, subsystem: 'middleware', time: err2.time, relation: 'explicit', root_cause_id: 12, chain: [err2]};
+  const inc3 = {id: 'inc-3', title: err3.message, root_message: err3.message, source: err3.source, subsystem: 'inference', time: err3.time, relation: 'explicit', root_cause_id: 25, chain: [err3]};
+
+  let phase = 1;
+  const currentPayload = () => phase === 1
+    ? page('alpha', [err2, err1], {
+        priority_entries: [err2, err1],
+        incidents: [inc1, inc2],
+        summary: [
+          {subsystem: 'inference', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 1, latest_error: err1, sources: {[err1.source]: {errors: 1, warnings: 0}}},
+          {subsystem: 'middleware', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 1, latest_error: err2, sources: {vr_gateway: {errors: 1, warnings: 0}}},
+        ],
+      })
+    : page('alpha', [err3], {
+        cursor: 25,
+        priority_entries: [err3, err2, err1],
+        incidents: [inc1, inc2, inc3],
+        summary: [
+          {subsystem: 'inference', state: 'error', errors: 2, warnings: 0, recent_errors: 2, total: 2, latest_error: err3, sources: {[err1.source]: {errors: 2, warnings: 0}}},
+          {subsystem: 'middleware', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 1, latest_error: err2, sources: {vr_gateway: {errors: 1, warnings: 0}}},
+        ],
+      });
+
+  const h = harness(() => Promise.resolve(response(currentPayload())));
+  const doc = h.root.ownerDocument;
+  const navLink = doc.createElement('a');
+  doc.body.append(navLink);
+  const watcher = watchBadge(navLink, {fetch: () => Promise.resolve(response(currentPayload())), interval: 60000});
+  try {
+    await settle();
+    // Before clearing: 2 focused errors in diagnosis, 2 incidents, alarm visible, badge visible, 2 rows below.
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 2);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 2);
+    assert.equal(h.root.querySelector('.diagnostic-log-alarm').hidden, false);
+    assert.equal(watcher.badge.hidden, false);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 2);
+
+    // Single-item clear: dismiss the first diagnosis item only.
+    h.root.querySelector('.diagnostic-log-item-clear').click();
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 1);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 1);
+    // Lower log list STILL retains both entries!
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 2);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 1);
+
+    // One-click clear all: top focus, alarm, incidents, and sidebar badge all clear; lower list retains both.
+    h.root.querySelector('.diagnostic-log-diagnosis .diagnostic-log-clear-btn').click();
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 0);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 0);
+    assert.equal(h.root.querySelector('.diagnostic-log-alarm').hidden, true);
+    assert.equal(watcher.badge.hidden, true);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 2);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 2);
+
+    // When a brand-new error arrives (id=25 > 12), top focus & alarm & badge immediately light up with ONLY the new error!
+    phase = 2;
+    await h.panel.refresh();
+    await settle();
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 1);
+    assert.ok(h.root.querySelector('.diagnostic-log-diagnosis').textContent.includes('Joint3_R'));
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 1);
+    assert.equal(h.root.querySelector('.diagnostic-log-alarm').hidden, false);
+    // Lower list shows all 3 entries (1 new + 2 cleared).
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 3);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 2);
+
+    // Restore brings all 3 errors back into top focus.
+    h.root.querySelector('.diagnostic-log-restore-btn').click();
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 3);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 0);
+  } finally {
+    watcher.dispose();
+    h.close();
+  }
 });

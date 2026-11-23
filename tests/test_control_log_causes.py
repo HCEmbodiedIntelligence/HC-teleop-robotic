@@ -100,5 +100,92 @@ def test_gateway_fault_uses_original_detector_instead_of_only_stop_message(tmp_p
         root_id = snapshot['incidents'][-1]['root_cause_id']
         assert next(e for e in snapshot['entries'] if e['id'] == root_id)['kind'] == 'vr_input_fault'
         assert len(snapshot['incidents'][-1]['chain']) == 3
+        assert snapshot['incidents'][-1]['source'] == 'vr_gateway'
+        assert snapshot['incidents'][-1]['time']
+    finally:
+        logs.close()
+
+
+def test_routine_lifecycle_safety_stops_do_not_create_error_incidents(tmp_path):
+    logs = DiagnosticLogs(tmp_path, poll_interval=.02).start()
+    try:
+        for reason in (
+            'middleware startup',
+            'loading control configuration; explicit resume required',
+            'middleware stopping; explicit resume required',
+            'control configuration reload; explicit resume required',
+            'robot profile applied: hc_tj; restart teleop',
+        ):
+            assert logs.emit({'kind': 'safety_stop', 'source': 'middleware', 'payload': {'reason': reason}})
+        # Real fault safety_stop and startup failure MUST still stay error/incident.
+        assert logs.emit({'kind': 'safety_stop', 'source': 'middleware', 'payload': {'reason': 'head tracking invalid'}})
+        assert logs.log('error', 'middleware startup failed: bad config')
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            snapshot = logs.snapshot(limit=500, priority=False)
+            if len(snapshot['entries']) >= 7:
+                break
+            time.sleep(.01)
+        assert len(snapshot['incidents']) == 1
+        assert snapshot['incidents'][0]['title'] == 'head tracking invalid'
+        errors = [e for e in snapshot['entries'] if e['level'] == 'error']
+        assert {e['message'] for e in errors} == {'head tracking invalid', 'middleware startup failed: bad config'}
+    finally:
+        logs.close()
+
+
+def test_fault_ack_events_do_not_duplicate_errors(tmp_path):
+    rig = Rig()
+    rig.auto()
+    rig.input(True)
+    rig.ack()
+    rig.ack()
+    rig.ns += 301_000_000
+    rig.control.input_lost('teleop input timeout')
+    snapshot = logged_incident(tmp_path, list(rig.control.events))
+    ack_errors = [e for e in snapshot['entries'] if e['kind'] == 'ack' and e['level'] == 'error']
+    assert ack_errors == []
+    assert snapshot['incidents'][-1]['root_cause_id'] is not None
+
+
+def test_control_rejections_and_arm_velocity_clipping_surface_with_details(tmp_path):
+    logs = DiagnosticLogs(tmp_path, poll_interval=.02).start()
+    try:
+        assert logs.emit({
+            'kind': 'control_diagnostic',
+            'source': 'ros_bridge',
+            'payload': {
+                'state': 'AUTO',
+                'epoch': 25,
+                'counts': {'rejected:target too far from measured position': 4},
+                'recent_rejection': 'target too far from measured position: Joint3_R target=1.200000 measured=0.700000 error=0.500000 limit=0.300000',
+            },
+        })
+        assert logs.emit({
+            'kind': 'control_clip',
+            'source': 'ros_bridge',
+            'payload': {
+                'state': 'AUTO',
+                'epoch': 25,
+                'count': 3,
+                'total': 3,
+                'last_clip': {
+                    'joint': 'Joint7_R', 'requested': -0.066, 'sent': -0.0676,
+                    'delta_rad': 0.0016, 'limit_rad_s': 1.0, 'dt_s': 0.01,
+                },
+            },
+        })
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            snapshot = logs.snapshot(limit=500, level='warning', priority=False)
+            if len(snapshot['entries']) >= 2:
+                break
+            time.sleep(.01)
+        by_kind = {e['kind']: e for e in snapshot['entries']}
+        assert by_kind['control_diagnostic']['level'] == 'error'
+        assert 'Joint3_R' in by_kind['control_diagnostic']['message']
+        assert by_kind['control_clip']['level'] == 'warning'
+        assert 'Joint7_R' in by_kind['control_clip']['message']
+        assert '1 rad/s' in by_kind['control_clip']['message']
     finally:
         logs.close()

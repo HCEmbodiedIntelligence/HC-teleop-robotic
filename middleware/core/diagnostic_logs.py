@@ -31,10 +31,301 @@ _TEXT_SECRET = re.compile(r'''(?ix)
 _CLI_SECRET = re.compile(r'(?i)(--[\w-]*(?:token|password|secret|api-key)\s+)(\S+)')
 _AUTH = re.compile(r'(?i)(\b(?:Bearer|Basic)\s+)\S+')
 _URL_AUTH = re.compile(r'(https?://)[^\s/@:]+:[^\s/@]+@', re.I)
+_ANSI = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]')
+_EPOCH_STAMP = re.compile(r'\[(\d{9,}\.\d+)\]')
+_LOCAL_STAMP = re.compile(r'\[(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\]')
 _LEVELS = {'debug': 10, 'info': 20, 'warning': 30, 'error': 40, 'critical': 50}
 _SKIP = {'vr_pose', 'ros_message', 'camera_frame', 'camera_status', 'status'}
 _CONTROL_DIAGNOSTICS = {'manual_input_timeout', 'heartbeat_timeout', 'recording_failed'}
+_ROUTINE_SAFETY_EXACT = frozenset({
+    'middleware startup',
+    'loading control configuration; explicit resume required',
+    'middleware stopping; explicit resume required',
+    'control configuration reload; explicit resume required',
+})
+_ROUTINE_SAFETY_PREFIXES = ('robot profile applied:',)
 _RECENT_ERROR_SECONDS = 300
+_EXTERNAL_HISTORY_GRACE_SECONDS = 5.0
+_ROSOUT_LEVELS = {10: 'debug', 20: 'info', 30: 'warning', 40: 'error', 50: 'critical'}
+_LOCAL_ROSOUT_PREFIXES = (
+    'hc_teleop_middleware',
+    'hc_teleop_recording',
+    'hc_robot_vr_teleop',
+    'controller_v2_3',
+    'hc_tj_marvin_bridge',
+    'hc_x1_joint_command_smoother',
+    'omnihand_',
+    'camera_bridge_',
+    'depth_png_compressor',
+    '_ros2cli_',
+    'ros2cli',
+    'launch_ros',
+)
+_INFERENCE_NODE_HINTS = ('holobrain', 'async_client', 'policy', 'infer', 'vla', 'model', 'motion')
+_NODE_HEX_SUFFIX = re.compile(r'_[0-9a-f]{8}$')
+
+
+def _is_routine_safety_stop(message):
+    text = str(message or '').strip().lower()
+    return text in _ROUTINE_SAFETY_EXACT or text.startswith(_ROUTINE_SAFETY_PREFIXES)
+
+
+def _format_control_diagnostic(payload):
+    counts = payload.get('counts') if isinstance(payload.get('counts'), dict) else {}
+    recent = str(payload.get('recent_rejection') or '').strip()
+    total = sum(int(v) for v in counts.values() if isinstance(v, (int, float)))
+    if recent:
+        suffix = f' ({total}x)' if total > 1 else ''
+        return f'control command rejected{suffix}: {recent}'
+    if counts:
+        summary = ', '.join(f'{k}={v}' for k, v in list(counts.items())[:6])
+        return f'control command rejected: {summary}'
+    return 'control command rejected'
+
+
+def _format_control_clip(payload):
+    count = int(payload.get('count') or 1)
+    clip = payload.get('last_clip') if isinstance(payload.get('last_clip'), dict) else {}
+    joint = clip.get('joint')
+    if joint:
+        req = clip.get('requested')
+        sent = clip.get('sent')
+        delta = clip.get('delta_rad')
+        limit = clip.get('limit_rad_s')
+        if all(isinstance(v, (int, float)) for v in (req, sent, delta, limit)):
+            return (f'arm velocity clipped ({count}x): {joint} requested={req:.4f} '
+                    f'sent={sent:.4f} delta={delta:+.4f} rad (limit={limit:g} rad/s)')
+        return f'arm velocity clipped ({count}x): {joint}'
+    return f'arm velocity clipped ({count}x)'
+
+
+class RosoutLogFilter:
+    """Filter remote ROS 2 /rosout messages (e.g. inference clients) into diagnostic events.
+
+    Ignores local middleware/control/hardware nodes already tailed from disk,
+    extracts latched faults and clipping from `[motion-diag]` INFO heartbeats on
+    state transitions, and rate-limits burst duplicates so a failing remote node
+    cannot saturate the bounded diagnostic queue.
+    """
+
+    def __init__(self, *, dedup_window_s=2.0, clip_window_s=5.0, clock=time.monotonic):
+        self._dedup_window_s = float(dedup_window_s)
+        self._clip_window_s = float(clip_window_s)
+        self._clock = clock
+        self._motion_state = {}
+        self._recent = {}
+
+    @staticmethod
+    def _clean_node(name):
+        node = str(name or '').strip().lstrip('/')
+        return node
+
+    @classmethod
+    def _is_local_node(cls, node):
+        lower = node.lower()
+        return not lower or any(lower.startswith(prefix) for prefix in _LOCAL_ROSOUT_PREFIXES)
+
+    @staticmethod
+    def _classify_node(node, file_path='', is_motion_diag=False):
+        lower = (node + ' ' + str(file_path or '')).lower()
+        subsystem = 'inference' if (is_motion_diag or any(h in lower for h in _INFERENCE_NODE_HINTS)) else 'ros'
+        short = _NODE_HEX_SUFFIX.sub('', node) or node
+        return subsystem, f'{subsystem}/{short}'
+
+    def _allow_dedup(self, key, now):
+        last = self._recent.get(key)
+        if last is not None and now - last < self._dedup_window_s:
+            return False
+        if len(self._recent) >= 256:
+            cutoff = now - self._dedup_window_s
+            self._recent = {k: ts for k, ts in self._recent.items() if ts >= cutoff}
+            if len(self._recent) >= 256:
+                self._recent.clear()
+        self._recent[key] = now
+        return True
+
+    def process(self, name, level, msg, *, stamp_sec=None, stamp_nanosec=0, file='', function='', line=0):
+        node = self._clean_node(name)
+        if self._is_local_node(node):
+            return []
+        text = str(msg or '').strip()
+        if not text:
+            return []
+        now = self._clock()
+        timestamp = (float(stamp_sec) + float(stamp_nanosec or 0) * 1e-9
+                     if stamp_sec is not None and float(stamp_sec) > 0 else time.time())
+        if text.startswith('[motion-diag] '):
+            return self._process_motion_diag(node, text[len('[motion-diag] '):], timestamp, now)
+        try:
+            numeric_level = int(level)
+        except (TypeError, ValueError):
+            numeric_level = 20
+        if numeric_level < 30:
+            return []
+        severity = _ROSOUT_LEVELS.get(numeric_level, 'error' if numeric_level >= 40 else 'warning')
+        subsystem, source = self._classify_node(node, file_path=file)
+        if not self._allow_dedup((source, severity, text[:240]), now):
+            return []
+        return [{
+            'kind': 'rosout',
+            'source': source,
+            'subsystem': subsystem,
+            'timestamp': timestamp,
+            'payload': {
+                'level': severity,
+                'message': text,
+                'node': node,
+                'file': str(file or ''),
+                'function': str(function or ''),
+                'line': int(line or 0),
+            },
+        }]
+
+    def _process_motion_diag(self, node, raw_json, timestamp, now):
+        try:
+            data = json.loads(raw_json)
+        except ValueError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        subsystem, source = self._classify_node(node, is_motion_diag=True)
+        if len(self._motion_state) >= 64 and node not in self._motion_state:
+            self._motion_state.clear()
+        state = self._motion_state.setdefault(node, {
+            'fault': '', 'feedback_pause': '', 'gate_reason': '',
+            'last_clip_emit': -1e9, 'timing_rejections': 0, 'last_timing_emit': -1e9,
+        })
+        events = []
+        fault = str(data.get('fault') or '').strip()
+        if fault:
+            if fault != state['fault']:
+                state['fault'] = fault
+                self._recent[(source, 'error', fault[:240])] = now
+                events.append({
+                    'kind': 'inference_fault',
+                    'source': source,
+                    'subsystem': subsystem,
+                    'timestamp': timestamp,
+                    'payload': {
+                        'level': 'error',
+                        'message': fault,
+                        'node': node,
+                        'inference_wait': data.get('inference_wait'),
+                        'control_wait': data.get('control_wait'),
+                        'request_ms': data.get('request_ms'),
+                        'max_clip_rad': data.get('max_clip_rad'),
+                        'tracking_error_max_rad': data.get('tracking_error_max_rad'),
+                        'feedback_timing': data.get('feedback_timing'),
+                        'ownership': data.get('ownership'),
+                    },
+                })
+        elif state['fault']:
+            previous = state['fault']
+            state['fault'] = ''
+            events.append({
+                'kind': 'inference_recovered',
+                'source': source,
+                'subsystem': subsystem,
+                'timestamp': timestamp,
+                'payload': {'level': 'info', 'message': 'inference fault cleared',
+                            'node': node, 'previous_fault': previous},
+            })
+
+        pause = str(data.get('feedback_pause') or '').strip()
+        if pause and pause != state['feedback_pause']:
+            state['feedback_pause'] = pause
+            events.append({
+                'kind': 'inference_pause',
+                'source': source,
+                'subsystem': subsystem,
+                'timestamp': timestamp,
+                'payload': {'level': 'warning', 'message': f'inference feedback pause: {pause}',
+                            'node': node, 'feedback_timing': data.get('feedback_timing')},
+            })
+        elif not pause and state['feedback_pause']:
+            state['feedback_pause'] = ''
+
+        try:
+            max_clip = float(data.get('max_clip_rad') or 0.0)
+        except (TypeError, ValueError):
+            max_clip = 0.0
+        if max_clip > 1e-4 and now - state['last_clip_emit'] >= self._clip_window_s:
+            state['last_clip_emit'] = now
+            events.append({
+                'kind': 'inference_clip',
+                'source': source,
+                'subsystem': subsystem,
+                'timestamp': timestamp,
+                'payload': {
+                    'level': 'warning',
+                    'message': f'inference action clipped: max_clip_rad={max_clip:.4f} rad',
+                    'node': node,
+                    'max_clip_rad': max_clip,
+                    'tracking_error_max_rad': data.get('tracking_error_max_rad'),
+                    'request_ms': data.get('request_ms'),
+                },
+            })
+
+        try:
+            timing_rej = int(data.get('ownership_timing_rejections') or 0)
+        except (TypeError, ValueError):
+            timing_rej = 0
+        if timing_rej > state['timing_rejections'] and now - state['last_timing_emit'] >= self._clip_window_s:
+            delta = timing_rej - state['timing_rejections']
+            state['timing_rejections'] = timing_rej
+            state['last_timing_emit'] = now
+            events.append({
+                'kind': 'inference_timing_rejection',
+                'source': source,
+                'subsystem': subsystem,
+                'timestamp': timestamp,
+                'payload': {
+                    'level': 'warning',
+                    'message': f'inference ownership timing rejected (+{delta}, total={timing_rej})',
+                    'node': node,
+                    'ownership_timing': data.get('ownership_timing'),
+                },
+            })
+        elif timing_rej < state['timing_rejections']:
+            state['timing_rejections'] = timing_rej
+
+        ownership = data.get('ownership') if isinstance(data.get('ownership'), dict) else {}
+        gate_reason = str(data.get('gate_reason') or '').strip()
+        if (not fault and data.get('allowed') is False and gate_reason
+                and ownership.get('state') == 'AUTO'):
+            if gate_reason != state['gate_reason']:
+                state['gate_reason'] = gate_reason
+                events.append({
+                    'kind': 'inference_gate_blocked',
+                    'source': source,
+                    'subsystem': subsystem,
+                    'timestamp': timestamp,
+                    'payload': {'level': 'warning', 'message': f'inference output blocked in AUTO: {gate_reason}',
+                                'node': node, 'ownership': ownership},
+                })
+        elif state['gate_reason'] and (data.get('allowed') is not False or not gate_reason):
+            state['gate_reason'] = ''
+        return events
+
+
+def _extract_log_epoch(text):
+    match = _EPOCH_STAMP.search(text)
+    if match:
+        try:
+            stamp = float(match[1])
+            if stamp > 1e12:
+                stamp /= 1e9
+            if 0 < stamp < 32503680000:
+                return stamp
+        except (TypeError, ValueError, OverflowError):
+            pass
+    local = _LOCAL_STAMP.search(text)
+    if local:
+        try:
+            return datetime.fromisoformat(f'{local[1]}T{local[2]}').timestamp()
+        except ValueError:
+            pass
+    return None
 
 
 def _subsystem_source(file, label=None):
@@ -52,7 +343,7 @@ def _entry_epoch(entry):
 
 
 def _text(value, limit=16384):
-    text = str(value)[:limit]
+    text = _ANSI.sub('', str(value))[:limit]
     text = _TEXT_SECRET.sub(lambda m: m.group('prefix') + '[REDACTED]', text)
     text = _CLI_SECRET.sub(r'\1[REDACTED]', text)
     text = _AUTH.sub(r'\1[REDACTED]', text)
@@ -141,6 +432,7 @@ class DiagnosticLogs:
         self._tails = {}
         self._tail_paths = []
         self._next_catalog = 0.
+        self._started_at = time.time()
 
     @staticmethod
     def _session_id(path):
@@ -329,9 +621,20 @@ class DiagnosticLogs:
         level = {'warn': 'warning', 'fatal': 'critical'}.get(level, level)
         if level not in _LEVELS:
             level = 'info'
-        if kind in {'safety_stop', 'vr_input_fault'} or event.get('state') in {'FAULT', 'ESTOP'} or kind in _CONTROL_DIAGNOSTICS:
-            level = 'error'
         message = payload.get('message') or payload.get('reason') or kind
+        if kind == 'control_diagnostic':
+            level = 'error'
+            message = _format_control_diagnostic(payload)
+        elif kind == 'control_clip':
+            level = 'warning'
+            message = _format_control_clip(payload)
+        is_routine_stop = kind == 'safety_stop' and _is_routine_safety_stop(message)
+        is_fault_state = event.get('state') in {'FAULT', 'ESTOP'} and kind != 'ack'
+        if (kind in {'vr_input_fault', 'inference_fault'}
+                or (kind == 'safety_stop' and not is_routine_stop)
+                or is_fault_state
+                or kind in _CONTROL_DIAGNOSTICS):
+            level = 'error'
         if kind == 'manual_input_timeout' and 'input_gap_ms' in payload:
             message = (f"{payload.get('reason', 'teleop input timeout')}: "
                        f"{payload['input_gap_ms']} ms > {payload.get('limit_ms', '?')} ms")
@@ -346,9 +649,11 @@ class DiagnosticLogs:
         event_key = event.get('event_id') or wrapper.get('event_id')
         if control and 'sequence' in event:
             event_key = 'control:' + ':'.join(map(str, owner[:2])) + ':' + str(event['sequence'])
+        raw_subsystem = wrapper.get('subsystem') or payload.get('subsystem')
+        subsystem = _text(raw_subsystem, 64) if raw_subsystem else 'middleware'
         return {'time': _stamp(event.get('stamp_ns', wrapper.get('timestamp', time.time()))),
                 'level': level, 'source': _text(wrapper.get('source', 'middleware'), 128),
-                'subsystem': 'middleware',
+                'subsystem': subsystem,
                 'message': _text(message), 'kind': kind,
                 'details': _clean(payload), 'file': None, 'line': None,
                 'event_key': _text(event_key, 256) if event_key else None,
@@ -372,9 +677,9 @@ class DiagnosticLogs:
         level = {'warn': 'warning', 'fatal': 'critical'}.get(level, level)
         if 'Traceback (most recent call last)' in text:
             level = 'error'
-        timestamp = re.search(r'\[(\d{9,}\.\d+)\]', text)
+        timestamp = _extract_log_epoch(text)
         subsystem, source = _subsystem_source(file, label)
-        entry = {'time': _stamp(timestamp[1] if timestamp else time.time()), 'level': level,
+        entry = {'time': _stamp(timestamp if timestamp is not None else time.time()), 'level': level,
                  'source': source, 'subsystem': subsystem, 'message': _text(text),
                  'kind': 'control_rejection' if '[control-diag]' in text else 'saved_log',
                  'details': {}, 'file': file, 'line': line, 'event_key': raw_key,
@@ -436,10 +741,17 @@ class DiagnosticLogs:
                     stat = os.fstat(stream.fileno())
                     state = self._tails.get(path)
                     if state is None or state['inode'] != stat.st_ino or stat.st_size < state['offset']:
-                        state = {'inode': stat.st_ino, 'offset': max(0, stat.st_size - self.max_bytes),
+                        if (state is None and label
+                                and stat.st_mtime < self._started_at - _EXTERNAL_HISTORY_GRACE_SECONDS):
+                            # Long-lived external stacks (e.g. HC_X1) stay up across
+                            # middleware restarts; don't backfill dormant historical logs.
+                            start_offset = stat.st_size
+                        else:
+                            start_offset = max(0, stat.st_size - self.max_bytes)
+                        state = {'inode': stat.st_ino, 'offset': start_offset,
                                  'line': 0, 'partial': b'', 'pending': [], 'pending_line': 1}
                         self._tails[path] = state
-                        if state['offset']:
+                        if state['offset'] and state['offset'] < stat.st_size:
                             stream.seek(state['offset'])
                             skipped = stream.readline(65536)
                             state['offset'] += len(skipped)
@@ -471,6 +783,10 @@ class DiagnosticLogs:
     def _flush_raw(self, path, state, root=None, label=None):
         text = '\n'.join(state['pending'])
         state['pending'] = []
+        if label:
+            line_epoch = _extract_log_epoch(text)
+            if line_epoch is not None and line_epoch < self._started_at - _EXTERNAL_HISTORY_GRACE_SECONDS:
+                return
         relative = str(path.relative_to(root or self.current_root))
         shown = f'{label}/{relative}' if label else relative
         key = 'raw:' + hashlib.sha256(f"{shown}:{state['inode']}:{state['pending_line']}:{text}".encode()).hexdigest()
@@ -552,8 +868,19 @@ class DiagnosticLogs:
                 if parent is None:
                     break
                 root = parent
-            is_fault = entry['kind'] == 'safety_stop' or (
-                entry['kind'] == 'revoked' and entry.get('details', {}).get('state') in {'FAULT', 'ESTOP'})
+            is_routine_stop = entry['kind'] == 'safety_stop' and _is_routine_safety_stop(entry.get('message'))
+            if is_routine_stop and entry.get('level') == 'error':
+                entry['level'] = 'info'
+            elif (entry['kind'] == 'ack' and entry.get('level') == 'error'
+                  and entry.get('details', {}).get('state') in {'FAULT', 'ESTOP'}):
+                entry['level'] = 'info'
+            elif entry['kind'] == 'control_diagnostic':
+                entry['level'] = 'error'
+                if entry.get('message') == 'control_diagnostic' and isinstance(entry.get('details'), dict):
+                    entry['message'] = _text(_format_control_diagnostic(entry['details']))
+            is_fault = ((entry['kind'] == 'safety_stop' and not is_routine_stop)
+                        or entry['kind'] == 'inference_fault'
+                        or (entry['kind'] == 'revoked' and entry.get('details', {}).get('state') in {'FAULT', 'ESTOP'}))
             # Explicit event identity wins, even when its parent has fallen
             # outside retention. Only legacy records without a cause pointer
             # may use the narrowly scoped same-owner typed diagnostic fallback.
@@ -562,6 +889,8 @@ class DiagnosticLogs:
                 if evidence and evidence.get('details', {}).get('reason') == entry.get('details', {}).get('reason'):
                     root = evidence
                     entry['cause_id'] = evidence['id'] if evidence['id'] != entry['id'] else None
+            if entry['kind'] == 'inference_fault' and root is None:
+                root = entry
             if root:
                 entry['root_cause_id'] = root['id']
             if is_fault:
@@ -571,6 +900,9 @@ class DiagnosticLogs:
                 chain_ids = list(dict.fromkeys([*(seen or []), *((root['id'],) if root else ()), entry['id']]))
                 chain = [dict(by_id[i]) for i in sorted(chain_ids) if i in by_id]
                 incidents[incident_id] = {'id': incident_id, 'title': entry['message'], 'level': entry['level'],
+                    'time': entry['time'],
+                    'source': root['source'] if root else entry['source'],
+                    'subsystem': (root.get('subsystem') if root else entry.get('subsystem')) or 'middleware',
                     'root_cause_id': root['id'] if root else None,
                     'root_message': root['message'] if root else '底层原因未确认；仅记录到停止结果',
                     'chain': chain, 'relation': 'explicit' if root else 'unknown'}
@@ -585,7 +917,7 @@ class DiagnosticLogs:
         for entry in entries:
             name = entry.get('subsystem') or 'middleware'
             group = groups.setdefault(name, {'subsystem': name, 'errors': 0, 'warnings': 0, 'recent_errors': 0,
-                                             'total': 0, 'sources': {}, 'latest_error': None})
+                                             'total': 0, 'sources': {}, 'latest_error': None, 'latest_warning': None})
             group['total'] += 1
             rank = _LEVELS.get(entry['level'], 20)
             group['errors'] += rank >= _LEVELS['error']
@@ -597,6 +929,10 @@ class DiagnosticLogs:
             if rank >= _LEVELS['error'] and (group['latest_error'] is None or entry['id'] > group['latest_error']['id']):
                 group['latest_error'] = {key: entry.get(key) for key in ('id', 'time', 'source', 'message', 'kind')}
                 group['latest_error']['message'] = _text(entry['message'], 600)
+            elif (_LEVELS['warning'] <= rank < _LEVELS['error']
+                  and (group['latest_warning'] is None or entry['id'] > group['latest_warning']['id'])):
+                group['latest_warning'] = {key: entry.get(key) for key in ('id', 'time', 'source', 'message', 'kind')}
+                group['latest_warning']['message'] = _text(entry['message'], 600)
         for group in groups.values():
             latest = group['latest_error']
             group['state'] = ('error' if latest and now - _entry_epoch(latest) <= _RECENT_ERROR_SECONDS

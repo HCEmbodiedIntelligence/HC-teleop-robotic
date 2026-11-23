@@ -1,58 +1,134 @@
 .diagnostic-logs { min-width: 0; }
 .diagnostic-log-heading { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; }
-.diagnostic-log-heading p { font-size:13px; margin:7px 0 16px; line-height:1.6; }
+.diagnostic-log-heading p { font-size:13px; margin:7px 0 16px; line-height:1.6; color:#595959; }
 .diagnostic-log-download { white-space:nowrap; color:#1677ff; padding:7px 0; font-size:13px; }
 .diagnostic-log-download[aria-disabled=true] { color:#8c8c8c; pointer-events:none; }
+
+/* Active 5-min alarm */
+.diagnostic-log-alarm { display:flex; flex-direction:column; gap:6px; padding:12px 14px; margin:0 0 14px; color:#a8071a; background:#fff1f0; border:1px solid #ffa39e; border-left:4px solid #cf1322; border-radius:6px; font-size:13px; }
+.diagnostic-log-alarm[hidden] { display:none; }
+.diagnostic-log-alarm-head { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+.diagnostic-log-alarm-line { text-align:left; background:none; border:0; padding:0; color:inherit; font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; cursor:pointer; white-space:pre-wrap; overflow-wrap:anywhere; }
+.diagnostic-log-alarm-line:hover { text-decoration:underline; }
+
+/* Top fault diagnosis box */
+.diagnostic-log-diagnosis { margin:0 0 14px; padding:14px 16px; border-radius:6px; border:1px solid #ffccc7; border-left:4px solid #cf1322; background:#fffafa; }
+.diagnostic-log-diagnosis[hidden] { display:none; }
+.diagnostic-log-diagnosis-ok { border-color:#b7eb8f; border-left-color:#52c41a; background:#f6ffed; padding:11px 14px; }
+.diagnostic-log-diag-ok-row { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+.diagnostic-log-diag-ok-head { font-size:13px; color:#237804; font-weight:600; }
+.diagnostic-log-diag-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:14px; color:#a8071a; }
+.diagnostic-log-diag-head-left { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+.diagnostic-log-diag-actions, .diagnostic-log-diag-item-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.diagnostic-log-clear-btn { padding:4px 11px; font-size:12px; font-weight:600; color:#cf1322; background:#fff; border:1px solid #ffa39e; border-radius:4px; cursor:pointer; white-space:nowrap; }
+.diagnostic-log-clear-btn:hover { background:#fff1f0; border-color:#cf1322; }
+.diagnostic-log-restore-btn { padding:4px 10px; font-size:12px; color:#595959; background:#fff; border:1px solid #d9d9d9; border-radius:4px; cursor:pointer; white-space:nowrap; }
+.diagnostic-log-restore-btn:hover { border-color:#1677ff; color:#1677ff; }
+.diagnostic-log-item-clear { padding:4px 9px; font-size:12px; color:#8c8c8c; background:#fff; border:1px solid #d9d9d9; border-radius:4px; cursor:pointer; white-space:nowrap; }
+.diagnostic-log-item-clear:hover { color:#cf1322; border-color:#ffa39e; background:#fff2f0; }
+.diagnostic-log-diag-sub { font-size:12px; color:#8c8c8c; font-weight:400; }
+.diagnostic-log-diag-list { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:8px; }
+.diagnostic-log-diag-item { padding:10px 12px; border:1px solid #ffe7e6; border-radius:5px; background:#fff; }
+.diagnostic-log-diag-item.is-recent { border-color:#ffa39e; background:#fff2f0; }
+.diagnostic-log-diag-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.diagnostic-log-diag-badge { font-size:11px; font-weight:600; padding:2px 7px; border-radius:3px; background:#fff7e6; color:#ad6800; border:1px solid #ffd591; }
+.diagnostic-log-diag-item.is-recent .diagnostic-log-diag-badge { background:#cf1322; color:#fff; border-color:#cf1322; }
+.diagnostic-log-diag-module { font-size:12px; font-weight:600; padding:2px 8px; border-radius:3px; background:#e6f4ff; color:#0958d9; }
+.diagnostic-log-diag-title { font-size:13px; color:#262626; }
+.diagnostic-log-diag-meta { margin-left:auto; font-size:11px; color:#8c8c8c; white-space:nowrap; }
+.diagnostic-log-diag-body { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:6px; flex-wrap:wrap; }
+.diagnostic-log-diag-hint { margin:0; font-size:12px; line-height:1.55; color:#595959; flex:1 1 260px; }
+.diagnostic-log-diag-jump { padding:4px 10px; font-size:12px; color:#1677ff; border:1px solid #91caff; background:#fff; border-radius:4px; cursor:pointer; white-space:nowrap; }
+.diagnostic-log-diag-jump:hover { background:#e6f4ff; }
+
+/* Subsystem overview cards */
+.diagnostic-log-overview { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:10px; margin:0 0 14px; }
+.diagnostic-log-card { text-align:left; display:flex; flex-direction:column; gap:7px; padding:12px 14px; border:1px solid #e8e8e8; border-left:4px solid #52c41a; border-radius:6px; background:#fff; cursor:pointer; color:#262626; min-width:0; }
+.diagnostic-log-card[aria-pressed=true] { outline:2px solid #1677ff; outline-offset:1px; }
+.diagnostic-log-card-error { border-left-color:#cf1322; background:#fff2f0; }
+.diagnostic-log-card-history-error { border-left-color:#fa541c; background:#fff7e6; }
+.diagnostic-log-card-warning { border-left-color:#d48806; background:#fffdf1; }
+.diagnostic-log-card-cleared { border-left-color:#8c8c8c; background:#fafafa; }
+.diagnostic-log-card-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; font-size:13px; }
+.diagnostic-log-card-state { font-size:11px; color:#389e0d; white-space:nowrap; }
+.diagnostic-log-card-error .diagnostic-log-card-state { color:#a8071a; font-weight:600; }
+.diagnostic-log-card-history-error .diagnostic-log-card-state { color:#d4380d; font-weight:600; }
+.diagnostic-log-card-warning .diagnostic-log-card-state { color:#ad6800; }
+.diagnostic-log-card-cleared .diagnostic-log-card-state { color:#8c8c8c; }
+.diagnostic-log-card-counts { display:flex; gap:10px; font-size:12px; color:#595959; }
+.diagnostic-log-count-error { color:#a8071a; font-weight:600; }
+.diagnostic-log-count-cleared { color:#8c8c8c; }
+.diagnostic-log-count-warning { color:#ad6800; }
+.diagnostic-log-card-sources { display:flex; gap:5px; flex-wrap:wrap; }
+.diagnostic-log-card-chip { font-size:11px; padding:1px 6px; border-radius:3px; background:#f5f5f5; border:1px solid #e8e8e8; color:#595959; }
+.diagnostic-log-card-chip.has-error { background:#fff1f0; border-color:#ffa39e; color:#a8071a; }
+.diagnostic-log-card-latest { margin:0; font-size:12px; line-height:1.45; color:#595959; overflow-wrap:anywhere; max-height:3em; overflow:hidden; }
+
+/* View tabs */
+.diagnostic-log-tabs { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 10px; }
+.diagnostic-log-tab { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border:1px solid #d9d9d9; border-radius:5px; background:#fff; color:#595959; font-size:13px; cursor:pointer; }
+.diagnostic-log-tab:hover { border-color:#1677ff; color:#1677ff; }
+.diagnostic-log-tab.active { background:#1677ff; border-color:#1677ff; color:#fff; font-weight:600; }
+.diagnostic-log-tab-count { font-size:11px; padding:0 6px; border-radius:9px; background:rgba(0,0,0,.06); color:inherit; line-height:18px; }
+.diagnostic-log-tab.active .diagnostic-log-tab-count { background:rgba(255,255,255,.24); }
+
+/* Toolbar */
 .diagnostic-log-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; padding:12px; background:#fafafa; border:1px solid #e8e8e8; border-radius:6px; }
 .diagnostic-log-field { display:flex; flex-direction:column; gap:6px; font-size:12px; color:#595959; min-width:0; }
 .diagnostic-log-field select, .diagnostic-log-field input[type=search] { min-height:34px; border:1px solid #d9d9d9; border-radius:4px; background:#fff; color:#262626; padding:6px 9px; max-width:100%; }
 .diagnostic-log-field input[type=checkbox] { width:18px; height:18px; margin:8px 0; accent-color:#1677ff; }
-.diagnostic-log-field input[type=search] { width:230px; }
-.diagnostic-log-status { color:#737373; font-size:12px; margin:12px 0; }
+.diagnostic-log-field input[type=search] { width:210px; }
+.diagnostic-log-status { color:#737373; font-size:12px; margin:10px 0; }
 .diagnostic-log-error,.diagnostic-log-warning { padding:11px 13px; margin:10px 0; border-radius:5px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
 .diagnostic-log-error { color:#a8071a; background:#fff1f0; border:1px solid #ffa39e; }
 .diagnostic-log-warning { color:#874d00; background:#fffbe6; border:1px solid #ffe58f; }
 .diagnostic-log-error[hidden],.diagnostic-log-warning[hidden],.diagnostic-log-empty[hidden],.diagnostic-log-more[hidden] { display:none; }
-.diagnostic-log-list,.diagnostic-log-chain { list-style:none; padding:0; margin:0; }
-.diagnostic-log-list { max-height:620px; overflow:auto; overscroll-behavior:contain; border:1px solid #e8e8e8; border-radius:6px; }
-.diagnostic-log-entry { padding:12px 14px; border-bottom:1px solid #eee; border-left:4px solid #d9d9d9; background:#fff; }
-.diagnostic-log-entry:last-child { border-bottom:0; }
-.diagnostic-log-level-error,.diagnostic-log-level-critical,.diagnostic-log-level-fatal { border-left-color:#cf1322; background:#fff2f0; }
-.diagnostic-log-level-warning,.diagnostic-log-level-warn { border-left-color:#d48806; background:#fffdf1; }
-.diagnostic-log-meta { display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:11px; color:#666; }
-.diagnostic-log-level { font-weight:700; }
-.diagnostic-log-level-error .diagnostic-log-level,.diagnostic-log-level-critical .diagnostic-log-level,.diagnostic-log-level-fatal .diagnostic-log-level { color:#a8071a; }
-.diagnostic-log-level-warning .diagnostic-log-level,.diagnostic-log-level-warn .diagnostic-log-level { color:#ad6800; }
-.diagnostic-log-message,.diagnostic-log-details { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0 0; font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; color:#262626; }
-.diagnostic-log-details { max-height:260px; overflow:auto; padding:9px; background:#fafafa; border:1px solid #eee; }
-.diagnostic-log-entry details { margin-top:8px; font-size:12px; }
-.diagnostic-log-file { color:#8c8c8c; font:11px/1.5 monospace; overflow-wrap:anywhere; margin-top:6px; }
-.diagnostic-log-incident { border:1px solid #ffa39e; border-left:4px solid #cf1322; border-radius:6px; padding:12px 14px; margin-bottom:12px; background:#fffaf9; }
-.diagnostic-log-incident summary { cursor:pointer; font-size:13px; line-height:1.6; }
-.diagnostic-log-relation { display:inline-block; margin-left:12px; font-size:11px; color:#8c4b00; }
-.diagnostic-log-explanation,.diagnostic-log-first,.diagnostic-log-cause { font-size:12px; line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* Incidents */
+.diagnostic-log-section-title { font-size:13px; font-weight:600; color:#595959; margin:4px 0 8px; }
+.diagnostic-log-incidents { margin-bottom:14px; }
+.diagnostic-log-incident { border:1px solid #ffa39e; border-left:4px solid #cf1322; border-radius:6px; padding:11px 14px; margin-bottom:10px; background:#fffaf9; }
+.diagnostic-log-incident summary { cursor:pointer; font-size:13px; line-height:1.6; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.diagnostic-log-incident-time { font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; color:#8c8c8c; }
+.diagnostic-log-relation { margin-left:auto; font-size:11px; padding:1px 7px; border-radius:3px; background:#fff7e6; color:#8c4b00; border:1px solid #ffe58f; }
+.diagnostic-log-explanation,.diagnostic-log-first,.diagnostic-log-cause { font-size:12px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0 0; }
 .diagnostic-log-cause { color:#a8071a; font-weight:600; }
 .diagnostic-log-first { color:#595959; }
-.diagnostic-log-chain { border-left:1px solid #d9d9d9; margin:12px 0 0 4px; padding-left:10px; max-height:420px; overflow:auto; }
+.diagnostic-log-chain { border-left:2px solid #ffd8bf; margin:10px 0 0 4px; padding-left:10px; max-height:420px; overflow:auto; }
+
+/* Log list */
+.diagnostic-log-list,.diagnostic-log-chain { list-style:none; padding:0; margin:0; }
+.diagnostic-log-list { max-height:620px; overflow:auto; overscroll-behavior:contain; border:1px solid #e8e8e8; border-radius:6px; }
+.diagnostic-log-entry { padding:11px 14px; border-bottom:1px solid #eee; border-left:4px solid #d9d9d9; background:#fff; }
+.diagnostic-log-entry:last-child { border-bottom:0; }
+.diagnostic-log-level-error,.diagnostic-log-level-critical,.diagnostic-log-level-fatal { border-left-color:#cf1322; background:#fff2f0; }
+.diagnostic-log-entry-cleared { border-left-color:#d9d9d9; background:#fafafa; }
+.diagnostic-log-entry-cleared .diagnostic-log-level { background:#8c8c8c; color:#fff; }
+.diagnostic-log-cleared-tag { font-size:11px; color:#8c8c8c; background:#f0f0f0; padding:1px 6px; border-radius:3px; border:1px solid #d9d9d9; }
+.diagnostic-log-level-warning,.diagnostic-log-level-warn { border-left-color:#d48806; background:#fffdf1; }
+.diagnostic-log-meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:11px; color:#666; }
+.diagnostic-log-level { font-weight:700; padding:1px 6px; border-radius:3px; background:#f0f0f0; }
+.diagnostic-log-level-error .diagnostic-log-level,.diagnostic-log-level-critical .diagnostic-log-level,.diagnostic-log-level-fatal .diagnostic-log-level { color:#fff; background:#cf1322; }
+.diagnostic-log-level-warning .diagnostic-log-level,.diagnostic-log-level-warn .diagnostic-log-level { color:#874d00; background:#ffe58f; }
+.diagnostic-log-source { font-weight:600; color:#0958d9; background:#e6f4ff; padding:1px 7px; border-radius:3px; }
+.diagnostic-log-kind { color:#595959; background:#f5f5f5; padding:1px 6px; border-radius:3px; border:1px solid #e8e8e8; }
+.diagnostic-log-repeat { font-weight:600; color:#ad6800; background:#fff1b8; padding:1px 7px; border-radius:9px; }
+.diagnostic-log-headline { margin:7px 0 0; font-size:13px; font-weight:600; color:#262626; line-height:1.5; }
+.diagnostic-log-hint { margin:3px 0 0; font-size:12px; color:#595959; line-height:1.55; }
+.diagnostic-log-message,.diagnostic-log-details { white-space:pre-wrap; overflow-wrap:anywhere; margin:7px 0 0; font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; color:#262626; }
+.diagnostic-log-message-raw { color:#595959; font-size:11px; padding:5px 8px; background:rgba(0,0,0,.025); border-radius:4px; }
+.diagnostic-log-details { max-height:260px; overflow:auto; padding:9px; background:#fafafa; border:1px solid #eee; }
+.diagnostic-log-entry details { margin-top:7px; font-size:12px; }
+.diagnostic-log-file { color:#8c8c8c; font:11px/1.5 monospace; overflow-wrap:anywhere; margin-top:6px; }
 .diagnostic-log-more { margin-top:12px; }
-.diagnostic-log-empty { padding:16px; font-size:13px; text-align:center; }
-@media(max-width:760px) { .diagnostic-log-heading { flex-direction:column; gap:0; } .diagnostic-log-field { flex:1 1 140px; } .diagnostic-log-field input[type=search] { width:100%; } .diagnostic-log-list { max-height:470px; } }
-.diagnostic-log-alarm { display:flex; flex-direction:column; gap:6px; padding:12px 14px; margin:0 0 14px; color:#a8071a; background:#fff1f0; border:1px solid #ffa39e; border-left:4px solid #cf1322; border-radius:6px; font-size:13px; }
-.diagnostic-log-alarm[hidden] { display:none; }
-.diagnostic-log-alarm-line { text-align:left; background:none; border:0; padding:0; color:inherit; font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; cursor:pointer; white-space:pre-wrap; overflow-wrap:anywhere; }
-.diagnostic-log-alarm-line:hover { text-decoration:underline; }
-.diagnostic-log-overview { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; margin:0 0 14px; }
-.diagnostic-log-card { text-align:left; display:flex; flex-direction:column; gap:6px; padding:11px 13px; border:1px solid #e8e8e8; border-left:4px solid #52c41a; border-radius:6px; background:#fff; cursor:pointer; color:#262626; min-width:0; }
-.diagnostic-log-card[aria-pressed=true] { outline:2px solid #1677ff; outline-offset:1px; }
-.diagnostic-log-card-error { border-left-color:#cf1322; background:#fff2f0; }
-.diagnostic-log-card-warning { border-left-color:#d48806; background:#fffdf1; }
-.diagnostic-log-card-head { display:flex; justify-content:space-between; gap:8px; align-items:baseline; font-size:13px; }
-.diagnostic-log-card-state { font-size:11px; color:#389e0d; white-space:nowrap; }
-.diagnostic-log-card-error .diagnostic-log-card-state { color:#a8071a; font-weight:600; }
-.diagnostic-log-card-warning .diagnostic-log-card-state { color:#ad6800; }
-.diagnostic-log-card-counts { display:flex; gap:10px; font-size:12px; color:#595959; }
-.diagnostic-log-count-error { color:#a8071a; }
-.diagnostic-log-count-warning { color:#ad6800; }
-.diagnostic-log-card-latest { margin:0; font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; color:#595959; white-space:pre-wrap; overflow-wrap:anywhere; max-height:5.2em; overflow:hidden; }
+.diagnostic-log-empty { padding:20px; font-size:13px; text-align:center; color:#8c8c8c; }
 .diagnostic-log-badge { margin-left:auto; min-width:18px; padding:0 5px; border-radius:9px; background:#cf1322; color:#fff; font-size:11px; line-height:18px; text-align:center; font-weight:600; }
 .diagnostic-log-badge[hidden] { display:none; }
+
+@media(max-width:760px) {
+  .diagnostic-log-heading { flex-direction:column; gap:0; }
+  .diagnostic-log-field { flex:1 1 140px; }
+  .diagnostic-log-field input[type=search] { width:100%; }
+  .diagnostic-log-list { max-height:470px; }
+  .diagnostic-log-diag-meta { margin-left:0; }
+}

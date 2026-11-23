@@ -2050,6 +2050,45 @@ class RosBridge:
                 ))
                 subscription_names.append("/vrdata")
 
+            # Observe remote ROS 2 /rosout logs (e.g. inference clients running on
+            # another host) on the telemetry executor only, never on the real-time
+            # control actor, so inference faults/clipping surface in runtime logs.
+            if not self._control_actor_mode and self.config.get("rosout_diagnostics", True):
+                try:
+                    from rcl_interfaces.msg import Log as RosoutLog
+                    from .diagnostic_logs import RosoutLogFilter
+
+                    rosout_filter = RosoutLogFilter()
+
+                    def rosout_cb(message: Any) -> None:
+                        stamp = getattr(message, "stamp", None)
+                        sec = getattr(stamp, "sec", None)
+                        nsec = getattr(stamp, "nanosec", 0)
+                        for ev in rosout_filter.process(
+                            name=getattr(message, "name", ""),
+                            level=getattr(message, "level", 0),
+                            msg=getattr(message, "msg", ""),
+                            stamp_sec=sec,
+                            stamp_nanosec=nsec,
+                            file=getattr(message, "file", ""),
+                            function=getattr(message, "function", ""),
+                            line=getattr(message, "line", 0),
+                        ):
+                            self.on_event(ev, [])
+
+                    subscriptions.append(telemetry_node.create_subscription(
+                        RosoutLog, "/rosout", rosout_cb,
+                        QoSProfile(
+                            depth=50,
+                            history=HistoryPolicy.KEEP_LAST,
+                            reliability=ReliabilityPolicy.BEST_EFFORT,
+                            durability=DurabilityPolicy.VOLATILE,
+                        ),
+                        callback_group=self._telemetry_callback_group,
+                    ))
+                except Exception:
+                    pass
+
             with self._lock:
                 self._trackers = trackers
             self._set_status(state="running", subscriptions=subscription_names, error=None)
@@ -2422,6 +2461,8 @@ class RosBridge:
 
         with self._lock:
             diagnostic_previous = rejection_counts()
+            clip_previous = (self._boundary.diagnostics.get('arm_velocity_clipped', 0)
+                             if self._legacy_enabled and self._boundary else 0)
         def publish_status():
             """Snapshot authority briefly; DDS/JSON work never holds its lock.
 
@@ -2429,7 +2470,7 @@ class RosBridge:
             order; current state is coalesced at the existing 10 Hz cadence.
             This observer never advances, grants or revokes robot authority.
             """
-            nonlocal event_cursor, state_last, state_sequence, diagnostic_last, diagnostic_previous
+            nonlocal event_cursor, state_last, state_sequence, diagnostic_last, diagnostic_previous, clip_previous
             # snapshot() also takes this same RLock. Its internal timestamp
             # lookup would therefore still run under the outer publication
             # lock unless the observational clock is sampled here first.
@@ -2456,6 +2497,7 @@ class RosBridge:
                         source=self._command_source,
                         stamp_ns=wall_ns)
                 diagnostic = None
+                clip_diagnostic = None
                 if now-diagnostic_last >= 1.0:
                     counts = rejection_counts()
                     delta = counts-diagnostic_previous
@@ -2466,6 +2508,13 @@ class RosBridge:
                                               rejection_stamp_ns=self._boundary.last_rejection_ns)
                     diagnostic_previous, diagnostic_last = counts, now
                     if self._legacy_enabled and self._boundary:
+                        arm_clips = int(self._boundary.diagnostics.get('arm_velocity_clipped', 0))
+                        if arm_clips > clip_previous:
+                            clip_diagnostic = dict(
+                                state=ownership.state, epoch=ownership.epoch,
+                                count=arm_clips - clip_previous, total=arm_clips,
+                                last_clip=dict(self._boundary.last_clip))
+                            clip_previous = arm_clips
                         self._boundary.arm_publish_gap_max_ms = 0.0
             while actor_evidence:
                 evidence = actor_evidence.popleft()
@@ -2487,6 +2536,8 @@ class RosBridge:
                 self.on_event(envelope('control_diagnostic', 'ros_bridge', diagnostic), [])
                 if not self._control_actor_mode:
                     node.get_logger().error('[control-diag] '+json.dumps(diagnostic, allow_nan=False))
+            if clip_diagnostic is not None:
+                self.on_event(envelope('control_clip', 'ros_bridge', clip_diagnostic), [])
             if state is not None:
                 publish_observer('/status/control/ownership', state, state_pub)
                 state_last = now
