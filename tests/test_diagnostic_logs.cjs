@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {JSDOM} = require('jsdom');
-const {mount, watchBadge, cleanDisplayMessage, explainEntry, collapseEntries, buildDiagnosis, sourceLabel} = require('../middleware/core/static/diagnostic_logs.js');
+const {mount, watchBadge, cleanDisplayMessage, explainEntry, collapseEntries, sourceLabel} = require('../middleware/core/static/diagnostic_logs.js');
 
 const response = body => ({ok: true, json: async () => body});
 const entry = (id, message = 'entry ' + id, level = 'info') => ({
@@ -50,7 +50,7 @@ test('session switch during an old request starts the new request with automatic
     // Deliberately ignore AbortController: generation checks must still fence
     // stale evidence even if the browser resolves an already cancelled fetch.
     if (count === 1) return new Promise(resolve => { resolveOld = resolve; });
-    return Promise.resolve(response(page(params.get('session'), [entry(2, 'new session')] )));
+    return Promise.resolve(response(page(params.get('session'), [entry(2, 'new session')])));
   });
   try {
     await settle();
@@ -87,29 +87,24 @@ test('filter switch during an aborted request still fetches once with automatic 
   } finally { h.close(); }
 });
 
-test('poll preserves expanded fault chain, fields, and scroll positions but isolates sessions', async () => {
+test('poll preserves expanded fields and scroll positions but isolates sessions', async () => {
   const info = entry(1, 'timeout', 'error');
-  const incident = {id: 'fault-1', title: 'Fault', relation: 'explicit', root_message: 'timeout', chain: [info]};
-  const h = harness(params => Promise.resolve(response(page(params.get('session'), [info], {incidents: [incident]}))));
+  const h = harness(params => Promise.resolve(response(page(params.get('session'), [info]))));
   try {
     await settle();
     const list = h.root.querySelector('.diagnostic-log-list');
-    const chain = h.root.querySelector('.diagnostic-log-chain');
     const details = [...h.root.querySelectorAll('details[data-diagnostic-key]')];
-    assert.equal(details.length, 3);
+    assert.equal(details.length, 1);
     details.forEach(node => { node.open = true; });
     list.scrollTop = 123;
-    chain.scrollTop = 77;
     await h.panel.refresh();
     assert.ok([...h.root.querySelectorAll('details[data-diagnostic-key]')].every(node => node.open));
     assert.equal(list.scrollTop, 123);
-    assert.equal(h.root.querySelector('.diagnostic-log-chain').scrollTop, 77);
     assert.equal(h.requests[1].searchParams.get('after'), '1');
     h.change(h.root.querySelector('select'), 'beta');
     await settle();
     assert.ok([...h.root.querySelectorAll('details[data-diagnostic-key]')].every(node => !node.open));
     assert.equal(list.scrollTop, 0);
-    assert.equal(h.root.querySelector('.diagnostic-log-chain').scrollTop, 0);
   } finally { h.close(); }
 });
 
@@ -135,17 +130,16 @@ test('latest error preview is visible before paging without advancing the chrono
   } finally { h.close(); }
 });
 
-test('log and incident HTML stays literal text, including priority previews', async () => {
+test('log HTML stays literal text, including priority previews', async () => {
   const payload = '<img src=x onerror="globalThis.stolen=true">';
   const bad = {...entry(10, payload, 'error'), source: payload, file: payload, details: {message: payload}};
   const h = harness(() => Promise.resolve(response(page('alpha', [], {
-    priority_entries: [bad], incidents: [{id: 'x', title: payload, relation: 'unknown', root_message: payload, chain: [bad]}]
+    priority_entries: [bad],
   }))));
   try {
     await settle();
     assert.equal(h.root.querySelectorAll('img,script,[onerror]').length, 0);
     assert.ok(h.root.querySelector('.diagnostic-log-message').textContent.includes(payload));
-    assert.ok(h.root.querySelector('.diagnostic-log-incident').textContent.includes(payload));
     assert.equal(globalThis.stolen, undefined);
   } finally { h.close(); }
 });
@@ -160,7 +154,7 @@ test('first entry request failures remain visible after resolving the initial se
   } finally { h.close(); }
 });
 
-test('diagnosis summary, readable labels, prefix cleanup, and duplicate folding simplify noisy logs', async () => {
+test('compact layout keeps only overview cards and lower list with pattern-based duplicate folding', async () => {
   const marvin = (id, ts) => ({
     id, level: 'warning', source: 'hardware/upper_body', subsystem: 'hardware', kind: 'saved_log',
     time: `2026-11-23T06:33:${String(ts).padStart(2, '0')}.000Z`,
@@ -172,62 +166,46 @@ test('diagnosis summary, readable labels, prefix cleanup, and duplicate folding 
   };
   const vrErr2 = {
     id: 12, level: 'error', source: 'vr_gateway', subsystem: 'middleware', kind: 'vr_input_fault',
-    time: '2026-11-23T06:32:05.000Z', message: 'no VR pose data for 609 ms'
-  };
-  const teleopEcho = {
-    id: 13, level: 'error', source: 'control/teleop_controller', subsystem: 'control', kind: 'saved_log',
-    time: '2026-11-23T06:32:05.010Z', message: '[ERROR] [1795415525.010] [hc_robot_vr_teleop]: Teleop disabled by emergency stop'
+    time: '2026-11-23T06:32:05.000Z', message: 'no VR pose data for 645 ms'
   };
   assert.equal(sourceLabel('hardware/upper_body'), '双臂驱动 (Marvin)');
   assert.equal(cleanDisplayMessage(marvin(1, 10).message).text, 'Marvin SDK 上一帧仍待发送，本帧不追加，等待下一条实时目标');
   assert.match(explainEntry(vrErr1).title, /VR 位姿数据断流/);
 
-  const folded = collapseEntries([marvin(3, 12), marvin(2, 11), marvin(1, 10)]);
-  assert.equal(folded.length, 1);
-  assert.equal(folded[0].count, 3);
-  assert.equal(folded[0].entry.id, 3);
-
-  const diag = buildDiagnosis([
-    {id: 'i1', title: 'no VR pose data for 612 ms', root_message: 'no VR pose data for 612 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr1.time, relation: 'explicit', root_cause_id: 10, chain: [vrErr1]},
-    {id: 'i2', title: 'no VR pose data for 609 ms', root_message: 'no VR pose data for 609 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr2.time, relation: 'explicit', root_cause_id: 12, chain: [vrErr2]},
-  ], [teleopEcho, vrErr2, vrErr1], [
-    {subsystem: 'middleware', state: 'error', errors: 2, warnings: 0, recent_errors: 2, total: 10, latest_error: vrErr2, sources: {vr_gateway: {errors: 2, warnings: 0}}},
-    {subsystem: 'hardware', state: 'warning', errors: 0, warnings: 3, recent_errors: 0, total: 3, latest_error: null, latest_warning: marvin(3, 12), sources: {'hardware/upper_body': {errors: 0, warnings: 3}}},
-  ]);
-  // Two VR pose timeouts fold into 1 primary fault; downstream teleop emergency-stop echo is suppressed from primary list.
-  assert.equal(diag.length, 1);
-  assert.equal(diag[0].count, 2);
-  assert.equal(diag[0].source, 'vr_gateway');
+  // Same pattern with different timeout ms collapses cleanly into 1 row.
+  const foldedVr = collapseEntries([vrErr2, vrErr1]);
+  assert.equal(foldedVr.length, 1);
+  assert.equal(foldedVr[0].count, 2);
+  assert.equal(foldedVr[0].entry.id, 12);
 
   const h = harness(params => Promise.resolve(response(page(params.get('session'), [marvin(3, 12), marvin(2, 11), marvin(1, 10)], {
-    priority_entries: [vrErr2],
-    incidents: [{id: 'i2', title: 'no VR pose data for 609 ms', root_message: 'no VR pose data for 609 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr2.time, relation: 'explicit', root_cause_id: 12, chain: [vrErr2]}],
+    priority_entries: [vrErr2, vrErr1],
+    incidents: [{id: 'i2', title: 'no VR pose data for 645 ms', root_message: 'no VR pose data for 645 ms', source: 'vr_gateway', subsystem: 'middleware', time: vrErr2.time, relation: 'explicit', root_cause_id: 12, chain: [vrErr2]}],
     summary: [
-      {subsystem: 'middleware', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 10, latest_error: vrErr2, sources: {vr_gateway: {errors: 1, warnings: 0}}},
+      {subsystem: 'middleware', state: 'error', errors: 2, warnings: 0, recent_errors: 2, total: 10, latest_error: vrErr2, sources: {vr_gateway: {errors: 2, warnings: 0}}},
       {subsystem: 'hardware', state: 'warning', errors: 0, warnings: 3, recent_errors: 0, total: 3, latest_error: null, latest_warning: marvin(3, 12), sources: {'hardware/upper_body': {errors: 0, warnings: 3}}},
     ]
   }))));
   try {
     await settle();
-    // Default view requests warning-and-above to filter out noisy info chatter.
     assert.equal(h.requests[0].searchParams.get('level'), 'warning');
-    // 3 duplicate Marvin warnings collapse into 1 list item + 1 VR error = 2 rows.
+    // No bloated alarm / diagnosis / incidents sections above the tabs.
+    assert.equal(h.root.querySelector('.diagnostic-log-alarm'), null);
+    assert.equal(h.root.querySelector('.diagnostic-log-diagnosis'), null);
+    assert.equal(h.root.querySelector('.diagnostic-log-incidents'), null);
+    // Overview cards remain visible.
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card').length, 2);
+    // 2 VR pose timeouts collapse to 1 row + 3 Marvin warnings collapse to 1 row = 2 rows.
     const rows = h.root.querySelectorAll('.diagnostic-log-list > li');
     assert.equal(rows.length, 2);
-    assert.ok(h.root.querySelector('.diagnostic-log-repeat').textContent.includes('重复 3 次'));
-    // Top diagnosis clearly names the module and Chinese cause.
-    const diagText = h.root.querySelector('.diagnostic-log-diagnosis').textContent;
-    assert.ok(diagText.includes('VR 头显网关'));
-    assert.ok(diagText.includes('VR 位姿数据断流'));
-    // Clicking "查看相关报错" switches level to error and subsystem to middleware.
-    h.root.querySelector('.diagnostic-log-diag-jump').click();
+    // Clicking a category card filters by subsystem.
+    h.root.querySelector('.diagnostic-log-card').click();
     await settle();
-    assert.equal(h.requests[1].searchParams.get('level'), 'error');
     assert.equal(h.requests[1].searchParams.get('subsystem'), 'middleware');
   } finally { h.close(); }
 });
 
-test('inference faults, boundary rejections, and velocity clipping translate cleanly', () => {
+test('inference faults, boundary rejections, grip return timeout, and velocity clipping translate cleanly', () => {
   assert.equal(sourceLabel('inference/holobrain_hc_tj_async_client'), '推理客户端 (HoloBrain)');
   const jump = explainEntry({
     kind: 'inference_fault',
@@ -246,9 +224,15 @@ test('inference faults, boundary rejections, and velocity clipping translate cle
     message: 'arm velocity clipped (3x): Joint7_R requested=-0.0660 sent=-0.0676 delta=+0.0016 rad (limit=1 rad/s)'
   });
   assert.match(clip.title, /中间件双臂速度限幅已截断动作.*Joint7_R.*1 rad\/s/);
+
+  const grip = explainEntry({
+    kind: 'revoked',
+    message: 'Grip return timed out waiting for the first model arm command'
+  });
+  assert.match(grip.title, /DAgger 退回自动模式超时/);
 });
 
-test('clearing focus errors removes them from top diagnosis/alarm/incidents/badge while keeping them in the lower log list', async () => {
+test('clearing focus errors clears overview cards and sidebar badge while keeping entries in the lower list', async () => {
   const err1 = {
     id: 10, level: 'error', source: 'inference/holobrain_hc_tj_async_client', subsystem: 'inference',
     kind: 'inference_fault', time: '2026-11-23T07:01:00.000Z',
@@ -264,15 +248,11 @@ test('clearing focus errors removes them from top diagnosis/alarm/incidents/badg
     kind: 'inference_fault', time: '2026-11-23T07:02:00.000Z',
     message: 'inference/protocol failure: first action jumps 0.050000 rad from feedback; limit is 0.020000 rad; joint=Joint3_R'
   };
-  const inc1 = {id: 'inc-1', title: err1.message, root_message: err1.message, source: err1.source, subsystem: 'inference', time: err1.time, relation: 'explicit', root_cause_id: 10, chain: [err1]};
-  const inc2 = {id: 'inc-2', title: err2.message, root_message: err2.message, source: err2.source, subsystem: 'middleware', time: err2.time, relation: 'explicit', root_cause_id: 12, chain: [err2]};
-  const inc3 = {id: 'inc-3', title: err3.message, root_message: err3.message, source: err3.source, subsystem: 'inference', time: err3.time, relation: 'explicit', root_cause_id: 25, chain: [err3]};
 
   let phase = 1;
   const currentPayload = () => phase === 1
     ? page('alpha', [err2, err1], {
         priority_entries: [err2, err1],
-        incidents: [inc1, inc2],
         summary: [
           {subsystem: 'inference', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 1, latest_error: err1, sources: {[err1.source]: {errors: 1, warnings: 0}}},
           {subsystem: 'middleware', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 1, latest_error: err2, sources: {vr_gateway: {errors: 1, warnings: 0}}},
@@ -281,7 +261,6 @@ test('clearing focus errors removes them from top diagnosis/alarm/incidents/badg
     : page('alpha', [err3], {
         cursor: 25,
         priority_entries: [err3, err2, err1],
-        incidents: [inc1, inc2, inc3],
         summary: [
           {subsystem: 'inference', state: 'error', errors: 2, warnings: 0, recent_errors: 2, total: 2, latest_error: err3, sources: {[err1.source]: {errors: 2, warnings: 0}}},
           {subsystem: 'middleware', state: 'error', errors: 1, warnings: 0, recent_errors: 1, total: 1, latest_error: err2, sources: {vr_gateway: {errors: 1, warnings: 0}}},
@@ -295,45 +274,37 @@ test('clearing focus errors removes them from top diagnosis/alarm/incidents/badg
   const watcher = watchBadge(navLink, {fetch: () => Promise.resolve(response(currentPayload())), interval: 60000});
   try {
     await settle();
-    // Before clearing: 2 focused errors in diagnosis, 2 incidents, alarm visible, badge visible, 2 rows below.
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 2);
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 2);
-    assert.equal(h.root.querySelector('.diagnostic-log-alarm').hidden, false);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-error').length, 2);
     assert.equal(watcher.badge.hidden, false);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 2);
 
-    // Single-item clear: dismiss the first diagnosis item only.
-    h.root.querySelector('.diagnostic-log-item-clear').click();
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 1);
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 1);
-    // Lower log list STILL retains both entries!
+    // Per-card clear: clears ONLY the first card's error highlight without filtering; both entries stay below.
+    h.root.querySelector('.diagnostic-log-card-clear').click();
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-error').length, 1);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-cleared').length, 1);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 2);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 1);
 
-    // One-click clear all: top focus, alarm, incidents, and sidebar badge all clear; lower list retains both.
-    h.root.querySelector('.diagnostic-log-diagnosis .diagnostic-log-clear-btn').click();
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 0);
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 0);
-    assert.equal(h.root.querySelector('.diagnostic-log-alarm').hidden, true);
+    // One-click clear all: all cards clear, sidebar badge hides, both entries remain in lower list.
+    h.root.querySelector('.diagnostic-log-clear-btn').click();
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-error').length, 0);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-cleared').length, 2);
     assert.equal(watcher.badge.hidden, true);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 2);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 2);
 
-    // When a brand-new error arrives (id=25 > 12), top focus & alarm & badge immediately light up with ONLY the new error!
+    // New error (id=25 > 12) re-highlights ONLY inference card and shows un-cleared above cleared entries below.
     phase = 2;
     await h.panel.refresh();
     await settle();
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-diag-item').length, 1);
-    assert.ok(h.root.querySelector('.diagnostic-log-diagnosis').textContent.includes('Joint3_R'));
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 1);
-    assert.equal(h.root.querySelector('.diagnostic-log-alarm').hidden, false);
-    // Lower list shows all 3 entries (1 new + 2 cleared).
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-error').length, 1);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-cleared').length, 1);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-list > li').length, 3);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 2);
 
-    // Restore brings all 3 errors back into top focus.
+    // Restore re-highlights all cards and removes cleared tags below.
     h.root.querySelector('.diagnostic-log-restore-btn').click();
-    assert.equal(h.root.querySelectorAll('.diagnostic-log-incident').length, 3);
+    assert.equal(h.root.querySelectorAll('.diagnostic-log-card-error').length, 2);
     assert.equal(h.root.querySelectorAll('.diagnostic-log-entry-cleared').length, 0);
   } finally {
     watcher.dispose();

@@ -163,6 +163,14 @@
         secondary: false,
       };
     }
+    if (lower.includes('grip return timed out waiting for the first model arm command')) {
+      return {
+        groupKey: 'dagger_return_model_timeout',
+        title: 'DAgger 退回自动模式超时（未收到模型首帧机械臂指令）',
+        hint: '松开 Grip 切回自动推理后，超时仍未收到推理端下发新的机械臂指令（请检查推理端是否故障停机或未开启）。',
+        secondary: false,
+      };
+    }
     if (kind === 'heartbeat_timeout' || lower.includes('heartbeat timeout') || lower.includes('heartbeat lost')) {
       return {
         groupKey: 'heartbeat_timeout',
@@ -173,6 +181,7 @@
     }
     if (lower.includes('teleop disabled by emergency stop')) {
       return {
+        groupKey: 'teleop_disabled_estop',
         title: '遥操作已响应急停关闭',
         hint: '本条为收到急停信号后的联动关闭日志，并非遥操作节点自身崩溃；请看对应时间点的上游急停原因。',
         secondary: true,
@@ -180,6 +189,7 @@
     }
     if (lower.includes('control process exited')) {
       return {
+        groupKey: 'control_process_exited',
         title: '控制进程已退出',
         hint: '隔离控制核心或控制子进程退出，请检查控制日志并重新启动。',
         secondary: false,
@@ -187,6 +197,7 @@
     }
     if (lower.includes('control configuration is not ready')) {
       return {
+        groupKey: 'control_config_not_ready',
         title: '控制配置未就绪，已拒绝恢复输出',
         hint: '控制进程尚未进入运行状态，请等待就绪后再点击恢复。',
         secondary: false,
@@ -194,6 +205,7 @@
     }
     if (cleaned.includes('Marvin SDK 上一帧仍待发送')) {
       return {
+        groupKey: 'marvin_sdk_frame_pending',
         title: '双臂底层上一帧仍在发送，跳过本次重复帧',
         hint: '偶发告警通常不影响运行；若连续高频出现，请检查机械臂通信延迟或控制下发频率。',
         secondary: false,
@@ -201,6 +213,7 @@
     }
     if (lower.includes('joint command input stop timeout')) {
       return {
+        groupKey: 'smoother_input_stop_timeout',
         title: '平滑器目标流中断，已暂停转发（保持当前姿态）',
         hint: '常见于停机、退出遥操作或上游切源时；若在正常运动中出现，说明上游控制指令断流。',
         secondary: false,
@@ -208,6 +221,7 @@
     }
     if (lower.includes('short joint command gap')) {
       return {
+        groupKey: 'smoother_short_command_gap',
         title: '关节目标帧间隔短暂偏大',
         hint: '上游指令短暂抖动，平滑器已自动过渡。',
         secondary: false,
@@ -215,13 +229,15 @@
     }
     if (lower.includes('smoother output and targets cleared immediately')) {
       return {
+        groupKey: 'smoother_estop_cleared',
         title: '平滑器已响应急停，立即清空输出目标',
-        hint: '收到急停信号后的保护动作，并非平滑器自身故障；具体停机原因请看上方触发急停的来源。',
+        hint: '收到急停信号后的保护动作，并非平滑器自身故障；具体停机原因请看上游触发急停的来源。',
         secondary: true,
       };
     }
     if (lower.includes('retarget integrator reset to fresh joint feedback')) {
       return {
+        groupKey: 'ik_integrator_reset',
         title: '逆解积分器已按当前关节反馈重置',
         hint: '恢复控制或切换控制源后的正常保护动作，用于防止机械臂跳变。',
         secondary: false,
@@ -229,6 +245,7 @@
     }
     if (lower.includes('solver reset waiting for fresh feedback')) {
       return {
+        groupKey: 'ik_reset_waiting_feedback',
         title: '逆解重置中，等待最新关节反馈',
         hint: '重置期间短暂阻断输出，收到最新关节状态后自动恢复。',
         secondary: false,
@@ -386,30 +403,28 @@
     if (Number(group.warnings) > 0) return {cls: 'warning', label: '仅有告警'};
     return {cls: 'ok', label: '运行正常'};
   }
+
+  // Per-session focus clearing: hides acknowledged errors from top overview
+  // cards & sidebar badge while retaining every record in the lower log list.
   const CLEAR_STORAGE_PREFIX = 'hc_diag_cleared_v1:';
   const docClearedStores = new WeakMap();
   const clearListeners = new WeakMap();
 
   function emptyClearedState() {
-    return {allBeforeId: 0, allIncidentIds: [], byKey: {}, entryIds: []};
+    return {allBeforeId: 0, bySubsystem: {}};
   }
   function normalizeClearedState(raw) {
     if (!raw || typeof raw !== 'object') return emptyClearedState();
-    const byKey = {};
-    if (raw.byKey && typeof raw.byKey === 'object') {
-      Object.entries(raw.byKey).forEach(([k, v]) => {
+    const bySubsystem = {};
+    if (raw.bySubsystem && typeof raw.bySubsystem === 'object') {
+      Object.entries(raw.bySubsystem).forEach(([k, v]) => {
         const num = Number(v);
-        if (Number.isFinite(num) && num >= 0) byKey[String(k)] = num;
+        if (Number.isFinite(num) && num > 0) bySubsystem[String(k)] = num;
       });
     }
-    const entryIds = Array.isArray(raw.entryIds)
-      ? Array.from(new Set(raw.entryIds.map(Number).filter(n => Number.isFinite(n) && n > 0))).slice(-500)
-      : [];
     return {
       allBeforeId: Math.max(0, Number(raw.allBeforeId) || 0),
-      allIncidentIds: Array.isArray(raw.allIncidentIds) ? raw.allIncidentIds.map(String).slice(-100) : [],
-      byKey,
-      entryIds,
+      bySubsystem,
     };
   }
   function getDocStore(doc) {
@@ -446,6 +461,9 @@
     }
     return emptyClearedState();
   }
+  function hasAnyCleared(cleared) {
+    return Boolean(cleared && (cleared.allBeforeId > 0 || Object.keys(cleared.bySubsystem || {}).length > 0));
+  }
   function saveClearedState(doc, sessionId, state) {
     if (!sessionId) return;
     const clean = normalizeClearedState(state);
@@ -470,82 +488,36 @@
     listeners.add(fn);
     return () => listeners.delete(fn);
   }
-  function hasAnyCleared(cleared) {
-    return Boolean(cleared && (cleared.allBeforeId > 0
-      || (Array.isArray(cleared.allIncidentIds) && cleared.allIncidentIds.length > 0)
-      || (Array.isArray(cleared.entryIds) && cleared.entryIds.length > 0)
-      || Object.keys(cleared.byKey || {}).length > 0));
-  }
-  function incidentMaxId(incident) {
-    const chain = Array.isArray(incident && incident.chain) ? incident.chain : [];
-    let maxId = Number(incident && incident.root_cause_id) || 0;
-    chain.forEach(e => {
-      const id = Number(e && e.id) || 0;
-      if (id > maxId) maxId = id;
-    });
-    return maxId;
-  }
-  function focusKeyFor(source, message, kind) {
-    const cleaned = cleanDisplayMessage(message).text;
-    const explained = explainEntry({message: cleaned, kind});
-    const groupKey = (explained && explained.groupKey) || (explained ? explained.title : cleaned);
-    return String(source || '') + ':' + groupKey;
-  }
-  function incidentFocusKey(incident) {
-    const chain = Array.isArray(incident && incident.chain) ? incident.chain : [];
-    const rootEntry = chain.find(e => e.id === incident.root_cause_id) || chain[0] || null;
-    const source = (incident && incident.source) || (rootEntry && rootEntry.source) || 'middleware';
-    const rawText = (incident && incident.relation === 'explicit' && incident.root_message)
-      ? incident.root_message
-      : ((incident && incident.title) || '');
-    return focusKeyFor(source, rawText, rootEntry && rootEntry.kind);
-  }
-  function isIncidentCleared(incident, cleared) {
-    if (!incident || !cleared) return false;
-    const maxId = incidentMaxId(incident);
-    if (cleared.allBeforeId > 0) {
-      if (maxId > 0 && maxId <= cleared.allBeforeId) return true;
-      if (maxId === 0 && cleared.allIncidentIds.includes(String(incident.id || ''))) return true;
-    }
-    const key = incidentFocusKey(incident);
-    if (Object.hasOwn(cleared.byKey || {}, key)) {
-      const cutoff = Number(cleared.byKey[key]);
-      if (maxId > 0 ? maxId <= cutoff : cutoff >= 0) return true;
-    }
-    return false;
+  function clearedCutoffForSubsystem(subsystem, cleared) {
+    if (!cleared) return 0;
+    const subCutoff = subsystem && cleared.bySubsystem ? (Number(cleared.bySubsystem[subsystem]) || 0) : 0;
+    return Math.max(Number(cleared.allBeforeId) || 0, subCutoff);
   }
   function isEntryFocusCleared(entry, cleared) {
     if (!entry || !cleared) return false;
     if ((LEVELS[levelOf(entry)] || 0) < 3) return false;
     const id = Number(entry.id) || 0;
-    if (cleared.allBeforeId > 0 && id > 0 && id <= cleared.allBeforeId) return true;
-    if (id > 0 && Array.isArray(cleared.entryIds) && cleared.entryIds.includes(id)) return true;
-    const key = focusKeyFor(entry.source || entry.subsystem || '', entry.message, entry.kind);
-    if (Object.hasOwn(cleared.byKey || {}, key)) {
-      const cutoff = Number(cleared.byKey[key]);
-      if (id > 0 && id <= cutoff) return true;
-    }
-    return false;
+    if (id <= 0) return false;
+    const cutoff = clearedCutoffForSubsystem(entry.subsystem || 'middleware', cleared);
+    return cutoff > 0 && id <= cutoff;
   }
   function isGroupErrorCleared(group, cleared) {
     if (!group || !cleared || !group.latest_error) return false;
-    const latest = group.latest_error;
-    const latestId = Number(latest.id) || 0;
-    if (cleared.allBeforeId > 0 && latestId > 0 && latestId <= cleared.allBeforeId) return true;
-    if (latestId > 0 && Array.isArray(cleared.entryIds) && cleared.entryIds.includes(latestId)) return true;
-    const key = focusKeyFor(latest.source || group.subsystem || '', latest.message, latest.kind);
-    if (Object.hasOwn(cleared.byKey || {}, key)) {
-      const cutoff = Number(cleared.byKey[key]);
-      if (latestId > 0 && latestId <= cutoff) return true;
-    }
-    return false;
+    const latestId = Number(group.latest_error.id) || 0;
+    if (latestId <= 0) return false;
+    const cutoff = clearedCutoffForSubsystem(group.subsystem, cleared);
+    return cutoff > 0 && latestId <= cutoff;
   }
-  function collapseEntries(entries) {
+
+  function collapseEntries(entries, clearedState = null) {
     const groups = [];
     const byKey = new Map();
     entries.forEach(entry => {
       const cleaned = cleanDisplayMessage(entry.message).text;
-      const key = [levelOf(entry), String(entry.source || ''), String(entry.kind || ''), cleaned].join('\u0000');
+      const explained = explainEntry(entry);
+      const pattern = (explained && explained.groupKey) || cleaned;
+      const clearedFlag = isEntryFocusCleared(entry, clearedState) ? '1' : '0';
+      const key = [levelOf(entry), String(entry.source || ''), String(entry.kind || ''), pattern, clearedFlag].join('\u0000');
       const existing = byKey.get(key);
       if (existing) {
         existing.count += 1;
@@ -567,117 +539,6 @@
       }
     });
     return groups;
-  }
-  function buildDiagnosis(incidents, priorityEntries, summary) {
-    const items = [];
-    const byKey = new Map();
-    const recentLatestBySubsystem = new Map();
-    (Array.isArray(summary) ? summary : []).forEach(g => {
-      if (g && g.state === 'error') {
-        const latestMs = g.latest_error && g.latest_error.time ? Date.parse(g.latest_error.time) : NaN;
-        recentLatestBySubsystem.set(g.subsystem, latestMs);
-      }
-    });
-    function isRecent(subsystem, time) {
-      if (!recentLatestBySubsystem.has(subsystem)) return false;
-      const refMs = recentLatestBySubsystem.get(subsystem);
-      const itemMs = time ? Date.parse(time) : NaN;
-      if (Number.isFinite(refMs) && Number.isFinite(itemMs)) {
-        return refMs - itemMs <= 300000;
-      }
-      return true;
-    }
-    const coveredIncidentIds = new Set();
-
-    function addItem(key, item) {
-      const existing = byKey.get(key);
-      if (existing) {
-        existing.count += 1;
-        existing.maxId = Math.max(existing.maxId || 0, item.maxId || 0);
-        if (Array.isArray(item.coveredIds)) {
-          item.coveredIds.forEach(id => existing.coveredIds.push(id));
-        }
-        if (String(item.time || '') > String(existing.time || '')) {
-          existing.time = item.time;
-          existing.title = item.title;
-          existing.hint = item.hint;
-          existing.raw = item.raw;
-        }
-        existing.recent = existing.recent || item.recent;
-        return;
-      }
-      byKey.set(key, item);
-      items.push(item);
-    }
-
-    (Array.isArray(incidents) ? incidents.slice().reverse() : []).forEach(incident => {
-      const chain = Array.isArray(incident.chain) ? incident.chain : [];
-      const rootEntry = chain.find(e => e.id === incident.root_cause_id) || chain[0] || null;
-      const source = incident.source || (rootEntry && rootEntry.source) || 'middleware';
-      const subsystem = incident.subsystem || (rootEntry && rootEntry.subsystem) || 'middleware';
-      const time = incident.time || (chain.length ? chain[chain.length - 1].time : '');
-      const rawText = (incident.relation === 'explicit' && incident.root_message) ? incident.root_message : (incident.title || '');
-      const explained = explainEntry({message: rawText, kind: rootEntry && rootEntry.kind});
-      const title = explained ? explained.title : cleanDisplayMessage(rawText).text;
-      const groupKey = (explained && explained.groupKey) || title;
-      const focusKey = String(source || '') + ':' + groupKey;
-      const hint = explained ? explained.hint : (incident.relation === 'explicit' ? '已关联触发停机的事件链，点击可筛选该模块报错日志。' : '已记录停机结果，展开下方故障溯源查看事件上下文。');
-      const chainIds = [];
-      chain.forEach(e => {
-        if (e && e.id != null) {
-          const numId = Number(e.id);
-          coveredIncidentIds.add(numId);
-          chainIds.push(numId);
-        }
-      });
-      addItem('inc:' + focusKey, {
-        focusKey,
-        maxId: incidentMaxId(incident),
-        coveredIds: chainIds,
-        source,
-        subsystem,
-        title,
-        hint,
-        raw: cleanDisplayMessage(rawText).text,
-        time,
-        count: 1,
-        recent: isRecent(subsystem, time),
-        isIncident: true,
-        secondary: Boolean(explained && explained.secondary),
-      });
-    });
-
-    (Array.isArray(priorityEntries) ? priorityEntries : []).forEach(entry => {
-      if (!entry || coveredIncidentIds.has(Number(entry.id))) return;
-      if (entry.kind === 'safety_stop' && items.some(i => i.isIncident && i.raw === cleanDisplayMessage(entry.message).text)) return;
-      const explained = explainEntry(entry);
-      const cleaned = cleanDisplayMessage(entry.message).text;
-      const title = explained ? explained.title : cleaned;
-      const groupKey = (explained && explained.groupKey) || title;
-      const subsystem = entry.subsystem || 'middleware';
-      const source = entry.source || subsystem;
-      const focusKey = String(source || '') + ':' + groupKey;
-      addItem('err:' + focusKey, {
-        focusKey,
-        maxId: Number(entry.id) || 0,
-        coveredIds: Number(entry.id) > 0 ? [Number(entry.id)] : [],
-        source,
-        subsystem,
-        title,
-        hint: explained ? explained.hint : '点击筛选该模块的错误日志查看完整上下文。',
-        raw: cleaned,
-        time: entry.time,
-        count: 1,
-        recent: isRecent(subsystem, entry.time),
-        isIncident: false,
-        secondary: Boolean(explained && explained.secondary),
-      });
-    });
-
-    // If we have concrete primary faults, omit secondary downstream echo rows from the top diagnosis box.
-    const primary = items.filter(item => !item.secondary);
-    const chosen = primary.length ? primary : items;
-    return chosen.sort((a, b) => Number(b.recent) - Number(a.recent) || String(b.time || '').localeCompare(String(a.time || ''))).slice(0, 8);
   }
   function recentErrors(summary, cleared = null) {
     return (Array.isArray(summary) ? summary : []).reduce((total, group) => {
@@ -735,20 +596,26 @@
       node.append(element('span', '', label), control);
       return node;
     }
+
     const heading = element('div', 'diagnostic-log-heading');
     const title = element('div');
     title.append(
       element('h2', '', '运行日志与故障诊断'),
-      element('p', '', '先看顶部「故障定位」快速确认哪个模块报错、什么原因；下方默认只看错误与警告并自动合并重复刷屏。此处仅查看，不改变机器人状态。')
+      element('p', '', '点击上方模块卡片可按模块筛选，点「一键清错」仅取消上方聚焦高亮，所有历史报错保留在下方日志列表中。')
     );
+    const headingActions = element('div', 'diagnostic-log-heading-actions');
+    const clearAllBtn = element('button', 'diagnostic-log-clear-btn', '一键清错');
+    clearAllBtn.type = 'button';
+    clearAllBtn.hidden = true;
+    const restoreBtn = element('button', 'diagnostic-log-restore-btn', '恢复聚焦');
+    restoreBtn.type = 'button';
+    restoreBtn.hidden = true;
     const download = element('a', 'diagnostic-log-download', '下载本会话日志');
     download.setAttribute('download', '');
-    heading.append(title, download);
+    headingActions.append(clearAllBtn, restoreBtn, download);
+    heading.append(title, headingActions);
 
-    const alarm = element('div', 'diagnostic-log-alarm'); alarm.hidden = true; alarm.setAttribute('role', 'alert');
-    const diagnosis = element('section', 'diagnostic-log-diagnosis'); diagnosis.setAttribute('aria-label', '故障定位摘要'); diagnosis.hidden = true;
     const overview = element('div', 'diagnostic-log-overview'); overview.setAttribute('aria-label', '各子系统状态');
-    const incidents = element('div', 'diagnostic-log-incidents'); incidents.setAttribute('aria-label', '故障链');
 
     const tabs = element('div', 'diagnostic-log-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '日志视图切换');
     const tabDefs = [
@@ -803,7 +670,7 @@
     const list = element('ol', 'diagnostic-log-list'); list.setAttribute('aria-label', '已保存的日志条目');
     const empty = element('p', 'diagnostic-log-empty', '当前会话没有匹配的日志。'); empty.hidden = true;
     const more = element('button', 'diagnostic-log-more', '加载后续记录'); more.type = 'button'; more.hidden = true;
-    root.replaceChildren(heading, alarm, diagnosis, overview, incidents, tabs, toolbar, status, error, warning, list, empty, more);
+    root.replaceChildren(heading, overview, tabs, toolbar, status, error, warning, list, empty, more);
 
     function visible() {
       return !doc.hidden && (!root.getClientRects || root.getClientRects().length > 0);
@@ -835,45 +702,44 @@
     function currentCleared() {
       return loadClearedState(doc, model.session);
     }
-    function currentMaxKnownId() {
-      let maxId = Number(model.cursor) || 0;
-      model.entries.forEach(e => { const id = Number(e && e.id) || 0; if (id > maxId) maxId = id; });
-      model.priorityEntries.forEach(e => { const id = Number(e && e.id) || 0; if (id > maxId) maxId = id; });
-      model.incidents.forEach(inc => { const id = incidentMaxId(inc); if (id > maxId) maxId = id; });
+    function currentMaxKnownId(targetSubsystem = '') {
+      let maxId = targetSubsystem ? 0 : (Number(model.cursor) || 0);
+      model.entries.forEach(e => {
+        if (targetSubsystem && (e.subsystem || 'middleware') !== targetSubsystem) return;
+        const id = Number(e && e.id) || 0;
+        if (id > maxId) maxId = id;
+      });
+      model.priorityEntries.forEach(e => {
+        if (targetSubsystem && (e.subsystem || 'middleware') !== targetSubsystem) return;
+        const id = Number(e && e.id) || 0;
+        if (id > maxId) maxId = id;
+      });
       model.summary.forEach(g => {
+        if (targetSubsystem && g.subsystem !== targetSubsystem) return;
         const eid = Number(g && g.latest_error && g.latest_error.id) || 0;
         const wid = Number(g && g.latest_warning && g.latest_warning.id) || 0;
         if (eid > maxId) maxId = eid;
-        if (wid > maxId) maxId = wid;
+        if (!targetSubsystem && wid > maxId) maxId = wid;
       });
       return maxId;
     }
     function clearAllFocusErrors() {
       if (!model.session) return;
       const prev = currentCleared();
-      const maxId = Math.max(prev.allBeforeId, currentMaxKnownId());
-      const incIds = Array.from(new Set([
-        ...prev.allIncidentIds,
-        ...model.incidents.map(i => String(i && i.id || '')).filter(Boolean),
-      ]));
       saveClearedState(doc, model.session, {
-        allBeforeId: maxId,
-        allIncidentIds: incIds,
-        byKey: prev.byKey,
-        entryIds: prev.entryIds,
+        allBeforeId: Math.max(prev.allBeforeId, currentMaxKnownId()),
+        bySubsystem: prev.bySubsystem,
       });
       render();
     }
-    function clearSingleFocusItem(item) {
-      if (!model.session || !item || !item.focusKey) return;
+    function clearSubsystemFocusErrors(targetSubsystem) {
+      if (!model.session || !targetSubsystem) return;
       const prev = currentCleared();
-      const cutoff = Math.max(Number(prev.byKey[item.focusKey]) || 0, Number(item.maxId) || 0);
-      const nextEntryIds = [...(prev.entryIds || []), ...(Array.isArray(item.coveredIds) ? item.coveredIds : [])];
+      const cutoff = Math.max(Number(prev.bySubsystem[targetSubsystem]) || 0, currentMaxKnownId(targetSubsystem));
+      if (cutoff <= 0) return;
       saveClearedState(doc, model.session, {
         allBeforeId: prev.allBeforeId,
-        allIncidentIds: prev.allIncidentIds,
-        byKey: {...prev.byKey, [item.focusKey]: cutoff},
-        entryIds: nextEntryIds,
+        bySubsystem: {...prev.bySubsystem, [targetSubsystem]: cutoff},
       });
       render();
     }
@@ -932,104 +798,35 @@
       subsystem.value = subsystem.value === name ? '' : name;
       resetView();
     }
-    function focusErrors(targetSubsystem) {
-      subsystem.value = targetSubsystem || '';
-      level.value = 'error';
-      resetView();
-    }
-    function renderDiagnosis(cleared) {
-      const totals = summaryTotals(model.summary);
-      const activeIncidents = model.incidents.filter(inc => !isIncidentCleared(inc, cleared));
-      const activePriority = model.priorityEntries.filter(entry => !isEntryFocusCleared(entry, cleared));
-      const items = buildDiagnosis(activeIncidents, activePriority, model.summary);
-      const allItems = hasAnyCleared(cleared) ? buildDiagnosis(model.incidents, model.priorityEntries, model.summary) : items;
-      const clearedCount = Math.max(0, allItems.length - items.length);
-      if (!model.summary.length && !items.length && !clearedCount) {
-        diagnosis.hidden = true;
-        return;
-      }
-      diagnosis.hidden = false;
-      diagnosis.classList.toggle('diagnostic-log-diagnosis-ok', items.length === 0);
-      if (!items.length) {
-        const okRow = element('div', 'diagnostic-log-diag-ok-row');
-        const okText = clearedCount > 0 || hasAnyCleared(cleared)
-          ? ('已清除当前聚焦报错（历史报错仍保留在下方日志列表中' + (totals.warnings ? ('；另有 ' + totals.warnings + ' 条运行告警') : '') + '）。')
-          : (totals.warnings
-            ? ('当前会话未发现报错，共有 ' + totals.warnings + ' 条运行告警（可在下方「错误与警告」查看）。')
-            : '当前会话未发现报错或故障。');
-        okRow.append(element('div', 'diagnostic-log-diag-ok-head', '✓ ' + okText));
-        if (hasAnyCleared(cleared)) {
-          const restoreBtn = element('button', 'diagnostic-log-restore-btn',
-            clearedCount > 0 ? ('恢复聚焦显示 (' + clearedCount + ')') : '恢复聚焦显示');
-          restoreBtn.type = 'button';
-          restoreBtn.addEventListener('click', restoreClearedErrors);
-          okRow.append(restoreBtn);
-        }
-        diagnosis.replaceChildren(okRow);
-        return;
-      }
-      const head = element('div', 'diagnostic-log-diag-head');
-      const headLeft = element('div', 'diagnostic-log-diag-head-left');
-      headLeft.append(
-        element('strong', '', '故障定位摘要（发现 ' + items.length + ' 类报错）'),
-        element('span', 'diagnostic-log-diag-sub',
-          clearedCount > 0
-            ? ('已隐藏 ' + clearedCount + ' 类已清错的历史报错（保留在下方日志列表）')
-            : '已过滤正常启停锁并去重，清除后仅在下方日志列表保留')
-      );
-      const headActions = element('div', 'diagnostic-log-diag-actions');
-      if (hasAnyCleared(cleared)) {
-        const restoreBtn = element('button', 'diagnostic-log-restore-btn', '恢复已清除');
-        restoreBtn.type = 'button';
-        restoreBtn.addEventListener('click', restoreClearedErrors);
-        headActions.append(restoreBtn);
-      }
-      const clearAllBtn = element('button', 'diagnostic-log-clear-btn', '一键清错');
-      clearAllBtn.type = 'button';
-      clearAllBtn.addEventListener('click', clearAllFocusErrors);
-      headActions.append(clearAllBtn);
-      head.append(headLeft, headActions);
-
-      const ul = element('ul', 'diagnostic-log-diag-list');
-      items.forEach(item => {
-        const li = element('li', 'diagnostic-log-diag-item' + (item.recent ? ' is-recent' : ''));
-        const top = element('div', 'diagnostic-log-diag-top');
-        top.append(
-          element('span', 'diagnostic-log-diag-badge', item.recent ? '近 5 分钟报错' : '本会话报错'),
-          element('span', 'diagnostic-log-diag-module', sourceLabel(item.source)),
-          element('strong', 'diagnostic-log-diag-title', item.title)
-        );
-        const meta = element('span', 'diagnostic-log-diag-meta',
-          (item.count > 1 ? ('发生 ' + item.count + ' 次 · 最近 ') : '') + formatTime(item.time));
-        top.append(meta);
-        const body = element('div', 'diagnostic-log-diag-body');
-        body.append(element('p', 'diagnostic-log-diag-hint', item.hint));
-        const itemBtns = element('div', 'diagnostic-log-diag-item-actions');
-        const action = element('button', 'diagnostic-log-diag-jump', '查看相关报错');
-        action.type = 'button';
-        action.addEventListener('click', () => focusErrors(item.subsystem));
-        const clearBtn = element('button', 'diagnostic-log-item-clear', '清错');
-        clearBtn.type = 'button';
-        clearBtn.addEventListener('click', () => clearSingleFocusItem(item));
-        itemBtns.append(action, clearBtn);
-        body.append(itemBtns);
-        li.append(top, body);
-        ul.append(li);
-      });
-      diagnosis.replaceChildren(head, ul);
-    }
     function renderOverview(cleared) {
       syncSubsystems();
       updateTabs();
-      renderDiagnosis(cleared);
+      const hasActiveErrorCards = model.summary.some(group => Number(group.errors) > 0 && !isGroupErrorCleared(group, cleared));
+      clearAllBtn.hidden = !hasActiveErrorCards;
+      restoreBtn.hidden = !hasAnyCleared(cleared);
+
       overview.replaceChildren(...model.summary.map(group => {
-        const errCleared = Number(group.errors) > 0 && isGroupErrorCleared(group, cleared);
+        const hasErrors = Number(group.errors) > 0;
+        const errCleared = hasErrors && isGroupErrorCleared(group, cleared);
         const stateInfo = cardStateInfo(group, errCleared);
-        const card = element('button', 'diagnostic-log-card diagnostic-log-card-' + stateInfo.cls);
-        card.type = 'button';
+        const card = element('div', 'diagnostic-log-card diagnostic-log-card-' + stateInfo.cls);
+        card.setAttribute('role', 'button');
+        card.setAttribute('tabindex', '0');
         card.setAttribute('aria-pressed', String(subsystem.value === group.subsystem));
         const head = element('div', 'diagnostic-log-card-head');
-        head.append(element('strong', '', subsystemLabel(group.subsystem)), element('span', 'diagnostic-log-card-state', stateInfo.label));
+        const headRight = element('div', 'diagnostic-log-card-head-right');
+        headRight.append(element('span', 'diagnostic-log-card-state', stateInfo.label));
+        if (hasErrors && !errCleared) {
+          const subClear = element('button', 'diagnostic-log-card-clear', '清错');
+          subClear.type = 'button';
+          subClear.title = '清除该模块上方报错高亮（下方日志保留）';
+          subClear.addEventListener('click', ev => {
+            ev.stopPropagation();
+            clearSubsystemFocusErrors(group.subsystem);
+          });
+          headRight.append(subClear);
+        }
+        head.append(element('strong', '', subsystemLabel(group.subsystem)), headRight);
         const counts = element('div', 'diagnostic-log-card-counts');
         counts.append(
           element('span', errCleared ? 'diagnostic-log-count-cleared' : 'diagnostic-log-count-error',
@@ -1056,33 +853,20 @@
         if (latest) {
           const explained = explainEntry(latest);
           const preview = explained ? explained.title : cleanDisplayMessage(latest.message).text;
+          const srcText = sourceLabel(latest.source);
+          const subText = subsystemLabel(group.subsystem);
+          const showSrc = srcText && !srcText.startsWith(subText);
           const prefix = (errCleared && latest === group.latest_error) ? '已清错 · ' : '';
-          card.append(element('p', 'diagnostic-log-card-latest', prefix + formatShortTime(latest.time) + ' · ' + sourceLabel(latest.source) + '：' + clip(preview, 180)));
+          card.append(element('p', 'diagnostic-log-card-latest',
+            prefix + formatShortTime(latest.time) + (showSrc ? (' · ' + srcText + '：') : ' · ') + clip(preview, 180)));
         }
         card.addEventListener('click', () => selectSubsystem(group.subsystem));
+        card.addEventListener('keydown', ev => {
+          if (ev.target !== card) return;
+          if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectSubsystem(group.subsystem); }
+        });
         return card;
       }));
-      const failing = model.summary.filter(group => group.state === 'error' && !isGroupErrorCleared(group, cleared));
-      alarm.hidden = !failing.length;
-      if (failing.length) {
-        const alarmHead = element('div', 'diagnostic-log-alarm-head');
-        alarmHead.append(element('strong', '', '最近 5 分钟有 ' + recentErrors(model.summary, cleared) + ' 条报错'));
-        const alarmClear = element('button', 'diagnostic-log-clear-btn', '一键清错');
-        alarmClear.type = 'button';
-        alarmClear.addEventListener('click', clearAllFocusErrors);
-        alarmHead.append(alarmClear);
-        alarm.replaceChildren(alarmHead);
-        failing.forEach(group => {
-          const latest = group.latest_error || {};
-          const explained = explainEntry(latest);
-          const summaryText = explained ? explained.title : cleanDisplayMessage(latest.message || '').text;
-          const line = element('button', 'diagnostic-log-alarm-line',
-            subsystemLabel(group.subsystem) + ' · ' + sourceLabel(latest.source) + '：' + clip(summaryText, 240));
-          line.type = 'button';
-          line.addEventListener('click', () => focusErrors(group.subsystem));
-          alarm.append(line);
-        });
-      }
     }
     function updateStatusText(shownCount, rawCount) {
       const modeText = priority.checked ? '错误优先' : '时间倒序';
@@ -1090,8 +874,7 @@
       status.textContent = '已显示 ' + shownCount + ' 条' + foldText + ' · ' + modeText + ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false});
     }
     function render() {
-      // Preserve the evidence the user is reading. Scope keys to the session
-      // and view: a duplicated entry in a chain need not be expanded in the list.
+      // Preserve the evidence the user is reading across polls.
       const openDetails = new Set(Array.from(root.querySelectorAll('details[data-diagnostic-key]'))
         .filter(node => node.open).map(node => node.dataset.diagnosticKey));
       const scrolls = new Map(Array.from(root.querySelectorAll('[data-diagnostic-scroll-key]'))
@@ -1101,7 +884,7 @@
       list.dataset.diagnosticScrollKey = model.session + ':list';
       const rawShown = visibleEntries(model.entries, model.priorityEntries, priority.checked);
       const renderedRows = collapse.checked
-        ? collapseEntries(rawShown).map(group => makeEntry(group.entry, 'list', group, cleared))
+        ? collapseEntries(rawShown, cleared).map(group => makeEntry(group.entry, 'list', group, cleared))
         : rawShown.map(entry => makeEntry(entry, 'list', null, cleared));
       list.replaceChildren(...renderedRows);
       empty.hidden = renderedRows.length !== 0;
@@ -1112,45 +895,6 @@
       }
       if (sessionsLoaded) updateStatusText(renderedRows.length, rawShown.length);
 
-      incidents.replaceChildren();
-      const visibleIncidents = model.incidents.filter(inc => !isIncidentCleared(inc, cleared));
-      if (visibleIncidents.length) {
-        incidents.append(element('div', 'diagnostic-log-section-title', '停机与故障溯源（' + visibleIncidents.length + ' 起）'));
-      }
-      visibleIncidents.slice().reverse().forEach(incident => {
-        const card = element('details', 'diagnostic-log-incident');
-        card.dataset.diagnosticKey = model.session + ':incident:' + incident.id;
-        const chain = Array.isArray(incident.chain) ? incident.chain.slice(0, 100).sort((a, b) => Number(a.id) - Number(b.id)) : [];
-        const rootEntry = chain.find(e => e.id === incident.root_cause_id) || chain[0] || null;
-        const src = incident.source || (rootEntry && rootEntry.source) || '';
-        const when = incident.time || (chain.length ? chain[chain.length - 1].time : '');
-        const explained = explainEntry({message: incident.root_message || incident.title, kind: rootEntry && rootEntry.kind});
-        const summary = element('summary');
-        if (when) summary.append(element('span', 'diagnostic-log-incident-time', formatShortTime(when)));
-        if (src) summary.append(element('span', 'diagnostic-log-source', sourceLabel(src)));
-        const titleText = explained ? (explained.title + '（' + clip(incident.title || '', 120) + '）') : (incident.title || '停机或异常事件');
-        summary.append(
-          element('strong', '', titleText),
-          element('span', 'diagnostic-log-relation', incident.relation === 'explicit' ? '已定位原因' : '原因待确认')
-        );
-        card.append(summary, element('p', 'diagnostic-log-explanation', explained ? explained.hint : incidentExplanation(incident)));
-        if (incident.root_message) {
-          card.append(element('p', 'diagnostic-log-cause',
-            (incident.relation === 'explicit' ? '直接触发原因：' : '已记录线索：') + clip(incident.root_message, 2000)));
-        }
-        const first = chain.find(entry => (LEVELS[levelOf(entry)] || 0) >= 2);
-        if (first) {
-          card.append(element('p', 'diagnostic-log-first',
-            '最早异常：' + formatTime(first.time) + ' · ' + sourceLabel(first.source) + ' · ' + clip(cleanDisplayMessage(first.message).text, 1200)));
-        }
-        if (chain.length) {
-          const timeline = element('ol', 'diagnostic-log-chain');
-          timeline.dataset.diagnosticScrollKey = model.session + ':incident:' + incident.id + ':chain';
-          chain.forEach(entry => timeline.append(makeEntry(entry, 'incident:' + incident.id)));
-          card.append(timeline);
-        } else card.append(element('p', '', '尚未保存可核对的事件链，不能据此判断底层原因。'));
-        incidents.append(card);
-      });
       root.querySelectorAll('details[data-diagnostic-key]').forEach(node => {
         node.open = openDetails.has(node.dataset.diagnosticKey);
       });
@@ -1220,6 +964,8 @@
         else if (!disposed && automatic.checked) timer = setTimer(() => { timer = null; void refreshLogs(); }, 2000);
       }
     }
+    clearAllBtn.addEventListener('click', clearAllFocusErrors);
+    restoreBtn.addEventListener('click', restoreClearedErrors);
     session.addEventListener('change', resetView);
     level.addEventListener('change', resetView);
     subsystem.addEventListener('change', resetView);
@@ -1281,8 +1027,8 @@
   }
   const api = {
     mount, watchBadge, recentErrors, subsystemLabel, sourceLabel, kindLabel,
-    cleanDisplayMessage, explainEntry, collapseEntries, buildDiagnosis,
-    isIncidentCleared, isEntryFocusCleared, isGroupErrorCleared,
+    cleanDisplayMessage, explainEntry, collapseEntries,
+    isEntryFocusCleared, isGroupErrorCleared,
     LogModel, sortEntries, mergeEntries, visibleEntries, incidentExplanation, formatTime, clip,
   };
   global.TeleopDiagnosticLogs = api;
