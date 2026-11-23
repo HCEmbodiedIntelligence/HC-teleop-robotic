@@ -918,6 +918,22 @@ class RosBridge:
             return bool(self._ready_locked(time.monotonic()) and self._boundary and
                         self._boundary.handover_ready())
 
+    def _handover_control_ready_locked(self):
+        """Online DAgger takeover/return requires ready hardware and fresh feedback.
+
+        Explicit start from HOLD and FAULT/ESTOP recovery still call
+        ``control_ready()`` so they enforce a stopped arm (<= 0.02 rad/s).
+        During active DAgger motion, waiting for all joints to brake to a dead
+        stop stretches every Grip handover to 250-600 ms; downstream command
+        smoothing bounds velocity/acceleration continuously across the ~15-30 ms
+        ownership switch.
+        """
+        if not (self._ready_locked(time.monotonic()) and self._boundary):
+            return False
+        if self.ownership.dagger_enabled and self.ownership.state in {'TAKEOVER', 'RETURNING'}:
+            return bool(self._boundary.feedback_fresh())
+        return bool(self._boundary.handover_ready())
+
     def recover_intervention(self):
         """An explicit reset may rearm hardware, but can only return to HOLD."""
         with self._lock:
@@ -2377,7 +2393,7 @@ class RosBridge:
                             stamp_ns=node.get_clock().now().nanoseconds,
                             **self._boundary.status())
                     ownership.fault('necessary robot feedback lost')
-                ownership.advance(control_ready=self.control_ready(),
+                ownership.advance(control_ready=self._handover_control_ready_locked(),
                                   manual_ready=ownership.input_valid and ownership.gripped)
                 if (ownership.state in {'AUTO', 'MANUAL'} and not self._command_output_enabled
                         and not self._actor_output_blocked()):

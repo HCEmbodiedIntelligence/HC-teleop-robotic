@@ -855,10 +855,19 @@ class MiddlewareRuntime:
         enabled = status.get("command_mux", {}).get("output_enabled")
         if not isinstance(enabled, bool):
             return
+        ownership = status.get("ownership")
+        ownership_state = ownership.get("state") if isinstance(ownership, dict) else ""
+        if not enabled and ownership_state in {"TAKEOVER", "RETURNING"}:
+            return  # Normal DAgger handover revokes the previous source without estopping.
+        ownership_reason = (
+            str(ownership.get("reason") or "")
+            if isinstance(ownership, dict) and ownership_state in {"HOLD", "FAULT", "ESTOP"}
+            else ""
+        )
         self.vr.send_event(envelope(
             "safety_resume" if enabled else "safety_stop", "middleware",
             {"reason": "middleware state synchronization" if enabled else
-             (self._safety_reason or "command output disabled; explicit resume required"),
+             (ownership_reason or self._safety_reason or "command output disabled; explicit resume required"),
              "state_snapshot": True},
         ))
 

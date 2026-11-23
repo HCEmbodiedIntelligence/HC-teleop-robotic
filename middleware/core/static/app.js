@@ -451,7 +451,10 @@ function renderSafetyButton(ros, replayWaiting = false) {
   const button=$('#stopButton');
   if(!button)return;
   const enabled=ros?.command_mux?.output_enabled;
-  safetyOutputEnabled=ros?.state==='running'&&typeof enabled==='boolean'?enabled:null;
+  const ownershipState=ros?.ownership?.state;
+  const handover=ownershipState==='TAKEOVER'||ownershipState==='RETURNING';
+  const effectiveEnabled=typeof enabled==='boolean'?(enabled||handover):null;
+  safetyOutputEnabled=ros?.state==='running'&&typeof effectiveEnabled==='boolean'?effectiveEnabled:null;
   safetyStatusReceivedAt=Date.now();
   button.disabled=safetyRequestPending||safetyOutputEnabled===null;
   button.textContent=safetyRequestPending?'正在处理…':safetyOutputEnabled===null?'急停状态未知':safetyOutputEnabled?'急停':replayWaiting?'恢复遥操作':'解除急停';

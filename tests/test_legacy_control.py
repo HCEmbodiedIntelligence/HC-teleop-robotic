@@ -870,3 +870,39 @@ def test_grip_takeover_hold_closes_on_release_pause_loss_or_timeout(case):
         assert any(e['kind'] == 'grip_takeover_hold_closed' for e in owner.events)
     elif case in {'tracking', 'feedback_stale', 'input_lost'}:
         assert owner.state == 'FAULT'
+
+
+def test_dagger_online_handover_does_not_wait_for_dead_stop_while_recovery_still_does():
+    rig = Rig()
+    owner, bridge, boundary = rig.control, rig.bridge, rig.boundary
+    arm = boundary.arms[0]
+    boundary.speeds[arm] = 1.2
+
+    assert not bridge.control_ready()
+    rig.trigger(2, 0., grip=True)
+    assert owner.state == 'TAKEOVER' and owner.dagger_enabled
+    with bridge._lock:
+        assert bridge._handover_control_ready_locked() is True
+    assert not bridge.control_ready()
+
+    boundary.sample_ns[arm] -= 300_000_000
+    with bridge._lock:
+        assert bridge._handover_control_ready_locked() is False
+    rig.feed()
+    boundary.speeds[arm] = 1.2
+    with bridge._lock:
+        assert bridge._handover_control_ready_locked() is True
+
+    rig.advance()
+    rig.advance()
+    assert owner.state == 'MANUAL'
+    rig.trigger(3, 0., grip=False)
+    assert owner.state == 'RETURNING'
+    with bridge._lock:
+        assert bridge._handover_control_ready_locked() is True
+    assert not bridge.control_ready()
+
+    owner.set_dagger(False)
+    assert owner.state == 'RETURNING' and not owner.dagger_enabled
+    with bridge._lock:
+        assert bridge._handover_control_ready_locked() is False

@@ -30,3 +30,16 @@ test('reported stop selects resume endpoint',async()=>{
  await vm.runInContext('toggleSafety()',ctx);
  assert.equal(calls[0],'/api/safety/resume');assert.equal(button.textContent,'急停');
 });
+test('dagger handover keeps emergency stop button active instead of flashing resume',async()=>{
+ const {ctx,button,calls}=setup();
+ for(const ownershipState of ['TAKEOVER','RETURNING']){
+  calls.length=0;
+  vm.runInContext(`renderSafetyButton({state:'running',command_mux:{output_enabled:false},ownership:{state:'${ownershipState}'}})`,ctx);
+  assert.equal(button.textContent,'急停');
+  assert.equal(button.className,'danger');
+  await vm.runInContext('toggleSafety()',ctx);
+  assert.equal(calls[0],'/api/safety/stop');
+ }
+ vm.runInContext(`renderSafetyButton({state:'running',command_mux:{output_enabled:false},ownership:{state:'FAULT'}})`,ctx);
+ assert.equal(button.textContent,'解除急停');
+});
