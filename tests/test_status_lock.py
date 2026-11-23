@@ -1,7 +1,7 @@
 """Status inspection must not wait for ROS clocks under the send lock."""
 from types import SimpleNamespace
 
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def test_status_reads_clocks_and_tracker_outside_send_lock():

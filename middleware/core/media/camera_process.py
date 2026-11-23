@@ -184,7 +184,7 @@ def _camera_worker(connection, config: dict[str, Any], domain_id: int):
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.qos import QoSProfile, ReliabilityPolicy
             from sensor_msgs.msg import CompressedImage, Image
-            from .ros_executor import create_single_threaded_executor
+            from ..control.ros_executor import create_single_threaded_executor
             context = Context()
             rclpy.init(args=[], context=context, domain_id=domain_id)
             node = rclpy.create_node(f"hc_camera_video_{os.getpid()}", context=context)

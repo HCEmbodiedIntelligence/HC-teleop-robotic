@@ -397,11 +397,11 @@ def test_dagger_targets_in_recording_and_replay(rig, tmp_path):
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
     from sensor_msgs.msg import JointState
-    from middleware.core.control_ownership import ControlToken
-    from middleware.core.dataset_topics import DatasetTopics
-    from middleware.core.ros_recording_executor import RosRecordingExecutor
-    from middleware.core.topic_player import TopicPlayer
-    from middleware.core.topic_recorder import TopicRecorder
+    from middleware.core.control.control_ownership import ControlToken
+    from middleware.core.recording.dataset_topics import DatasetTopics
+    from middleware.core.recording.ros_recording_executor import RosRecordingExecutor
+    from middleware.core.recording.topic_player import TopicPlayer
+    from middleware.core.recording.topic_recorder import TopicRecorder
 
     teleop, solver = rig
     teleop._joint_state_callback(feedback(*rig))
@@ -563,7 +563,7 @@ def test_manual_aux_is_generation_scoped_and_expires(rig):
     import copy
     import time
     from sensor_msgs.msg import JointState
-    from middleware.core.control_ownership import ControlToken
+    from middleware.core.control.control_ownership import ControlToken
     teleop, solver = rig
     ik = solver.intervention
     ik.active = ik.ready = True

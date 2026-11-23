@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from .config import ConfigError, ConfigStore
+from ..config import ConfigError, ConfigStore
 from .robot_profiles import RobotProfileError, RobotProfileManager, STANDARD_TOPICS
 
 

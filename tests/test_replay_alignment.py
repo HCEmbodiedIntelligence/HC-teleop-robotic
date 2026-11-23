@@ -23,11 +23,11 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 import yaml
 
-from middleware.core.control_process import CoreProcessClient, IsolatedRosBridge, RemotePublicationCapture
-from middleware.core.publication_capture import PublicationCapture
-from middleware.core.replay_alignment import ReplayAlignmentPlanner, step_trapezoidal_axis
-from middleware.core.topic_player import TopicPlayer
-from middleware.core.topic_recorder import TopicRecorder, _get_msg_def
+from middleware.core.control.control_process import CoreProcessClient, IsolatedRosBridge, RemotePublicationCapture
+from middleware.core.recording.publication_capture import PublicationCapture
+from middleware.core.recording.replay_alignment import ReplayAlignmentPlanner, step_trapezoidal_axis
+from middleware.core.recording.topic_player import TopicPlayer
+from middleware.core.recording.topic_recorder import TopicRecorder, _get_msg_def
 from tests.test_legacy_control import Rig, message
 
 

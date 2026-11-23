@@ -18,13 +18,13 @@ import sys
 import tempfile
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 INSTALL_COMMAND = "./tools/setup_lerobot.sh"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(ROOT / 'upload_client') not in sys.path:
     sys.path.insert(0, str(ROOT / 'upload_client'))
-from middleware.core.export_progress import ExportProgress, progress_path
+from middleware.core.recording.export_progress import ExportProgress, progress_path
 
 
 def writer_python() -> Path:
@@ -691,7 +691,7 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
             presence = validate_lerobot_info(snapshot, read_json(staged_dataset / 'meta/info.json'))
             atomic_json(staged_dataset / 'capture-context.json', {'schema_version': 'hc-capture-context/v1',
                 'recording_id': snapshot['recording_id'], 'capture_snapshot': snapshot, 'feature_presence': presence})
-        from middleware.core.takeover_log import takeover_file
+        from middleware.core.recording.takeover_log import takeover_file
         takeovers = takeover_file(source)
         if takeovers:
             shutil.copyfile(takeovers, staged_dataset / 'meta/takeovers.json')
@@ -699,7 +699,7 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
             raise FileExistsError(f'Destination was created during export: {destination}')
         staged_dataset.rename(destination)
         result['path'] = str(destination)
-        from middleware.core.artifact_state import atomic_json
+        from middleware.core.recording.artifact_state import atomic_json
         atomic_json(destination / '.hc-export-complete.json', {'source':str(source), 'frames':result['frames'], 'complete':True})
         progress.update('转换完成', 100, result['frames'], result['frames'], '帧', state='completed', force=True)
         return result

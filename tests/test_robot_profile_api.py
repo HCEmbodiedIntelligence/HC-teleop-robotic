@@ -281,7 +281,7 @@ class RobotProfileApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stop_data["replay"]["requires_reset"])
 
     async def test_replay_home_endpoint_requires_reset_and_consumes_it(self):
-        from middleware.core.ros_bridge import RosBridge
+        from middleware.core.control.ros_bridge import RosBridge
 
         await self.client.post("/api/recording/start", json={
             "filename": "replay_home.mcap", "force": True, "selection": {"mode": "local"},

@@ -3,7 +3,7 @@
 ## Main branch integration
 
 Ported from `origin/humanoid` at `f7f12c9` onto main. Main retains `TopicRecorder`;
-`middleware/core/recording_artifacts.py` provides the persistent capture-time binding,
+`middleware/core/recording/recording_artifacts.py` provides the persistent capture-time binding,
 closed-source/export-complete handoff and deletion leases. It does not use
 `RecordingService`, raw capture/sealing, or data tools. The raw protocol remains in
 the reusable client, but the embedded main service has no raw seal callback.
@@ -22,9 +22,9 @@ This copy comes from humanoid_manager/upload_client at 26cbe8b7b751276cbcbc2e21d
 
 Install `python -m pip install ./upload_client`; the middleware also requires its existing aiohttp dependency. The uploader itself has no ROS, training-stack, manager or platform-source imports.
 
-`core.upload_service.UploadService(config, *, artifact_state_dir, data_directory, request_raw_seal=None)` has synchronous start/stop, enqueue(artifact_id, binding_id=None), binding_snapshot(), seal_raw(recording_id, binding_id=None), artifact_usage() and cancel_artifact(). Run lifecycle and request methods with asyncio.to_thread. stop() returns `stopped:false` if a network request is still exiting; it never releases that request's file lease early.
+`core.uploads.upload_service.UploadService(config, *, artifact_state_dir, data_directory, request_raw_seal=None)` has synchronous start/stop, enqueue(artifact_id, binding_id=None), binding_snapshot(), seal_raw(recording_id, binding_id=None), artifact_usage() and cancel_artifact(). Run lifecycle and request methods with asyncio.to_thread. stop() returns `stopped:false` if a network request is still exiting; it never releases that request's file lease early.
 
-Register `core.upload_api.register_upload_routes(app, service)`. GET /api/uploads returns status/jobs. POST /api/uploads/{binding,enqueue,seal-raw,retry,cancel,scan} uses JSON. /api/recordings/upload is unchanged (local file import). Serve the existing static directory, load upload_panel.js/css and call window.mountUploadPanel(container); the return value disposes its refresh timer.
+Register `core.uploads.upload_api.register_upload_routes(app, service)`. GET /api/uploads returns status/jobs. POST /api/uploads/{binding,enqueue,seal-raw,retry,cancel,scan} uses JSON. /api/recordings/upload is unchanged (local file import). Serve the existing static directory, load upload_panel.js/css and call window.mountUploadPanel(container); the return value disposes its refresh timer.
 
 Config uses existing humanoid_upload.common.DEFAULTS plus enabled, queue_directory, platform_base_url, credential_ref, robot_id, local_robot_id and task_id. Disable uploads by default. Resolve paths against the middleware configuration location before construction. Queue storage must be outside the recording data root. credential_ref accepts env:NAME or file:/absolute/path; secret files must be owned by the service user and mode 0600. Credentials never enter ready descriptors or public queue responses.
 
@@ -36,7 +36,7 @@ Deletion must use `with ArtifactLocks(artifact_state_dir).delete(artifact_id): .
 
 Independent process (optional, do not also run the embedded worker):
 ```
-PYTHONPATH=middleware python -m core.upload_service --config /absolute/hc-upload-service.json
+PYTHONPATH=middleware python -m core.uploads.upload_service --config /absolute/hc-upload-service.json
 ```
 The JSON wrapper contains uploads (config object), artifact_state_dir, data_directory. It binds 127.0.0.1:8091 by default. This process has no recorder callback: seal-raw accurately returns RAW_SEAL_UNAVAILABLE. The embedded service supports the callback. Existing humanoid-upload CLI remains for legacy sealed bundles; use the HC service for ready descriptors.
 

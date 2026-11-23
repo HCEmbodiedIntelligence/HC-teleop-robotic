@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 pytest.importorskip('rclpy')
-import middleware.core.qos_event_observer as module
+import middleware.core.control.qos_event_observer as module
 
 
 class Group:

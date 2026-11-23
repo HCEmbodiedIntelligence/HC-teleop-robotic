@@ -12,8 +12,8 @@ from mcap.well_known import MessageEncoding, SchemaEncoding
 from rclpy.serialization import serialize_message
 from sensor_msgs.msg import JointState
 
-from middleware.core.topic_player import TopicPlayer
-from middleware.core.topic_recorder import _get_msg_def
+from middleware.core.recording.topic_player import TopicPlayer
+from middleware.core.recording.topic_recorder import _get_msg_def
 
 
 class TopicPlayerTests(unittest.TestCase):

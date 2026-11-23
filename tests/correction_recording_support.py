@@ -1,7 +1,7 @@
 """Local-only main recording pipeline for recovered DAgger integration tests."""
-from middleware.core.platform_connection import PlatformConnection
-from middleware.core.task_recording import TaskRecorder
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.uploads.platform_connection import PlatformConnection
+from middleware.core.uploads.task_recording import TaskRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 def config(directory):

@@ -2,7 +2,7 @@ import socket
 from types import SimpleNamespace as NS
 
 import pytest
-from middleware.core.media_qos import mark_media_transport
+from middleware.core.media.media_qos import mark_media_transport
 from middleware.core.config import validate_config, ConfigError
 
 
@@ -66,7 +66,7 @@ def test_relay_without_exposed_socket_is_not_reported_as_fully_marked():
 
 
 def test_process_stale_status_invalidates_receiver_measurements():
-    from middleware.core.camera_process import CameraProcessService
+    from middleware.core.media.camera_process import CameraProcessService
     service = CameraProcessService({'enabled': False})
     service._status.update(receiver_stale=False, receiver_decoded_fps=30, receiver_render_gap_p95_ms=35)
     status = service.status()

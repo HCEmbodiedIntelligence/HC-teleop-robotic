@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 import zipfile
 
-from middleware.core.recording_download_worker import build_download, CHUNK_SIZE
+from middleware.core.recording.recording_download_worker import build_download, CHUNK_SIZE
 
 
 class ArchiveWorkerTests(unittest.TestCase):

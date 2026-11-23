@@ -3,7 +3,7 @@ import struct
 import threading
 import time
 
-from middleware.core.recording_frame_log import RecordingFrameLog
+from middleware.core.recording.recording_frame_log import RecordingFrameLog
 
 
 def raw(ns):

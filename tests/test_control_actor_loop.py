@@ -251,7 +251,7 @@ def test_manual_action_evidence_enters_fifo_outside_gate_before_release_close():
 @pytest.mark.parametrize('actor_mode', [False, True])
 def test_only_actor_dedicated_target_topics_use_depth_one(actor_mode):
     from unittest.mock import Mock, patch
-    from middleware.core.legacy_control import LegacyTopicControl
+    from middleware.core.control.legacy_control import LegacyTopicControl
     from rclpy.qos import HistoryPolicy, ReliabilityPolicy, qos_profile_sensor_data
     rig = Rig()
     bridge = rig.bridge
@@ -390,7 +390,7 @@ def test_readonly_parent_publishers_preserve_original_qos():
     node, publishers = Mock(), {}
     topics = ['/status/control/ownership','/events/control/intervention','/internal/control/action_evidence']
     for topic in topics:
-        from middleware.core.ros_bridge import RosBridge
+        from middleware.core.control.ros_bridge import RosBridge
         RosBridge._publisher(node, publishers, topic, 'std_msgs/msg/String', String)
     for topic, call in zip(topics,node.create_publisher.call_args_list):
         qos = call.args[2]
@@ -455,8 +455,8 @@ def test_control_worker_ipc_wake_handles_requests_and_sentinel(monkeypatch):
     import multiprocessing as mp
     import os
     import threading
-    from middleware.core import control_process
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control import control_process
+    from middleware.core.control.ros_bridge import RosBridge
 
     ctx = mp.get_context('spawn')
     channels = {
@@ -528,7 +528,7 @@ def test_control_worker_ipc_wake_handles_requests_and_sentinel(monkeypatch):
 
 def test_parse_cpu_list_and_pin_control_actor_cpu(monkeypatch):
     import os
-    from middleware.core import control_process
+    from middleware.core.control import control_process
 
     assert control_process._parse_cpu_list('1-3, 6, 8-9\n') == {1, 2, 3, 6, 8, 9}
     assert control_process._parse_cpu_list('') == set()
@@ -579,8 +579,8 @@ def test_parse_cpu_list_and_pin_control_actor_cpu(monkeypatch):
 
 
 def test_actor_checkpoint_separates_hot_path_from_snapshot_and_copies_joint_state():
-    from middleware.core.ros_bridge import _copy_actor_message
-    from middleware.core.control_process import _RecordingIngress
+    from middleware.core.control.ros_bridge import _copy_actor_message
+    from middleware.core.control.control_process import _RecordingIngress
     from sensor_msgs.msg import JointState
 
     rig = actor()

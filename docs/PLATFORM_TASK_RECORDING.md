@@ -64,8 +64,8 @@ MCAP＋MP4 转换直接读取源 MCAP，不额外预扫描源文件计算 CRC64 
 | 平台 | `migrations/ingest/022_robot_connections.sql` | 增量持久化表 |
 | 平台 | `ConnectionLink.tsx`、`OnboardRobotDialog.tsx`、`RobotOnboardingTab.tsx` | 原数据源标签页与抽屉内的单链接入口 |
 | 平台 | `openapi/robot_connections.yaml`、完整 OpenAPI、前端 generated 文件 | 接口契约与前端操作白名单 |
-| 机器人 | `middleware/core/platform_connection.py`、`platform_api.py` | 本地连接服务、配置读取、任务列表、凭据管理 |
-| 机器人 | `middleware/core/task_recording.py`、`topic_recorder.py`、`app.py` | 统一录制入口、固定归属、整理封存、恢复 |
+| 机器人 | `middleware/core/uploads/platform_connection.py`、`platform_api.py` | 本地连接服务、配置读取、任务列表、凭据管理 |
+| 机器人 | `middleware/core/uploads/task_recording.py`、`topic_recorder.py`、`app.py` | 统一录制入口、固定归属、整理封存、恢复 |
 | 机器人 | `static/platform_panel.js`、`static/app.js`、`static/index.html` | 选任务、上传列表、历史补选和三类状态 |
 | 机器人 | `upload_client/humanoid_upload/artifacts.py`、`http.py` | 快照清单、匿名兑换与错误分类，保留最新 main 的代理修复 |
 

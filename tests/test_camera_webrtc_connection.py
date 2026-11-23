@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 
 
 class CameraHandshakeTests(unittest.IsolatedAsyncioTestCase):

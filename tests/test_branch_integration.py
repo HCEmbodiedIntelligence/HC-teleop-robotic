@@ -11,7 +11,7 @@ import yaml
 from adapters.core.runtime_config import unified_profile
 from middleware.core.app import MiddlewareRuntime
 from middleware.core.config import ConfigStore, validate_config
-from middleware.core.robot_profiles import RobotProfileManager
+from middleware.core.robot.robot_profiles import RobotProfileManager
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,7 +75,7 @@ def test_video_bundle_preserves_depth_bytes_stamps_and_source(tmp_path):
     pytest.importorskip('av')
     from mcap.writer import Writer
     from mcap.reader import make_reader
-    from middleware.core.video_bundle import prepare, VERSION
+    from middleware.core.recording.video_bundle import prepare, VERSION
     source = tmp_path/'source.mcap'
     original_depth = []
     with source.open('wb') as stream:

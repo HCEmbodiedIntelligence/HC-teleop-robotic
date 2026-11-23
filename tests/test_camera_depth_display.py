@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 
 
 class DepthDisplayTests(unittest.TestCase):

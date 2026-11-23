@@ -29,7 +29,7 @@ from openarmx_hc_robot_adapter.node import OpenArmXHcRobotAdapter
 
 from middleware.core.app import MiddlewareRuntime, create_app
 from middleware.core.config import ConfigStore, validate_config
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 ROOT = Path(__file__).resolve().parents[1]

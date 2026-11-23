@@ -23,7 +23,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState, CompressedImage, Image
 from std_msgs.msg import Float64MultiArray, String
-from middleware.core.ros_executor import create_single_threaded_executor
+from middleware.core.control.ros_executor import create_single_threaded_executor
 
 
 class TeleopSessionMonitor(Node):

@@ -185,7 +185,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    from middleware.core.robot_api import selected_profile
+    from middleware.core.robot.robot_api import selected_profile
     import yaml
     config = os.environ.get('HC_ARM_TELEOP_CONFIG')
     if config:

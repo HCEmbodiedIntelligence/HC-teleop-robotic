@@ -11,7 +11,7 @@ from humanoid_upload.bundle import checksum
 from humanoid_upload.common import DEFAULTS, UploadError, atomic_json, read_json
 from humanoid_upload.queue import Queue
 from humanoid_upload.worker import Worker
-from core.upload_service import UploadService
+from core.uploads.upload_service import UploadService
 
 @pytest.fixture
 def hc_cfg(tmp_path):
@@ -194,7 +194,7 @@ def test_binding_scan_restart(hc_cfg):
 def test_api_secret_rejection(hc_cfg):
     from aiohttp import web
     from aiohttp.test_utils import TestClient,TestServer
-    from core.upload_api import register_upload_routes
+    from core.uploads.upload_api import register_upload_routes
     async def run():
         svc=service(hc_cfg); app=web.Application(); register_upload_routes(app,svc)
         async with TestClient(TestServer(app)) as client:
@@ -346,7 +346,7 @@ def test_restart_validates_settings_before_worker(hc_cfg,key,value):
 def test_binding_save_failure_does_not_change_live_default(hc_cfg,monkeypatch):
     svc=service(hc_cfg); before=svc.binding_snapshot()
     def fail(*args): raise OSError('disk full')
-    monkeypatch.setattr('core.upload_service.atomic_json',fail)
+    monkeypatch.setattr('core.uploads.upload_service.atomic_json',fail)
     with pytest.raises(OSError):
         svc.set_binding({**svc.bindings[before['binding_id']],'task_id':'not-persisted'})
     assert svc.binding_snapshot()==before

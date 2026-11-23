@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 import yaml
 import numpy as np
 import pybullet as p
-from middleware.core.robot_profiles import RobotProfileManager
+from middleware.core.robot.robot_profiles import RobotProfileManager
 from adapters.v23.src.pinocchio_interface_v3 import PinocchioInterfaceV3
 from adapters.v23.src.controller_v2_3 import ControllerV23
 

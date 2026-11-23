@@ -9,7 +9,7 @@ import pytest
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Header, String
 from mcap.reader import make_reader
-from middleware.core.recording_cdr import read_event
+from middleware.core.recording.recording_cdr import read_event
 
 from tests.robot_api_fake_rig import FakeRig
 from tests.correction_recording_support import config as recording_config

@@ -8,8 +8,8 @@ import pytest
 from rclpy.serialization import serialize_message
 from sensor_msgs.msg import Image, JointState
 
-from middleware.core.topic_recorder import TopicRecorder
-from middleware.core.lerobot_export import prepare_mcap, writer_python
+from middleware.core.recording.topic_recorder import TopicRecorder
+from middleware.core.recording.lerobot_export import prepare_mcap, writer_python
 
 
 def require_official_writer():
@@ -58,7 +58,7 @@ def test_full_session_exports_all_phases_and_preserves_human_labels_in_both_form
     assert rows[0]['grid_time'] == 0 and rows[-1]['grid_time'] >= 1.9
     assert {row['intervention'] for row in rows} == {False, True}
     assert all(row['intervention'] == (.5 <= row['grid_time'] < 1.) for row in rows)
-    from middleware.core.video_bundle import prepare
+    from middleware.core.recording.video_bundle import prepare
     bundle = prepare(recorder.path, tmp_path/'bundle', dict(recording_id='session',
         started_at='2026-10-22T00:00:00Z', ended_at='2026-10-22T00:00:02Z'))
     assert json.loads((bundle/'intervention-session.json').read_text()) == session
@@ -67,7 +67,7 @@ def test_full_session_exports_all_phases_and_preserves_human_labels_in_both_form
     script = '''
 import json,sys
 from pathlib import Path
-from middleware.core.lerobot_export import write_dataset
+from middleware.core.recording.lerobot_export import write_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 source=Path(sys.argv[1]); root=source.parent/'dataset'
 write_dataset(source,root)
@@ -119,7 +119,7 @@ def test_corrections_export_boolean_and_never_joins_across_long_gap(tmp_path, lo
     script = '''
 import json,sys
 from pathlib import Path
-from middleware.core.lerobot_export import write_dataset
+from middleware.core.recording.lerobot_export import write_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 source=Path(sys.argv[1]); root=source.parent/'dataset'
 result=write_dataset(source,root)

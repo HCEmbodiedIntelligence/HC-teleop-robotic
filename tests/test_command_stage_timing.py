@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import threading
 import time
 
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def test_sampled_command_diagnostics_leave_the_final_gate_and_targets_unchanged():

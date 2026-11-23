@@ -11,8 +11,8 @@ from rclpy.qos import QoSProfile
 from rclpy.serialization import deserialize_message, serialize_message
 from sensor_msgs.msg import JointState
 
-from middleware.core.publication_capture import PublicationCapture
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.publication_capture import PublicationCapture
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 def test_successful_native_ros_cdr_publish_and_capture_have_identical_original_payload(monkeypatch):

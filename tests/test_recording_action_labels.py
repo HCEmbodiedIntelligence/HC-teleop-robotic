@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 from mcap.reader import make_reader
-from middleware.core.recording_cdr import read_event
+from middleware.core.recording.recording_cdr import read_event
 from rclpy.serialization import serialize_message, deserialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from middleware.core.recording_action_labels import (
+from middleware.core.recording.recording_action_labels import (
     RecordingActionLabels, ActionLabelBuffer, action_label_policy,
     ACTION_TOPIC, PUBLISHED_TOPIC, PROVENANCE_TOPIC, FEEDBACK_TOPIC, STATUS_TOPIC,
     OWNERSHIP_TOPIC, JOINT_TYPE,
@@ -167,7 +167,7 @@ def test_buffer_pressure_flushes_evidence_without_dropping():
 
 
 def test_actual_mcap_separates_label_clock_and_exact_publication_evidence(tmp_path):
-    from middleware.core.topic_recorder import TopicRecorder
+    from middleware.core.recording.topic_recorder import TopicRecorder
     topics = [dict(topic=topic, type=kind) for topic, kind in [
         (ACTION_TOPIC, JOINT_TYPE), (FEEDBACK_TOPIC, JOINT_TYPE),
         (STATUS_TOPIC, 'std_msgs/msg/String'), (OWNERSHIP_TOPIC, 'std_msgs/msg/String')]]
@@ -205,7 +205,7 @@ def test_actual_mcap_separates_label_clock_and_exact_publication_evidence(tmp_pa
 
 
 def test_page_selection_and_existing_feedback_threshold_are_respected():
-    from middleware.core.ros_recording_executor import recording_subscriptions
+    from middleware.core.recording.ros_recording_executor import recording_subscriptions
     config = dict(legacy_control_profile=str(Path(__file__).resolve().parents[1]/'adapters/robots/x1'), subscriptions=[
         dict(topic=topic, type=kind, outputs=['record'], max_hz=10 if topic == STATUS_TOPIC else 0)
         for topic, kind in [(ACTION_TOPIC, JOINT_TYPE), (FEEDBACK_TOPIC, JOINT_TYPE),
@@ -222,8 +222,8 @@ def test_page_selection_and_existing_feedback_threshold_are_respected():
 
 def test_drive_replay_uses_real_commands_and_excludes_feedback_labels(tmp_path):
     from mcap.writer import Writer
-    from middleware.core.topic_recorder import _get_msg_def
-    from middleware.core.topic_player import TopicPlayer
+    from middleware.core.recording.topic_recorder import _get_msg_def
+    from middleware.core.recording.topic_player import TopicPlayer
     from unittest.mock import Mock
     path = tmp_path/'drive.mcap'
     with path.open('wb') as stream:

@@ -26,8 +26,8 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, bridge
     from std_msgs.msg import Bool, String
     import yaml
     from adapters.core.arm_teleop_node import RobotArmTeleopNode
-    from middleware.core.ros_bridge import RosBridge
-    from middleware.core.control_process import IsolatedRosBridge
+    from middleware.core.control.ros_bridge import RosBridge
+    from middleware.core.control.control_process import IsolatedRosBridge
 
     domain=int(os.environ['ROS_DOMAIN_ID'])
     assert 200<=domain<=232 and os.environ.get('ROS_LOCALHOST_ONLY')=='1'

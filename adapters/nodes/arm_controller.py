@@ -35,7 +35,7 @@ def main() -> None:
     )
     args, ros_args = parser.parse_known_args()
     from adapters.core.arm_teleop_node import RobotArmTeleopNode
-    from middleware.core.ros_executor import create_single_threaded_executor
+    from middleware.core.control.ros_executor import create_single_threaded_executor
 
     if hasattr(sys, "setswitchinterval"):
         try:

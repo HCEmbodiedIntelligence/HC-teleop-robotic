@@ -22,7 +22,7 @@ for candidate in (PROJECT_ROOT, PROJECT_ROOT / '.deps'):
 
 from mcap.reader import make_reader
 
-from middleware.core.capture_window import WINDOW_METADATA, _HEADER_TYPES
+from middleware.core.recording.capture_window import WINDOW_METADATA, _HEADER_TYPES
 from tools.diagnostics.audit_mcap_timing import (
     ACTION,
     ACTION_PROVENANCE,

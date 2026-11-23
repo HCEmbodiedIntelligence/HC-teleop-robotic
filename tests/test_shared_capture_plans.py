@@ -13,18 +13,18 @@ from test_platform_task_recording import LOCAL, choice, finish
 from humanoid_upload.artifacts import inspect_ready
 from humanoid_upload.capture_plan import digest, reference, validate_lerobot_info, validate_snapshot
 from humanoid_upload.common import UploadError, atomic_json, read_json
-from middleware.core.capture_requirements import check_device
-from middleware.core.export_progress import ExportProgress, progress_path
-from middleware.core.lerobot_export import preserved_episode
-from middleware.core.platform_connection import PlatformConnection
-from middleware.core.task_recording import TaskRecorder
-from middleware.core.topic_recorder import TopicRecorder, read_recording_metadata
+from middleware.core.recording.capture_requirements import check_device
+from middleware.core.recording.export_progress import ExportProgress, progress_path
+from middleware.core.recording.lerobot_export import preserved_episode
+from middleware.core.uploads.platform_connection import PlatformConnection
+from middleware.core.uploads.task_recording import TaskRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder, read_recording_metadata
 
 
 def test_joint_only_mcap_can_be_packaged_without_dummy_video(tmp_path):
     from mcap.reader import make_reader
     from mcap.writer import Writer
-    from middleware.core.video_bundle import prepare
+    from middleware.core.recording.video_bundle import prepare
 
     source = tmp_path / 'joints.mcap'
     with source.open('wb') as stream:
@@ -70,14 +70,14 @@ def environment(tmp_path, monkeypatch, server, fmt='mcap'):
 def recorder_for(cfg, platform, tmp_path, monkeypatch):
     raw = TopicRecorder(cfg['ros']['recording'], tmp_path)
     if raw.save_format in ('lerobot', 'both'):
-        monkeypatch.setattr('middleware.core.lerobot_export.ensure_export_available', lambda: 'synthetic-converter')
+        monkeypatch.setattr('middleware.core.recording.lerobot_export.ensure_export_available', lambda: 'synthetic-converter')
         def convert():
             # A format-valid synthetic Parquet dataset replaces only the external
             # ROS/official writer process; recorder, seal, queue, HTTP are real.
             import pyarrow as pa
             import pyarrow.parquet as pq
             target = raw.directory/'lerobot'/raw.path.stem
-            from middleware.core.capture_formats import lerobot_snapshot
+            from middleware.core.recording.capture_formats import lerobot_snapshot
             snapshot = lerobot_snapshot(read_recording_metadata(raw.path)) or json.loads(read_recording_metadata(raw.path)['capture_snapshot'])
             features = {k: {f: v for f, v in feature.items() if f in ('dtype', 'shape', 'names', 'units')}
                         for k, feature in snapshot['output']['features'].items() if feature['required']}
@@ -488,8 +488,8 @@ def test_actual_platform_episode_receipts_keep_data_and_annotation_independent(s
 def test_shared_export_preparation_uses_original_samples_without_placeholder_assets(source_format, tmp_path, monkeypatch):
     import sys
     from mcap.writer import Writer
-    from middleware.core.lerobot_export import prepare_mcap
-    from middleware.core.topic_recorder import RECORDING_METADATA_NAME
+    from middleware.core.recording.lerobot_export import prepare_mcap
+    from middleware.core.recording.topic_recorder import RECORDING_METADATA_NAME
     # Only the ROS serializer is substituted; MCAP traversal and export preparation are real.
     monkeypatch.setitem(sys.modules, 'rclpy.serialization', SimpleNamespace(
         deserialize_message=lambda data, _: SimpleNamespace(**json.loads(data))))
@@ -537,7 +537,7 @@ def test_export_process_uses_captured_frequency_and_task_after_defaults_change(s
     raw._active_metadata = {'capture_snapshot':json.dumps(snapshot), 'platform_task':json.dumps({'task':task})}
     raw.lerobot_fps, raw.lerobot_task = 30, 'changed default'
     launch = Mock(return_value=Mock())
-    monkeypatch.setattr('middleware.core.topic_recorder.subprocess.Popen', launch)
+    monkeypatch.setattr('middleware.core.recording.topic_recorder.subprocess.Popen', launch)
     try:
         raw._start_lerobot_export()
         command = launch.call_args.args[0]

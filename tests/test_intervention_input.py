@@ -9,8 +9,8 @@ import pytest
 
 from adapters.core.intervention import ClutchInput, InterventionTeleop
 from middleware.core.app import MiddlewareRuntime
-from middleware.core.control_ownership import ControlOwnership, ControlToken
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.control_ownership import ControlOwnership, ControlToken
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def packet(sequence, grip):

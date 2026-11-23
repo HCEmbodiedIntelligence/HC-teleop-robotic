@@ -16,8 +16,8 @@ from pathlib import Path
 root = Path(sys.argv[1])
 runpy.run_path(str(root / 'middleware/server.py'))
 import humanoid_upload
-from middleware.core.platform_connection import PlatformConnection
-from middleware.core.task_recording import TaskRecorder
+from middleware.core.uploads.platform_connection import PlatformConnection
+from middleware.core.uploads.task_recording import TaskRecorder
 assert Path(humanoid_upload.__file__).resolve().parent == root / 'upload_client/humanoid_upload'
 '''
     result = subprocess.run(

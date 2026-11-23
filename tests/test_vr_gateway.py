@@ -5,7 +5,7 @@ import time
 import unittest
 
 from middleware.core.protocol import LEGACY_PACKET_FORMAT
-from middleware.core.vr_gateway import VrGateway
+from middleware.core.media.vr_gateway import VrGateway
 
 
 def _unused_udp_port() -> int:

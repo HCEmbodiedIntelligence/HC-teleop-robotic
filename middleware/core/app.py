@@ -18,20 +18,20 @@ from typing import Any
 from aiohttp import WSMsgType, web
 import yaml
 
-from .camera_process import CameraProcessService as CameraService
-from .simulation import SimulationService, register_simulation_routes
+from .media.camera_process import CameraProcessService as CameraService
+from .robot.simulation import SimulationService, register_simulation_routes
 from .config import ConfigError, ConfigStore, validate_config, isolated_control_process_enabled
-from .profile_api import register_profile_routes
+from .robot.profile_api import register_profile_routes
 from .protocol import envelope
-from .robot_profiles import RobotProfileManager
-from .robot_api import RobotApiProfile, selected_profile, selected_profile_root
+from .robot.robot_profiles import RobotProfileManager
+from .robot.robot_api import RobotApiProfile, selected_profile, selected_profile_root
 from adapters.core.runtime_config import unified_profile
-from .ros_bridge import RosBridge
-from .ros_recording_executor import RosRecordingExecutor, recording_subscriptions
-from .topic_player import TopicPlayer
-from .topic_recorder import TopicRecorder
-from .takeover_log import TakeoverLog
-from .vr_gateway import VrGateway
+from .control.ros_bridge import RosBridge
+from .recording.ros_recording_executor import RosRecordingExecutor, recording_subscriptions
+from .recording.topic_player import TopicPlayer
+from .recording.topic_recorder import TopicRecorder
+from .recording.takeover_log import TakeoverLog
+from .media.vr_gateway import VrGateway
 from .diagnostic_logs import DiagnosticLogs, DiagnosticLogHandler, register_log_routes
 from .runtime_mode import configure_environment
 
@@ -53,7 +53,7 @@ def _upload_failure_status(code: str) -> int:
 
 def control_bridge_class(ros_config: dict[str, Any]):
     if isolated_control_process_enabled(ros_config):
-        from .control_process import IsolatedRosBridge
+        from .control.control_process import IsolatedRosBridge
         return IsolatedRosBridge
     return RosBridge
 
@@ -192,8 +192,8 @@ class MiddlewareRuntime:
                                  topics=recording_subscriptions(self.config["ros"]))
         self.recorder = recorder
         try:
-            from .platform_connection import PlatformConnection
-            from .task_recording import TaskRecorder
+            from .uploads.platform_connection import PlatformConnection
+            from .uploads.task_recording import TaskRecorder
             self.platform = PlatformConnection(self.config, self.config_dir, recorder.directory)
             self.recorder = TaskRecorder(recorder, self.platform)
             self.platform.activity_provider = lambda: "COLLECTING" if self.recorder.is_recording() else (
@@ -255,10 +255,10 @@ class MiddlewareRuntime:
         self.camera = next(iter(self.cameras.values()), None)
         dataset_config = self.config["ros"].get("dataset_topics", {})
         if dataset_config.get("enabled", False):
-            from .dataset_topics import load_joint_groups
-            from .x1_recording import is_x1
+            from .recording.dataset_topics import load_joint_groups
+            from .recording.x1_recording import is_x1
             dataset_config["x1_recording_fk"] = is_x1(self.config["ros"])
-            from .camera_metadata import load_camera_metadata
+            from .media.camera_metadata import load_camera_metadata
             dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
             dataset_config["camera_metadata"] = load_camera_metadata(self.config, self.config_dir)
         self.ros = control_bridge_class(self.config['ros'])(
@@ -314,7 +314,7 @@ class MiddlewareRuntime:
         self.uploads = None
         self.upload_error = None
         try:
-            from .upload_service import UploadService
+            from .uploads.upload_service import UploadService
             upload_config = copy.deepcopy(self.config.get("uploads", {"enabled": False}))
             queue_path = Path(upload_config.get("queue_directory", "../runtime/upload_queue")).expanduser()
             upload_config["queue_directory"] = str(
@@ -455,7 +455,7 @@ class MiddlewareRuntime:
         action_capture = bool(self.config['ros'].get('legacy_control_profile')
                               and action_max_hz <= 0)
         self.config['ros']['record_action_at_publication'] = action_capture
-        from .recording_action_labels import action_label_policy
+        from .recording.recording_action_labels import action_label_policy
         recorder.action_label_policy = (action_label_policy(self.config['ros'])
                                         if action_capture else None)
         if action_capture:
@@ -465,7 +465,7 @@ class MiddlewareRuntime:
             if callable(factory):
                 recorder.publication_capture = factory(recorder, selected=selected)
             else:
-                from .publication_capture import PublicationCapture
+                from .recording.publication_capture import PublicationCapture
                 recorder.publication_capture = PublicationCapture(recorder, selected=selected)
                 self.ros._publication_capture = recorder.publication_capture
 
@@ -1072,7 +1072,7 @@ def create_app(store: ConfigStore) -> web.Application:
     runtime.diagnostics = diagnostics
     diagnostic_handler = DiagnosticLogHandler(diagnostics)
     diagnostic_handler.setLevel(logging.WARNING)
-    from .control_runtime import ControlRuntime
+    from .control.control_runtime import ControlRuntime
     runtime.control_runtime = ControlRuntime(store.path)
     profile_root = selected_profile_root(config, store.path.parent)
     profiles = RobotProfileManager(profile_root)
@@ -1116,7 +1116,7 @@ def create_app(store: ConfigStore) -> web.Application:
         return await handler(request)
 
     app.middlewares.append(serialize_simulation_changes)
-    from .intervention_api import register_intervention_routes
+    from .control.intervention_api import register_intervention_routes
     register_intervention_routes(app, runtime)
     register_simulation_routes(app, simulation)
     static_dir = Path(__file__).parent / "static"
@@ -1400,7 +1400,7 @@ def create_app(store: ConfigStore) -> web.Application:
             topic = item["topic"]
             info = topic_health.get(topic)
             if info is None:
-                from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+                from .control.ros_bridge import DEFAULT_TOPIC_STANDARDS
                 std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
                 target_hz = float(item.get("target_hz", 0) or std["target_hz"])
                 min_hz = float(item.get("min_hz", 0) or std["min_hz"])
@@ -1487,7 +1487,7 @@ def create_app(store: ConfigStore) -> web.Application:
                 info = topic_health.get(topic)
                 if not info or info.get("state") != "ok":
                     hz = info.get("hz", 0.0) if info else 0.0
-                    from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+                    from .control.ros_bridge import DEFAULT_TOPIC_STANDARDS
                     std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
                     min_hz = float(item.get("min_hz", 0) or (info.get("min_hz") if info else std["min_hz"]))
                     issues.append({
@@ -1616,8 +1616,8 @@ def create_app(store: ConfigStore) -> web.Application:
         })
 
     async def download_recording(request: web.Request) -> web.StreamResponse:
-        from .recording_datasets import resolve_dataset, archive_dataset, archive_datasets
-        from .takeover_log import takeover_file
+        from .recording.recording_datasets import resolve_dataset, archive_dataset, archive_datasets
+        from .recording.takeover_log import takeover_file
         from urllib.parse import quote
         identifier = request.match_info["filename"]
         if runtime.recorder is None:
@@ -1657,7 +1657,7 @@ def create_app(store: ConfigStore) -> web.Application:
             archive.unlink(missing_ok=True)
 
     async def get_dataset_video(request: web.Request) -> web.FileResponse:
-        from .recording_datasets import resolve_dataset, dataset_video
+        from .recording.recording_datasets import resolve_dataset, dataset_video
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
         identifier = request.match_info["filename"]
@@ -1718,7 +1718,7 @@ def create_app(store: ConfigStore) -> web.Application:
             return web.json_response({'ok': False, 'error': str(exc)}, status=400)
 
     async def batch_download_recordings(request: web.Request) -> web.StreamResponse:
-        from .recording_datasets import archive_datasets, validate_download_selection
+        from .recording.recording_datasets import archive_datasets, validate_download_selection
         if runtime.recorder is None:
             raise web.HTTPServiceUnavailable(text="recorder not available")
         if request.content_type == 'application/json':
@@ -1932,7 +1932,7 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_post("/api/teleop/home", teleop_home)
     app.router.add_post("/api/teleop/source", set_control_source)
     try:
-        from .upload_api import register_upload_routes
+        from .uploads.upload_api import register_upload_routes
 
         class UploadProxy:
             def status(self):
@@ -1961,7 +1961,7 @@ def create_app(store: ConfigStore) -> web.Application:
 
         async def update_upload_settings(body):
             from humanoid_upload.common import UploadError
-            from .upload_service import UploadService
+            from .uploads.upload_service import UploadService
             if set(body) != {"enabled", "auto_enqueue"} or any(type(v) is not bool for v in body.values()):
                 raise ValueError()
             async with runtime._restart_lock:
@@ -2020,12 +2020,12 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/api/recording/precheck", precheck_recording)
     app.router.add_post("/api/recording/start", start_recording)
     app.router.add_post("/api/recording/stop", stop_recording)
-    from .platform_api import register_platform_routes
+    from .uploads.platform_api import register_platform_routes
     register_platform_routes(app, runtime)
     app.router.add_get("/api/recording/status", get_recording_status)
     app.router.add_get("/api/recordings", get_recordings)
     app.router.add_post("/api/recordings/upload", import_mcap_file)
-    from .recording_downloads import register_download_routes
+    from .recording.recording_downloads import register_download_routes
     register_download_routes(app, lambda: runtime.recorder)
     app.router.add_get("/api/recordings/{filename}/download", download_recording)
     app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)

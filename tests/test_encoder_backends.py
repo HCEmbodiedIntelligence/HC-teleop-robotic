@@ -7,7 +7,7 @@ from unittest.mock import patch
 import av
 import numpy as np
 
-from middleware.core.fast_h264 import FastH264Encoder, encoder_backend
+from middleware.core.media.fast_h264 import FastH264Encoder, encoder_backend
 
 
 def frame(image, index):
@@ -23,7 +23,7 @@ class EncoderBackendsTests(unittest.TestCase):
         encoder.target_bitrate = 2_500_000
         rng = np.random.default_rng(17)
         sizes = []
-        with patch("middleware.core.fast_h264.time.monotonic") as clock:
+        with patch("middleware.core.media.fast_h264.time.monotonic") as clock:
             for index in range(180):
                 clock.return_value = index / 30
                 if index == 90:
@@ -124,7 +124,7 @@ class EncoderBackendsTests(unittest.TestCase):
             encoder = FastH264Encoder()
         finally:
             encoder_backend.reset(token)
-        with patch('middleware.core.jetson_h264.jetson_platform', return_value={'is_jetson': False}):
+        with patch('middleware.core.media.jetson_h264.jetson_platform', return_value={'is_jetson': False}):
             list(encoder._encode_frame(frame(np.zeros((400, 640, 3), np.uint8), 0), False))
         self.assertEqual(encoder.actual_backend, "x264")
         self.assertIn("GStreamer", encoder.fallback_reason)

@@ -16,8 +16,8 @@ from urllib.parse import quote
 import yaml
 from aiohttp import web
 
-from .config import ConfigError
-from .runtime_mode import configure_environment
+from ..config import ConfigError
+from ..runtime_mode import configure_environment
 from .robot_profiles import RobotProfileError, UrdfModel, validate_profile_id
 from .robot_api import selected_profile_root
 
@@ -29,7 +29,7 @@ class SimulationError(ValueError):
 class SimulationService:
     def __init__(self, store, profiles):
         self.store, self.profiles = store, profiles
-        self.project = Path(__file__).resolve().parents[2]
+        self.project = Path(__file__).resolve().parents[3]
         self.lock = asyncio.Lock()
         self.processes = []
         self.readers = []

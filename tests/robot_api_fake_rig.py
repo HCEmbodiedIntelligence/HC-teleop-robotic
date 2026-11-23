@@ -22,8 +22,8 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 from geometry_msgs.msg import PoseStamped
 
 from middleware.core.config import validate_config
-from middleware.core.robot_api import RobotApiProfile
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.robot.robot_api import RobotApiProfile
+from middleware.core.control.ros_bridge import RosBridge
 
 
 class FakeRig:

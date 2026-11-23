@@ -81,7 +81,7 @@ class DatasetTopics:
             self.publisher('/action/head/pose', PoseStamped),
         )
         subscribe(PoseArray, '/status/head/tracking_poses', self.robot_head, head_pubs)
-        from .camera_metadata import CameraMetadata
+        from ..media.camera_metadata import CameraMetadata
         self.camera_metadata = CameraMetadata(node, config.get('camera_metadata', {}))
         self.publishers.update(self.camera_metadata.publishers)
         self.subscriptions.extend(self.camera_metadata.subscriptions)
@@ -184,7 +184,7 @@ class DatasetTopics:
 def load_joint_groups(config, config_dir):
     """Resolve split groups from the active robot profile, including profiles without waist."""
     from adapters.core.runtime_config import unified_profile
-    from .robot_api import RobotApiProfile, selected_profile
+    from ..robot.robot_api import RobotApiProfile, selected_profile
     import yaml
     directory = selected_profile(config, config_dir)
     if unified_profile(directory):

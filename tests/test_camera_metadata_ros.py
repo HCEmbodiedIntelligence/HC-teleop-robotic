@@ -10,8 +10,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import String
 
-from middleware.core.camera_metadata import CALIBRATION_TOPIC, EXTRINSICS_TOPIC, load_camera_metadata
-from middleware.core.dataset_topics import DatasetTopics
+from middleware.core.media.camera_metadata import CALIBRATION_TOPIC, EXTRINSICS_TOPIC, load_camera_metadata
+from middleware.core.recording.dataset_topics import DatasetTopics
 
 
 def test_camera_metadata_dds_round_trip_and_stale_feedback(monkeypatch):

@@ -1,7 +1,7 @@
 import socket
 import time
 import unittest
-from middleware.core.vr_gateway import VrGateway
+from middleware.core.media.vr_gateway import VrGateway
 from middleware.core.protocol import DISCOVERY_REQUEST, RELEASE_REQUEST, PACKET_FORMAT, MAGIC, PROTOCOL_VERSION
 
 

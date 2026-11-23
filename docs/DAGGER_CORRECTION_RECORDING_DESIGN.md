@@ -43,7 +43,7 @@ corrections:
 
 ## 实现与验证
 
-核心文件为 [correction_recording.py](../middleware/core/correction_recording.py)、[raw 纠正采集](../middleware/core/capture/corrections.py)、[TopicRecorder](../middleware/core/topic_recorder.py)、[RecordingService](../middleware/core/recording_service.py) 和 [LeRobot 导出](../middleware/core/lerobot_export.py)。打开/关闭边界有序入队，首个有效缓存观测带来源时间。最终 HC 发出的人工目标和实测反馈分别记录；按身份、epoch、来源时间和关闭边界拒绝跨段混入。
+核心文件为 [correction_recording.py](../middleware/core/recording/correction_recording.py)、[raw 纠正采集](../middleware/core/capture/corrections.py)、[TopicRecorder](../middleware/core/recording/topic_recorder.py)、[RecordingService](../middleware/core/recording_service.py) 和 [LeRobot 导出](../middleware/core/recording/lerobot_export.py)。打开/关闭边界有序入队，首个有效缓存观测带来源时间。最终 HC 发出的人工目标和实测反馈分别记录；按身份、epoch、来源时间和关闭边界拒绝跨段混入。
 
 正常停止用独立完成标志和已接受/已写入计数，不再为塞入停止哨兵挤掉数据。长缺口、缺失必要来源、尾部中断和队列拒收作为质量信息保存；长缺口处 LeRobot 保留原时间并分成连续有效子段，不把两端动作拼接为相邻帧。
 
@@ -106,12 +106,12 @@ corrections:
 | 已有基础 | 可以复用 | 必须补齐 |
 | --- | --- | --- |
 | [RecordingService](../middleware/core/recording_service.py) | recording_id、作业状态、后台写入收尾/导出、失败重试、绑定和产物身份 | 现有 `start()` 会建作业、写入器与订阅，不适合每次握持才执行；需增加会话预备和快速分段 |
-| [RosRecordingExecutor](../middleware/core/ros_recording_executor.py)、[TopicRecorder](../middleware/core/topic_recorder.py) | 独立订阅/写入进程、有界队列、源统计 | 让采集入口跨纠正片段保持就绪，按代际和精确边界路由，不靠 UI start/stop 时间切片 |
+| [RosRecordingExecutor](../middleware/core/recording/ros_recording_executor.py)、[TopicRecorder](../middleware/core/recording/topic_recorder.py) | 独立订阅/写入进程、有界队列、源统计 | 让采集入口跨纠正片段保持就绪，按代际和精确边界路由，不靠 UI start/stop 时间切片 |
 | [CaptureHub](../middleware/core/capture/hub.py)及 [capture/session.py](../middleware/core/capture/session.py) | raw 采集、独立缓存、关闭截止点与后台收尾 | 在媒体写入前应用同一纠正片段范围；不能先全程录视频后仅隐藏 AUTO 帧 |
 | [profile_capture.py](../middleware/core/profile_capture.py) | 公共关节名、SI 单位、主相机与时效配置，禁用 next-state action 补造 | 将动作证据及片段身份贯穿 raw 与导出 |
-| [lerobot_export.py](../middleware/core/lerobot_export.py) | 固定频率、源时间/有效性、官方数据集写入与加载验证 | 增加 intervention 与分段校验；现有“一个录制文件一个 episode”不能拿全会话文件直接导出 |
-| [UploadService](../middleware/core/upload_service.py)、[上传队列](../upload_client/humanoid_upload/queue.py)与 [Worker](../upload_client/humanoid_upload/worker.py) | 持久队列、任务绑定、分片重试/对账、平台处理与质检状态 | 将纠正产物及质量报告接入相同上传流程，不另建仅本地可见的数据类型 |
-| [下载入口](../middleware/core/app.py)、[recording_datasets.py](../middleware/core/recording_datasets.py) | 已完成 MCAP 下载、LeRobot 目录 ZIP 下载 | raw 源包及封存整包还需统一下载入口，不能把现有 LeRobot 下载能力当作已支持 raw |
+| [lerobot_export.py](../middleware/core/recording/lerobot_export.py) | 固定频率、源时间/有效性、官方数据集写入与加载验证 | 增加 intervention 与分段校验；现有“一个录制文件一个 episode”不能拿全会话文件直接导出 |
+| [UploadService](../middleware/core/uploads/upload_service.py)、[上传队列](../upload_client/humanoid_upload/queue.py)与 [Worker](../upload_client/humanoid_upload/worker.py) | 持久队列、任务绑定、分片重试/对账、平台处理与质检状态 | 将纠正产物及质量报告接入相同上传流程，不另建仅本地可见的数据类型 |
+| [下载入口](../middleware/core/app.py)、[recording_datasets.py](../middleware/core/recording/recording_datasets.py) | 已完成 MCAP 下载、LeRobot 目录 ZIP 下载 | raw 源包及封存整包还需统一下载入口，不能把现有 LeRobot 下载能力当作已支持 raw |
 
 现有工作流详见 [recording-workflows.md](recording-workflows.md)。HC 的官方 LeRobot 写入器使用独立 0.4.3 环境；本地调研的 rollout 代码不是该写入环境的版本。新增特征需要实际往返验证，不为了采集功能整体升级推理环境。
 
@@ -167,7 +167,7 @@ corrections:
 
 控制交还与这些后台步骤并行。例如松手时还有三帧已接收图像待写，它们会继续写入；不会为了让队列看起来为空而删除它们。内存条目写入后被释放，与删除磁盘上的录制数据是两回事。
 
-实施前 [TopicRecorder.stop()](../middleware/core/topic_recorder.py) 会在满队列时丢弃数据以塞入 `None`。现已改为独立完成标志，等待所有已接受事件写入后关闭；已用暂停写进程、填满队列、调用停止、恢复写进程的测试确认不因正常停止丢数据。
+实施前 [TopicRecorder.stop()](../middleware/core/recording/topic_recorder.py) 会在满队列时丢弃数据以塞入 `None`。现已改为独立完成标志，等待所有已接受事件写入后关闭；已用暂停写进程、填满队列、调用停止、恢复写进程的测试确认不因正常停止丢数据。
 
 恢复后的程序动作使用不同来源和代际，即使它们先到达采集进程也不会进入旧片段。相机包需要依据采集时间而非仅依据到达时间归属：截止点之后曝光的帧不加入；不能确定时间归属的包标记无效，不猜测。
 

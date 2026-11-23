@@ -2,7 +2,7 @@
 import multiprocessing as mp
 import struct
 
-from middleware.core.capture_window import (
+from middleware.core.recording.capture_window import (
     CaptureAudit, CaptureWindow, SensorPreroll, buffered_sensor, header_stamp_ns,
 )
 
@@ -88,7 +88,7 @@ def test_audit_storage_is_bounded_and_reports_when_evidence_is_truncated():
 
 
 def test_ingress_rechecks_a_pre_stop_decision_under_the_shared_fence(tmp_path):
-    from middleware.core.topic_recorder import TopicRecorder, enqueue_record
+    from middleware.core.recording.topic_recorder import TopicRecorder, enqueue_record
     recorder = TopicRecorder(dict(directory=str(tmp_path)), tmp_path)
     try:
         recorder._capture_window.reset(True)
@@ -108,7 +108,7 @@ def test_ingress_rechecks_a_pre_stop_decision_under_the_shared_fence(tmp_path):
 
 
 def test_truncated_mcap_metadata_is_best_effort_and_does_not_raise(tmp_path):
-    from middleware.core.capture_window import read_capture_metadata
+    from middleware.core.recording.capture_window import read_capture_metadata
     source = tmp_path/'broken.mcap'
     for raw in (b'', b'not mcap', b'\x89MCAP0\r\n'):
         source.write_bytes(raw)

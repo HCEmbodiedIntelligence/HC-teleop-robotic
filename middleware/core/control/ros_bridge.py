@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .control_ownership import ControlToken
-from .protocol import envelope
-from .replay_alignment import HandAlignmentTrack, ReplayAlignmentPlanner
+from ..protocol import envelope
+from ..recording.replay_alignment import HandAlignmentTrack, ReplayAlignmentPlanner
 
 
 EventCallback = Callable[[dict[str, Any], list[str]], None]
@@ -248,7 +248,7 @@ class RosBridge:
         self._public_api = None
         self._legacy_enabled = bool(config.get("legacy_control_profile"))
         if config.get("robot_api_profile"):
-            from .robot_api import RobotApiProfile
+            from ..robot.robot_api import RobotApiProfile
             self._public_api = RobotApiProfile(config["robot_api_profile"])
         self.on_event = on_event
         self.on_frame = on_frame
@@ -1801,13 +1801,13 @@ class RosBridge:
             last_emit: dict[str, float] = {}
 
             if self.config.get("robot_api_profile"):
-                from .robot_api_boundary import RobotApiBoundary
+                from ..robot.robot_api_boundary import RobotApiBoundary
                 robot_api_boundary = RobotApiBoundary(node, self._public_api, subscribe_commands=False)
                 self._boundary = robot_api_boundary
 
             dataset_config = self.config.get("dataset_topics", {})
             if dataset_config.get("enabled", False) and not self._control_actor_mode:
-                from .dataset_worker import DatasetTopicProcess
+                from ..recording.dataset_worker import DatasetTopicProcess
                 dataset_process = DatasetTopicProcess(
                     dataset_config, domain_id,
                     self.config.get("node_name", "hc_teleop_middleware") + "_dataset",
@@ -2056,7 +2056,7 @@ class RosBridge:
             if not self._control_actor_mode and self.config.get("rosout_diagnostics", True):
                 try:
                     from rcl_interfaces.msg import Log as RosoutLog
-                    from .diagnostic_logs import RosoutLogFilter
+                    from ..diagnostic_logs import RosoutLogFilter
 
                     rosout_filter = RosoutLogFilter()
 

@@ -25,7 +25,7 @@ def test_dagger_home_keeps_authority_and_exit_returns_vr(monkeypatch):
     from std_msgs.msg import Bool, String
     import yaml
     from adapters.core.arm_teleop_node import RobotArmTeleopNode
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control.ros_bridge import RosBridge
 
     domain=int(os.environ['ROS_DOMAIN_ID'])
     assert 200<=domain<=232 and os.environ.get('ROS_LOCALHOST_ONLY')=='1'

@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from middleware.core.robot_profiles import RobotProfileError, RobotProfileManager
-from middleware.core.robot_api import RobotApiProfile, selected_profile
+from middleware.core.robot.robot_profiles import RobotProfileError, RobotProfileManager
+from middleware.core.robot.robot_api import RobotApiProfile, selected_profile
 
 
 def load_selection(config_path: Path) -> tuple[str, RobotProfileManager]:

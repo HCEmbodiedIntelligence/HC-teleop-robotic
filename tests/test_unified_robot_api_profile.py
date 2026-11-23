@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from middleware.core.robot_api import RobotApiProfile, selected_profile
-from middleware.core.robot_profiles import RobotProfileError, RobotProfileManager
+from middleware.core.robot.robot_api import RobotApiProfile, selected_profile
+from middleware.core.robot.robot_profiles import RobotProfileError, RobotProfileManager
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = [ROOT / 'adapters/robots' / n for n in ('openarmx', 'x1')]

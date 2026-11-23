@@ -287,13 +287,13 @@ VR 断流应撤销 VR 输入；检查它在 `source=motion` 时是否错误地�
 
 | 区域 | 入口 | 工作 |
 | --- | --- | --- |
-| Profile | `middleware/core/robot_profiles.py`、`profile_api.py`、`middleware/profile_cli.py` | 新 schema、引用解析、校验、导入导出和有效 profile 一致性 |
+| Profile | `middleware/core/robot/robot_profiles.py`、`profile_api.py`、`middleware/profile_cli.py` | 新 schema、引用解析、校验、导入导出和有效 profile 一致性 |
 | 启动 | `adapters/start.sh`、`adapters/core/runtime_config.py`、`tools/run_motion.sh`、`tools/motion.launch.py` | 加载同一解析结果，连接公共/内部话题、传递驱动参数 |
 | Motion ROS | `src/humanoid_motion_server/src/humanoid_motion_control_node.cpp` | 命令/反馈/Action 映射，来源授权，在线描述或描述发布者集成 |
 | Motion 核心 | `src/humanoid_motion_server/src/motion/{command_pipeline,sdk_motion_backend}.cpp` | 复用共享 RTC、组仲裁和回位流程 |
 | VR | `adapters/nodes/motion_teleop_bridge.py`、`adapters/core/arm_teleop_node.py` | 同一 ServoP 入口、home 迁移、模型反馈、共同检查和辅助关节 |
-| 许可 | `middleware/core/ros_bridge.py` 及安全事件调用处 | 保留独立硬件使能，来源和 epoch 拒绝旧输入 |
-| 数据 | `middleware/core/dataset_topics.py` 及受影响的录制/回放代码 | 公共关节投影、有效 profile、名称与元数据一致 |
+| 许可 | `middleware/core/control/ros_bridge.py` 及安全事件调用处 | 保留独立硬件使能，来源和 epoch 拒绝旧输入 |
+| 数据 | `middleware/core/recording/dataset_topics.py` 及受影响的录制/回放代码 | 公共关节投影、有效 profile、名称与元数据一致 |
 | 硬件 | 同级 OpenArmX adapter、通用 driver 配置/launch | 内部原生名称边界和 profile 参数消费 |
 | 示例/说明 | `examples/robot_api_demo.py`、`examples/README.md`、`docs/ROBOT_PUBLIC_API.md`、硬件契约 | 在线发现、ServoJ/P demo、最终实际接口和迁移说明 |
 

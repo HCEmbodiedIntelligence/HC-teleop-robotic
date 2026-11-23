@@ -18,10 +18,10 @@ from typing import Any, Callable
 # enable_packet_info: 开启套接字底层报文控制信息获取（如目标 IP，用于识别广播接口）
 # receive_packet: 接收 UDP 数据报及其关联的接口元信息
 # reply_packet: 向客户端准确回复 UDP 响应报文
-from .network import enable_packet_info, receive_packet, reply_packet
+from ..network import enable_packet_info, receive_packet, reply_packet
 
 # 从当前包的 protocol 模块导入协议相关常量与数据编解码工具：
-from .protocol import (
+from ..protocol import (
     DISCOVERY_REQUEST,   # 发现请求协议标志字符串（PICO 头显局域网广播搜索服务端时发送）
     RELEASE_REQUEST,     # 释放会话请求标志字符串（PICO 头显退出应用或主动释放控制权时发送）
     PacketError,         # 解码数据包异常基类（格式非法、校验失败等）

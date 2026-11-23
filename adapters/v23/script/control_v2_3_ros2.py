@@ -27,8 +27,8 @@ if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
 try:
-    from middleware.core.qos_event_observer import QosEventObserver
-    from middleware.core.ros_executor import create_single_threaded_executor
+    from middleware.core.control.qos_event_observer import QosEventObserver
+    from middleware.core.control.ros_executor import create_single_threaded_executor
 except ImportError:
     QosEventObserver = None
     create_single_threaded_executor = None

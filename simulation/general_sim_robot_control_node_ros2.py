@@ -144,7 +144,7 @@ class SimRobotController(Node, AssembledRobot):
         from adapters.core.runtime_config import unified_profile
         unified = unified_profile(self.robot_description_path)
         if unified:
-            from middleware.core.robot_api import RobotApiProfile
+            from middleware.core.robot.robot_api import RobotApiProfile
             RobotApiProfile(self.robot_description_path)
         self.joint_state_pub = self.create_publisher(
             JointState, "/internal/robot/joint_states" if unified else "/io_teleop/joint_states", 1

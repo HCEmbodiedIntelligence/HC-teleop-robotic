@@ -1,7 +1,7 @@
 """Exact recording time boundaries and partial writer failure reporting."""
 import pytest
 
-from middleware.core.correction_recording import WindowRouter
+from middleware.core.recording.correction_recording import WindowRouter
 
 
 def fixture(*, drop=None):

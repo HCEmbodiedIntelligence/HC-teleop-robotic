@@ -42,7 +42,7 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_missing_optional_dependency_does_not_stop_recording(self):
-        with patch.dict(sys.modules, {'middleware.core.upload_service': None}):
+        with patch.dict(sys.modules, {'middleware.core.uploads.upload_service': None}):
             await self.runtime._start_uploads()
         self.assertIsNone(self.runtime.uploads)
         self.assertTrue(self.runtime.upload_error)
@@ -54,7 +54,7 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
             factory = Mock(return_value=service)
             self.runtime.config['uploads'].update(enabled=enabled, auto_enqueue=automatic)
             self.runtime.recorder.binding_snapshot = None
-            with patch.dict(sys.modules, {'middleware.core.upload_service': SimpleNamespace(UploadService=factory)}):
+            with patch.dict(sys.modules, {'middleware.core.uploads.upload_service': SimpleNamespace(UploadService=factory)}):
                 await self.runtime._start_uploads()
             self.assertEqual(factory.call_args.kwargs, {
                 'artifact_state_dir': self.runtime.recorder.artifact_state_dir,
@@ -75,7 +75,7 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unavailable_upload_api_still_serves_main(self):
         store = ConfigStore(self.root / 'config.yaml')
-        with patch.dict(sys.modules, {'middleware.core.upload_api': None}):
+        with patch.dict(sys.modules, {'middleware.core.uploads.upload_api': None}):
             app = create_app(store)
         with patch.object(MiddlewareRuntime, 'start', new=AsyncMock()), \
              patch.object(MiddlewareRuntime, 'stop', new=AsyncMock()):
@@ -91,8 +91,8 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_installed_but_disabled_uploader_exposes_read_only_status(self):
         client_source = str(Path(__file__).resolve().parents[1] / 'upload_client')
         with patch.object(sys, 'path', [client_source, *sys.path]):
-            from middleware.core.upload_service import UploadService
-            from middleware.core.upload_api import register_upload_routes
+            from middleware.core.uploads.upload_service import UploadService
+            from middleware.core.uploads.upload_api import register_upload_routes
         from aiohttp import web
         service = UploadService({'enabled': False}, artifact_state_dir=self.root / 'state',
                                 data_directory=self.root / 'recordings')
@@ -110,7 +110,7 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.root / 'state').exists())
 
     async def test_upload_switch_persists_without_restarting_control(self):
-        from middleware.core.topic_recorder import TopicRecorder
+        from middleware.core.recording.topic_recorder import TopicRecorder
         recorder = TopicRecorder({'directory': str(self.root / 'recordings'),
                                   'artifact_state_dir': str(self.root / 'artifacts'),
                                   'upload_job_state_dir': str(self.root / 'jobs')}, self.root)
@@ -157,7 +157,7 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
         client_source = str(Path(__file__).resolve().parents[1] / 'upload_client')
         with patch.object(sys, 'path', [client_source, *sys.path]):
             from humanoid_upload.artifacts import ArtifactLocks
-        from middleware.core.topic_recorder import TopicRecorder
+        from middleware.core.recording.topic_recorder import TopicRecorder
         recorder = TopicRecorder({'directory': str(self.root / 'recordings'),
                                   'artifact_state_dir': str(self.root / 'artifacts'),
                                   'upload_job_state_dir': str(self.root / 'jobs')}, self.root)
@@ -193,8 +193,8 @@ class UploadRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_auto_upload_without_binding_reports_http_and_vr_error(self):
         client_source = str(Path(__file__).resolve().parents[1] / 'upload_client')
         with patch.object(sys, 'path', [client_source, *sys.path]):
-            from middleware.core.upload_service import UploadService
-        from middleware.core.topic_recorder import TopicRecorder
+            from middleware.core.uploads.upload_service import UploadService
+        from middleware.core.recording.topic_recorder import TopicRecorder
         recorder = TopicRecorder({'directory': str(self.root / 'recordings'),
                                   'artifact_state_dir': str(self.root / 'artifacts'),
                                   'upload_job_state_dir': str(self.root / 'jobs')}, self.root)

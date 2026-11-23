@@ -9,7 +9,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile
 from sensor_msgs.msg import JointState
 
-from middleware.core.ros_qos import subscription_qos, recording_subscription_qos
+from middleware.core.control.ros_qos import subscription_qos, recording_subscription_qos
 
 
 @pytest.mark.parametrize('kind,cls',[('sensor_msgs/msg/JointState',JointState),

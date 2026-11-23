@@ -148,7 +148,7 @@ class _ParentLiveness:
 
 class _RecordingIngress:
     def __init__(self, resources, finish):
-        from .topic_recorder import enqueue_record
+        from ..recording.topic_recorder import enqueue_record
         self.resources, self.finish = resources, finish
         self._enqueue_record = enqueue_record
 
@@ -285,7 +285,7 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
         0 <= time.monotonic()-channels['capture_ready_at'].value <= .25)
     bridge._action_sink = lambda evidence: async_hook('action', evidence)
     if capture_spec:
-        from .publication_capture import PublicationCapture
+        from ..recording.publication_capture import PublicationCapture
         bridge._publication_capture = PublicationCapture(
             _RecordingIngress(capture_spec['resources'], capture_spec['finish']),
             selected=lambda: child_selected[0])

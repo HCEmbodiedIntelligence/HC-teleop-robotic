@@ -3,7 +3,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from middleware.core.publication_capture import PublicationCapture, serialize_snapshot, SerializedSnapshot
+from middleware.core.recording.publication_capture import PublicationCapture, serialize_snapshot, SerializedSnapshot
 
 
 def recorder():
@@ -22,7 +22,7 @@ def test_successful_cdr_bypasses_message_access_and_snapshot_copy():
     payload = b'\x00\x01\x00\x00same-successful-publication'
     capture.begin_generation()
     try:
-        with patch('middleware.core.publication_capture.JointSnapshot.copy',
+        with patch('middleware.core.recording.publication_capture.JointSnapshot.copy',
                    side_effect=AssertionError('raw capture read message fields')):
             capture.complete(capture.reserve(), object(), serialized_cdr=payload, publication_ns=123456789)
             capture.end_generation()

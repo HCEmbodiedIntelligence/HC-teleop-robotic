@@ -8,8 +8,8 @@ from rclpy.serialization import serialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from middleware.core.lerobot_export import prepare_mcap
-from middleware.core.topic_recorder import _get_msg_def
+from middleware.core.recording.lerobot_export import prepare_mcap
+from middleware.core.recording.topic_recorder import _get_msg_def
 from tools.diagnostics.audit_mcap_timing import (
     ACTION, ACTION_PROVENANCE, PUBLISHED_ACTION, audit,
 )
@@ -103,7 +103,7 @@ def test_timing_audit_accepts_both_action_provenance_formats(tmp_path, encoding)
 
 @pytest.mark.parametrize('encoding', ['json', 'cdr'])
 def test_video_bundle_keeps_event_schema_encoding_and_payload(tmp_path, encoding):
-    from middleware.core.video_bundle import prepare
+    from middleware.core.recording.video_bundle import prepare
     source = tmp_path / 'source.mcap'
     payload = event_bytes({'kind': 'manual_close', 'reason': '人工接管'}, encoding)
     with source.open('wb') as stream:

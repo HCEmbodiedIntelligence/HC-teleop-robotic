@@ -19,8 +19,8 @@ def test_slow_hands_do_not_starve_arm_reader(monkeypatch):
     from sensor_msgs.msg import JointState
     from std_msgs.msg import Bool
     import yaml
-    from middleware.core.ros_bridge import RosBridge
-    from middleware.core.legacy_control import LegacyTopicControl
+    from middleware.core.control.ros_bridge import RosBridge
+    from middleware.core.control.legacy_control import LegacyTopicControl
 
     shared_hands = os.environ.get('HC_TEST_SHARED_HANDS') == '1'
     if shared_hands:

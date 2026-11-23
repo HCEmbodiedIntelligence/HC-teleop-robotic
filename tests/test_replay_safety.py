@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 class ReplaySafetyTests(unittest.TestCase):

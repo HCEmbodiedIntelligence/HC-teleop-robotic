@@ -247,7 +247,7 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
     from rclpy.serialization import deserialize_message, serialize_message
     from rosidl_runtime_py.utilities import get_message
     from sensor_msgs.msg import JointState
-    from .ros_qos import recording_subscription_qos
+    from ..control.ros_qos import recording_subscription_qos
     context = Context()
     node = executor = None
     try:

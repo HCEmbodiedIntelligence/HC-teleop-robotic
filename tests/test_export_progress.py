@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 from unittest.mock import patch
-from middleware.core.export_progress import ExportProgress, progress_path, read_progress
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.export_progress import ExportProgress, progress_path, read_progress
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 def test_atomic_throttled_monotonic_progress(tmp_path):

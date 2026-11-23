@@ -139,12 +139,12 @@ class DownloadJobs:
                 job.data.update(state='scanning', stage='正在读取文件列表')
                 job.folder = self.temp_root / job.id
                 job.folder.mkdir()
-                repo = Path(__file__).resolve().parents[2]
+                repo = Path(__file__).resolve().parents[3]
                 env = dict(os.environ)
                 env['PYTHONPATH'] = str(repo) + os.pathsep + env.get('PYTHONPATH', '')
                 env['PYTHONUNBUFFERED'] = '1'
                 job.process = await asyncio.create_subprocess_exec(
-                    sys.executable, '-m', 'middleware.core.recording_download_worker',
+                    sys.executable, '-m', 'middleware.core.recording.recording_download_worker',
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE, env=env, cwd=repo)
                 stderr_task = asyncio.create_task(job.process.stderr.read())

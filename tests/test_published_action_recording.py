@@ -9,8 +9,8 @@ from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import JointState
 
 from middleware.core.app import MiddlewareRuntime
-from middleware.core.publication_capture import PublicationCapture
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.recording.publication_capture import PublicationCapture
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def make_bridge(capture):
@@ -140,7 +140,7 @@ def test_recording_exception_does_not_change_successful_output():
 
 def test_real_mcap_contains_every_accepted_publication(tmp_path):
     from mcap.reader import make_reader
-    from middleware.core.topic_recorder import TopicRecorder
+    from middleware.core.recording.topic_recorder import TopicRecorder
     topic = dict(topic='/action/joint_states', type='sensor_msgs/msg/JointState')
     recorder = TopicRecorder({'directory': str(tmp_path), 'format': 'mcap'},
                              tmp_path, topics=[topic])

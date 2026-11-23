@@ -11,7 +11,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import Header, String
 
-from middleware.core.camera_metadata import (
+from middleware.core.media.camera_metadata import (
     CALIBRATION_TOPIC, EXTRINSICS_TOPIC, CameraKinematics, CameraMetadata, load_camera_metadata,
 )
 

@@ -13,7 +13,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
-from middleware.core.qos_event_observer import QosEventObserver
+from middleware.core.control.qos_event_observer import QosEventObserver
 
 
 @pytest.mark.skipif(os.environ.get('ROS_DOMAIN_ID') != '231' or

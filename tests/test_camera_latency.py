@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 from aiortc.mediastreams import MediaStreamError
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 
 
 class VideoClockTests(unittest.IsolatedAsyncioTestCase):

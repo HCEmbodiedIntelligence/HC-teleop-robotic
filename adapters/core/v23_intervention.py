@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 
-from middleware.core.control_ownership import ControlToken
+from middleware.core.control.control_ownership import ControlToken
 
 
 class V23Intervention:

@@ -18,7 +18,7 @@ import tempfile
 from mcap.records import Attachment, Channel, Footer, Header, Message, Metadata, Schema
 from mcap.stream_reader import StreamReader
 from mcap.writer import Writer
-from middleware.core.recording_cdr import write_string
+from middleware.core.recording.recording_cdr import write_string
 
 STRING_SCHEMA = ('std_msgs/msg/String', 'ros2msg', b'string data\n')
 

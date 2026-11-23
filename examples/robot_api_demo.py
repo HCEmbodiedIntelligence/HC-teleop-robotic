@@ -49,7 +49,7 @@ def positive(value):
 def load_profile(path):
     # Optional offline describe only; online commands never load local YAML.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from middleware.core.robot_api import RobotApiProfile
+    from middleware.core.robot.robot_api import RobotApiProfile
     return capability_profile(RobotApiProfile(path).describe())
 
 

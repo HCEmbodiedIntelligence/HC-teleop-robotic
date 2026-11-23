@@ -8,7 +8,7 @@ import math
 import time
 import uuid
 
-from middleware.core.control_ownership import ControlToken
+from middleware.core.control.control_ownership import ControlToken
 from middleware.core.protocol import is_sequence_newer
 from .arm_teleop_math import binary_trigger_state
 

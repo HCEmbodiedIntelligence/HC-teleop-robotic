@@ -8,8 +8,8 @@ from urllib.parse import quote
 
 from aiohttp.test_utils import TestClient, TestServer
 from middleware.core.config import ConfigStore
-from middleware.core.topic_recorder import TopicRecorder
-from middleware.core.recording_datasets import (
+from middleware.core.recording.topic_recorder import TopicRecorder
+from middleware.core.recording.recording_datasets import (
     archive_datasets, resolve_dataset, validate_download_selection, MAX_BATCH_DOWNLOAD_SELECTION,
 )
 

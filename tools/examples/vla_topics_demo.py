@@ -45,7 +45,7 @@ class VlaTopicsDemo(Node):
         try:
             if self.output:
                 from mcap.writer import Writer
-                from middleware.core.topic_recorder import _get_msg_def
+                from middleware.core.recording.topic_recorder import _get_msg_def
 
                 self.output.parent.mkdir(parents=True, exist_ok=True)
                 self.stream = self.output.open("xb")  # 不覆盖已有采集。

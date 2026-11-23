@@ -10,7 +10,7 @@ import pytest
 
 from middleware.core.app import MiddlewareRuntime, control_bridge_class
 from middleware.core.config import validate_config
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 class DeferredCommands:
@@ -66,7 +66,7 @@ def test_bridge_selection_is_opt_in_and_environment_is_reversible(monkeypatch):
     monkeypatch.delenv('HC_ISOLATED_CONTROL_PROCESS', raising=False)
     assert control_bridge_class({}) is RosBridge
     facade = type('IsolatedRosBridge', (), {})
-    monkeypatch.setitem(sys.modules, 'middleware.core.control_process',
+    monkeypatch.setitem(sys.modules, 'middleware.core.control.control_process',
                         SimpleNamespace(IsolatedRosBridge=facade))
     assert control_bridge_class({'isolated_control_process': True}) is facade
     monkeypatch.setenv('HC_ISOLATED_CONTROL_PROCESS', '1')
@@ -91,7 +91,7 @@ def test_remote_capture_is_installed_on_base_writer_without_transferring_recorde
 
 
 def test_facade_keeps_camera_observation_health_when_merging_core_status():
-    from middleware.core.control_process import IsolatedRosBridge
+    from middleware.core.control.control_process import IsolatedRosBridge
     bridge = IsolatedRosBridge.__new__(IsolatedRosBridge)
     camera_health = {'/test/camera/color/compressed': {'has_data': True, 'hz': 30}}
     bridge._telemetry = SimpleNamespace(status=lambda: {'state': 'running', 'topic_health': camera_health,
@@ -256,8 +256,8 @@ def test_http_resume_waits_off_event_loop_and_preserves_arrival_fence(tmp_path, 
 @pytest.mark.parametrize('cancel_request', [False, True])
 def test_shutdown_waits_for_inflight_capture_even_if_http_request_is_cancelled(tmp_path, cancel_request):
     from aiohttp import web
-    from middleware.core.control_ownership import ControlOwnership
-    from middleware.core.intervention_api import register_intervention_routes
+    from middleware.core.control.control_ownership import ControlOwnership
+    from middleware.core.control.intervention_api import register_intervention_routes
 
     runtime = runtime_for(tmp_path)
     control = runtime.ros.ownership = ControlOwnership()

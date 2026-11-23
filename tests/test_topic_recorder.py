@@ -9,7 +9,7 @@ from rclpy.serialization import deserialize_message, serialize_message
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 class TopicRecorderTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class TopicRecorderTests(unittest.TestCase):
                 'profile_id': '', 'profile_display_name': '', 'robot_name': '',
                 'controller_config': '', 'free_joints': [],
             }
-            with patch('middleware.core.topic_recorder._inspect_mcap_file', return_value=metadata) as inspect:
+            with patch('middleware.core.recording.topic_recorder._inspect_mcap_file', return_value=metadata) as inspect:
                 recorder.list_recordings('mcap')
                 recorder.list_recordings('mcap')
             inspect.assert_called_once()
@@ -39,8 +39,8 @@ class TopicRecorderTests(unittest.TestCase):
             class Process:
                 pid = 31415
 
-            with patch('middleware.core.lerobot_export.ensure_export_available'), \
-                    patch('middleware.core.topic_recorder.subprocess.Popen', return_value=Process()) as spawn:
+            with patch('middleware.core.recording.lerobot_export.ensure_export_available'), \
+                    patch('middleware.core.recording.topic_recorder.subprocess.Popen', return_value=Process()) as spawn:
                 result = recorder.convert_recordings_to_lerobot(['one.mcap', 'two.mcap'])
 
             self.assertEqual(result['accepted'], ['one.mcap', 'two.mcap'])
@@ -134,7 +134,7 @@ class TopicRecorderTests(unittest.TestCase):
             self.assertEqual(compact["profile_id"], "openarmx")
             reloaded = TopicRecorder({"directory": "recordings"}, Path(directory))
             with patch(
-                "middleware.core.topic_recorder._inspect_mcap_file",
+                "middleware.core.recording.topic_recorder._inspect_mcap_file",
                 side_effect=AssertionError("persistent compact cache was not used"),
             ):
                 compact_after_restart = reloaded.list_recordings(

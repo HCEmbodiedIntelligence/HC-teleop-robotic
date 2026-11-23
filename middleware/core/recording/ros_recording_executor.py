@@ -11,7 +11,7 @@ from typing import Any
 from .topic_recorder import TopicRecorder, _counter_add, _lower_recording_priority
 from .x1_recording import is_x1
 from .capture_window import SensorPreroll, buffered_sensor
-from .config import isolated_control_process_enabled
+from ..config import isolated_control_process_enabled
 
 
 def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -178,7 +178,7 @@ def _health_snapshot(
     now: float,
     active_topics: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    from .ros_bridge import DEFAULT_TOPIC_STANDARDS
+    from ..control.ros_bridge import DEFAULT_TOPIC_STANDARDS
 
     result: dict[str, dict[str, Any]] = {}
     for item in subscriptions:
@@ -391,11 +391,11 @@ def _raw_recording_process(
         import rclpy
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
-        from .ros_executor import create_single_threaded_executor
+        from ..control.ros_executor import create_single_threaded_executor
         from rclpy.qos import qos_profile_sensor_data
-        from .ros_qos import recording_subscription_qos
+        from ..control.ros_qos import recording_subscription_qos
         if sensor_window:
-            from .ros_qos import warm_recording_subscription_qos
+            from ..control.ros_qos import warm_recording_subscription_qos
         from rosidl_runtime_py.utilities import get_message
 
         domain_id = int(config.get("domain_id", 14))

@@ -21,10 +21,10 @@ def _fake_peers(profile, connection):
     from sensor_msgs.msg import JointState
     from std_msgs.msg import Bool, Header, String
     import yaml
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control.ros_bridge import RosBridge
     from middleware.core.config import ConfigStore
-    from middleware.core.dataset_topics import load_joint_groups
-    from middleware.core.camera_metadata import load_camera_metadata
+    from middleware.core.recording.dataset_topics import load_joint_groups
+    from middleware.core.media.camera_metadata import load_camera_metadata
 
     config = yaml.safe_load((profile/'arm_teleop.yaml').read_text())
     arms = [n for side in ('right','left') for n in config['arms'][side]['joint_names']]
@@ -142,10 +142,10 @@ def test_commands_keep_draining_when_dataset_executor_is_busy(monkeypatch):
     from sensor_msgs.msg import JointState
     from std_msgs.msg import Bool, Header, String
     import yaml
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control.ros_bridge import RosBridge
     from middleware.core.config import ConfigStore
-    from middleware.core.dataset_topics import load_joint_groups
-    from middleware.core.camera_metadata import load_camera_metadata
+    from middleware.core.recording.dataset_topics import load_joint_groups
+    from middleware.core.media.camera_metadata import load_camera_metadata
 
     root = Path(__file__).resolve().parents[1]
     profile = root/'adapters/robots/x1'

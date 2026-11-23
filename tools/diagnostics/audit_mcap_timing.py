@@ -14,7 +14,7 @@ import struct
 
 from mcap.reader import make_reader
 
-from middleware.core.recording_cdr import read_event
+from middleware.core.recording.recording_cdr import read_event
 
 ACTION = '/action/joint_states'
 PUBLISHED_ACTION = '/internal/recording/published_action'

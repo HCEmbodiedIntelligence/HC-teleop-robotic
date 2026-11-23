@@ -11,7 +11,7 @@ from rosidl_runtime_py.utilities import get_message
 
 from middleware.core.app import MiddlewareRuntime
 from middleware.core.config import ConfigError, validate_config
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 class Wire:
@@ -82,7 +82,7 @@ def test_switch_ready_timeout_and_replay_end_propagate_disable():
     assert wire.values()[-1] is False
     bridge.set_command_output_enabled(True)
     wire.drain(bridge)
-    with patch('middleware.core.ros_bridge.time.monotonic',
+    with patch('middleware.core.control.ros_bridge.time.monotonic',
                return_value=bridge._hardware_ready_last + 1):
         wire.drain(bridge)
     assert wire.values()[-1] is False
@@ -100,16 +100,16 @@ def test_older_queued_stop_does_not_overwrite_later_explicit_resume():
 
 def test_stop_is_reasserted_after_discovery_but_enable_is_never_repeated():
     bridge, wire = bridge_for('motion'), Wire()
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=100.):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=100.):
         bridge.emergency_stop('/control/emergency_stop', 'before discovery')
         wire.drain(bridge)
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=100.2):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=100.2):
         wire.drain(bridge)
         assert wire.values() == [False, False]
         bridge.receive_hardware_ready(True)
         bridge.set_command_output_enabled(True)
         wire.drain(bridge)
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=100.4):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=100.4):
         wire.drain(bridge)
         assert wire.values() == [False, False, True]
 

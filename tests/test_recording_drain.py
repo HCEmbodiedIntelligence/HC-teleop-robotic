@@ -6,7 +6,7 @@ import time
 
 from mcap.reader import make_reader
 
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 def test_full_queue_slow_writer_stop_keeps_all_accepted_messages(tmp_path):
@@ -44,7 +44,7 @@ def test_full_queue_slow_writer_stop_keeps_all_accepted_messages(tmp_path):
 
 
 def test_ingress_distinguishes_message_limit_from_byte_limit(tmp_path):
-    from middleware.core.topic_recorder import enqueue_record
+    from middleware.core.recording.topic_recorder import enqueue_record
     for name, config, expected in [
         ('count', dict(queue_capacity=1), 'queue_capacity_rejections'),
         ('bytes', dict(queue_bytes=1500), 'byte_budget_rejections')]:
@@ -61,7 +61,7 @@ def test_ingress_distinguishes_message_limit_from_byte_limit(tmp_path):
 
 
 def test_bulk_raw_events_use_separate_queue_and_drain_cleanly(tmp_path):
-    from middleware.core.topic_recorder import enqueue_record
+    from middleware.core.recording.topic_recorder import enqueue_record
     recorder = TopicRecorder({'directory': str(tmp_path), 'queue_capacity': 16}, tmp_path)
     recorder.start('bulk.mcap')
     try:
@@ -83,7 +83,7 @@ def test_bulk_raw_events_use_separate_queue_and_drain_cleanly(tmp_path):
 
 def test_enqueue_record_unlocks_before_queue_put_and_rolls_back_on_full(tmp_path):
     import multiprocessing as mp
-    from middleware.core.topic_recorder import enqueue_record
+    from middleware.core.recording.topic_recorder import enqueue_record
 
     lock = threading.RLock()
     accepting = threading.Event()

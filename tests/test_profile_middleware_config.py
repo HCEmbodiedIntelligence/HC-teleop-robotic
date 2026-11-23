@@ -10,8 +10,8 @@ from middleware.core.config import (
     ConfigError, ConfigStore, ROBOT_MIDDLEWARE_DEFAULTS,
     validate_robot_middleware,
 )
-from middleware.core.ros_bridge import DEFAULT_TOPIC_STANDARDS
-from middleware.core.ros_recording_executor import recording_subscriptions
+from middleware.core.control.ros_bridge import DEFAULT_TOPIC_STANDARDS
+from middleware.core.recording.ros_recording_executor import recording_subscriptions
 
 
 def write_yaml(path, value):

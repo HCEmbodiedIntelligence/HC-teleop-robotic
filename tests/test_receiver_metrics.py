@@ -1,5 +1,5 @@
 import unittest
-from middleware.core.receiver_metrics import ReceiverMetrics
+from middleware.core.media.receiver_metrics import ReceiverMetrics
 
 
 class ReceiverMetricsTests(unittest.TestCase):

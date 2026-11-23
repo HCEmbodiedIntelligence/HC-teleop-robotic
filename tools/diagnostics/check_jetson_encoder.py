@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def probe(width, height, count):
-    from middleware.core.jetson_h264 import JetsonH264Codec, jetson_platform, INSTALL_GUIDANCE
+    from middleware.core.media.jetson_h264 import JetsonH264Codec, jetson_platform, INSTALL_GUIDANCE
     result = {'backend': 'jetson', 'hardware_available': False,
               'platform': jetson_platform(), 'test': 'raw I420 -> Jetson hardware -> Annex-B -> software decode',
               'packages_installed': False, 'frames_encoded': 0, 'frames_decoded': 0}

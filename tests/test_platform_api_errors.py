@@ -10,7 +10,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from humanoid_upload.common import UploadError
-from middleware.core.platform_api import register_platform_routes
+from middleware.core.uploads.platform_api import register_platform_routes
 
 
 class PlatformErrorTests(unittest.IsolatedAsyncioTestCase):
@@ -157,7 +157,7 @@ class PlatformErrorTests(unittest.IsolatedAsyncioTestCase):
                 platform = SimpleNamespace(connect=Mock(side_effect=UploadError(code, reason, retry=retryable)), error=None)
                 app = web.Application()
                 register_platform_routes(app, SimpleNamespace(platform=platform))
-                with self.assertLogs('middleware.core.platform_api', level='WARNING') as logs:
+                with self.assertLogs('middleware.core.uploads.platform_api', level='WARNING') as logs:
                     async with TestClient(TestServer(app)) as client:
                         response = await client.post('/api/platform/connect', json={
                             'link': 'http://platform/#robot-connect=never-log-this-ticket'})

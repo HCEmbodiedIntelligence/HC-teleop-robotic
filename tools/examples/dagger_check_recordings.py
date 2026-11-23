@@ -13,7 +13,7 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(ROOT/'.deps'))
 from mcap.reader import make_reader
-from middleware.core.recording_cdr import read_event
+from middleware.core.recording.recording_cdr import read_event
 from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped

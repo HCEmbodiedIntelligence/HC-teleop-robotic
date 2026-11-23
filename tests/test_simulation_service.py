@@ -11,8 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from middleware.core.app import create_app
 from middleware.core.config import ConfigError, ConfigStore, validate_config
-from middleware.core.robot_profiles import RobotProfileManager
-from middleware.core.simulation import SimulationError, SimulationService
+from middleware.core.robot.robot_profiles import RobotProfileManager
+from middleware.core.robot.simulation import SimulationError, SimulationService
 from tests.test_robot_profiles import URDF, io_yaml
 
 
@@ -49,7 +49,7 @@ class SimulationServiceTests(unittest.IsolatedAsyncioTestCase):
             prefix = args[:args.index('--') + 1]
             return await real_spawn(*prefix, sys.executable, '-u', '-c',
                 'import time; print("HC_SIMULATION_READY", flush=True); print(\'HC_SIMULATION_FRAME {"positions":{"a":0.1},"base_pose":[[0,0,0],[0,0,0,1]]}\', flush=True); time.sleep(60)', **kwargs)
-        self.spawn_patch = patch('middleware.core.simulation.asyncio.create_subprocess_exec', side_effect=spawn)
+        self.spawn_patch = patch('middleware.core.robot.simulation.asyncio.create_subprocess_exec', side_effect=spawn)
         self.spawn_patch.start()
 
     async def asyncTearDown(self):

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 import pytest
-from middleware.core.lerobot_export import joint_vector, latest_sample, synchronized_episodes
+from middleware.core.recording.lerobot_export import joint_vector, latest_sample, synchronized_episodes
 
 
 def test_joint_names_align_command_to_feedback():
@@ -123,7 +123,7 @@ def test_prepare_real_mcap_keeps_full_recording_span_and_missing_masks(tmp_path)
     from sensor_msgs.msg import Image, JointState
     from std_msgs.msg import String
     from geometry_msgs.msg import TwistStamped
-    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.recording.lerobot_export import prepare_mcap
 
     source = tmp_path / 'source.mcap'
     staging = tmp_path / 'staging'
@@ -194,7 +194,7 @@ def subset_action_joint_manifest(tmp_path):
     from rclpy.serialization import serialize_message
     from mcap.writer import Writer
     from sensor_msgs.msg import JointState
-    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.recording.lerobot_export import prepare_mcap
 
     source = tmp_path / 'joint_subset.mcap'
     staging = tmp_path / 'staging'
@@ -234,7 +234,7 @@ def test_prepare_mcap_preserves_changing_partial_action_with_axis_validity(tmp_p
     import sys
     from types import SimpleNamespace
     from mcap.writer import Writer
-    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.recording.lerobot_export import prepare_mcap
 
     monkeypatch.setitem(sys.modules, 'rclpy.serialization', SimpleNamespace(
         deserialize_message=lambda data, _: SimpleNamespace(**json.loads(data))))
@@ -263,14 +263,14 @@ def test_prepare_mcap_preserves_changing_partial_action_with_axis_validity(tmp_p
 def test_official_loader_independent_action_joint_dimensions(subset_action_joint_manifest):
     import os
     import subprocess
-    from middleware.core.lerobot_export import ROOT, writer_python
+    from middleware.core.recording.lerobot_export import ROOT, writer_python
     executable = writer_python()
     if not executable.exists():
         pytest.skip('optional LeRobot environment is not installed')
     script = '''
 import sys
 from pathlib import Path
-from middleware.core.lerobot_export import write_dataset
+from middleware.core.recording.lerobot_export import write_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 manifest=Path(sys.argv[1]); root=manifest.parent/'dataset'
 result=write_dataset(manifest,root)
@@ -298,7 +298,7 @@ def test_official_writer_loader_roundtrip(tmp_path):
     import json
     import os
     import subprocess
-    from middleware.core.lerobot_export import ROOT, writer_python
+    from middleware.core.recording.lerobot_export import ROOT, writer_python
     executable = writer_python()
     if not executable.exists():
         pytest.skip('optional LeRobot environment is not installed')
@@ -307,7 +307,7 @@ def test_official_writer_loader_roundtrip(tmp_path):
 import json,sys,numpy as np
 from pathlib import Path
 from PIL import Image
-from middleware.core.lerobot_export import write_dataset
+from middleware.core.recording.lerobot_export import write_dataset
 p=Path(sys.argv[1]); image=p.parent/'rgb.png'
 Image.new('RGB',(16,16),(255,0,0)).save(image)
 row={'values':{'observation.state':[1.,2.],'action':[3.,4.],'observation.images.eye':str(image)},'source_times':[0.,0.,0.],'grid_time':0.}
@@ -332,7 +332,7 @@ def test_official_writer_loader_optional_source_masks(tmp_path):
     """Missing and stale held values remain distinguishable after serialization."""
     import os
     import subprocess
-    from middleware.core.lerobot_export import ROOT, writer_python
+    from middleware.core.recording.lerobot_export import ROOT, writer_python
     executable = writer_python()
     if not executable.exists():
         pytest.skip('optional LeRobot environment is not installed')
@@ -340,7 +340,7 @@ def test_official_writer_loader_optional_source_masks(tmp_path):
 import json,sys,numpy as np
 from pathlib import Path
 from PIL import Image
-from middleware.core.lerobot_export import write_dataset
+from middleware.core.recording.lerobot_export import write_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 p=Path(sys.argv[1]); image=p.parent/'rgb.png'
@@ -383,7 +383,7 @@ def test_short_episode_mp4_frame_order_and_timestamps(tmp_path, fps):
     """Verify actual encoding, concatenation and official cross-episode lookup."""
     import os
     import subprocess
-    from middleware.core.lerobot_export import ROOT, writer_python
+    from middleware.core.recording.lerobot_export import ROOT, writer_python
     executable = writer_python()
     if not executable.exists():
         pytest.skip('optional LeRobot environment is not installed')
@@ -391,7 +391,7 @@ def test_short_episode_mp4_frame_order_and_timestamps(tmp_path, fps):
 import json,sys,numpy as np,av
 from pathlib import Path
 from PIL import Image
-from middleware.core.lerobot_export import write_dataset
+from middleware.core.recording.lerobot_export import write_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 p=Path(sys.argv[1]); fps=int(sys.argv[2]); lengths=[1,2,1,3,7,1]
@@ -469,7 +469,7 @@ def test_explicit_gripper_sources_keep_independent_age_masks(tmp_path):
     from mcap.writer import Writer
     from rclpy.serialization import serialize_message
     from sensor_msgs.msg import JointState
-    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.recording.lerobot_export import prepare_mcap
     source=tmp_path/'grasp.mcap';staging=tmp_path/'stage';staging.mkdir()
     mappings=[dict(topic='/action/left_hand/joint_states',names=['finger'],units=['m'],max_age_sec=.3),
               dict(topic='/action/right_hand/joint_states',names=['missing_finger'],units=['m'],max_age_sec=.3)]
@@ -497,7 +497,7 @@ def test_explicit_gripper_sources_keep_independent_age_masks(tmp_path):
 
 
 def test_source_clock_uses_header_when_every_stamp_is_consistent():
-    from middleware.core.lerobot_export import apply_source_clock
+    from middleware.core.recording.lerobot_export import apply_source_clock
     samples = [(1_050_000_000, 'a'), (1_080_000_000, 'b')]
     assert apply_source_clock(samples, [1_000_000_000, 1_033_000_000]) == (
         'header', [(1_000_000_000, 'a'), (1_033_000_000, 'b')])
@@ -510,7 +510,7 @@ def test_source_clock_uses_header_when_every_stamp_is_consistent():
     [1_000_000_000, -1_920_000_000],          # stamp 3 s behind receive: another clock
 ])
 def test_source_clock_keeps_log_time_for_whole_stream_when_any_stamp_is_unusable(headers):
-    from middleware.core.lerobot_export import apply_source_clock
+    from middleware.core.recording.lerobot_export import apply_source_clock
     samples = [(1_050_000_000, 'a'), (1_080_000_000, 'b')]
     assert apply_source_clock(samples, headers) == ('log_time', samples)
 
@@ -522,7 +522,7 @@ def test_prepare_mcap_aligns_camera_and_state_on_header_stamps(tmp_path):
     from rclpy.serialization import serialize_message
     from mcap.writer import Writer
     from sensor_msgs.msg import Image, JointState
-    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.recording.lerobot_export import prepare_mcap
 
     source = tmp_path / 'source.mcap'
     staging = tmp_path / 'staging'
@@ -582,8 +582,8 @@ def test_preserved_snapshot_keeps_log_clock_when_first_headers_differ(tmp_path):
     from sensor_msgs.msg import JointState
     from mcap.writer import Writer
     from capture_contract_support import snapshot_document, task_document
-    from middleware.core.lerobot_export import prepare_mcap
-    from middleware.core.topic_recorder import RECORDING_METADATA_NAME
+    from middleware.core.recording.lerobot_export import prepare_mcap
+    from middleware.core.recording.topic_recorder import RECORDING_METADATA_NAME
 
     task = task_document(source_format='LEROBOT_V3')
     snapshot = snapshot_document(task, dict(recording_id='preserved-clock',

@@ -7,7 +7,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
 from builtin_interfaces.msg import Time
 
-from middleware.core.dataset_topics import DatasetTopics
+from middleware.core.recording.dataset_topics import DatasetTopics
 
 
 class Publisher:
@@ -128,7 +128,7 @@ def test_config_offers_projected_topics_and_raw_vr_for_page_selection():
     from pathlib import Path
     from middleware.core.config import ConfigStore
     config = ConfigStore(Path(__file__).parents[1] / 'middleware/config.yaml').load()
-    from middleware.core.dataset_topics import load_joint_groups
+    from middleware.core.recording.dataset_topics import load_joint_groups
     config['ros']['dataset_topics']['joint_groups'] = load_joint_groups(config, Path(__file__).parents[1] / 'middleware')
     b = DatasetTopics(Node(), config['ros']['dataset_topics'])
     # Presence in the topic catalogue does not force the page to record it.
@@ -146,7 +146,7 @@ def test_no_projection_subscribes_to_its_own_output():
 def test_groups_follow_every_bundled_profile(backend, monkeypatch):
     from pathlib import Path
     import yaml
-    from middleware.core.dataset_topics import load_joint_groups
+    from middleware.core.recording.dataset_topics import load_joint_groups
     monkeypatch.setenv('HC_CONTROL_BACKEND', backend)
     monkeypatch.delenv('HC_ROBOT_NAME', raising=False)
     monkeypatch.delenv('HC_ROBOT_CONFIG_ROOT', raising=False)
@@ -169,7 +169,7 @@ def test_groups_follow_every_bundled_profile(backend, monkeypatch):
 def test_groups_follow_profile_without_waist(tmp_path, monkeypatch):
     from pathlib import Path
     import yaml
-    from middleware.core.dataset_topics import load_joint_groups
+    from middleware.core.recording.dataset_topics import load_joint_groups
 
     root = Path(__file__).parents[1]
     config = yaml.safe_load((root / 'middleware/config.yaml').read_text())
@@ -239,7 +239,7 @@ def test_raw_subscription_skips_deserialization_until_subscriber_present(monkeyp
     from rclpy.context import Context
     from rclpy.qos import qos_profile_sensor_data
     import rclpy.serialization
-    from middleware.core.ros_executor import CachedWaitSetExecutor
+    from middleware.core.control.ros_executor import CachedWaitSetExecutor
 
     monkeypatch.setenv('ROS_LOCALHOST_ONLY', '1')
     monkeypatch.setenv('ROS_DOMAIN_ID', '231')

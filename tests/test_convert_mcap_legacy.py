@@ -8,7 +8,7 @@ import pytest
 from mcap.reader import make_reader
 from mcap.writer import CompressionType, Writer
 
-from middleware.core.recording_cdr import position_label, read_string, write_string
+from middleware.core.recording.recording_cdr import position_label, read_string, write_string
 from tools.diagnostics.convert_mcap_legacy import convert, verify
 
 

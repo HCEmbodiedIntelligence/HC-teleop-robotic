@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 from mcap.writer import Writer
-from middleware.core.recording_artifacts import RecordingArtifacts
-from middleware.core.export_progress import ExportProgress, progress_path
-from middleware.core.upload_service import UploadService
+from middleware.core.recording.recording_artifacts import RecordingArtifacts
+from middleware.core.recording.export_progress import ExportProgress, progress_path
+from middleware.core.uploads.upload_service import UploadService
 from humanoid_upload.artifacts import ArtifactLocks
 from humanoid_upload.common import UploadError
 
@@ -136,7 +136,7 @@ def test_closed_source_recovered_after_restart(tmp_path):
 
 
 def test_real_recorder_publishes_closed_capture_and_deletion_lease(tmp_path):
-    from middleware.core.topic_recorder import TopicRecorder
+    from middleware.core.recording.topic_recorder import TopicRecorder
     recorder = TopicRecorder({'directory': str(tmp_path/'data'),
         'artifact_state_dir': str(tmp_path/'ready'),
         'upload_job_state_dir': str(tmp_path/'jobs')}, tmp_path)

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp.test_utils import TestClient, TestServer
 import unittest
 from middleware.core.app import create_app, MiddlewareRuntime
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 from middleware.core.config import ConfigStore
 
 

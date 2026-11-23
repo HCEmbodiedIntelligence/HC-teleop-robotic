@@ -230,7 +230,7 @@ class PlatformConnection:
 
     @property
     def source_format(self):
-        from .capture_formats import SOURCE_FORMATS, artifact_formats
+        from ..recording.capture_formats import SOURCE_FORMATS, artifact_formats
         return SOURCE_FORMATS[artifact_formats(self.state['upload_format'])[0]]
 
     def preflight(self, selection, *, remember=True, source_format=None):

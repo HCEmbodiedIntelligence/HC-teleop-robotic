@@ -7,9 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from middleware.core.control_ownership import ControlOwnership, OwnershipConflict
+from middleware.core.control.control_ownership import ControlOwnership, OwnershipConflict
 from middleware.core.app import MiddlewareRuntime
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 class Rig:
@@ -559,8 +559,8 @@ def test_heartbeat_diagnostic_keeps_real_timeout_fault():
 
 
 def test_recordings_tag_confirmed_control_across_mode_changes(tmp_path):
-    from middleware.core.takeover_log import TakeoverLog, takeover_path
-    from middleware.core.topic_recorder import TopicRecorder
+    from middleware.core.recording.takeover_log import TakeoverLog, takeover_path
+    from middleware.core.recording.topic_recorder import TopicRecorder
 
     rig = Rig()
     control = rig.control

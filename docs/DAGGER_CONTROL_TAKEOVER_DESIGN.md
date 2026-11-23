@@ -15,7 +15,7 @@
 3. 保持头显跟踪有效、右 Grip 松开，等采集与硬件就绪后点击“开始程序”。外部继续发送原有 ServoJ，无需暂停、重置或握手接口。
 4. 右 Grip 握住控制双臂及已验证夹爪；正常松开自动交还。HOLD 中接管结束仍回 HOLD。跟踪丢失、断连、默认零值不视为正常松手；故障/急停需要显式恢复至 HOLD，再开始程序。
 
-控制实现位于 [control_ownership.py](../middleware/core/control_ownership.py)、[ros_bridge.py](../middleware/core/ros_bridge.py)、[robot_api_boundary.py](../middleware/core/robot_api_boundary.py)、[intervention.py](../adapters/core/intervention.py) 和 [Motion 节点](../src/humanoid_motion_server/src/humanoid_motion_control_node.cpp)。使用现有 `Header`、`String`、`JointState`、`PoseArray`、`PoseStamped` 携带内部身份与确认；推理程序无需处理这些内部信息。
+控制实现位于 [control_ownership.py](../middleware/core/control/control_ownership.py)、[ros_bridge.py](../middleware/core/control/ros_bridge.py)、[robot_api_boundary.py](../middleware/core/robot/robot_api_boundary.py)、[intervention.py](../adapters/core/intervention.py) 和 [Motion 节点](../src/humanoid_motion_server/src/humanoid_motion_control_node.cpp)。使用现有 `Header`、`String`、`JointState`、`PoseArray`、`PoseStamped` 携带内部身份与确认；推理程序无需处理这些内部信息。
 
 入口与最终硬件发布边界共同校验实例、会话和 epoch；旧异步计算即使迟到也不能越过已撤销的权限。交接主动撤销并等实际确认，正常路径不等待 lease 到期或录制收尾。普通交接保持最后已发送位置；FAULT/ESTOP/OFF 撤销硬件使能。首版夹爪开放范围为有真实反馈和已接入最终路由的 OpenArmX 夹爪；其他手型保持，未宣称通用灵巧手支持。
 
@@ -114,14 +114,14 @@ ServoJ 消息仍为 `sensor_msgs/msg/JointState`，使用现有公共关节名�
 
 | 已有能力 | 代码位置 | 对本功能的意义 |
 | --- | --- | --- |
-| `motion / vr / exoskeleton` 来源选择 | [ros_bridge.py](../middleware/core/ros_bridge.py)，`set_control_source()`、`forward_live_command()` | 已有唯一来源选择器，可以扩展为人工抢占的执行入口 |
+| `motion / vr / exoskeleton` 来源选择 | [ros_bridge.py](../middleware/core/control/ros_bridge.py)，`set_control_source()`、`forward_live_command()` | 已有唯一来源选择器，可以扩展为人工抢占的执行入口 |
 | 切源或停机递增 `_output_epoch` 并设置旧消息截止时间 | 同上，`_revoke_locked()` | 可以取消旧一代输出资格 |
 | 切源关闭输出，显式 resume 才恢复 | [app.py](../middleware/core/app.py)，`set_control_source()`、`_on_safety_resume()` | 已有授权边界；目前需要独立操作，尚无接管事务 |
-| Motion 限时许可 `/control/motion/permit` | [ros_bridge.py](../middleware/core/ros_bridge.py)、[humanoid_motion_control_node.cpp](../src/humanoid_motion_server/src/humanoid_motion_control_node.cpp) | 现有 `motion:epoch / vr:epoch` 区分程序与 VR 来源 |
+| Motion 限时许可 `/control/motion/permit` | [ros_bridge.py](../middleware/core/control/ros_bridge.py)、[humanoid_motion_control_node.cpp](../src/humanoid_motion_server/src/humanoid_motion_control_node.cpp) | 现有 `motion:epoch / vr:epoch` 区分程序与 VR 来源 |
 | Motion 许可换代时取消 session、撤销发布资格 | [command_pipeline.cpp](../src/humanoid_motion_server/src/motion/command_pipeline.cpp)，`setOutputPermit()`、`publishCommand()` | 可以清掉已有 Servo/Move 和延迟计算结果 |
-| 程序与 VR 使用同一 Motion / IK / 最终关节 RTC | [robot_api.py](../middleware/core/robot_api.py)、[unified_motion_teleop.py](../adapters/nodes/unified_motion_teleop.py) | 无需再做一套 IK 或运动平滑器 |
+| 程序与 VR 使用同一 Motion / IK / 最终关节 RTC | [robot_api.py](../middleware/core/robot/robot_api.py)、[unified_motion_teleop.py](../adapters/nodes/unified_motion_teleop.py) | 无需再做一套 IK 或运动平滑器 |
 | VR 离合采用相对映射，可清除参考 | [arm_teleop_node.py](../adapters/core/arm_teleop_node.py)，`_release_all()`、`_reset_reference_service()` | 接管时可在当前机器人位置重新建立参考 |
-| 硬件 ready、使能、命令时效检查 | [ros_bridge.py](../middleware/core/ros_bridge.py)、[robot_api_boundary.py](../middleware/core/robot_api_boundary.py) | 接管继续使用这些门控 |
+| 硬件 ready、使能、命令时效检查 | [ros_bridge.py](../middleware/core/control/ros_bridge.py)、[robot_api_boundary.py](../middleware/core/robot/robot_api_boundary.py) | 接管继续使用这些门控 |
 
 当前链路大体如下：
 
@@ -495,14 +495,14 @@ AUTO 期间，VR 接管按钮监听保持工作，机械臂遥操作输出仍关
 
 | 工作 | 拟涉及位置 | 完成条件 |
 | --- | --- | --- |
-| 控制权状态机、事件幂等、状态输出 | 新增 `middleware/core/control_ownership.py`，接入 [ros_bridge.py](../middleware/core/ros_bridge.py) | 只有一个所有者，所有换代与故障转换可解释 |
+| 控制权状态机、事件幂等、状态输出 | 新增 `middleware/core/control/control_ownership.py`，接入 [ros_bridge.py](../middleware/core/control/ros_bridge.py) | 只有一个所有者，所有换代与故障转换可解释 |
 | ServoJ 接收门、显式撤销、代际贯穿与清理确认 | [humanoid_motion_control_node.cpp](../src/humanoid_motion_server/src/humanoid_motion_control_node.cpp)、[command_pipeline.cpp](../src/humanoid_motion_server/src/motion/command_pipeline.cpp)、`humanoid_motion_interfaces` | 不合作的持续发送者不能越过人工控制，旧 session/结果不恢复 |
-| 最终输出权限复查 | [ros_bridge.py](../middleware/core/ros_bridge.py)、[robot_api_boundary.py](../middleware/core/robot_api_boundary.py) | 从选择器到模型命令之间无脱离代际检查的恢复路径 |
+| 最终输出权限复查 | [ros_bridge.py](../middleware/core/control/ros_bridge.py)、[robot_api_boundary.py](../middleware/core/robot/robot_api_boundary.py) | 从选择器到模型命令之间无脱离代际检查的恢复路径 |
 | 接管事件监听、相对参考、夹爪连续性 | [app.py](../middleware/core/app.py)、[arm_teleop_node.py](../adapters/core/arm_teleop_node.py)、[unified_motion_teleop.py](../adapters/nodes/unified_motion_teleop.py) | 握持接管、正常释放自动交还；人工第一帧不跳变 |
 | 操作与状态展示 | [app.js](../middleware/core/static/app.js)、[index.html](../middleware/core/static/index.html) | 显示程序/人工/保持/故障与采集状态，正常交还无需按钮 |
-| profile 能力和旁路检查 | [robot_api.py](../middleware/core/robot_api.py)、相关 profile/驱动契约 | 未接入权限检查的辅助通道不开放 |
-| 纠正片段采集、动作证据、后台保存与 LeRobot 导出 | [recording_service.py](../middleware/core/recording_service.py)、[ros_recording_executor.py](../middleware/core/ros_recording_executor.py)、[lerobot_export.py](../middleware/core/lerobot_export.py)及配套方案所列位置 | 采集预备、每次接管独立成段、首尾证据完整，磁盘工作不阻塞控制 |
-| 平台上传、离线保存与本地下载 | [upload_service.py](../middleware/core/upload_service.py)、[recording_datasets.py](../middleware/core/recording_datasets.py)、[app.py](../middleware/core/app.py)及上传适配器 | 与普通采集共用任务/队列，断网保留本地文件，恢复续传；MCAP/LeRobot/raw 下载可用，纠正标签可追溯 |
+| profile 能力和旁路检查 | [robot_api.py](../middleware/core/robot/robot_api.py)、相关 profile/驱动契约 | 未接入权限检查的辅助通道不开放 |
+| 纠正片段采集、动作证据、后台保存与 LeRobot 导出 | [recording_service.py](../middleware/core/recording_service.py)、[ros_recording_executor.py](../middleware/core/recording/ros_recording_executor.py)、[lerobot_export.py](../middleware/core/recording/lerobot_export.py)及配套方案所列位置 | 采集预备、每次接管独立成段、首尾证据完整，磁盘工作不阻塞控制 |
+| 平台上传、离线保存与本地下载 | [upload_service.py](../middleware/core/uploads/upload_service.py)、[recording_datasets.py](../middleware/core/recording/recording_datasets.py)、[app.py](../middleware/core/app.py)及上传适配器 | 与普通采集共用任务/队列，断网保留本地文件，恢复续传；MCAP/LeRobot/raw 下载可用，纠正标签可追溯 |
 
 按三个步骤交付：先做状态机及假硬件控制闭环，再接 VR、采集/导出和必要的机型适配，最后做录制压力测试与低速真机验收。所有功能代码都在本文及配套录制方案审核通过后开始；推理端始终不在改动清单中。
 

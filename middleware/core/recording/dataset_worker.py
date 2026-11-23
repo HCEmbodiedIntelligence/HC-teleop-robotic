@@ -24,10 +24,10 @@ class DatasetTopicProcess:
         # Preserve the selected domain and DDS transport configuration. The
         # explicit project path also supports launching server.py directly.
         env['ROS_DOMAIN_ID'] = str(self.domain_id)
-        root = str(Path(__file__).resolve().parents[2])
+        root = str(Path(__file__).resolve().parents[3])
         env['PYTHONPATH'] = os.pathsep.join(filter(None, [root, env.get('PYTHONPATH', '')]))
         self.process = subprocess.Popen(
-            [sys.executable, '-u', '-m', 'middleware.core.dataset_worker'],
+            [sys.executable, '-u', '-m', 'middleware.core.recording.dataset_worker'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
             env=env,
         )
@@ -94,8 +94,8 @@ def main():
     import rclpy
     from rclpy.executors import SingleThreadedExecutor
     from .dataset_topics import DatasetTopics
-    from .qos_event_observer import QosEventObserver
-    from .ros_executor import create_single_threaded_executor
+    from ..control.qos_event_observer import QosEventObserver
+    from ..control.ros_executor import create_single_threaded_executor
     request = json.loads(sys.stdin.readline())
     domain = int(request['domain_id'])
     os.environ['ROS_DOMAIN_ID'] = str(domain)

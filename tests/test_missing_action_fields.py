@@ -17,8 +17,8 @@ from rosidl_runtime_py.set_message import set_message_fields
 from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import JointState
 
-from middleware.core.dataset_topics import DatasetTopics
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.dataset_topics import DatasetTopics
+from middleware.core.recording.topic_recorder import TopicRecorder
 from test_legacy_control import Rig, message
 
 
@@ -179,7 +179,7 @@ def test_mcap_projection_replay_and_hardware_ignore_missing_fields(tmp_path, mon
 @pytest.mark.skipif(os.environ.get('HC_RUN_LEGACY_ROS_TESTS') != '1', reason='isolated ROS test')
 def test_websocket_joint_payload_uses_null_without_mutating_ros_nan():
     import rclpy
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control.ros_bridge import RosBridge
     domain = int(os.environ['ROS_DOMAIN_ID'])
     assert 200 <= domain <= 232 and os.environ.get('ROS_LOCALHOST_ONLY') == '1'
     events = []

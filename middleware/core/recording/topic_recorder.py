@@ -659,10 +659,10 @@ class TopicRecorder(CorrectionSupport):
         temporary = spec_path.with_suffix('.json.tmp')
         temporary.write_text(json.dumps({'items': items}, ensure_ascii=False), encoding='utf-8')
         temporary.replace(spec_path)
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         log_path = spec_path.with_suffix('.log')
         with log_path.open('ab') as log:
-            command = [sys.executable, '-m', 'middleware.core.batch_lerobot_export', str(spec_path)]
+            command = [sys.executable, '-m', 'middleware.core.recording.batch_lerobot_export', str(spec_path)]
             if sys.platform.startswith('linux'):
                 command = ['nice', '-n', '10', *command]
             process = subprocess.Popen(command, cwd=root, env=background_environment(),
@@ -937,7 +937,7 @@ class TopicRecorder(CorrectionSupport):
             from humanoid_upload.capture_plan import validate_snapshot
             snapshot = validate_snapshot(snapshot, source_format='LEROBOT_V3')
             task = json.loads(self._active_metadata['platform_task'])['task']['name']
-        command = [sys.executable, "-m", "middleware.core.lerobot_export",
+        command = [sys.executable, "-m", "middleware.core.recording.lerobot_export",
                    str(self.path), str(destination), "--fps", str(fps),
                    "--task", task, "--robot-type",
                    self._active_metadata.get("profile_id", "robot"), "--action-sources", json.dumps(self.action_sources)]
@@ -946,7 +946,7 @@ class TopicRecorder(CorrectionSupport):
             if sys.platform.startswith("linux"):
                 command = ["nice", "-n", "10", *command]
             self._export_process = subprocess.Popen(
-                command, cwd=Path(__file__).resolve().parents[2],
+                command, cwd=Path(__file__).resolve().parents[3],
                 stdout=self._export_log, stderr=subprocess.STDOUT,
                 env=background_environment(),
             )

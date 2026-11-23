@@ -27,7 +27,7 @@
 
 ## 录制范围
 
-main 原有 `middleware/core/video_bundle.py` 将 RGB 编码成独立 MP4，将深度消息保留在
+main 原有 `middleware/core/recording/video_bundle.py` 将 RGB 编码成独立 MP4，将深度消息保留在
 `raw.mcap` 中。深度不转成有损视频，消息字节、log/publish 时间戳和 sequence 保留，源
 MCAP 也保留。新增集成测试同时覆盖 `16UC1` 和 `32FC1`。这里的“无损”指深度数据；RGB
 仍采用视频编码。

@@ -10,7 +10,7 @@ from rclpy.clock import Clock, ClockChange, ClockType, ROSClock
 from rclpy.time import Time
 from rclpy.time_source import TimeSource
 
-from middleware.core.control_clock import ControlClock
+from middleware.core.control.control_clock import ControlClock
 
 
 class CallbackClock:
@@ -63,7 +63,7 @@ def test_activation_cannot_be_overwritten_between_initial_version_check_and_flag
         activation.join(1)
         assert not activation.is_alive()
         assert clock.changed.is_set()
-        with patch('middleware.core.control_clock.time.time_ns', side_effect=AssertionError('stale initialization flag')):
+        with patch('middleware.core.control.control_clock.time.time_ns', side_effect=AssertionError('stale initialization flag')):
             assert reader.now_ns() == 7_000_000_000
     finally:
         reader.close()
@@ -82,7 +82,7 @@ def test_initialization_during_an_unfinished_jump_keeps_native_reads():
     clock = ChangingClock()
     reader = ControlClock(clock)
     try:
-        with patch('middleware.core.control_clock.time.time_ns', side_effect=AssertionError('clock jump still in progress')):
+        with patch('middleware.core.control.control_clock.time.time_ns', side_effect=AssertionError('clock jump still in progress')):
             assert reader.now_ns() == 7_000_000_000
         clock.active = True
         clock.post(SimpleNamespace(clock_change=ClockChange.ROS_TIME_ACTIVATED))
@@ -105,7 +105,7 @@ def test_activation_waits_for_a_system_time_sample_already_in_progress():
     read = threading.Thread(target=lambda: samples.append(reader.now_ns()), daemon=True)
     activation = threading.Thread(target=clock.activate, daemon=True)
     try:
-        with patch('middleware.core.control_clock.time.time_ns', side_effect=system_sample):
+        with patch('middleware.core.control.control_clock.time.time_ns', side_effect=system_sample):
             read.start()
             assert sampling.wait(1)
             activation.start()
@@ -116,7 +116,7 @@ def test_activation_waits_for_a_system_time_sample_already_in_progress():
             activation.join(1)
         assert not read.is_alive() and not activation.is_alive()
         assert samples == [123]
-        with patch('middleware.core.control_clock.time.time_ns', side_effect=AssertionError('wall time after activation')):
+        with patch('middleware.core.control.control_clock.time.time_ns', side_effect=AssertionError('wall time after activation')):
             assert reader.now_ns() == 7_000_000_000
     finally:
         release.set()
@@ -145,7 +145,7 @@ def test_system_clock_is_sampled_again_for_every_read_without_native_allocation(
     clock = Clock(clock_type=ClockType.SYSTEM_TIME)
     reader = ControlClock(clock)
     with patch.object(clock, 'now', side_effect=AssertionError('unnecessary native allocation')):
-        with patch('middleware.core.control_clock.time.time_ns', side_effect=[100, 101, 90]):
+        with patch('middleware.core.control.control_clock.time.time_ns', side_effect=[100, 101, 90]):
             assert [reader.now_ns(), reader.now_ns(), reader.now_ns()] == [100, 101, 90]
     reader.close()
 
@@ -155,17 +155,17 @@ def test_ros_time_activation_pauses_and_deactivation_follow_the_real_clock():
     source.attach_clock(clock)
     reader = ControlClock(clock)
     try:
-        with patch('middleware.core.control_clock.time.time_ns', return_value=123):
+        with patch('middleware.core.control.control_clock.time.time_ns', return_value=123):
             assert reader.now_ns() == 123
         source.ros_time_is_active = True
         clock.set_ros_time_override(Time(nanoseconds=7_000_000_000))
-        with patch('middleware.core.control_clock.time.time_ns', side_effect=AssertionError('wall clock with /clock active')):
+        with patch('middleware.core.control.control_clock.time.time_ns', side_effect=AssertionError('wall clock with /clock active')):
             assert reader.now_ns() == 7_000_000_000
             assert reader.now_ns() == 7_000_000_000  # Paused simulation remains paused.
             clock.set_ros_time_override(Time(nanoseconds=2_000_000_000))
             assert reader.now_ns() == 2_000_000_000  # Backward simulation jump.
         source.ros_time_is_active = False
-        with patch('middleware.core.control_clock.time.time_ns', return_value=456):
+        with patch('middleware.core.control.control_clock.time.time_ns', return_value=456):
             assert reader.now_ns() == 456
         source.ros_time_is_active = True
         clock.set_ros_time_override(Time(nanoseconds=9_000_000_000))

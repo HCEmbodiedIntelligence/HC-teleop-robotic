@@ -183,7 +183,7 @@ class RobotArmTeleopNode(Node):
         self.external_ik = self.backend in {"v23", "generic", "motion"}
         self.robot_api = None
         if self.backend == "motion":
-            from middleware.core.robot_api import RobotApiProfile, INTERNAL_STATE
+            from middleware.core.robot.robot_api import RobotApiProfile, INTERNAL_STATE
             self.robot_api = RobotApiProfile(self.config_path.parent)
             self.control["joint_state_topic"] = INTERNAL_STATE
             self.control["command_topic"] = "/internal/vr/aux_joint_targets"
@@ -571,7 +571,7 @@ class RobotArmTeleopNode(Node):
             f"backend={self.backend}, command={self.control['command_topic']}, "
             f"enabled={self.enabled}"
         )
-        from middleware.core.qos_event_observer import QosEventObserver
+        from middleware.core.control.qos_event_observer import QosEventObserver
         observed_nodes = [self, self._command_node] if self._command_node is not None else [self]
         self._qos_event_observer = QosEventObserver(observed_nodes, enabled=(
             None if self.backend == 'v23' and self.config_path.parent.name == 'x1' else False))

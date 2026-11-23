@@ -10,8 +10,8 @@ def test_xy_recording_during_dagger_writes_mcap(tmp_path, state):
     from mcap.reader import make_reader
     from middleware.core.app import MiddlewareRuntime
     from middleware.core.config import validate_config
-    from middleware.core.topic_recorder import TopicRecorder
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.recording.topic_recorder import TopicRecorder
+    from middleware.core.control.ros_bridge import RosBridge
     cfg = validate_config({'vr':{'publish_to_ros':False}})
     cfg['ros']['recording'].update(directory=str(tmp_path/'data'),min_free_bytes=0)
     recorder=TopicRecorder(cfg['ros']['recording'], tmp_path)
@@ -50,7 +50,7 @@ def test_xy_recording_during_dagger_writes_mcap(tmp_path, state):
         recorder.shutdown()
 
 def test_exit_dagger_selects_vr_without_enabling_motion():
-    from middleware.core.ros_bridge import RosBridge
+    from middleware.core.control.ros_bridge import RosBridge
     bridge=RosBridge({'enabled':True,'command_mux':{'source':'motion'},'intervention':{'automatic_recording':False}},lambda *a:None)
     bridge._enqueue=Mock(return_value=True)
     bridge.ownership.enable()
@@ -63,8 +63,8 @@ def test_exit_dagger_selects_vr_without_enabling_motion():
     assert any(c.args==('control_source','vr') for c in bridge._enqueue.call_args_list)
 
 def test_home_queue_rejects_auto_and_accepts_only_current_manual_authority():
-    from middleware.core.ros_bridge import RosBridge
-    from middleware.core.control_ownership import ControlToken
+    from middleware.core.control.ros_bridge import RosBridge
+    from middleware.core.control.control_ownership import ControlToken
     bridge=RosBridge({'enabled':True},lambda *a:None)
     bridge._legacy_enabled=True
     bridge._enqueue=Mock(return_value=True)

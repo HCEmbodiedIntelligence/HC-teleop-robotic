@@ -5,8 +5,8 @@ import zipfile
 
 import pytest
 
-from middleware.core.correction_recording import WindowRouter, SessionRouter
-from middleware.core.control_ownership import ControlToken
+from middleware.core.recording.correction_recording import WindowRouter, SessionRouter
+from middleware.core.control.control_ownership import ControlToken
 from tests.correction_recording_support import local_service as service
 
 
@@ -145,7 +145,7 @@ def test_existing_export_backlog_rejects_prepare_before_starting_processes(tmp_p
 
 
 def test_prepared_slot_is_hidden_and_cannot_be_uploaded_before_intervention(tmp_path):
-    from middleware.core.topic_recorder import TopicRecorder
+    from middleware.core.recording.topic_recorder import TopicRecorder
     from humanoid_upload.common import UploadError
     recorder = service(tmp_path)
     slot = TopicRecorder(recorder.config, tmp_path)

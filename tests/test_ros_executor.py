@@ -10,7 +10,7 @@ from rclpy.context import Context
 from rclpy.qos import QoSProfile
 from std_msgs.msg import String
 
-from middleware.core.ros_executor import CachedWaitSetExecutor, create_single_threaded_executor
+from middleware.core.control.ros_executor import CachedWaitSetExecutor, create_single_threaded_executor
 
 
 def test_cached_wait_set_drains_callbacks_guards_timers_and_zero_polls():
@@ -77,7 +77,7 @@ def test_create_single_threaded_executor_preserves_test_mocks():
 
 
 def test_cached_wait_set_handles_waitables_via_qos_observer():
-    from middleware.core.qos_event_observer import QosEventObserver
+    from middleware.core.control.qos_event_observer import QosEventObserver
 
     context = Context()
     rclpy.init(args=[], context=context, domain_id=231)

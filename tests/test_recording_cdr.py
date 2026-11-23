@@ -10,7 +10,7 @@ from rclpy.serialization import deserialize_message, serialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from middleware.core.recording_cdr import read_joint_state, read_string, position_label, write_string, read_event
+from middleware.core.recording.recording_cdr import read_joint_state, read_string, position_label, write_string, read_event
 
 
 @pytest.mark.parametrize('count', [0, 1, 7, 14, 27])
@@ -65,7 +65,7 @@ def test_label_worker_never_initializes_ros_numpy_or_native_threadpools():
     raw = serialize_message(message).hex()
     code = '''
 import sys,json
-from middleware.core.recording_action_labels import RecordingActionLabels
+from middleware.core.recording.recording_action_labels import RecordingActionLabels
 labels=RecordingActionLabels(feedback_timeout_s=.25,status_timeout_s=.25)
 labels.process(dict(topic='/action/joint_states',msg_type='sensor_msgs/msg/JointState',
     _raw=bytes.fromhex(sys.argv[1]),stamp_ns=123000000000))
@@ -96,7 +96,7 @@ def test_event_reader_accepts_historical_json_and_ros_string(encoding):
 def test_event_codec_never_initializes_ros_or_numpy():
     code = """
 import sys
-from middleware.core.recording_cdr import write_string, read_event
+from middleware.core.recording.recording_cdr import write_string, read_event
 assert read_event(write_string('{"ok":true}'), 'cdr', 'std_msgs/msg/String') == {'ok': True}
 assert 'numpy' not in sys.modules
 assert 'rclpy' not in sys.modules

@@ -7,7 +7,7 @@ import struct
 import threading
 import unittest
 
-from middleware.core.rtp_fec import (
+from middleware.core.media.rtp_fec import (
     encode_ulpfec, protected_sequences, recover_ulpfec, red_unwrap, red_wrap,
     rtp_layout, unwrap_red_payload, wrap_red_payload, zero_mutable_extensions,
 )

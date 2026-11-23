@@ -16,7 +16,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Header, String
 from humanoid_motion_interfaces.action import MoveJ
 
-from middleware.core.robot_api import RobotApiProfile, INTERNAL_STATE
+from middleware.core.robot.robot_api import RobotApiProfile, INTERNAL_STATE
 from adapters.nodes.motion_teleop_bridge import MotionCache, valid_stamp
 
 
@@ -69,7 +69,7 @@ class UnifiedMotionTeleopBridge(Node):
 
     def authorized(self):
         if self.intervention:
-            from middleware.core.control_ownership import ControlToken
+            from middleware.core.control.control_ownership import ControlToken
             return (self.ownership_phase == 'grant' and
                     ControlToken.from_key(self.ownership_key).source == 'vr' and
                     time.monotonic()-self.permit_time <= .3)
@@ -82,7 +82,7 @@ class UnifiedMotionTeleopBridge(Node):
         self.permit_stamp = self.stamp(msg)
         if msg.frame_id.startswith('hc1:'):
             try:
-                from middleware.core.control_ownership import ControlToken
+                from middleware.core.control.control_ownership import ControlToken
                 key, phase, _, _ = msg.frame_id.split('#')
                 ControlToken.from_key(key)
                 if phase not in {'revoke', 'grant', 'off'}:

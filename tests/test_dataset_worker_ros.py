@@ -19,7 +19,7 @@ def assert_isolated():
 
 def test_projection_process_stops_on_parent_pipe_eof():
     assert_isolated()
-    process=subprocess.Popen([sys.executable,'-u','-m','middleware.core.dataset_worker'],
+    process=subprocess.Popen([sys.executable,'-u','-m','middleware.core.recording.dataset_worker'],
         stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
         # communicate closes the parent pipe immediately after the one config
@@ -34,7 +34,7 @@ def test_projection_process_stops_on_parent_pipe_eof():
 
 def test_projection_startup_error_is_reported_and_owned_child_is_reaped(monkeypatch):
     assert_isolated()
-    from middleware.core.dataset_worker import DatasetTopicProcess
+    from middleware.core.recording.dataset_worker import DatasetTopicProcess
     original=subprocess.Popen
     children=[]
     def spawn(*args,**kwargs):

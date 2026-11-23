@@ -1,7 +1,7 @@
 from types import SimpleNamespace as Obj
 from unittest.mock import patch
 
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 from adapters.core.runtime_config import backend
 from adapters.nodes.motion_teleop_bridge import MotionCache, profile_settings
 from pathlib import Path
@@ -22,7 +22,7 @@ def make_bridge():
 def test_move_without_vr_grip_and_source_exclusion():
     bridge = make_bridge()
     sent = []
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=1.1):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=1.1):
         assert bridge.forward_live_command('motion', message(), sent.append)
         assert not bridge.forward_live_command('vr', message(), sent.append)
         assert not bridge.forward_live_command('motion', message(), sent.append)
@@ -31,7 +31,7 @@ def test_move_without_vr_grip_and_source_exclusion():
 
 def test_ready_timeout_and_stop_require_new_enable_and_new_target():
     bridge = make_bridge()
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=2.):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=2.):
         assert not bridge.forward_live_command('motion', message(), lambda m: None)
         bridge.receive_hardware_ready(True)
         assert not bridge.forward_live_command('motion', message(), lambda m: None)
@@ -45,7 +45,7 @@ def test_ready_timeout_and_stop_require_new_enable_and_new_target():
 
 def test_source_switch_rejects_previous_and_queued_target():
     bridge = make_bridge()
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=1.1):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=1.1):
         bridge.set_control_source('vr')
         assert not bridge.forward_live_command('motion', message(), lambda m: None)
         bridge.set_command_output_enabled(True)
@@ -55,7 +55,7 @@ def test_source_switch_rejects_previous_and_queued_target():
 @pytest.mark.parametrize('stamp', [0, 99, 101])
 def test_invalid_headers(stamp):
     bridge = make_bridge()
-    with patch('middleware.core.ros_bridge.time.monotonic', return_value=1.1):
+    with patch('middleware.core.control.ros_bridge.time.monotonic', return_value=1.1):
         assert not bridge.forward_live_command('motion', message(stamp), lambda m: None)
         assert not bridge.forward_live_command('motion', message(names=('j', 'j')), lambda m: None)
 

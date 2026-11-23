@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from middleware.core.ros_recording_executor import RosRecordingExecutor, recording_reader_groups
+from middleware.core.recording.ros_recording_executor import RosRecordingExecutor, recording_reader_groups
 
 
 SMALL = dict(topic='/observation/joint_states', type='sensor_msgs/msg/JointState', outputs=['record'])

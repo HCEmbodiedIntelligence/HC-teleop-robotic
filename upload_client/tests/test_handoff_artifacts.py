@@ -56,7 +56,7 @@ def test_b_recorder_to_uploader_delete_lease(tmp_path,monkeypatch,delete_entry):
     import threading
     import time
     from humanoid_upload.common import UploadError
-    from core.upload_service import UploadService
+    from core.uploads.upload_service import UploadService
     if not os.environ.get('HC_RECORDING_WORKTREE'):
         pytest.skip('B recording worktree not provided')
     worktree=Path(os.environ['HC_RECORDING_WORKTREE']).resolve()

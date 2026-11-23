@@ -7,7 +7,7 @@ import textwrap
 import threading
 import unittest
 
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 
 
 class CameraRtcIsolationTests(unittest.IsolatedAsyncioTestCase):
@@ -58,7 +58,7 @@ class StaleFrameWaitTests(unittest.TestCase):
             import asyncio
             import time
             import numpy as np
-            from middleware.core.camera import CameraService
+            from middleware.core.media.camera import CameraService
 
             async def check():
                 camera = CameraService({'enabled': True, 'width': 64, 'height': 48})

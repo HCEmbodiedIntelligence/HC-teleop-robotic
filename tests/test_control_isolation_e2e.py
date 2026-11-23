@@ -20,8 +20,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 import yaml
 
-from middleware.core.control_process import CoreProcessClient, RemotePublicationCapture
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.control.control_process import CoreProcessClient, RemotePublicationCapture
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -126,7 +126,7 @@ def config():
 
 
 def test_replay_home_is_available_after_normal_parent_revoke_but_not_after_estop(loopback):
-    from middleware.core.control_process import IsolatedRosBridge
+    from middleware.core.control.control_process import IsolatedRosBridge
 
     client = CoreProcessClient(config())
     proxy = IsolatedRosBridge.__new__(IsolatedRosBridge)

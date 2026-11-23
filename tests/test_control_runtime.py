@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from middleware.core.control_runtime import ControlRuntime
+from middleware.core.control.control_runtime import ControlRuntime
 
 
 class ControlRuntimeTests(unittest.IsolatedAsyncioTestCase):

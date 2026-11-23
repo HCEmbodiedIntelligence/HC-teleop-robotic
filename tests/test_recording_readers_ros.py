@@ -14,8 +14,8 @@ import rclpy
 from rclpy.context import Context
 from sensor_msgs.msg import JointState, CompressedImage
 
-from middleware.core.ros_recording_executor import RosRecordingExecutor
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.ros_recording_executor import RosRecordingExecutor
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 def wait_until(predicate, timeout=5.):

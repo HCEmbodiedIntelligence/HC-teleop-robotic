@@ -10,7 +10,7 @@ from pathlib import Path
 from aiohttp.test_utils import TestClient, TestServer
 
 from middleware.core.config import ConfigStore
-from middleware.core.recording_datasets import MAX_BATCH_DOWNLOAD_SELECTION
+from middleware.core.recording.recording_datasets import MAX_BATCH_DOWNLOAD_SELECTION
 
 
 class RecordingDownloadJobApiTests(unittest.IsolatedAsyncioTestCase):
@@ -38,7 +38,7 @@ class RecordingDownloadJobApiTests(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
 
     def manager(self):
-        from middleware.core.recording_downloads import DOWNLOAD_JOBS
+        from middleware.core.recording.recording_downloads import DOWNLOAD_JOBS
         return self.app[DOWNLOAD_JOBS]
 
     def make_dataset(self):
@@ -272,7 +272,7 @@ class RecordingDownloadJobApiTests(unittest.IsolatedAsyncioTestCase):
             return await original(sys.executable, '-c', script, **kwargs)
         raw = self.recordings / 'capture.mcap'
         raw.write_bytes(b'original source')
-        with patch('middleware.core.recording_downloads.asyncio.create_subprocess_exec', slow_worker):
+        with patch('middleware.core.recording.recording_downloads.asyncio.create_subprocess_exec', slow_worker):
             job = await self.create_job(['capture.mcap'])
             await self.wait_for(job['id'], 'packing')
             actual = self.manager().jobs[job['id']]

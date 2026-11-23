@@ -92,7 +92,7 @@ VR 映射位姿 ─独立 VR 来源检查─┘
 
 ## Profile 选择、迁移与启动
 
-统一解析器为 `middleware/core/robot_api.py`。`robot_api.yaml` 引用 `arm_teleop.yaml` 的 arms/body 有序分组和 `robot.initial_joints`，结合 URDF 及 Motion 限位解析；不维护第二套模型或 home。Motion/SDK 分组必须一致，不支持的配置在启动前拒绝。
+统一解析器为 `middleware/core/robot/robot_api.py`。`robot_api.yaml` 引用 `arm_teleop.yaml` 的 arms/body 有序分组和 `robot.initial_joints`，结合 URDF 及 Motion 限位解析；不维护第二套模型或 home。Motion/SDK 分组必须一致，不支持的配置在启动前拒绝。
 
 导出的完整 profile ZIP 保留 `robot_api.yaml`、Motion 配置和资源；导入时重新校验。只含 URDF/旧 VR 配置的历史 profile 保留旧能力，但明确标记统一 API 不可用及原因。OpenArmX、X1 的统一模式要求 Motion；显式使用 v23 时整条链恢复为旧接口模式，不声明统一 API 能力。
 

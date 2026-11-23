@@ -4,7 +4,7 @@ import threading
 import time
 from unittest.mock import Mock
 
-from middleware.core.control_ownership import ControlOwnership
+from middleware.core.control.control_ownership import ControlOwnership
 from test_control_status_isolation import input_frame, setup_callbacks
 from test_legacy_control import Rig
 

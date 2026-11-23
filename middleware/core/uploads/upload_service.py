@@ -8,8 +8,8 @@ from pathlib import Path
 from humanoid_upload.artifacts import ArtifactLocks, artifact_id
 from humanoid_upload.common import DEFAULTS, UploadError, atomic_json, canonical, read_json, validate_config
 from humanoid_upload.queue import Queue, public_job
-from .background_process import BackgroundProcess, BackgroundProcessStopped
-from .artifact_jobs import enqueue_ready, upload_tick
+from ..recording.background_process import BackgroundProcess, BackgroundProcessStopped
+from ..recording.artifact_jobs import enqueue_ready, upload_tick
 
 
 class UploadService:

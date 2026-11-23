@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from aiortc.mediastreams import MediaStreamError
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 
 class FreshFrameTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -66,6 +66,6 @@ class FreshFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.camera.latest().mean(),20)
         self.camera._set_status(capture_fps=20.,webrtc_send_fps=20.)
         self.camera._record_webrtc_frame()
-        with patch('middleware.core.camera.time.monotonic',return_value=time.monotonic()+2):
+        with patch('middleware.core.media.camera.time.monotonic',return_value=time.monotonic()+2):
             self.assertEqual(self.camera.status()['capture_fps'],0)
             self.assertEqual(self.camera.status()['webrtc_send_fps'],0)

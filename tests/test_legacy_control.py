@@ -18,10 +18,10 @@ pytest.importorskip('sensor_msgs.msg')
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
 
-from middleware.core.control_ownership import ControlOwnership
-from middleware.core.intervention_api import register_intervention_routes
-from middleware.core.legacy_control import LegacyTopicControl
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.control_ownership import ControlOwnership
+from middleware.core.control.intervention_api import register_intervention_routes
+from middleware.core.control.legacy_control import LegacyTopicControl
+from middleware.core.control.ros_bridge import RosBridge
 from adapters.core.v23_intervention import V23Intervention
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -602,7 +602,7 @@ def test_input_callback_error_and_feedback_failure_are_retained():
 
 def test_callback_timing_preserves_return_and_exception():
     bridge=Rig().bridge
-    with patch('middleware.core.ros_bridge.time.monotonic_ns', side_effect=[0,25_000_000]):
+    with patch('middleware.core.control.ros_bridge.time.monotonic_ns', side_effect=[0,25_000_000]):
         assert bridge._timed_callback('probe',lambda value:value+1)(4)==5
     snapshot=bridge.status()
     assert snapshot['callback_timings']['probe']==dict(count=1,max_ms=25.,last_ms=25.)

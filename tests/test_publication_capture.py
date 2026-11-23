@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from middleware.core.publication_capture import PublicationCapture
+from middleware.core.recording.publication_capture import PublicationCapture
 
 
 def message(value):

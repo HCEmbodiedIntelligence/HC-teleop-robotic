@@ -15,7 +15,7 @@ from xml.etree import ElementTree
 
 import yaml
 
-from .config import ConfigError, ROBOT_MIDDLEWARE_DEFAULTS, validate_robot_middleware
+from ..config import ConfigError, ROBOT_MIDDLEWARE_DEFAULTS, validate_robot_middleware
 
 
 STANDARD_TOPICS = {
@@ -340,7 +340,7 @@ def _generate_arm_teleop_config(
 ) -> dict[str, Any] | None:
     if len(arm_joint_indices) != 2:
         return None
-    root_dir = Path(__file__).resolve().parents[2]
+    root_dir = Path(__file__).resolve().parents[3]
     template_path = root_dir / "adapters" / "robots" / "x1" / "arm_teleop.yaml"
     if not template_path.is_file():
         template_path = root_dir / "arm_teleop.yaml"

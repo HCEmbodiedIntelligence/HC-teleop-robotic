@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from middleware.core.legacy_control import LegacyTopicControl
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.legacy_control import LegacyTopicControl
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def snapshot_rig():

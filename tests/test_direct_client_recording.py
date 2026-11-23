@@ -18,9 +18,9 @@ from rclpy.serialization import deserialize_message, serialize_message
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
 
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder
 from test_legacy_control import Rig
-from middleware.core.dataset_topics import DatasetTopics
+from middleware.core.recording.dataset_topics import DatasetTopics
 
 
 @pytest.mark.parametrize('revoked', [False, True])

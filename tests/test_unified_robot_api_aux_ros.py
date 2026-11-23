@@ -14,8 +14,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from mcap.writer import Writer
 from rclpy.serialization import serialize_message
-from middleware.core.topic_player import TopicPlayer
-from middleware.core.topic_recorder import _get_msg_def
+from middleware.core.recording.topic_player import TopicPlayer
+from middleware.core.recording.topic_recorder import _get_msg_def
 from middleware.core.app import MiddlewareRuntime
 from middleware.core.config import validate_config
 

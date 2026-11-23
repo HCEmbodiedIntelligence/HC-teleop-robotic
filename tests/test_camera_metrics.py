@@ -4,12 +4,12 @@ import time
 from types import SimpleNamespace
 import unittest
 
-from middleware.core.camera_metrics import CameraPipelineMetrics, instrument_sender
+from middleware.core.media.camera_metrics import CameraPipelineMetrics, instrument_sender
 
 
 class PipelineMetricsTests(unittest.TestCase):
     def test_local_overwrite_is_reported_without_network_loss_feedback(self):
-        from middleware.core.camera import CameraService
+        from middleware.core.media.camera import CameraService
         camera=CameraService({'enabled':True})
         camera._pcs.add(object())  # An active viewer enables the decode mailbox.
         msg=SimpleNamespace(format='jpeg', data=b'pending JPEG')

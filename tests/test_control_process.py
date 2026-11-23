@@ -11,14 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from middleware.core.control_ownership import ControlOwnership
-from middleware.core.control_process import CoreProcessClient, RemoteOwnership, RemotePublicationCapture
-from middleware.core.control_process import IsolatedRosBridge, publish_readonly_observation
-from middleware.core.control_process import _ParentLiveness
+from middleware.core.control.control_ownership import ControlOwnership
+from middleware.core.control.control_process import CoreProcessClient, RemoteOwnership, RemotePublicationCapture
+from middleware.core.control.control_process import IsolatedRosBridge, publish_readonly_observation
+from middleware.core.control.control_process import _ParentLiveness
 
 
 def test_parent_sentinel_reuses_one_registration_and_polls_every_checkpoint(monkeypatch):
-    import middleware.core.control_process as module
+    import middleware.core.control.control_process as module
     parent_calls, created, registrations, polls = [], [], [], []
     class Poller:
         def register(self, descriptor, mask):
@@ -41,7 +41,7 @@ def test_parent_sentinel_reuses_one_registration_and_polls_every_checkpoint(monk
 
 
 def test_parent_sentinel_hangup_detected_even_before_ppid_changes(monkeypatch):
-    import middleware.core.control_process as module
+    import middleware.core.control.control_process as module
     read_fd, write_fd = os.pipe()
     monkeypatch.setattr(module.mp, 'parent_process', lambda:SimpleNamespace(sentinel=read_fd))
     monkeypatch.setattr(module.os, 'getppid', lambda:123)
@@ -63,7 +63,7 @@ def test_parent_sentinel_hangup_detected_even_before_ppid_changes(monkeypatch):
 
 
 def test_parent_sentinel_error_fails_closed_and_nonpoll_platform_keeps_old_check(monkeypatch):
-    import middleware.core.control_process as module
+    import middleware.core.control.control_process as module
     monkeypatch.setattr(module.os, 'getppid', lambda:123)
     parent = SimpleNamespace(sentinel=5, is_alive=lambda:False)
     monkeypatch.setattr(module.mp, 'parent_process', lambda:parent)
@@ -369,7 +369,7 @@ def test_parent_death_closes_child_output_and_exits(tmp_path):
     code = '''
 import os
 from test_control_process import FakeBridge
-from middleware.core.control_process import CoreProcessClient
+from middleware.core.control.control_process import CoreProcessClient
 if __name__ == '__main__':
     client = CoreProcessClient({'stop_log': %r}, bridge_factory=FakeBridge)
     client.start()
@@ -504,7 +504,7 @@ def test_killed_owner_holding_shared_lock_cannot_block_fallback_or_parent_cleanu
 
 
 def test_slow_readonly_dds_and_ui_observers_cannot_hold_actor_admin_or_record_fifo(monkeypatch):
-    from middleware.core import ros_bridge
+    from middleware.core.control import ros_bridge
     entered_ros, entered_ui, release = threading.Event(), threading.Event(), threading.Event()
     published, manual = [], []
     class Telemetry:
@@ -577,7 +577,7 @@ def test_priority_stop_invalidates_a_resume_queued_before_stop(client):
 
 @pytest.mark.parametrize('full_session', [False, True])
 def test_original_manual_close_is_delivered_after_later_revoke(client, full_session):
-    from middleware.core.correction_recording import CorrectionSession
+    from middleware.core.recording.correction_recording import CorrectionSession
     # Exercise the actual open/close implementation without file writer setup.
     capture = CorrectionSession.__new__(CorrectionSession)
     capture.lock = threading.RLock()

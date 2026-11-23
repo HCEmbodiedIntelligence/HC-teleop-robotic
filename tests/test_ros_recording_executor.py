@@ -6,9 +6,9 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from middleware.core import ros_recording_executor as recording_module
+from middleware.core.recording import ros_recording_executor as recording_module
 
-from middleware.core.ros_recording_executor import (
+from middleware.core.recording.ros_recording_executor import (
     RateGate,
     StatePreroll,
     RosRecordingExecutor,
@@ -192,7 +192,7 @@ class RosRecordingExecutorTests(unittest.TestCase):
             'rclpy.executors': SimpleNamespace(SingleThreadedExecutor=Executor),
             'rclpy.qos': SimpleNamespace(qos_profile_sensor_data=object()),
             'rosidl_runtime_py.utilities': SimpleNamespace(get_message=lambda x: bytes),
-            'middleware.core.ros_qos': SimpleNamespace(
+            'middleware.core.control.ros_qos': SimpleNamespace(
                 recording_subscription_qos=lambda item: object()),
         }
         items = [dict(topic=state, type='sensor_msgs/msg/JointState'),
@@ -200,7 +200,7 @@ class RosRecordingExecutorTests(unittest.TestCase):
         with patch.dict(sys.modules, modules), \
              patch.object(recording_module, '_lower_recording_priority'), \
              patch.object(recording_module, '_health_snapshot', return_value={}), \
-             patch('middleware.core.topic_recorder.enqueue_record',
+             patch('middleware.core.recording.topic_recorder.enqueue_record',
                    side_effect=lambda resources, event: recorded.append(
                        {**event, '_test_capture': capture[0]}) or True), \
              patch.object(recording_module.time, 'monotonic', side_effect=lambda: clock[0]), \

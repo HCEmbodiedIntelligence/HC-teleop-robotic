@@ -82,11 +82,11 @@ export ROS_LOCALHOST_ONLY=0    # 跨机器；同机隔离仿真设为 1
 
 ```bash
 export PYTHONPATH="$PWD/.deps${PYTHONPATH:+:$PYTHONPATH}"
-/usr/bin/python3 -m middleware.core.lerobot_export \
+/usr/bin/python3 -m middleware.core.recording.lerobot_export \
   runtime/vla_demo/episode_001.mcap runtime/vla_demo/episode_001_lerobot \
   --fps 15 --task '把物体放入盒子' --robot-type x1
 ```
 
 这里生成的是按接收时间对齐的数据。训练时使用 `observation.source_available/source_valid/source_age`，名称顺序与来源见 `meta/teleop_sync.json`；数值默认有效期 0.2 秒、图像 0.25 秒。深度和独立手部原始消息保留在 MCAP，不会自动成为主动作或 RGB 特征。
 
-接口来源：[硬件契约](../interfaces/hardware_interface_v2.yaml)、[分组话题](dataset_topics.md)、[LeRobot 导出实现](../middleware/core/lerobot_export.py)。
+接口来源：[硬件契约](../interfaces/hardware_interface_v2.yaml)、[分组话题](dataset_topics.md)、[LeRobot 导出实现](../middleware/core/recording/lerobot_export.py)。

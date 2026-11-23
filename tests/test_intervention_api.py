@@ -6,8 +6,8 @@ from unittest.mock import Mock
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from middleware.core.control_ownership import ControlOwnership
-from middleware.core.intervention_api import register_intervention_routes
+from middleware.core.control.control_ownership import ControlOwnership
+from middleware.core.control.intervention_api import register_intervention_routes
 
 
 class InterventionApiTests(unittest.IsolatedAsyncioTestCase):

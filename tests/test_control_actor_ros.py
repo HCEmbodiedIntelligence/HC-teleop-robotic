@@ -12,7 +12,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
@@ -81,7 +81,7 @@ def test_real_ros_actor_single_sender_latest_targets_and_stop(monkeypatch):
         assert qos_observer is not None
         if qos_observer['enabled']:
             assert qos_observer['moved'] > 0
-            from middleware.core.qos_event_observer import QosEventObserver
+            from middleware.core.control.qos_event_observer import QosEventObserver
             assert not any(QosEventObserver._is_default_incompatible(handler)
                            for handler in waitables_at_ready)
         assert bridge._contention_thread is None

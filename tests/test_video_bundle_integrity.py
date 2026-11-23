@@ -7,7 +7,7 @@ import pytest
 from mcap.writer import Writer
 
 from humanoid_upload.common import UploadError, canonical
-from middleware.core import video_bundle
+from middleware.core.recording import video_bundle
 
 
 @pytest.mark.parametrize('legacy_source_hash', [False, True])

@@ -10,8 +10,8 @@ from unittest.mock import patch
 import av
 import numpy as np
 
-from middleware.core.jetson_h264 import JetsonH264Codec, validate_access_unit, jetson_platform
-from middleware.core.fast_h264 import FastH264Encoder, encoder_backend
+from middleware.core.media.jetson_h264 import JetsonH264Codec, validate_access_unit, jetson_platform
+from middleware.core.media.fast_h264 import FastH264Encoder, encoder_backend
 
 
 IDR = b'\x00\x00\x00\x01\x67\x42\xc0\x1f\x00\x00\x01\x68\x00\x00\x00\x01\x65\x01'
@@ -106,8 +106,8 @@ class JetsonH264Tests(unittest.TestCase):
                       FlowReturn=NS(OK='ok'), SECOND=1_000_000_000,
                       CLOCK_TIME_NONE=2**64-1, PARAM_MUTABLE_PLAYING=4096, Buffer=Buffer)
         self.platform = {'is_jetson': True, 'model': 'Jetson AGX Orin', 'hardware_note': None}
-        self.platform_patch = patch('middleware.core.jetson_h264.jetson_platform', return_value=self.platform)
-        self.gst_patch = patch('middleware.core.jetson_h264._load_gst', return_value=(self.gst, self.gst_video))
+        self.platform_patch = patch('middleware.core.media.jetson_h264.jetson_platform', return_value=self.platform)
+        self.gst_patch = patch('middleware.core.media.jetson_h264._load_gst', return_value=(self.gst, self.gst_video))
         self.platform_patch.start()
         self.gst_patch.start()
         self.addCleanup(self.platform_patch.stop)
@@ -149,9 +149,9 @@ class JetsonH264Tests(unittest.TestCase):
     def test_device_enumeration_preserves_nvhost_and_adds_v4l2_nvenc(self):
         # Bypass setUp's platform mock to exercise actual discovery logic.
         function = jetson_platform
-        with patch('middleware.core.jetson_h264.Path.read_bytes',
+        with patch('middleware.core.media.jetson_h264.Path.read_bytes',
                    side_effect=[b'NVIDIA Jetson AGX Orin Developer Kit', b'nvidia,tegra234']), \
-             patch('middleware.core.jetson_h264.Path.glob',
+             patch('middleware.core.media.jetson_h264.Path.glob',
                    side_effect=[[Path('/dev/nvhost-msenc')], [], [Path('/dev/v4l2-nvenc')]]) as glob:
             platform = function()
         self.assertEqual(platform['encoder_devices'], ['/dev/nvhost-msenc', '/dev/v4l2-nvenc'])

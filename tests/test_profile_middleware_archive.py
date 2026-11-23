@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from middleware.core.config import ConfigStore, ROBOT_MIDDLEWARE_DEFAULTS
-from middleware.core.robot_profiles import RobotProfileError, RobotProfileManager
+from middleware.core.robot.robot_profiles import RobotProfileError, RobotProfileManager
 from tests.test_robot_profiles import URDF, io_yaml
 
 

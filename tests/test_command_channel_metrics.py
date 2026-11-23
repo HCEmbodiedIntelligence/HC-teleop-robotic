@@ -5,12 +5,12 @@ import time
 
 import pytest
 
-from middleware.core.ros_bridge import RosBridge
+from middleware.core.control.ros_bridge import RosBridge
 
 
 def rig(monkeypatch):
     clock = [10.]
-    monkeypatch.setattr('middleware.core.ros_bridge.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('middleware.core.control.ros_bridge.time.monotonic', lambda: clock[0])
     bridge = RosBridge({}, lambda *args: None)
     bridge._boundary = SimpleNamespace(arms=('arm',), hands={'right': ('right_finger',), 'left': ('left_finger',)},
         prepare=lambda m: m, commit=lambda *_args, **_kwargs: True)

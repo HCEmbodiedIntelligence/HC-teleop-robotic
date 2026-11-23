@@ -8,13 +8,13 @@ except ImportError:  # pragma: no cover - optional camera dependencies
     av = None
     np = None
 
-from middleware.core.camera import CameraService, cv2
+from middleware.core.media.camera import CameraService, cv2
 
 
 @unittest.skipIf(av is None or np is None, "camera dependencies are unavailable")
 class FastH264EncoderTests(unittest.TestCase):
     def test_periodic_refresh_is_bounded(self):
-        from middleware.core.fast_h264 import FastH264Encoder
+        from middleware.core.media.fast_h264 import FastH264Encoder
 
         encoder = FastH264Encoder()
         base = np.random.default_rng(3).integers(
@@ -35,7 +35,7 @@ class FastH264EncoderTests(unittest.TestCase):
         self.assertLess(encoded_sizes[60], 20_000)
 
     def test_rapid_remb_changes_do_not_reopen_encoder(self):
-        from middleware.core.fast_h264 import FastH264Encoder
+        from middleware.core.media.fast_h264 import FastH264Encoder
 
         encoder = FastH264Encoder()
         image = np.zeros((400, 640, 3), dtype=np.uint8)

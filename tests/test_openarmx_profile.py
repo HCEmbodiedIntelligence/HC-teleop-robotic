@@ -6,7 +6,7 @@ from xml.etree import ElementTree
 import numpy as np
 import yaml
 
-from middleware.core.robot_profiles import RobotProfileManager
+from middleware.core.robot.robot_profiles import RobotProfileManager
 
 
 ROOT = Path(__file__).resolve().parents[1]

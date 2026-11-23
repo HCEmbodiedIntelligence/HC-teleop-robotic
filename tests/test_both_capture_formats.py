@@ -6,9 +6,9 @@ import pytest
 
 from humanoid_upload.capture_plan import reference
 from humanoid_upload.common import UploadError
-from middleware.core.capture_formats import lerobot_snapshot
-from middleware.core.topic_recorder import read_recording_metadata
-from middleware.core.export_progress import ExportProgress, progress_path
+from middleware.core.recording.capture_formats import lerobot_snapshot
+from middleware.core.recording.topic_recorder import read_recording_metadata
+from middleware.core.recording.export_progress import ExportProgress, progress_path
 from test_platform_task_recording import choice, finish
 from test_shared_capture_plans import environment, recorder_for, record, server
 

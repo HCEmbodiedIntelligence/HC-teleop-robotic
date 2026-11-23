@@ -5,8 +5,8 @@ from mcap.reader import make_reader
 from rclpy.serialization import serialize_message
 from std_msgs.msg import String
 
-from middleware.core.ros_recording_executor import recording_subscriptions
-from middleware.core.topic_recorder import TopicRecorder, _inspect_mcap_file, enqueue_record
+from middleware.core.recording.ros_recording_executor import recording_subscriptions
+from middleware.core.recording.topic_recorder import TopicRecorder, _inspect_mcap_file, enqueue_record
 
 
 @pytest.mark.parametrize('profile', ['x1', 'other'])

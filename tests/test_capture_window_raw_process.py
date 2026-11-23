@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 
-from middleware.core import ros_recording_executor as module
-from middleware.core.capture_window import CaptureWindow, header_stamp_ns
+from middleware.core.recording import ros_recording_executor as module
+from middleware.core.recording.capture_window import CaptureWindow, header_stamp_ns
 
 
 @pytest.mark.parametrize('ordinary', [True, False])
@@ -81,13 +81,13 @@ def test_warm_readers_survive_generation_and_late_rgbd_is_recorded_once(ordinary
         'rclpy.executors': SimpleNamespace(SingleThreadedExecutor=Executor),
         'rclpy.qos': SimpleNamespace(qos_profile_sensor_data=object()),
         'rosidl_runtime_py.utilities': SimpleNamespace(get_message=lambda kind:bytes),
-        'middleware.core.ros_qos': SimpleNamespace(recording_subscription_qos=lambda item:'configured',
+        'middleware.core.control.ros_qos': SimpleNamespace(recording_subscription_qos=lambda item:'configured',
             warm_recording_subscription_qos=lambda item:'best_effort'),
     }
     with patch.dict(sys.modules, modules), \
          patch.object(module, '_lower_recording_priority'), \
          patch.object(module, '_health_snapshot', return_value={}), \
-         patch('middleware.core.topic_recorder.enqueue_record', side_effect=lambda resources,event,**kw:recorded.append(event) or True), \
+         patch('middleware.core.recording.topic_recorder.enqueue_record', side_effect=lambda resources,event,**kw:recorded.append(event) or True), \
          patch.object(module.time, 'monotonic', side_effect=lambda:clock[0]), \
          patch.object(module.time, 'time_ns', side_effect=lambda:round(clock[0]*1e9)):
         module._raw_recording_process({'legacy_control_profile':'x1'}, items, None,

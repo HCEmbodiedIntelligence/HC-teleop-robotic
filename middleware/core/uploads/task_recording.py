@@ -12,8 +12,8 @@ from uuid import uuid4
 
 from humanoid_upload.common import UploadError, atomic_json, read_json
 
-from .capture_formats import SOURCE_FORMATS, artifact_formats, artifact_identity, upload_formats, job_artifact_formats
-from .background_process import BackgroundProcess, BackgroundProcessError, BackgroundProcessStopped
+from ..recording.capture_formats import SOURCE_FORMATS, artifact_formats, artifact_identity, upload_formats, job_artifact_formats
+from ..recording.background_process import BackgroundProcess, BackgroundProcessError, BackgroundProcessStopped
 
 
 def now():
@@ -29,7 +29,7 @@ def _format_incompatible(save_format, upload_format):
     return None
 
 
-from .correction_support import CorrectionSupport
+from ..recording.correction_support import CorrectionSupport
 
 
 class TaskRecorder(CorrectionSupport):
@@ -92,7 +92,7 @@ class TaskRecorder(CorrectionSupport):
         if warmup:
             self.prepare_recording()
         deadline = time.monotonic() + (2.0 if warmup else 0.0)
-        from .capture_requirements import check_device
+        from ..recording.capture_requirements import check_device
         while True:
             try:
                 health = self.capture_health() if self.capture_health else {}
@@ -295,7 +295,7 @@ class TaskRecorder(CorrectionSupport):
                 job = copy.deepcopy(self.jobs[identity])
             source = Path(job['path'])
             if job.get('capture_snapshot'):
-                from .topic_recorder import read_recording_metadata
+                from ..recording.topic_recorder import read_recording_metadata
                 metadata = read_recording_metadata(source)
                 if (metadata.get('recording_id') != identity or
                         json.loads(metadata.get('capture_snapshot', 'null')) != job['capture_snapshot'] or
@@ -351,7 +351,7 @@ class TaskRecorder(CorrectionSupport):
         if fmt == 'lerobot':
             source = Path(job['path'])
             target = Path(job.get('dataset_path') or self.directory / 'lerobot' / source.stem)
-            from .export_progress import progress_path
+            from ..recording.export_progress import progress_path
             import time
             # The converter is the existing recorder's independent process.
             # Wait on its durable progress, not the next recording's settings.
@@ -371,7 +371,7 @@ class TaskRecorder(CorrectionSupport):
                 if progress.get('state') != 'exporting':
                     raise UploadError('EXPORT_INTERRUPTED', '转换尚未完成，原始 MCAP 已保留；请恢复转换后重试')
                 time.sleep(0.2)
-        from .artifact_jobs import seal_task_artifact
+        from ..recording.artifact_jobs import seal_task_artifact
         upload = self.platform.upload
         cfg = upload._config(job['binding']['binding_id']) if job.get('binding') else upload.cfg
         return upload.artifact_process.call(seal_task_artifact, job, fmt,
@@ -420,7 +420,7 @@ class TaskRecorder(CorrectionSupport):
                     source = Path(job['path'])
                     dataset = Path(job.get('dataset_path') or self.directory / 'lerobot' / source.stem)
                     if fmt == 'lerobot':
-                        from .export_progress import progress_path
+                        from ..recording.export_progress import progress_path
                         progress = read_json(progress_path(dataset)) if progress_path(dataset).exists() else {}
                         if not (dataset / 'meta/info.json').is_file() or progress.get('state') in ('exporting', 'error'):
                             raise UploadError('EXPORT_INCOMPLETE', 'LeRobot 数据集未完成，不能上传')
@@ -481,12 +481,12 @@ class TaskRecorder(CorrectionSupport):
             return {'ok': True, 'recording_id': job['recording_id']}
 
     def adopt_history(self, identifier):
-        from .recording_datasets import resolve_dataset
-        from .topic_recorder import read_recording_metadata
+        from ..recording.recording_datasets import resolve_dataset
+        from ..recording.topic_recorder import read_recording_metadata
         target = resolve_dataset(self.directory, identifier)
         dataset = target if identifier.startswith('lerobot:') else None
         if dataset:
-            from .export_progress import progress_path, read_progress
+            from ..recording.export_progress import progress_path, read_progress
             if read_progress(progress_path(dataset)).get('state') in ('exporting', 'error'):
                 raise UploadError('EXPORT_INCOMPLETE', '历史数据集尚未完整整理，源文件已保留')
             # 1. Exact match by dataset name
@@ -688,7 +688,7 @@ class TaskRecorder(CorrectionSupport):
 
     def delete_recording(self, filename):
         with self.lock:
-            from .recording_datasets import resolve_dataset
+            from ..recording.recording_datasets import resolve_dataset
             job = next((job for job in self.jobs.values() if Path(job['path']).name == filename
                         or 'lerobot:' + Path(job['path']).stem == filename
                         or 'bundle:' + Path(job['path']).stem == filename), None)

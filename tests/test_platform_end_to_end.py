@@ -34,9 +34,9 @@ from hc_data_platform.robot_ingest.service import RobotIngestService
 from hc_data_platform.security.auth import AuthContext
 from datetime import datetime, timezone
 
-from middleware.core.platform_connection import PlatformConnection
-from middleware.core.task_recording import TaskRecorder
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.uploads.platform_connection import PlatformConnection
+from middleware.core.uploads.task_recording import TaskRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder
 from humanoid_upload.common import UploadError
 from test_platform_task_recording import LOCAL, capture, choice, finish
 from capture_contract_support import task_document, snapshot_document

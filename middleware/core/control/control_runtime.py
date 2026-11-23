@@ -13,7 +13,7 @@ import yaml
 class ControlRuntime:
     def __init__(self, config_path: Path):
         self.config_path = Path(config_path).resolve()
-        self.project = Path(__file__).resolve().parents[2]
+        self.project = Path(__file__).resolve().parents[3]
         self.enabled = os.environ.get("HC_MANAGED_CONTROL") == "1"
         self.process = None
         self.state = "stopped" if self.enabled else "unmanaged"

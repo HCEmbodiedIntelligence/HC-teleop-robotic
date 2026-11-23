@@ -37,7 +37,7 @@ def action_label_policy(config):
            or topic != STATUS_TOPIC and float(selected[topic].get('max_hz', 0)) > 0
            for topic, kind in required.items()):
         return None
-    from .legacy_control import LegacyTopicControl
+    from ..control.legacy_control import LegacyTopicControl
     import yaml
     try:
         profile = yaml.safe_load((Path(config['legacy_control_profile'])/'arm_teleop.yaml').read_text())

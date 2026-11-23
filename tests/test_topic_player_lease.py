@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mcap.writer import Writer
-from middleware.core.topic_player import TopicPlayer
+from middleware.core.recording.topic_player import TopicPlayer
 
 
 def make_recording(path):
@@ -76,7 +76,7 @@ def test_cancelled_reader_error_cannot_replace_stop_status_or_release_again(tmp_
     entered, release = threading.Event(), threading.Event()
     ros = MagicMock()
     player = TopicPlayer(tmp_path, lambda: ros)
-    from middleware.core import topic_player
+    from middleware.core.recording import topic_player
     original = topic_player.make_reader
     def reader(stream):
         if threading.current_thread().name == 'TopicPlayer-first.mcap':

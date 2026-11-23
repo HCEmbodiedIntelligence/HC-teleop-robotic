@@ -17,7 +17,7 @@ def load_camera_metadata(config, config_dir):
     """Only profiles with an explicit camera frame opt into model extrinsics."""
     import yaml
     from adapters.core.runtime_config import unified_profile
-    from .robot_api import RobotApiProfile, selected_profile
+    from ..robot.robot_api import RobotApiProfile, selected_profile
 
     directory = selected_profile(config, config_dir)
     teleop = yaml.safe_load((directory / 'arm_teleop.yaml').read_text())

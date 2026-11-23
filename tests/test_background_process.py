@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from middleware.core.background_process import (
+from middleware.core.recording.background_process import (
     BackgroundProcess, BackgroundProcessError, BackgroundProcessStopped,
 )
 from humanoid_upload.common import UploadError
@@ -84,7 +84,7 @@ def test_dead_child_fails_current_call_and_restarts_on_next_job():
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux process lifecycle')
 def test_child_exits_if_middleware_parent_dies():
     parent = subprocess.Popen([sys.executable, '-c',
-        "import os,sys; from middleware.core.background_process import BackgroundProcess; "
+        "import os,sys; from middleware.core.recording.background_process import BackgroundProcess; "
         "worker=BackgroundProcess('test-parent-exit'); "
         "print(worker.call(os.getpid),flush=True); sys.stdin.readline()"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -132,7 +132,7 @@ def test_stop_interrupts_blocked_child_and_releases_callers():
 def _upload_fixture(tmp_path, monkeypatch, base='http://127.0.0.1:1'):
     from humanoid_upload.bundle import checksum
     from humanoid_upload.common import atomic_json
-    from middleware.core.upload_service import UploadService
+    from middleware.core.uploads.upload_service import UploadService
     data, ready = tmp_path/'data', tmp_path/'ready'
     data.mkdir()
     monkeypatch.setenv('HC_BACKGROUND_TEST_TOKEN', 'synthetic-token')

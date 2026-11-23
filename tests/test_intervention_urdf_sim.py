@@ -21,7 +21,7 @@ from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import String
 from mcap.reader import make_reader
-from middleware.core.recording_cdr import read_event
+from middleware.core.recording.recording_cdr import read_event
 
 from tests.correction_recording_support import service as RecordingService
 from tests.robot_api_fake_rig import FakeRig
@@ -39,7 +39,7 @@ def run_simulator(profile, report):
     from PIL import Image as PillowImage
     sys.path.insert(0, str(ROOT/'simulation'))
     from simulation.general_sim_robot_control_node_ros2 import SimRobotController
-    from middleware.core.robot_api import RobotApiProfile
+    from middleware.core.robot.robot_api import RobotApiProfile
 
     api = RobotApiProfile(profile)
     report.mkdir(parents=True, exist_ok=True)
@@ -293,7 +293,7 @@ def test_pose_router_handles_missed_revoke_without_retagging_old_pose():
     from std_msgs.msg import Header
     from builtin_interfaces.msg import Time
     from adapters.nodes.unified_motion_teleop import UnifiedMotionTeleopBridge as Bridge
-    from middleware.core.control_ownership import ControlToken
+    from middleware.core.control.control_ownership import ControlToken
 
     old = ControlToken('controller', 'session', 4, 'motion', '').key()
     current = ControlToken('controller', 'session', 5, 'vr', 'segment').key()

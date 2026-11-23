@@ -5,9 +5,9 @@ from mcap.reader import make_reader
 from rclpy.serialization import serialize_message
 from sensor_msgs.msg import CompressedImage
 
-from middleware.core.capture_window import read_capture_metadata
-from middleware.core.ros_recording_executor import RosRecordingExecutor
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.capture_window import read_capture_metadata
+from middleware.core.recording.ros_recording_executor import RosRecordingExecutor
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 def frame(stamp, data):

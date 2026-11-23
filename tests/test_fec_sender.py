@@ -9,8 +9,8 @@ from aiortc.rtcrtpparameters import RTCRtpCodecParameters, RTCRtpHeaderExtension
 from aiortc.rtp import (HeaderExtensionsMap, RtcpPsfbPacket, RtcpRtpfbPacket,
                        RtpPacket, RTCP_PSFB_APP, RTCP_RTPFB_NACK, pack_remb_fci)
 
-from middleware.core.fec_sender import FecSender, configure_fec
-from middleware.core.rtp_fec import (protected_sequences, recover_ulpfec, red_unwrap,
+from middleware.core.media.fec_sender import FecSender, configure_fec
+from middleware.core.media.rtp_fec import (protected_sequences, recover_ulpfec, red_unwrap,
                                     rtp_layout, unwrap_red_payload, zero_mutable_extensions)
 
 SSRC, RTX_SSRC = 0x11223344, 0x55667788

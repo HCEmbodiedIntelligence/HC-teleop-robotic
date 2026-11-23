@@ -10,11 +10,11 @@ from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import Image, JointState
 from mcap.reader import make_reader
-from middleware.core.recording_cdr import read_event
+from middleware.core.recording.recording_cdr import read_event
 from rclpy.serialization import deserialize_message
 
-from middleware.core.control_ownership import ControlToken
-from middleware.core.takeover_log import TakeoverLog
+from middleware.core.control.control_ownership import ControlToken
+from middleware.core.recording.takeover_log import TakeoverLog
 from tests.correction_recording_support import service as RecordingService
 from tests.correction_recording_support import config as recording_config
 
@@ -106,7 +106,7 @@ def test_raw_short_corrections_preserve_images_actions_and_unbound_download(tmp_
                         for schema, channel, msg in messages
                         if channel.topic == '/events/control/action_evidence']
             assert evidence and all(event['intervention_id'] == job['metadata']['intervention_id'] for event in evidence)
-            from middleware.core.recording_datasets import archive_dataset
+            from middleware.core.recording.recording_datasets import archive_dataset
             archive = archive_dataset(bundle)
             archive.unlink()
         recorder.stop_corrections()

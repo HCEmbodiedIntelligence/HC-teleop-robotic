@@ -4,14 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from middleware.core.topic_recorder import TopicRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder
 
 
 class LeRobotRecordingTests(unittest.TestCase):
     def test_next_capture_does_not_wait_for_previous_export(self):
         import threading
         import time
-        from middleware.core.export_progress import progress_path, read_progress
+        from middleware.core.recording.export_progress import progress_path, read_progress
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -21,7 +21,7 @@ class LeRobotRecordingTests(unittest.TestCase):
             process.poll.return_value = None
             done = threading.Event()
             process.wait.side_effect = lambda: (done.wait(5), 0)[1]
-            with patch('middleware.core.topic_recorder.subprocess.Popen', return_value=process):
+            with patch('middleware.core.recording.topic_recorder.subprocess.Popen', return_value=process):
                 recorder._start_lerobot_export()
             destination = Path(recorder._lerobot_path)
             try:
@@ -43,7 +43,7 @@ class LeRobotRecordingTests(unittest.TestCase):
     def test_missing_environment_does_not_start_partial_recording(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = TopicRecorder({'directory': directory, 'format': 'lerobot'}, Path(directory))
-            with patch('middleware.core.lerobot_export.ensure_export_available', side_effect=RuntimeError('install environment')):
+            with patch('middleware.core.recording.lerobot_export.ensure_export_available', side_effect=RuntimeError('install environment')):
                 with self.assertRaisesRegex(RuntimeError, 'install environment'):
                     recorder.start()
             self.assertFalse(recorder.status()['recording'])
@@ -58,9 +58,9 @@ class LeRobotRecordingTests(unittest.TestCase):
             process = Mock()
             process.poll.return_value = 2
             process.returncode = 2
-            with patch('middleware.core.topic_recorder.subprocess.Popen', return_value=process) as launch:
+            with patch('middleware.core.recording.topic_recorder.subprocess.Popen', return_value=process) as launch:
                 recorder._start_lerobot_export()
-            self.assertIn('middleware.core.lerobot_export', launch.call_args.args[0])
+            self.assertIn('middleware.core.recording.lerobot_export', launch.call_args.args[0])
             status = recorder.status()
             self.assertEqual(status['export_state'], 'error')
             self.assertIn('原始 MCAP 已保留', status['export_error'])
@@ -73,7 +73,7 @@ class LeRobotRecordingTests(unittest.TestCase):
             recorder.path = root / 'episode.mcap'
             process = Mock()
             process.poll.return_value = None
-            with patch('middleware.core.topic_recorder.subprocess.Popen', return_value=process):
+            with patch('middleware.core.recording.topic_recorder.subprocess.Popen', return_value=process):
                 recorder._start_lerobot_export()
             self.assertEqual(recorder.status()['export_state'], 'exporting')
             dataset = Path(recorder._lerobot_path)

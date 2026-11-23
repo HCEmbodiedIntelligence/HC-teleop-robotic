@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from middleware.core.platform_connection import PlatformConnection
-from middleware.core.task_recording import TaskRecorder
-from middleware.core.topic_recorder import TopicRecorder, read_recording_metadata
+from middleware.core.uploads.platform_connection import PlatformConnection
+from middleware.core.uploads.task_recording import TaskRecorder
+from middleware.core.recording.topic_recorder import TopicRecorder, read_recording_metadata
 from humanoid_upload.common import UploadError, atomic_json, read_json
 from capture_contract_support import task_document, snapshot_document
 
@@ -578,17 +578,17 @@ def configure_lerobot_upload(recorder, service, monkeypatch):
         for topic in topics
     ]
     recorder.capture_health = lambda: {topic: {'has_data': True, 'hz': 15} for topic in topics}
-    monkeypatch.setattr('middleware.core.lerobot_export.ensure_export_available', lambda: 'synthetic-converter')
+    monkeypatch.setattr('middleware.core.recording.lerobot_export.ensure_export_available', lambda: 'synthetic-converter')
 
 
 def test_both_local_uploads_only_selected_lerobot(tmp_path, monkeypatch):
-    from middleware.core.export_progress import progress_path
+    from middleware.core.recording.export_progress import progress_path
     cfg, service, recorder = connected(tmp_path, monkeypatch)
     configure_lerobot_upload(recorder, service, monkeypatch)
     # Keep this policy test deterministic; BackgroundProcess transport has its
     # own coverage and does not affect which descriptor is upload-eligible.
     monkeypatch.setattr(service.upload.artifact_process, 'call', lambda function, *args: function(*args))
-    monkeypatch.setattr('middleware.core.artifact_jobs.enqueue_ready', lambda descriptor, cfg: {'queued': True})
+    monkeypatch.setattr('middleware.core.recording.artifact_jobs.enqueue_ready', lambda descriptor, cfg: {'queued': True})
     def exported():
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -675,7 +675,7 @@ def test_capture_check_wakes_recording_inputs_before_reading_health():
 
 
 def test_lerobot_export_failure_never_uploads_mcap_fallback(tmp_path, monkeypatch):
-    from middleware.core.export_progress import progress_path
+    from middleware.core.recording.export_progress import progress_path
     cfg, service, recorder = connected(tmp_path, monkeypatch)
     configure_lerobot_upload(recorder, service, monkeypatch)
     def failed_export():

@@ -15,9 +15,9 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription
 from aiortc.sdp import SessionDescription
 from aiortc.rtcrtpparameters import RTCRtpCodecParameters as Codec
 
-from middleware.core.camera import CameraService
+from middleware.core.media.camera import CameraService
 from middleware.core.config import validate_config, ConfigError
-from middleware.core.rtp_fec import (red_unwrap, unwrap_red_payload, rtp_layout,
+from middleware.core.media.rtp_fec import (red_unwrap, unwrap_red_payload, rtp_layout,
     protected_sequences, recover_ulpfec)
 
 
