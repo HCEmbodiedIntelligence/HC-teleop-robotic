@@ -1,59 +1,71 @@
+"""中间件组合根（MiddlewareRuntime）与 HTTP/WebSocket 应用装配入口（create_app）。"""
 from __future__ import annotations
 
 import asyncio
-import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
 import logging
 import os
-import socket
-import time
-import uuid
-from collections import deque
-from contextlib import nullcontext
-from datetime import datetime
 from pathlib import Path
+import socket
+import threading
+import time
 from typing import Any
 
 from aiohttp import WSMsgType, web
-import yaml
 
-from .media.camera_process import CameraProcessService as CameraService
-from .robot.simulation import SimulationService, register_simulation_routes
-from .config import ConfigError, ConfigStore, validate_config, isolated_control_process_enabled
-from .robot.profile_api import register_profile_routes
-from .protocol import envelope
-from .robot.robot_profiles import RobotProfileManager
-from .robot.robot_api import RobotApiProfile, selected_profile, selected_profile_root
 from adapters.core.runtime_config import unified_profile
+from .config import (
+    ConfigError,
+    ConfigStore,
+    isolated_control_process_enabled,
+    validate_config,
+)
+from .control.intervention_api import register_intervention_routes
 from .control.ros_bridge import RosBridge
-from .recording.ros_recording_executor import RosRecordingExecutor, recording_subscriptions
+from .control.safety_controller import SafetyController
+from .control.teleop_api import register_teleop_routes
+from .diagnostic_logs import DiagnosticLogHandler, DiagnosticLogs, register_log_routes
+from .media.camera_api import build_camera_services, register_camera_routes
+from .media.camera_process import CameraProcessService as CameraService
+from .media.vr_gateway import VrGateway
+from .media.vr_pose_handler import VrPoseHandler
+from .media.ws_broadcaster import WebSocketBroadcaster
+from .protocol import envelope
+from .recording.recording_api import register_recording_routes
+from .recording.recording_controller import (
+    RecordingController,
+    configure_publication_capture,
+)
+from .recording.replay_api import format_replay_state_payload, register_replay_routes
+from .recording.ros_recording_executor import (
+    RosRecordingExecutor,
+    recording_subscriptions,
+)
+from .recording.takeover_log import TakeoverLog
 from .recording.topic_player import TopicPlayer
 from .recording.topic_recorder import TopicRecorder
-from .recording.takeover_log import TakeoverLog
-from .media.vr_gateway import VrGateway
-from .diagnostic_logs import DiagnosticLogs, DiagnosticLogHandler, register_log_routes
+from .robot.profile_api import register_profile_routes
+from .robot.profile_metadata import load_session_profile_metadata
+from .robot.robot_api import RobotApiProfile, selected_profile, selected_profile_root
+from .robot.robot_profiles import RobotProfileManager
+from .robot.simulation import SimulationService, register_simulation_routes
 from .runtime_mode import configure_environment
-
-
-def _upload_failure(exc: Exception) -> dict[str, Any] | None:
-    """Identify optional uploader errors without making uploads a hard dependency."""
-    try:
-        from humanoid_upload.common import UploadError
-    except ImportError:
-        return None
-    if not isinstance(exc, UploadError):
-        return None
-    return {"ok": False, "code": exc.code, "reason": exc.action}
-
-
-def _upload_failure_status(code: str) -> int:
-    return 409 if code in {"ARTIFACT_BUSY", "WORKER_ALREADY_RUNNING", "BINDING_REQUIRED"} else 400
+from .uploads.platform_api import register_platform_routes
+from .uploads.upload_integration import (
+    register_runtime_upload_routes,
+    start_runtime_uploads,
+    upload_failure as _upload_failure,
+    upload_failure_status as _upload_failure_status,
+)
 
 
 def control_bridge_class(ros_config: dict[str, Any]):
     if isolated_control_process_enabled(ros_config):
         from .control.control_process import IsolatedRosBridge
+
         return IsolatedRosBridge
     return RosBridge
 
@@ -70,6 +82,8 @@ def local_ip() -> str:
 
 
 class MiddlewareRuntime:
+    """中间件运行时组合根：负责子系统生命周期编排，并将具体逻辑委托给各领域协作者。"""
+
     def __init__(self, config: dict[str, Any], config_dir: Path):
         self.config = copy.deepcopy(config)
         self.config_dir = config_dir
@@ -90,9 +104,11 @@ class MiddlewareRuntime:
         self.upload_error = None
         self.player: TopicPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.websockets: set[web.WebSocketResponse] = set()
-        self._broadcast_pending: dict[str, dict[str, Any]] = {}
-        self._broadcast_drain_task: asyncio.Task | None = None
+        self.broadcaster = WebSocketBroadcaster(
+            send_event=lambda event: self._broadcast(event)
+        )
+        self.websockets: set[web.WebSocketResponse] = self.broadcaster.clients
+        self._broadcast_pending: dict[str, dict[str, Any]] = self.broadcaster.pending
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.started_at = time.time()
         self._restart_lock = asyncio.Lock()
@@ -101,112 +117,137 @@ class MiddlewareRuntime:
         self._safety_reason = ""
         self._safety_event_lock = threading.RLock()
         self._safety_event_generation = 0
-        self._last_x_held = False
-        self._last_y_held = False
-        self._last_a_held = False
-        self._last_both_sticks_held = False
-        self._last_replay_status_sent_at = 0.0
         self.session_profile_metadata: dict[str, str] = {}
         self.control_runtime = None
         self._control_watch_task = None
 
-    def _load_session_profile_metadata(self) -> dict[str, str]:
-        """Describe the Profile actually selected when this runtime starts."""
-        profile_config = self.config.get("robot_profiles", {})
-        profile_id = str(
-            os.environ.get("HC_ROBOT_NAME")
-            or profile_config.get("active", "")
-        ).strip()
-        if not profile_id:
-            return {}
+        # 领域协作者（组合替代上帝类）
+        self.vr_pose_handler = VrPoseHandler(self)
+        self.recording_controller = RecordingController(self)
+        self.safety_controller = SafetyController(self)
 
-        metadata: dict[str, str] = {
-            "profile_id": profile_id,
-            "profile_display_name": profile_id,
-            "robot_name": profile_id,
-            "controller_config": "",
-            "free_joints": "[]",
-            "ros_domain_id": str(self.config.get("ros", {}).get("domain_id", 14)),
-        }
-        profile_dir = selected_profile(self.config, self.config_dir)
+    def _load_session_profile_metadata(self) -> dict[str, str]:
+        return load_session_profile_metadata(self.config, self.config_dir)
+
+    async def _init_recorder_and_uploads(self) -> TopicRecorder:
+        base_recorder = TopicRecorder(
+            self.config["ros"]["recording"],
+            self.config_dir,
+            topics=recording_subscriptions(self.config["ros"]),
+        )
+        self.recorder = base_recorder
         try:
-            profile = yaml.safe_load(
-                (profile_dir / "profile.yaml").read_text(encoding="utf-8")
-            ) or {}
-            metadata["profile_display_name"] = str(
-                profile.get("display_name") or profile_id
+            from .uploads.platform_connection import PlatformConnection
+            from .uploads.task_recording import TaskRecorder
+
+            self.platform = PlatformConnection(
+                self.config, self.config_dir, base_recorder.directory
             )
-            metadata["robot_name"] = str(profile.get("robot_name") or profile_id)
-            controller_name = str(
-                profile.get("primary_config") or "controller_v23.yml"
-            )
-            metadata["controller_config"] = controller_name
-            controller = yaml.safe_load(
-                (profile_dir / controller_name).read_text(encoding="utf-8")
-            ) or {}
-            free_joints = controller.get("model", {}).get("free_joints", [])
-            if isinstance(free_joints, list):
-                metadata["free_joints"] = json.dumps(
-                    [str(name) for name in free_joints],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+            self.recorder = TaskRecorder(base_recorder, self.platform)
+            self.platform.activity_provider = (
+                lambda: "COLLECTING"
+                if self.recorder.is_recording()
+                else (
+                    "UPLOADING"
+                    if any(
+                        job["state"] == "uploading"
+                        for job in self.platform.upload.jobs()
+                    )
+                    else "IDLE"
                 )
-        except (OSError, TypeError, yaml.YAMLError):
-            pass
-        if unified_profile(profile_dir):
-            api = RobotApiProfile(profile_dir)
-            metadata.update(robot_api_schema="hc-robot-api/v1", robot_api_revision=api.revision,
-                            robot_api_info=json.dumps(api.describe(), separators=(",", ":")),
-                            free_joints=json.dumps([j["public_name"] for j in api.joints.values()]))
-        return metadata
+            )
+            self.platform.start()
+            self.uploads = self.platform.upload
+        except ImportError as exc:
+            logging.getLogger(__name__).warning(
+                "Platform connection component could not load: %s",
+                exc.name or type(exc).__name__,
+            )
+            self.platform = None
+            await self._start_uploads()
+            self.recorder.binding_snapshot = None
+        return base_recorder
+
+    def _configure_profile_on_ros_config(self) -> None:
+        profile_dir = (
+            selected_profile(self.config, self.config_dir)
+            if os.environ.get("HC_ROBOT_NAME")
+            or self.config.get("robot_profiles", {}).get("active")
+            else None
+        )
+        self.config["ros"].pop("robot_api_profile", None)
+        self.config["ros"].pop("legacy_control_profile", None)
+        if profile_dir is not None and unified_profile(profile_dir):
+            RobotApiProfile(profile_dir)
+            self.config["ros"]["robot_api_profile"] = str(profile_dir)
+        elif profile_dir is not None and self.config["ros"].get("intervention", {}).get(
+            "legacy_topics", False
+        ):
+            self.config["ros"]["legacy_control_profile"] = str(profile_dir)
+
+    def _wire_ros_and_recorder(self, base_recorder: TopicRecorder) -> None:
+        dataset_config = self.config["ros"].get("dataset_topics", {})
+        if dataset_config.get("enabled", False):
+            from .media.camera_metadata import load_camera_metadata
+            from .recording.dataset_topics import load_joint_groups
+            from .recording.x1_recording import is_x1
+
+            dataset_config["x1_recording_fk"] = is_x1(self.config["ros"])
+            dataset_config["joint_groups"] = load_joint_groups(
+                self.config, self.config_dir
+            )
+            dataset_config["camera_metadata"] = load_camera_metadata(
+                self.config, self.config_dir
+            )
+        self.ros = control_bridge_class(self.config["ros"])(
+            self.config["ros"],
+            self.emit,
+            on_frame=self._handle_camera_ros_message,
+            camera_topics=list(self._cameras_by_topic),
+        )
+        self.recorder.configure_corrections(self.config["ros"])
+        base_recorder.takeovers = TakeoverLog(self.ros.ownership.ros_clock)
+        self.ros.ownership.manual_changed = base_recorder.takeovers.manual_changed
+        self.ros.ownership.dagger_changed = base_recorder.takeovers.dagger_changed
+        self.ros.ownership.open_segment = self.recorder.correction_open
+        self.ros.ownership.close_segment = self.recorder.correction_close
+
+        def capture_ready() -> bool:
+            capture = self.recorder.corrections
+            return bool(capture and capture.status()["ready"])
+
+        self.ros.ownership.capture_ready = capture_ready
+        self.ros._action_sink = self.recorder.correction_action
+        self._configure_publication_capture(base_recorder)
+        self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
+        self.recorder.prepare_recording = self.recording_ros.prepare_recording
+        if self.platform is not None:
+            self.recorder.capture_health = self.recording_ros.get_topic_health
 
     async def start(self) -> None:
         self._stopping = False
         self.loop = asyncio.get_running_loop()
         configured_domain_id = int(self.config.get("ros", {}).get("domain_id", 14))
         domain_id = configure_environment(configured_domain_id)
-        # Every ROS context (VR, safety, recording and camera) uses the selected
-        # runtime domain, including after a Dashboard configuration reload.
+        # 所有 ROS 上下文（VR、安全、录制、相机）统一使用当前运行时域 ID。
         self.config.setdefault("ros", {})["domain_id"] = domain_id
         try:
             import rclpy
+
             if not rclpy.ok():
                 rclpy.init(args=[], domain_id=domain_id)
         except Exception:
             pass
 
-        from concurrent.futures import ThreadPoolExecutor
-        self._record_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="recording-command")
-        self._control_commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="control-command")
+        self._record_commands = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="recording-command"
+        )
+        self._control_commands = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="control-command"
+        )
         self.session_profile_metadata = self._load_session_profile_metadata()
-        profile_dir = (selected_profile(self.config, self.config_dir)
-                       if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
-        self.config["ros"].pop("robot_api_profile", None)
-        self.config["ros"].pop("legacy_control_profile", None)
-        if profile_dir is not None and unified_profile(profile_dir):
-            RobotApiProfile(profile_dir)
-            self.config["ros"]["robot_api_profile"] = str(profile_dir)
-        elif profile_dir is not None and self.config["ros"].get("intervention", {}).get("legacy_topics", False):
-            self.config["ros"]["legacy_control_profile"] = str(profile_dir)
-        recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir,
-                                 topics=recording_subscriptions(self.config["ros"]))
-        self.recorder = recorder
-        try:
-            from .uploads.platform_connection import PlatformConnection
-            from .uploads.task_recording import TaskRecorder
-            self.platform = PlatformConnection(self.config, self.config_dir, recorder.directory)
-            self.recorder = TaskRecorder(recorder, self.platform)
-            self.platform.activity_provider = lambda: "COLLECTING" if self.recorder.is_recording() else (
-                "UPLOADING" if any(job['state'] == 'uploading' for job in self.platform.upload.jobs()) else "IDLE")
-            self.platform.start()
-            self.uploads = self.platform.upload
-        except ImportError as exc:
-            logging.getLogger(__name__).warning(
-                "Platform connection component could not load: %s", exc.name or type(exc).__name__
-            )
-            self.platform = None
-            await self._start_uploads()
-            self.recorder.binding_snapshot = None
+        self._configure_profile_on_ros_config()
+        base_recorder = await self._init_recorder_and_uploads()
         self.player = TopicPlayer(
             self.recorder.directory,
             lambda: self.ros,
@@ -214,75 +255,10 @@ class MiddlewareRuntime:
             lambda: self.session_profile_metadata.get("profile_id", ""),
             lambda: self.session_profile_metadata,
         )
-        camera_config = self.config.get("camera", {})
-        base_camera_config = {
-            key: value for key, value in camera_config.items() if key != "streams"
-        }
-        configured_streams = camera_config.get("streams", [])
-        if not configured_streams:
-            configured_streams = [
-                {
-                    "id": "main",
-                    "name": "主相机",
-                    "topic": base_camera_config.get(
-                        "custom_topic", ""
-                    ) or base_camera_config.get(
-                        "topic", "/observation/cameras/head/color/compressed"
-                    ),
-                    "enabled": base_camera_config.get("enabled", False),
-                }
-            ]
-
-        self.cameras = {}
-        self._cameras_by_topic = {}
-        for stream in configured_streams:
-            if not base_camera_config.get("enabled", False) or not stream.get(
-                "enabled", True
-            ):
-                continue
-            stream_config = {**base_camera_config, **stream, "enabled": True}
-            stream_id = str(stream_config.get("id", "main"))
-            service = CameraService(stream_config, domain_id=domain_id)
-            self.cameras[stream_id] = service
-            active_topic = str(
-                stream_config.get("custom_topic", "")
-                or stream_config.get(
-                    "topic", "/observation/cameras/head/color/compressed"
-                )
-            )
-            self._cameras_by_topic.setdefault(active_topic, []).append(service)
-
-        self.camera = next(iter(self.cameras.values()), None)
-        dataset_config = self.config["ros"].get("dataset_topics", {})
-        if dataset_config.get("enabled", False):
-            from .recording.dataset_topics import load_joint_groups
-            from .recording.x1_recording import is_x1
-            dataset_config["x1_recording_fk"] = is_x1(self.config["ros"])
-            from .media.camera_metadata import load_camera_metadata
-            dataset_config["joint_groups"] = load_joint_groups(self.config, self.config_dir)
-            dataset_config["camera_metadata"] = load_camera_metadata(self.config, self.config_dir)
-        self.ros = control_bridge_class(self.config['ros'])(
-            self.config["ros"],
-            self.emit,
-            on_frame=self._handle_camera_ros_message,
-            camera_topics=list(self._cameras_by_topic),
+        self.cameras, self._cameras_by_topic, self.camera = build_camera_services(
+            self.config.get("camera", {}), domain_id=domain_id
         )
-        self.recorder.configure_corrections(self.config['ros'])
-        recorder.takeovers = TakeoverLog(self.ros.ownership.ros_clock)
-        self.ros.ownership.manual_changed = recorder.takeovers.manual_changed
-        self.ros.ownership.dagger_changed = recorder.takeovers.dagger_changed
-        self.ros.ownership.open_segment = self.recorder.correction_open
-        self.ros.ownership.close_segment = self.recorder.correction_close
-        def capture_ready():
-            capture = self.recorder.corrections
-            return bool(capture and capture.status()['ready'])
-        self.ros.ownership.capture_ready = capture_ready
-        self.ros._action_sink = self.recorder.correction_action
-        self._configure_publication_capture(recorder)
-        self.recording_ros = RosRecordingExecutor(self.config["ros"], self.recorder)
-        self.recorder.prepare_recording = self.recording_ros.prepare_recording
-        if self.platform is not None:
-            self.recorder.capture_health = self.recording_ros.get_topic_health
+        self._wire_ros_and_recorder(base_recorder)
         self.vr = VrGateway(
             self.config["vr"], self._on_pose, self.emit, self._on_vr_timeout
         )
@@ -296,7 +272,9 @@ class MiddlewareRuntime:
             self._on_safety_event("middleware startup")
         self._safety_sync_task = asyncio.create_task(self._sync_safety_state())
         if self.control_runtime is not None and self.control_runtime.enabled:
-            self._on_safety_event("loading control configuration; explicit resume required", force=True)
+            self._on_safety_event(
+                "loading control configuration; explicit resume required", force=True
+            )
             await self.control_runtime.start(self.config)
             if self.control_runtime.status()["state"] != "running":
                 self._on_safety_event(self.control_runtime.error, force=True)
@@ -307,74 +285,43 @@ class MiddlewareRuntime:
         process = self.control_runtime.process
         await process.wait()
         self.control_runtime.status()
-        self._on_safety_event("control process exited; see control runtime status", force=True)
+        self._on_safety_event(
+            "control process exited; see control runtime status", force=True
+        )
 
     async def _start_uploads(self) -> None:
-        """Optional uploader; unavailable dependencies must not prevent local recording."""
-        self.uploads = None
-        self.upload_error = None
-        try:
-            from .uploads.upload_service import UploadService
-            upload_config = copy.deepcopy(self.config.get("uploads", {"enabled": False}))
-            queue_path = Path(upload_config.get("queue_directory", "../runtime/upload_queue")).expanduser()
-            upload_config["queue_directory"] = str(
-                (self.config_dir / queue_path).resolve() if not queue_path.is_absolute() else queue_path
-            )
-            service = UploadService(
-                upload_config, artifact_state_dir=self.recorder.artifact_state_dir,
-                data_directory=self.recorder.directory,
-            )
-            try:
-                await asyncio.to_thread(service.start)
-            except Exception:
-                await asyncio.to_thread(service.stop)
-                raise
-            self.uploads = service
-            self.recorder.upload_service = service
-            if upload_config.get("enabled", False) and upload_config.get("auto_enqueue", False):
-                self.recorder.binding_snapshot = service.binding_snapshot
-        except Exception as exc:
-            self.upload_error = str(exc)
-            self._log("error", "upload unavailable: " + str(exc))
+        await start_runtime_uploads(self)
 
     async def stop(self) -> None:
         self._stopping = True
-        # Revoke before draining any queued positive authorizations. The core
-        # fence also rejects a resume already submitted by the headset.
-        if self.ros is not None and getattr(self.ros, 'isolated_control_process', False) is True:
-            self._on_safety_event("middleware stopping; explicit resume required", force=True)
-        elif self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
+        # 在排空排队授权前立即撤销输出，隔离核心栅栏也会拒绝头显已提交的恢复请求。
+        if self.ros is not None and getattr(self.ros, "isolated_control_process", False) is True:
+            self._on_safety_event(
+                "middleware stopping; explicit resume required", force=True
+            )
+        elif self.ros is not None and getattr(self.ros, "ownership", None) and self.ros.ownership.active:
             self.ros.ownership.disable()
-        # An accepted API request may still be preparing a capture in a worker.
-        # Keep its core and writer alive until preparation/cleanup completes.
-        # Emergency-stop handling deliberately never acquires this lock.
+        # 持有生命周期锁等待在途的介入采集准备/清理完成；急停本身绝不竞争此锁。
         async with self._intervention_lifecycle_lock:
             await self._stop_after_intervention()
 
     async def _stop_after_intervention(self) -> None:
         if self.control_runtime is not None and self.control_runtime.enabled:
-            self._on_safety_event("control configuration reload; explicit resume required", force=True)
+            self._on_safety_event(
+                "control configuration reload; explicit resume required", force=True
+            )
             if self._control_watch_task is not None:
                 self._control_watch_task.cancel()
                 await asyncio.gather(self._control_watch_task, return_exceptions=True)
                 self._control_watch_task = None
             await self.control_runtime.stop()
-        if self._broadcast_drain_task is not None:
-            self._broadcast_drain_task.cancel()
-            try:
-                await self._broadcast_drain_task
-            except asyncio.CancelledError:
-                pass
-            self._broadcast_drain_task = None
-        self._broadcast_pending.clear()
-        if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
-            if getattr(self.ros, 'isolated_control_process', False) is True:
+        await self.broadcaster.stop()
+        if self.ros is not None and getattr(self.ros, "ownership", None) and self.ros.ownership.active:
+            if getattr(self.ros, "isolated_control_process", False) is True:
                 try:
                     await asyncio.to_thread(self.ros.ownership.disable)
                 except RuntimeError as exc:
-                    # A dead core is already fail-closed. Continue sealing the
-                    # writer and releasing workers instead of abandoning stop.
-                    self._log('warning', str(exc))
+                    self._log("warning", str(exc))
             else:
                 self.ros.ownership.disable()
         if self._safety_sync_task is not None:
@@ -389,29 +336,28 @@ class MiddlewareRuntime:
         if self.vr is not None:
             await asyncio.to_thread(self.vr.stop)
         if self._control_commands is not None:
-            await asyncio.to_thread(self._control_commands.shutdown, wait=True, cancel_futures=True)
+            await asyncio.to_thread(
+                self._control_commands.shutdown, wait=True, cancel_futures=True
+            )
             self._control_commands = None
         for camera in self.cameras.values():
             await camera.stop()
         self.cameras.clear()
         self._cameras_by_topic.clear()
         self.camera = None
-        # No queued VR start/stop may reopen a writer after its ROS reader or
-        # control process has been stopped. Keep both alive while commands drain.
+        # 在关闭 ROS 录制读取器与控制核心之前，先排空所有排队的 VR 录制启停命令。
         if self._record_commands is not None:
             await asyncio.to_thread(self._record_commands.shutdown, wait=True)
             self._record_commands = None
-        if (self.recorder is not None and self.ros is not None
-                and getattr(self.ros, 'isolated_control_process', False) is True):
-            # Seal the real admission window while raw late-frame readers and
-            # the capture proxy are alive. Corrections close through ownership
-            # hooks and the facade's ordered recording-event drain.
+        if (
+            self.recorder is not None
+            and self.ros is not None
+            and getattr(self.ros, "isolated_control_process", False) is True
+        ):
             try:
                 await asyncio.to_thread(self.recorder.stop)
             except (RuntimeError, OSError) as exc:
-                # The facade still closes capture admission and drains its
-                # ordered hook stream when the core or writer has failed.
-                self._log('warning', f'recording stop during shutdown: {exc}')
+                self._log("warning", f"recording stop during shutdown: {exc}")
         if self.recording_ros is not None:
             await asyncio.to_thread(self.recording_ros.stop)
         if self.ros is not None:
@@ -421,10 +367,11 @@ class MiddlewareRuntime:
         if self.platform is not None:
             await asyncio.to_thread(self.platform.stop)
         elif self.uploads is not None:
-            await asyncio.to_thread(getattr(self.uploads, 'close', self.uploads.stop))
+            await asyncio.to_thread(getattr(self.uploads, "close", self.uploads.stop))
         self.uploads = None
         try:
             import rclpy
+
             if rclpy.ok():
                 rclpy.shutdown()
         except Exception:
@@ -443,35 +390,12 @@ class MiddlewareRuntime:
                 os.environ["ROS_DOMAIN_ID"] = str(config["ros"]["domain_id"])
             await self.start()
 
-    def _configure_publication_capture(self, recorder) -> None:
-        """Attach lifecycle hooks to the base writer, not its TaskRecorder proxy.
-
-        TaskRecorder delegates reads through __getattr__, but assignments remain
-        on the proxy. The base start/stop/status methods must own this object.
-        """
-        action_max_hz = next((float(item.get('max_hz', 0))
-            for item in self.config['ros'].get('subscriptions', [])
-            if item.get('topic') == '/action/joint_states'), 0.)
-        action_capture = bool(self.config['ros'].get('legacy_control_profile')
-                              and action_max_hz <= 0)
-        self.config['ros']['record_action_at_publication'] = action_capture
-        from .recording.recording_action_labels import action_label_policy
-        recorder.action_label_policy = (action_label_policy(self.config['ros'])
-                                        if action_capture else None)
-        if action_capture:
-            selected = lambda: recorder.records_topic(
-                '/action/joint_states', 'sensor_msgs/msg/JointState')
-            factory = getattr(self.ros, 'create_publication_capture', None)
-            if callable(factory):
-                recorder.publication_capture = factory(recorder, selected=selected)
-            else:
-                from .recording.publication_capture import PublicationCapture
-                recorder.publication_capture = PublicationCapture(recorder, selected=selected)
-                self.ros._publication_capture = recorder.publication_capture
+    def _configure_publication_capture(self, recorder: Any) -> None:
+        configure_publication_capture(self, recorder)
 
     def emit(self, event: dict[str, Any], outputs: list[str]) -> None:
         self.events.append(event)
-        diagnostics = getattr(self, 'diagnostics', None)
+        diagnostics = getattr(self, "diagnostics", None)
         if diagnostics is not None:
             diagnostics.emit(event)
         if "record" in outputs and self.recorder is not None:
@@ -479,524 +403,70 @@ class MiddlewareRuntime:
         if "udp" in outputs and self.vr is not None:
             self.vr.send_event(event)
         if "websocket" in outputs and self.loop is not None:
-            self.loop.call_soon_threadsafe(
-                self._schedule_broadcast, event
-            )
+            self.loop.call_soon_threadsafe(self._schedule_broadcast, event)
 
     def _schedule_broadcast(self, event: dict[str, Any]) -> None:
-        """Coalesce live telemetry without dropping state-change events."""
-        kind = str(event.get("kind", ""))
-        key = ""
-        if kind == "vr_pose":
-            key = kind
-        elif kind == "ros_message":
-            key = f"ros_message:{event.get('topic', '')}"
-        if not key:
-            asyncio.create_task(self._broadcast(event))
-            return
-        self._broadcast_pending[key] = event
-        if self._broadcast_drain_task is None or self._broadcast_drain_task.done():
-            self._broadcast_drain_task = asyncio.create_task(
-                self._drain_broadcast_pending()
-            )
-
-    async def _drain_broadcast_pending(self) -> None:
-        while self._broadcast_pending:
-            pending = tuple(self._broadcast_pending.values())
-            self._broadcast_pending.clear()
-            for event in pending:
-                await self._broadcast(event)
-                # send_str can complete synchronously. Give RTP/timers a turn
-                # even when telemetry keeps refilling the pending dictionary.
-                await asyncio.sleep(0)
+        self.broadcaster.schedule(event)
 
     async def _broadcast(self, event: dict[str, Any]) -> None:
-        if not self.websockets:
-            return
-
-        def _json_default(obj: Any) -> Any:
-            if isinstance(obj, bytes):
-                return obj.decode("utf-8", errors="replace")
-            if hasattr(obj, "tolist"):
-                return obj.tolist()
-            return str(obj)
-
-        safe_event = {k: v for k, v in event.items() if k != "_raw"}
-        try:
-            message = json.dumps(
-                safe_event,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=_json_default,
-            )
-        except Exception:
-            return
-        dead = []
-        for ws in tuple(self.websockets):
-            try:
-                await ws.send_str(message)
-            except (ConnectionError, RuntimeError):
-                dead.append(ws)
-        for ws in dead:
-            self.websockets.discard(ws)
+        await self.broadcaster.broadcast(event)
 
     def _on_pose(
         self, packet: Any, pose_dict: dict[str, Any] | None = None
     ) -> None:
-        """
-        VR 位姿回调函数：接收 VR 网关解码出的姿态包与手柄输入，
-        执行手柄按键语义判断（急停恢复、录制打标、开始/停止录制）并向 ROS 话题发布位姿。
-        """
-        # 从原始数据包中获取左手柄和右手柄的输入对象（包含按键位掩码与摇杆状态）
-        left_input = getattr(packet, "left_input", None)
-        right_input = getattr(packet, "right_input", None)
+        self.vr_pose_handler.handle(packet, pose_dict)
 
-        # 提取左手柄的“持续按住掩码(held_mask)”与“刚刚按下沿触发掩码(pressed_mask)”
-        left_held = int(getattr(left_input, "held_mask", 0))
-        left_pressed = int(getattr(left_input, "pressed_mask", 0))
-        # 提取右手柄的“持续按住掩码(held_mask)”与“刚刚按下沿触发掩码(pressed_mask)”
-        right_held = int(getattr(right_input, "held_mask", 0))
-        right_pressed = int(getattr(right_input, "pressed_mask", 0))
-
-        # --- 1. 右手柄 A 键处理：解除系统软急停 / 恢复遥操作 ---
-        # A 键对应掩码最低位 bit 0 (即 & 1)
-        a_held = bool(right_held & 1)
-        # 上升沿检测：当帧按下，或者持续按住且上一帧未按住时触发（确保一次物理按压仅触发一次）
-        a_down = bool(right_pressed & 1) or (a_held and not self._last_a_held)
-        self._last_a_held = a_held
-
-        # 检查 DAgger 算法是否正处于人类主动介入接管状态
-        # 介入激活时按键由专门的接管模块处理，避免急停恢复与介入逻辑产生竞态冲突
-        intervention_active = bool(self.ros is not None and
-            getattr(self.ros, 'ownership', None) and self.ros.ownership.active)
-        # 若 A 键被按下且非介入模式，通知安全系统恢复遥操作输出
-        if a_down and not intervention_active:
-            self._dispatch_safety_resume("VR controller A button pressed")
-
-        # --- 2. 双摇杆同时按下处理：录制数据打标 (Mark / Bookmark) ---
-        # 左右摇杆下压键 (Thumbstick Click) 对应二进制第 5 位: 1 << 5 (即 32)
-        stick_bit = 1 << 5
-        # 检查左右摇杆是否同时处于按住状态
-        both_sticks_held = bool(left_held & stick_bit) and bool(right_held & stick_bit)
-        # 检查左右摇杆是否在当前帧同时被按下
-        both_sticks_pressed = bool(left_pressed & stick_bit) and bool(right_pressed & stick_bit)
-        # 组合边沿检测：支持双手稍有毫秒级先后误差的双按手势
-        mark_down = both_sticks_pressed or (
-            both_sticks_held and not self._last_both_sticks_held
-        )
-        self._last_both_sticks_held = both_sticks_held
-        # 触发打标动作（标记当前正在录制或刚刚录完的数据片段）
-        if mark_down:
-            self._dispatch_recording(self._handle_vr_record_mark)
-
-        # --- 3. 轨迹重放状态同步向 VR 头显回传 ---
-        # UDP 传输可能丢包；若处于轨迹重放或等待 A 键确认状态，每秒定期向 VR 发送一次状态快照
-        if self.player is not None and self.vr is not None:
-            replay = self.player.status()
-            now = time.monotonic()
-            if (replay.get("is_active") or replay.get("requires_reset")) and (
-                now - self._last_replay_status_sent_at >= 1.0
-            ):
-                replay_message = (
-                    "重放结束；请按 A 恢复遥操作"
-                    if replay.get("requires_reset")
-                    else "正在重放"
-                )
-                # 使用 envelope 封装协议，通过 UDP 回传给头显更新 UI
-                self.vr.send_event(
-                    envelope(
-                        "replay_status",
-                        "middleware",
-                        {**replay, "message": replay_message},
-                    )
-                )
-                self._last_replay_status_sent_at = now
-
-        # --- 4. 左手柄 X/Y 键处理：示教数据采集开始 / 结束 ---
-        if left_input is not None:
-            # 左手柄 X 键 (bit 0): 开始录制轨迹数据
-            x_down = bool(left_pressed & 1) or (bool(left_held & 1) and not self._last_x_held)
-            self._last_x_held = bool(left_held & 1)
-
-            # 左手柄 Y 键 (bit 1): 停止录制轨迹数据
-            y_down = bool(left_pressed & 2) or (bool(left_held & 2) and not self._last_y_held)
-            self._last_y_held = bool(left_held & 2)
-
-            # 派发异步录制任务
-            if x_down:
-                self._dispatch_recording(self._handle_vr_record_start)
-            elif y_down:
-                self._dispatch_recording(self._handle_vr_record_stop)
-
-        # --- 5. 将 VR 位姿发布到 ROS 2 话题 ---
-        # 若未开启 ROS 功能则直接返回
-        if self.ros is None:
-            return
-        # 检查配置中是否允许发布到 ROS
-        if self.config["vr"].get("publish_to_ros", True):
-            # 优先使用已转换的字典，避免重复序列化消耗 CPU
-            frame = pose_dict if pose_dict is not None else packet.as_dict()
-            # 异步发布到 ROS 话题（默认 /vrdata）
-            self.ros.publish(
-                self.config["vr"]["data_topic"],
-                "std_msgs/msg/String",
-                {
-                    "data": json.dumps(
-                        # 注入中间件接收的高精度纳秒时间戳 hc_received_ns 用于时延追踪
-                        {**frame, 'hc_received_ns': frame.get('hc_received_ns', time.time_ns())},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                },
-            )
-
-    def _dispatch_recording(self, operation):
-        if self._record_commands is None or self._stopping:
-            # Never run writer setup or an IPC fence on the pose receive loop.
-            return
-        if not self._record_command_slots.acquire(blocking=False):
-            self._log('error', 'recording command queue is full')
-            return
-        try:
-            future = self._record_commands.submit(operation)
-        except Exception:
-            self._record_command_slots.release()
-            raise
-        future.add_done_callback(lambda _: self._record_command_slots.release())
+    def _dispatch_recording(self, operation: Any) -> None:
+        self.recording_controller.dispatch(operation)
 
     def _dispatch_safety_resume(self, reason: str) -> None:
-        if getattr(self.ros, 'isolated_control_process', False) is not True:
-            self._on_safety_resume(reason)
-            return
-        fence = self.ros.authorization_fence()
-        if self._stopping or self._control_commands is None:
-            return
-        if not self._control_command_slots.acquire(blocking=False):
-            self._log('warning', 'control command queue is full; press A again to resume')
-            return
-        try:
-            future = self._control_commands.submit(self._on_safety_resume, reason, expected_fence=fence)
-        except RuntimeError:
-            self._control_command_slots.release()
-            return
-        future.add_done_callback(lambda _: self._control_command_slots.release())
+        SafetyController.dispatch_resume(self, reason)
 
     def _handle_vr_record_start(self) -> None:
-        if self.recorder is None:
-            return
-        if getattr(self.recorder, 'corrections', None):
-            self._log('info', 'DAgger 会话按所选范围录制，X/Y 普通录制已停用')
-            return
-        status = self.recorder.status()
-        if status.get("recording", False):
-            self._log("info", "VR requested record start, but already recording")
-            self.emit(
-                envelope(
-                    "recording_status",
-                    "middleware",
-                    {
-                        "recording": True,
-                        "filename": status.get("active_file", ""),
-                        "action": "already_recording",
-                        "message": "Already recording",
-                    },
-                ),
-                ["websocket", "udp"],
-            )
-            return
-        try:
-            if self.platform is None and self.recording_ros is not None:
-                self.recording_ros.prepare_recording()
-            filename = f"teleop_{time.strftime('%Y%m%d_%H%M%S')}.mcap"
-            path = self.recorder.start(filename, self.session_profile_metadata)
-            self._log("info", f"Recording started by VR X button: {filename}")
-            if self.ros is not None:
-                self.ros.publish(
-                    "/teleop/recording_state",
-                    "std_msgs/msg/String",
-                    {"data": json.dumps({"recording": True, "filename": filename})},
-                )
-            self.emit(
-                envelope(
-                    "recording_started",
-                    "middleware",
-                    {
-                        "recording": True,
-                        "filename": filename,
-                        "path": str(path),
-                        "action": "start",
-                        "message": "Recording started",
-                    },
-                ),
-                ["websocket", "udp"],
-            )
-        except Exception as exc:
-            upload_failure = _upload_failure(exc)
-            error_text = (f"{upload_failure['code']}: {upload_failure['reason']}"
-                          if upload_failure else str(exc))
-            self._log("error", f"Failed to start recording on VR X button: {error_text}")
-            self.emit(
-                envelope(
-                    "recording_error",
-                    "middleware",
-                    {
-                        "recording": False,
-                        "error": error_text,
-                        "action": "start_failed",
-                        **({"code": upload_failure["code"], "reason": upload_failure["reason"]}
-                           if upload_failure else {}),
-                    },
-                ),
-                ["websocket", "udp"],
-            )
+        self.recording_controller.vr_start()
 
     def _handle_vr_record_stop(self) -> None:
-        if self.recorder is not None and getattr(self.recorder, 'corrections', None):
-            self._log('info', '纠正采集使用 Grip 自动分段，X/Y 不结束纠正会话')
-            return
-        if self.recorder is None:
-            return
-        status = self.recorder.status()
-        if not status.get("recording", False):
-            self._log("info", "VR requested record stop, but not currently recording")
-            self.emit(
-                envelope(
-                    "recording_status",
-                    "middleware",
-                    {
-                        "recording": False,
-                        "action": "not_recording",
-                        "message": "Not recording",
-                    },
-                ),
-                ["websocket", "udp"],
-            )
-            return
-        try:
-            stopped_status = self.recorder.stop()
-            self._log("info", f"Recording stopped by VR Y button: {stopped_status}")
-            if self.ros is not None:
-                self.ros.publish(
-                    "/teleop/recording_state",
-                    "std_msgs/msg/String",
-                    {"data": json.dumps({"recording": False, "status": stopped_status})},
-                )
-            self.emit(
-                envelope(
-                    "recording_stopped",
-                    "middleware",
-                    {
-                        "recording": False,
-                        "status": stopped_status,
-                        "action": "stop",
-                        "message": "Recording stopped",
-                    },
-                ),
-                ["websocket", "udp"],
-            )
-        except Exception as exc:
-            self._log("error", f"Failed to stop recording on VR Y button: {exc}")
-            self.emit(
-                envelope(
-                    "recording_error",
-                    "middleware",
-                    {
-                        "error": str(exc),
-                        "action": "stop_failed",
-                    },
-                ),
-                ["websocket", "udp"],
-            )
+        self.recording_controller.vr_stop()
 
     def _handle_vr_record_mark(self) -> None:
-        if self.recorder is None:
-            return
-        try:
-            result = self.recorder.mark_current_or_latest("vr_dual_thumbstick")
-            filename = str(result.get("filename", ""))
-            message = f"已标记录制文件: {filename}"
-            self._log("info", message)
-            if self.ros is not None:
-                self.ros.publish(
-                    "/teleop/recording_state",
-                    "std_msgs/msg/String",
-                    {"data": json.dumps(result, ensure_ascii=False)},
-                )
-            self.emit(
-                envelope(
-                    "recording_marked",
-                    "middleware",
-                    {**result, "action": "mark", "message": message},
-                ),
-                ["websocket", "udp"],
-            )
-        except Exception as exc:
-            self._log("error", f"Failed to mark recording from VR: {exc}")
-            self.emit(
-                envelope(
-                    "recording_mark_error",
-                    "middleware",
-                    {
-                        "action": "mark_failed",
-                        "error": str(exc),
-                        "message": "没有可标记的录制文件",
-                    },
-                ),
-                ["websocket", "udp"],
-            )
+        self.recording_controller.vr_mark()
 
     def _send_safety_snapshot(self) -> None:
-        """Repair lost UDP events / headset reconnects without changing actuator state."""
-        if self.ros is None or self.vr is None:
-            return
-        status = self.ros.status()
-        if status.get("state") != "running":
-            return  # Unknown state must never clear the headset latch.
-        enabled = status.get("command_mux", {}).get("output_enabled")
-        if not isinstance(enabled, bool):
-            return
-        ownership = status.get("ownership")
-        ownership_state = ownership.get("state") if isinstance(ownership, dict) else ""
-        if not enabled and ownership_state in {"TAKEOVER", "RETURNING"}:
-            return  # Normal DAgger handover revokes the previous source without estopping.
-        ownership_reason = (
-            str(ownership.get("reason") or "")
-            if isinstance(ownership, dict) and ownership_state in {"HOLD", "FAULT", "ESTOP"}
-            else ""
-        )
-        self.vr.send_event(envelope(
-            "safety_resume" if enabled else "safety_stop", "middleware",
-            {"reason": "middleware state synchronization" if enabled else
-             (ownership_reason or self._safety_reason or "command output disabled; explicit resume required"),
-             "state_snapshot": True},
-        ))
+        SafetyController.send_snapshot(self)
 
     async def _sync_safety_state(self) -> None:
-        while True:
-            self._send_safety_snapshot()
-            await asyncio.sleep(0.5)
+        await SafetyController.sync_loop(self)
 
     def _on_vr_timeout(self, reason: str) -> None:
-        # Preserve the detector's original reason even if a later watchdog or
-        # output-close notification reports a different final stop message.
-        cause = envelope('vr_input_fault', 'vr_gateway', {'reason': reason})
-        cause['event_id'] = uuid.uuid4().hex
-        diagnostics = getattr(self, 'diagnostics', None)
-        if diagnostics is not None:
-            diagnostics.emit(cause)
-        if self.ros and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
-            # Headset availability gates manual takeover, not model inference
-            # or already-authorized program output. Manual loss still faults.
-            self.ros.ownership.input_lost(reason, cause_event_id=cause['event_id'])
-            return
-        source = (self.ros.status().get("command_mux", {}).get("source") if self.ros else None)
-        if source is None:
-            source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
-        if source == "vr":
-            self._on_safety_event(reason, cause_event_id=cause['event_id'])
-        else:
-            # VR link health cannot revoke another explicitly selected source.
-            if self.ros:
-                self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": False})
-            self.emit(envelope("vr_timeout", "middleware", {"reason": reason}), ["websocket", "udp"])
+        SafetyController.handle_vr_timeout(self, reason)
 
-    def _on_safety_event(self, reason: str, *, force: bool = False,
-                         cause_event_id: str | None = None) -> None:
-        with getattr(self, '_safety_event_lock', nullcontext()):
-            self._safety_event_generation = getattr(self, '_safety_event_generation', 0) + 1
-            self._safety_reason = reason
-            if self.ros is not None and (force or self.config["safety"].get("enabled", True)):
-                self.ros.emergency_stop(self.config["safety"]["stop_topic"], reason)
-            cause = envelope('safety_trigger', 'middleware', {'reason': reason})
-            if cause_event_id:
-                cause['payload']['cause_event_id'] = cause_event_id
-            cause['event_id'] = uuid.uuid4().hex
-            self.emit(cause, [])
-            self.emit(envelope("safety_stop", "middleware", {
-                "reason": reason, "cause_event_id": cause['event_id'],
-            }), ["websocket", "udp"])
+    def _on_safety_event(
+        self,
+        reason: str,
+        *,
+        force: bool = False,
+        cause_event_id: str | None = None,
+    ) -> None:
+        SafetyController.trigger_stop(
+            self, reason, force=force, cause_event_id=cause_event_id
+        )
 
-    def _on_safety_resume(self, reason: str, *, expected_fence=None) -> bool:
-        if getattr(self, '_stopping', False) or self.ros is None:
-            return False
-        control_runtime = getattr(self, 'control_runtime', None)
-        if (control_runtime is not None and control_runtime.enabled
-                and control_runtime.status()["state"] != "running"):
-            self._on_safety_event("control configuration is not ready; resume rejected", force=True)
-            return False
-        isolated = getattr(self.ros, 'isolated_control_process', False) is True
-        safety_generation = getattr(self, '_safety_event_generation', 0)
-        resumed_fence = None
-        if isolated and self.ros.status().get('state') != 'running':
-            self._log('warning', 'control core is not running; explicit resume rejected')
-            return False
-        if isolated and expected_fence is None:
-            expected_fence = self.ros.authorization_fence()
-        if self.ros is not None and getattr(self.ros, 'ownership', None) and self.ros.ownership.active:
-            try:
-                if isolated:
-                    self.ros.recover_intervention(expected_fence=expected_fence)
-                else:
-                    self.ros.recover_intervention()
-            except (ValueError, RuntimeError) as exc:
-                self._log('warning', str(exc))
-                return False
-            return True
-        if self.ros is not None:
-            stop_topic = self.config["safety"].get("stop_topic", "/control/emergency_stop")
-            if isolated:
-                try:
-                    result = self.ros.resume_output(stop_topic, expected_fence=expected_fence)
-                    if isinstance(result, dict):
-                        resumed_fence = result.get('authorization_fence')
-                except (ValueError, RuntimeError) as exc:
-                    self._log('warning', str(exc))
-                    return False
-            else:
-                self.ros.set_command_output_enabled(True)
-                self.ros.publish(stop_topic, "std_msgs/msg/Bool", {"data": False})
-                source = self.config.get("ros", {}).get("command_mux", {}).get("source", "vr")
-                self.ros.publish("/control/teleop/enabled", "std_msgs/msg/Bool", {"data": source == "vr"})
-        def notify_resumed():
-            self._safety_reason = ""
-            if self.player is not None:
-                self.player.acknowledge_reset()
-            self.emit(envelope("safety_resume", "middleware", {"reason": reason}), ["websocket", "udp"])
-
-        if isolated:
-            # A slow successful RPC cannot overwrite the reason/UI event of a
-            # newer stop that arrived while the RPC response was in transit.
-            with self._safety_event_lock:
-                if (safety_generation != self._safety_event_generation or
-                        resumed_fence is not None and tuple(resumed_fence) != self.ros.authorization_fence()):
-                    return False
-                notify_resumed()
-        else:
-            notify_resumed()
-        return True
+    def _on_safety_resume(self, reason: str, *, expected_fence: Any = None) -> bool:
+        return SafetyController.resume(self, reason, expected_fence=expected_fence)
 
     def _on_replay_state(self, event_type: str, status: dict[str, Any]) -> None:
-        state = str(status.get("state", "idle"))
-        messages = {
-            "replay_started": "正在重放；重放结束后请按 A 恢复遥操作",
-            "replay_paused": "重放已暂停",
-            "replay_resumed": "重放已继续",
-            "replay_stopped": "重放已停止；请按 A 恢复遥操作",
-            "replay_completed": "重放完成；请按 A 恢复遥操作",
-            "replay_error": "重放异常；请按 A 恢复遥操作",
-            "replay_reset": "已恢复实时遥操作",
-            "replay_home_requested": "回初始位姿指令已提交",
-        }
-        payload = {
-            **status,
-            "state": state,
-            "message": messages.get(event_type, event_type),
-        }
-        self.emit(envelope(event_type, "middleware", payload), ["websocket", "udp"])
+        self.emit(
+            envelope(
+                event_type, "middleware", format_replay_state_payload(event_type, status)
+            ),
+            ["websocket", "udp"],
+        )
 
     def _log(self, level: str, message: str) -> None:
-        self.emit(envelope("log", "middleware", {"level": level, "message": message}),
-                  ["websocket"])
+        self.emit(
+            envelope("log", "middleware", {"level": level, "message": message}),
+            ["websocket"],
+        )
 
     def topic_health(self) -> dict[str, Any]:
         recording_health = (
@@ -1004,12 +474,8 @@ class MiddlewareRuntime:
             if self.recording_ros is not None
             else {}
         )
-        bridge_health = (
-            self.ros.get_topic_health() if self.ros is not None else {}
-        )
-        # The isolated raw subscriber measures source arrival rate without
-        # competing with control, WebSocket serialization or camera callbacks.
-        # Prefer it whenever both paths observe the same recorded topic.
+        bridge_health = self.ros.get_topic_health() if self.ros is not None else {}
+        # 独立原始订阅器直接统计话题到达率，避免受控制、WS 序列化或相机回调干扰。
         return {**bridge_health, **recording_health}
 
     def status(self) -> dict[str, Any]:
@@ -1025,16 +491,18 @@ class MiddlewareRuntime:
         }
         camera_streams = [camera.status() for camera in self.cameras.values()]
         camera_status = (
-            dict(camera_streams[0])
-            if camera_streams
-            else {"state": "stopped"}
+            dict(camera_streams[0]) if camera_streams else {"state": "stopped"}
         )
         camera_status["streams"] = camera_streams
         return {
             "status": "ok",
             "version": 1,
             "runtime_profile": self.session_profile_metadata,
-            "control_runtime": self.control_runtime.status() if self.control_runtime else {"state": "unmanaged"},
+            "control_runtime": (
+                self.control_runtime.status()
+                if self.control_runtime
+                else {"state": "unmanaged"}
+            ),
             "control_backend": os.environ.get("HC_CONTROL_BACKEND") or None,
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "websocket_clients": len(self.websockets),
@@ -1043,8 +511,16 @@ class MiddlewareRuntime:
             "recording_executor": recording_executor_status,
             "vr": self.vr.status() if self.vr else {"state": "stopped"},
             "camera": camera_status,
-            "recording": self.recorder.status() if self.recorder else {"recording": False, "enabled": False},
-            "replay": self.player.status() if self.player else {"state": "idle", "is_active": False},
+            "recording": (
+                self.recorder.status()
+                if self.recorder
+                else {"recording": False, "enabled": False}
+            ),
+            "replay": (
+                self.player.status()
+                if self.player
+                else {"state": "idle", "is_active": False}
+            ),
         }
 
 
@@ -1060,39 +536,24 @@ async def cors_middleware(request: web.Request, handler: Any) -> web.StreamRespo
     return response
 
 
-def create_app(store: ConfigStore) -> web.Application:
-    config = store.load()
-    runtime = MiddlewareRuntime(config, store.path.parent)
-    # The HC_X1 hardware stack (arm bridge, smoother, cameras, hands, chassis)
-    # is started separately and writes runtime/session_*/ logs of its own.
-    hardware_logs = Path(os.environ.get('HC_X1_LOG_ROOT', str(Path.home() / 'HC_X1' / 'runtime')))
-    diagnostics = DiagnosticLogs(
-        Path(__file__).resolve().parents[2], os.environ.get('HC_MIDDLEWARE_LOG_DIR'),
-        external_roots=[('hardware', hardware_logs)])
-    runtime.diagnostics = diagnostics
-    diagnostic_handler = DiagnosticLogHandler(diagnostics)
-    diagnostic_handler.setLevel(logging.WARNING)
-    from .control.control_runtime import ControlRuntime
-    runtime.control_runtime = ControlRuntime(store.path)
-    profile_root = selected_profile_root(config, store.path.parent)
-    profiles = RobotProfileManager(profile_root)
-    app = web.Application(
-        client_max_size=100 * 1024 * 1024, middlewares=[cors_middleware]
-    )
-    register_log_routes(app, diagnostics)
-    simulation = SimulationService(store, profiles)
-
+def _build_simulation_guard_middleware(
+    store: ConfigStore, runtime: MiddlewareRuntime, simulation: SimulationService
+):
     @web.middleware
-    async def serialize_simulation_changes(request, handler):
-        # Serialize profile/config writes against launches so a running model can
-        # never observe half-imported assets or a different active selection.
+    async def serialize_simulation_changes(request: web.Request, handler: Any):
+        # 串行化配置/型号写入与仿真启动，避免运行中模型读到半导入资产或不一致的配置。
         if request.method in {"POST", "PUT", "DELETE"} and (
-            request.path.startswith("/api/robot-profiles") or request.path == "/api/config"
+            request.path.startswith("/api/robot-profiles")
+            or request.path == "/api/config"
         ):
             if runtime.recorder is not None and runtime.recorder.is_recording():
                 raise web.HTTPConflict(text="请先停止录制，再修改配置或机器人型号")
-            if runtime.ros and getattr(runtime.ros, 'ownership', None) and runtime.ros.ownership.active:
-                raise web.HTTPConflict(text='请先退出人工干预会话，再修改配置或机器人型号')
+            if (
+                runtime.ros
+                and getattr(runtime.ros, "ownership", None)
+                and runtime.ros.ownership.active
+            ):
+                raise web.HTTPConflict(text="请先退出人工干预会话，再修改配置或机器人型号")
             async with simulation.lock:
                 stop_required = True
                 if request.path == "/api/config":
@@ -1104,21 +565,72 @@ def create_app(store: ConfigStore) -> web.Application:
                             or proposed["simulation"] != store.value["simulation"]
                         )
                     except (ConfigError, ValueError, TypeError):
-                        stop_required = False  # Let the config handler report validation errors.
+                        stop_required = False
                 elif request.path.endswith("/activate"):
-                    # Even the same ID may now contain newly imported assets/settings.
                     stop_required = True
                 elif request.method == "DELETE":
-                    stop_required = request.match_info["profile_id"] == simulation.profile_id
+                    stop_required = (
+                        request.match_info["profile_id"] == simulation.profile_id
+                    )
                 if simulation.processes and stop_required:
                     await simulation.stop()
                 return await handler(request)
         return await handler(request)
 
-    app.middlewares.append(serialize_simulation_changes)
-    from .control.intervention_api import register_intervention_routes
-    register_intervention_routes(app, runtime)
-    register_simulation_routes(app, simulation)
+    return serialize_simulation_changes
+
+
+async def _stream_simulation_frames(simulation: SimulationService) -> None:
+    last_frame = None
+    while True:
+        await asyncio.sleep(1.0 / 30.0)
+        frame = simulation.latest_frame
+        if frame is last_frame or frame is None or simulation.state != "running":
+            continue
+        last_frame = frame
+        event = {
+            "type": "simulation_frame",
+            "data": {**frame, "profile_id": simulation.profile_id},
+        }
+        for viewer in tuple(simulation.viewers):
+            try:
+                await asyncio.wait_for(viewer.send_json(event), timeout=0.5)
+            except (ConnectionError, RuntimeError, asyncio.TimeoutError):
+                simulation.set_viewer(viewer, False)
+                try:
+                    await asyncio.wait_for(viewer.close(), timeout=0.2)
+                except (ConnectionError, RuntimeError, asyncio.TimeoutError):
+                    pass
+
+
+def create_app(store: ConfigStore) -> web.Application:
+    config = store.load()
+    runtime = MiddlewareRuntime(config, store.path.parent)
+    hardware_logs = Path(
+        os.environ.get("HC_X1_LOG_ROOT", str(Path.home() / "HC_X1" / "runtime"))
+    )
+    diagnostics = DiagnosticLogs(
+        Path(__file__).resolve().parents[2],
+        os.environ.get("HC_MIDDLEWARE_LOG_DIR"),
+        external_roots=[("hardware", hardware_logs)],
+    )
+    runtime.diagnostics = diagnostics
+    diagnostic_handler = DiagnosticLogHandler(diagnostics)
+    diagnostic_handler.setLevel(logging.WARNING)
+
+    from .control.control_runtime import ControlRuntime
+
+    runtime.control_runtime = ControlRuntime(store.path)
+    profiles = RobotProfileManager(selected_profile_root(config, store.path.parent))
+    simulation = SimulationService(store, profiles)
+
+    app = web.Application(
+        client_max_size=100 * 1024 * 1024,
+        middlewares=[
+            cors_middleware,
+            _build_simulation_guard_middleware(store, runtime, simulation),
+        ],
+    )
     static_dir = Path(__file__).parent / "static"
 
     async def index(_request: web.Request) -> web.FileResponse:
@@ -1132,8 +644,14 @@ def create_app(store: ConfigStore) -> web.Application:
 
     async def put_config(request: web.Request) -> web.Response:
         if runtime.recorder is not None and runtime.recorder.is_recording():
-            return web.json_response({'ok': False, 'code': 'RECORDING_ACTIVE',
-                'reason': '请先停止当前录制，再保存配置；新保存方式用于下一段录制'}, status=409)
+            return web.json_response(
+                {
+                    "ok": False,
+                    "code": "RECORDING_ACTIVE",
+                    "reason": "请先停止当前录制，再保存配置；新保存方式用于下一段录制",
+                },
+                status=409,
+            )
         try:
             proposed = await request.json()
             old_server = dict(store.value["server"])
@@ -1142,102 +660,35 @@ def create_app(store: ConfigStore) -> web.Application:
             await runtime.restart(saved)
             control_status = runtime.control_runtime.status()
             if control_status["state"] == "failed":
-                return web.json_response({"ok": False, "config": saved,
-                    "error": "配置已保存，但控制进程启动失败；输出保持停止",
-                    "control_runtime": control_status}, status=503)
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "config": saved,
+                        "error": "配置已保存，但控制进程启动失败；输出保持停止",
+                        "control_runtime": control_status,
+                    },
+                    status=503,
+                )
             restart_required = (
                 saved["server"] != old_server
                 or saved["robot_profiles"]["root"] != old_profile_root
             )
             return web.json_response(
-                {"ok": True, "config": saved, "server_restart_required": restart_required,
-                 "control_runtime": control_status}
+                {
+                    "ok": True,
+                    "config": saved,
+                    "server_restart_required": restart_required,
+                    "control_runtime": control_status,
+                }
             )
         except (ConfigError, json.JSONDecodeError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
-    async def get_topics(_request: web.Request) -> web.Response:
-        status = runtime.ros.status() if runtime.ros else {}
-        return web.json_response(status.get("discovered_topics", []))
-
-    async def publish(request: web.Request) -> web.Response:
-        data = await request.json()
-        required = ("topic", "type", "data")
-        if any(key not in data for key in required) or not isinstance(data["data"], dict):
-            raise web.HTTPBadRequest(text="topic, type and object data are required")
-        if runtime.ros is None or runtime.ros.status()["state"] != "running":
-            raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
-        accepted = runtime.ros.publish(data["topic"], data["type"], data["data"])
-        return web.json_response({"accepted": accepted}, status=202 if accepted else 429)
-
-    async def emergency_stop(request: web.Request) -> web.Response:
-        data = await request.json() if request.can_read_body else {}
-        runtime._on_safety_event(str(data.get("reason", "dashboard emergency stop")))
-        return web.json_response({"accepted": True}, status=202)
-
-    async def safety_resume(request: web.Request) -> web.Response:
-        if (runtime.control_runtime.enabled
-                and runtime.control_runtime.status()["state"] != "running"):
-            return web.json_response({"accepted": False, "error": "控制进程尚未就绪，不能恢复输出",
-                "control_runtime": runtime.control_runtime.status()}, status=409)
-        isolated = getattr(runtime.ros, 'isolated_control_process', False) is True
-        fence = runtime.ros.authorization_fence() if isolated else None
-        data = await request.json() if request.can_read_body else {}
-        reason = str(data.get("reason", "dashboard safety resume"))
-        accepted = (await asyncio.to_thread(runtime._on_safety_resume, reason, expected_fence=fence)
-                    if isolated else runtime._on_safety_resume(reason))
-        return web.json_response({"accepted": accepted}, status=202 if accepted else 409)
-
-    async def teleop_home(request: web.Request) -> web.Response:
-        if runtime.ros and runtime.ros.ownership.active:
-            if not runtime.ros.request_manual_home():
-                raise web.HTTPConflict(text='请先握住右 Grip 完成人工接管，确认硬件就绪后再回零')
-            return web.json_response({"accepted": True}, status=202)
-        source = (runtime.ros.status().get("command_mux", {}).get("source", "vr")
-                  if runtime.ros else store.value.get("ros", {}).get("command_mux", {}).get("source", "vr"))
-        if source != "vr":
-            raise web.HTTPConflict(text="回零仅在 VR/IK 控制源下可用")
-        if runtime.ros is not None:
-            runtime.ros.publish("/teleop/arm/home", "std_msgs/msg/Bool", {"data": True})
-        return web.json_response({"accepted": True}, status=202)
-
-    async def set_control_source(request: web.Request) -> web.Response:
-        data = await request.json()
-        source = str(data.get("source", "")).strip().lower()
-        if source not in {"vr", "exoskeleton", "motion"}:
-            raise web.HTTPBadRequest(text="source must be vr, exoskeleton or motion")
-        if runtime.ros is None or runtime.ros.status().get("state") != "running":
-            raise web.HTTPServiceUnavailable(text="ROS bridge is not running")
-
-        if runtime.ros.ownership.active:
-            raise web.HTTPConflict(text='人工干预会话正在管理控制来源')
-
-        proposed = copy.deepcopy(store.value)
-        proposed["ros"]["command_mux"]["source"] = source
-        saved = store.save(proposed)
-        runtime.config["ros"]["command_mux"]["source"] = source
-        accepted = runtime.ros.set_control_source(source)
-        runtime.ros.publish(
-            "/control/teleop/enabled",
-            "std_msgs/msg/Bool",
-            {"data": source == "vr"},
-        )
-        runtime.emit(
-            envelope(
-                "control_source",
-                "middleware",
-                {"source": source},
-            ),
-            ["websocket"],
-        )
-        return web.json_response(
-            {"accepted": accepted, "source": source},
-            status=202 if accepted else 429,
-        )
-
     async def websocket(request: web.Request) -> web.WebSocketResponse:
-        # Telemetry shares the event loop with RTP; synchronous deflate stalls video.
-        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1024 * 1024, compress=False)
+        # 遥测与 RTP 共享事件循环；同步 deflate 压缩会卡顿视频。
+        ws = web.WebSocketResponse(
+            heartbeat=20, max_msg_size=1024 * 1024, compress=False
+        )
         await ws.prepare(request)
         runtime.websockets.add(ws)
         await ws.send_json(envelope("connected", "middleware", runtime.status()))
@@ -1253,10 +704,17 @@ def create_app(store: ConfigStore) -> web.Application:
                         await ws.send_json(envelope("pong", "middleware", {}))
                     elif data.get("type") == "simulation_viewer":
                         if data.get("data", {}).get("enabled", True):
-                            simulation.set_viewer(ws, True, data.get("data", {}).get("render_mode", "native"))
+                            simulation.set_viewer(
+                                ws, True, data.get("data", {}).get("render_mode", "native")
+                            )
                         else:
                             simulation.set_viewer(ws, False)
-                        await ws.send_json({"type": "simulation_viewer_ack", "data": {"registered": ws in simulation.viewers}})
+                        await ws.send_json(
+                            {
+                                "type": "simulation_viewer_ack",
+                                "data": {"registered": ws in simulation.viewers},
+                            }
+                        )
                     elif data.get("kind") == "ros_publish":
                         accepted = bool(
                             runtime.ros
@@ -1274,615 +732,7 @@ def create_app(store: ConfigStore) -> web.Application:
             simulation.set_viewer(ws, False)
         return ws
 
-    def camera_for_request(request: web.Request) -> tuple[str, CameraService | None]:
-        camera_id = str(request.match_info.get("camera_id", "")).strip()
-        if camera_id:
-            return camera_id, runtime.cameras.get(camera_id)
-        default_id = next(iter(runtime.cameras), "")
-        return default_id, runtime.cameras.get(default_id)
-
-    async def webrtc_offer(request: web.Request) -> web.Response:
-        camera_id, camera = camera_for_request(request)
-        if camera is None:
-            runtime._log("error", "WebRTC offer received but camera service is unavailable")
-            print("[WebRTC] ERROR: Camera service is unavailable", flush=True)
-            raise web.HTTPServiceUnavailable(text="camera service is unavailable")
-        peer_ip = request.remote or "unknown"
-        try:
-            body = await request.json()
-            print(f"[WebRTC:{camera_id}] Offer received from {peer_ip}", flush=True)
-            runtime._log("info", f"WebRTC {camera_id} offer received from {peer_ip}")
-            answer = await camera.offer(body)
-            print(f"[WebRTC:{camera_id}] Answer generated for {peer_ip}", flush=True)
-            runtime._log("info", f"WebRTC {camera_id} answer generated for {peer_ip}")
-            return web.json_response(answer)
-        except Exception as exc:
-            import traceback
-            tb = traceback.format_exc()
-            print(f"[WebRTC] Offer failed for {peer_ip}: {exc}\n{tb}", flush=True)
-            runtime._log("error", f"WebRTC offer failed for {peer_ip}: {exc}\n{tb}")
-            raise web.HTTPServiceUnavailable(text=f"WebRTC offer failed: {exc}") from exc
-
-    async def receiver_report(request: web.Request) -> web.Response:
-        _camera_id, camera = camera_for_request(request)
-        if camera is None:
-            raise web.HTTPNotFound(text="camera stream not found")
-        if request.content_length is not None and request.content_length > 16384:
-            raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=request.content_length)
-        raw = bytearray()
-        async for chunk in request.content.iter_chunked(4096):
-            raw.extend(chunk)
-            if len(raw) > 16384:
-                raise web.HTTPRequestEntityTooLarge(max_size=16384, actual_size=len(raw))
-        try:
-            payload = json.loads(raw)
-            accepted = await camera.receiver_report(payload)
-        except (ValueError, TypeError, RuntimeError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        return web.json_response({"accepted": accepted})
-
-    async def get_camera_status(request: web.Request) -> web.Response:
-        camera_id = str(request.match_info.get("camera_id", "")).strip()
-        if camera_id:
-            camera = runtime.cameras.get(camera_id)
-            if camera is None:
-                raise web.HTTPNotFound(text=f"camera stream not found: {camera_id}")
-            return web.json_response(camera.status())
-        streams = [camera.status() for camera in runtime.cameras.values()]
-        status = dict(streams[0]) if streams else {"state": "disabled"}
-        status["streams"] = streams
-        return web.json_response(status)
-
-    async def get_camera_snapshot(request: web.Request) -> web.Response:
-        _camera_id, camera = camera_for_request(request)
-        if camera is None:
-            raise web.HTTPServiceUnavailable(text="camera service is unavailable")
-        frame = await asyncio.to_thread(camera.latest)
-        if frame is None:
-            raise web.HTTPNotFound(text="no frame available")
-        try:
-            import cv2
-            success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not success:
-                raise RuntimeError("failed to encode frame")
-            return web.Response(body=encoded.tobytes(), content_type="image/jpeg")
-        except Exception as exc:
-            raise web.HTTPInternalServerError(text=str(exc))
-
-    async def get_camera_stream(_request: web.Request) -> web.StreamResponse:
-        _camera_id, camera = camera_for_request(_request)
-        if camera is None:
-            raise web.HTTPServiceUnavailable(text="camera service is unavailable")
-        response = web.StreamResponse(
-            status=200,
-            reason="OK",
-            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
-        )
-        await response.prepare(_request)
-        try:
-            import cv2
-            while True:
-                frame = await asyncio.to_thread(camera.latest)
-                if frame is not None:
-                    success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    if success:
-                        data = encoded.tobytes()
-                        await response.write(
-                            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
-                        )
-                await asyncio.sleep(0.033)
-        except (asyncio.CancelledError, ConnectionResetError):
-            pass
-        return response
-
-    async def precheck_recording(_request: web.Request) -> web.Response:
-        if runtime.recording_ros is not None:
-            try:
-                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
-                # Frequency checks need more than one sample. Keep this work off
-                # the WebRTC/media path while the recorder warms up.
-                await asyncio.sleep(1.9)
-            except (RuntimeError, TimeoutError) as exc:
-                return web.json_response(
-                    {"ok": False, "ready": False, "reason": str(exc), "issues": []},
-                    status=503,
-                )
-        subs = store.value.get("ros", {}).get("subscriptions", [])
-        recording_topics = [
-            item for item in subs
-            if item.get("enabled", True) and "record" in item.get("outputs", [])
-        ]
-        topic_health = runtime.topic_health()
-
-        checked = []
-        issues = []
-        for item in recording_topics:
-            topic = item["topic"]
-            info = topic_health.get(topic)
-            if info is None:
-                from .control.ros_bridge import DEFAULT_TOPIC_STANDARDS
-                std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
-                target_hz = float(item.get("target_hz", 0) or std["target_hz"])
-                min_hz = float(item.get("min_hz", 0) or std["min_hz"])
-                item_stat = {
-                    "topic": topic,
-                    "type": item.get("type", "std_msgs/msg/String"),
-                    "messages": 0,
-                    "hz": 0.0,
-                    "target_hz": target_hz,
-                    "min_hz": min_hz,
-                    "has_data": False,
-                    "state": "no_data",
-                    "message": "未检测到消息发布 (0 Hz)",
-                }
-            else:
-                item_stat = dict(info)
-            checked.append(item_stat)
-            if item_stat["state"] == "no_data":
-                issues.append({
-                    "topic": topic,
-                    "state": "no_data",
-                    "hz": 0.0,
-                    "min_hz": item_stat["min_hz"],
-                    "reason": f"{topic}: 未检测到消息发布 (0 Hz，标准: ≥ {item_stat['min_hz']:.1f} Hz)",
-                })
-            elif item_stat["state"] == "low_rate":
-                issues.append({
-                    "topic": topic,
-                    "state": "low_rate",
-                    "hz": item_stat["hz"],
-                    "min_hz": item_stat["min_hz"],
-                    "reason": f"{topic}: 消息频率偏低 ({item_stat['hz']:.1f} Hz < 标准 {item_stat['min_hz']:.1f} Hz)",
-                })
-
-        ready = len(issues) == 0 and len(recording_topics) > 0
-        return web.json_response({
-            "ok": True,
-            "ready": ready,
-            "topic_count": len(recording_topics),
-            "topics": checked,
-            "issues": issues,
-            "reason": "" if ready else ("未勾选任何录制话题" if not recording_topics else f"{len(issues)} 个待录制话题未达标"),
-        })
-
-    async def start_recording(request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder is not initialized")
-        data = {}
-        if request.can_read_body:
-            try:
-                data = await request.json()
-            except Exception:
-                pass
-        if runtime.recording_ros is not None:
-            try:
-                await asyncio.to_thread(runtime.recording_ros.prepare_recording)
-            except (RuntimeError, TimeoutError) as exc:
-                return web.json_response({"ok": False, "reason": str(exc)}, status=503)
-        if runtime.platform is None and runtime.upload_error:
-            if (data.get('selection') or {}).get('mode', 'local') != 'local':
-                return web.json_response({'ok': False, 'code': 'PLATFORM_UNAVAILABLE',
-                    'reason': '平台模块尚未安装，可暂不关联平台任务录制到本机'}, status=409)
-        force = bool(data.get("force", False))
-        filename = str(data.get("filename", "")).strip()
-
-        if not force:
-            subs = store.value.get("ros", {}).get("subscriptions", [])
-            recording_topics = [
-                item for item in subs
-                if item.get("enabled", True) and "record" in item.get("outputs", [])
-            ]
-            if not recording_topics:
-                return web.json_response({
-                    "ok": False,
-                    "can_force": True,
-                    "reason": "尚未勾选任何需要录制的话题，请先在下方勾选录制话题",
-                    "issues": [{"topic": "none", "reason": "未勾选录制话题"}],
-                }, status=400)
-
-            topic_health = runtime.topic_health()
-            issues = []
-            for item in recording_topics:
-                topic = item["topic"]
-                info = topic_health.get(topic)
-                if not info or info.get("state") != "ok":
-                    hz = info.get("hz", 0.0) if info else 0.0
-                    from .control.ros_bridge import DEFAULT_TOPIC_STANDARDS
-                    std = DEFAULT_TOPIC_STANDARDS.get(topic, {"target_hz": 10.0, "min_hz": 1.0})
-                    min_hz = float(item.get("min_hz", 0) or (info.get("min_hz") if info else std["min_hz"]))
-                    issues.append({
-                        "topic": topic,
-                        "state": info.get("state", "no_data") if info else "no_data",
-                        "hz": hz,
-                        "min_hz": min_hz,
-                        "reason": f"{topic}: 未检测到消息发布 (0 Hz)" if hz == 0 else f"{topic}: 频率不足 ({hz:.1f} Hz < 标准 {min_hz:.1f} Hz)",
-                    })
-            if issues:
-                return web.json_response({
-                    "ok": False,
-                    "can_force": True,
-                    "reason": "待录制话题未检测到消息或频率未达标",
-                    "issues": issues,
-                }, status=400)
-
-        try:
-            path = await asyncio.to_thread(
-                runtime.recorder.start,
-                filename,
-                runtime.session_profile_metadata,
-                *([data.get("selection")] if runtime.platform is not None else []),
-            )
-        except (ValueError, RuntimeError, FileExistsError, ImportError) as exc:
-            return web.json_response({"ok": False, "reason": str(exc)}, status=400)
-        except Exception as exc:
-            failure = _upload_failure(exc)
-            if failure is None:
-                raise
-            return web.json_response(failure, status=_upload_failure_status(failure["code"]))
-        status = runtime.recorder.status()
-        if not status.get("recording") or status.get("path") != path:
-            return web.json_response({"ok": True, "recording": False, "path": path, "replayed": True})
-        if runtime.ros is not None:
-            runtime.ros.publish(
-                "/teleop/recording_state",
-                "std_msgs/msg/String",
-                {"data": json.dumps({"recording": True, "filename": filename})},
-            )
-        runtime.emit(
-            envelope(
-                "recording_started",
-                "middleware",
-                {
-                    "recording": True,
-                    "filename": filename,
-                    "path": str(path),
-                    "action": "start",
-                    "message": "Recording started",
-                },
-            ),
-            ["websocket", "udp"],
-        )
-        return web.json_response({"ok": True, "recording": True, "path": path})
-
-    async def stop_recording(_request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder is not initialized")
-        rec_status = await asyncio.to_thread(runtime.recorder.stop)
-        if runtime.ros is not None:
-            runtime.ros.publish(
-                "/teleop/recording_state",
-                "std_msgs/msg/String",
-                {"data": json.dumps({"recording": False, "status": rec_status})},
-            )
-        runtime.emit(
-            envelope(
-                "recording_stopped",
-                "middleware",
-                {
-                    "recording": False,
-                    "status": rec_status,
-                    "action": "stop",
-                    "message": "Recording stopped",
-                },
-            ),
-            ["websocket", "udp"],
-        )
-        return web.json_response({"ok": True, "recording": False, "status": rec_status})
-
-    async def get_recording_status(_request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            return web.json_response({"recording": False, "enabled": False})
-        return web.json_response(runtime.recorder.status())
-
-    async def get_recordings(request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            return web.json_response({
-                "files": [],
-                "directory": "",
-                "total_count": 0,
-                "total_size_bytes": 0,
-                "total_size_human": "0 B",
-            })
-        format_filter = request.query.get('format', 'all')
-        identifier = request.query.get('identifier', '')
-        compact = request.query.get('compact') == '1'
-        try:
-            files, format_counts = await asyncio.gather(
-                asyncio.to_thread(runtime.recorder.list_recordings, format_filter, identifier, compact),
-                asyncio.to_thread(runtime.recorder.recording_format_counts),
-            )
-        except ValueError as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        if compact:
-            files = [{key: value for key, value in item.items() if key not in {'channels', 'videos'}}
-                     for item in files]
-        total_bytes = sum(f["size_bytes"] for f in files)
-        if total_bytes < 1024:
-            human = f"{total_bytes} B"
-        elif total_bytes < 1024 * 1024:
-            human = f"{total_bytes / 1024:.1f} KB"
-        elif total_bytes < 1024 * 1024 * 1024:
-            human = f"{total_bytes / (1024 * 1024):.2f} MB"
-        else:
-            human = f"{total_bytes / (1024 * 1024 * 1024):.2f} GB"
-        return web.json_response({
-            "files": files,
-            "directory": str(runtime.recorder.directory),
-            "total_count": len(files),
-            "total_size_bytes": total_bytes,
-            "total_size_human": human,
-            "format": format_filter,
-            "format_counts": format_counts,
-        })
-
-    async def download_recording(request: web.Request) -> web.StreamResponse:
-        from .recording.recording_datasets import resolve_dataset, archive_dataset, archive_datasets
-        from .recording.takeover_log import takeover_file
-        from urllib.parse import quote
-        identifier = request.match_info["filename"]
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder not available")
-        try:
-            target = resolve_dataset(runtime.recorder.directory, identifier)
-        except (ValueError, FileNotFoundError) as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
-        if target.is_file():
-            if runtime.recorder.is_recording() and runtime.recorder.path == target:
-                raise web.HTTPConflict(text="recording is still being written")
-            if request.query.get("with_tags") != "1" or not takeover_file(target):
-                return web.FileResponse(target, headers={
-                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name)}",
-                    "Content-Type": "application/octet-stream",
-                })
-        try:
-            if target.is_file():
-                archive = await asyncio.to_thread(archive_datasets, target.parent, [identifier])
-            else:
-                archive = await asyncio.to_thread(archive_dataset, target)
-        except ValueError as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        try:
-            response = web.StreamResponse(headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(target.name + '.zip')}",
-                "Content-Type": "application/zip",
-                "Content-Length": str(archive.stat().st_size),
-            })
-            await response.prepare(request)
-            with archive.open('rb') as handle:
-                while chunk := await asyncio.to_thread(handle.read, 256 * 1024):
-                    await response.write(chunk)
-            await response.write_eof()
-            return response
-        finally:
-            archive.unlink(missing_ok=True)
-
-    async def get_dataset_video(request: web.Request) -> web.FileResponse:
-        from .recording.recording_datasets import resolve_dataset, dataset_video
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder not available")
-        identifier = request.match_info["filename"]
-        if not identifier.startswith(("lerobot:", "bundle:")):
-            raise web.HTTPNotFound(text="not a LeRobot dataset")
-        try:
-            target = resolve_dataset(runtime.recorder.directory, identifier)
-            video = dataset_video(target, request.query.get("path", ""))
-        except (ValueError, FileNotFoundError) as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
-        return web.FileResponse(video, headers={"Content-Type": "video/mp4"})
-
-    async def delete_recording(request: web.Request) -> web.Response:
-        filename = request.match_info["filename"]
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder not available")
-        try:
-            await asyncio.to_thread(runtime.recorder.delete_recording, filename)
-            return web.json_response({"ok": True, "deleted": filename})
-        except FileNotFoundError as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
-        except ValueError as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        except Exception as exc:
-            failure = _upload_failure(exc)
-            if failure is None:
-                raise
-            return web.json_response(failure, status=_upload_failure_status(failure["code"]))
-
-    async def batch_delete_recordings(request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder not available")
-        data = await request.json() if request.can_read_body else {}
-        filenames = list(data.get("filenames", []))
-        deleted = []
-        failed = []
-        for fname in filenames:
-            try:
-                await asyncio.to_thread(runtime.recorder.delete_recording, fname)
-                deleted.append(fname)
-            except Exception as exc:
-                failure = _upload_failure(exc)
-                failed.append({"filename": fname, "error": str(exc),
-                               **({"code": failure["code"], "reason": failure["reason"]}
-                                  if failure else {})})
-        return web.json_response({"ok": True, "deleted": deleted, "failed": failed})
-
-    async def batch_convert_lerobot(request: web.Request) -> web.Response:
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder not available")
-        data = await request.json() if request.can_read_body else {}
-        try:
-            result = await asyncio.to_thread(
-                runtime.recorder.convert_recordings_to_lerobot, data.get('filenames')
-            )
-            return web.json_response(result, status=202 if result.get('accepted') else 200)
-        except (ValueError, RuntimeError, FileNotFoundError) as exc:
-            return web.json_response({'ok': False, 'error': str(exc)}, status=400)
-
-    async def batch_download_recordings(request: web.Request) -> web.StreamResponse:
-        from .recording.recording_datasets import archive_datasets, validate_download_selection
-        if runtime.recorder is None:
-            raise web.HTTPServiceUnavailable(text="recorder not available")
-        if request.content_type == 'application/json':
-            data = await request.json() if request.can_read_body else {}
-            filenames = data.get('filenames') if isinstance(data, dict) else None
-        else:
-            form = await request.post()
-            try:
-                filenames = json.loads(str(form.get('filenames', '[]')))
-            except (TypeError, ValueError):
-                filenames = None
-        try:
-            filenames = validate_download_selection(filenames)
-            if (runtime.recorder.is_recording() and runtime.recorder.path is not None
-                    and runtime.recorder.path.name in filenames):
-                raise web.HTTPConflict(text="recording is still being written")
-            archive = await asyncio.to_thread(
-                archive_datasets, runtime.recorder.directory, filenames
-            )
-        except (ValueError, FileNotFoundError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        try:
-            response = web.StreamResponse(headers={
-                'Content-Disposition': f'attachment; filename="hc-datasets-{datetime.now().strftime("%Y%m%d-%H%M%S")}.zip"',
-                'Content-Type': 'application/zip', 'Content-Length': str(archive.stat().st_size),
-            })
-            await response.prepare(request)
-            with archive.open('rb') as handle:
-                while chunk := await asyncio.to_thread(handle.read, 256 * 1024):
-                    await response.write(chunk)
-            await response.write_eof()
-            return response
-        finally:
-            archive.unlink(missing_ok=True)
-
-    async def start_replay(request: web.Request) -> web.Response:
-        if runtime.player is None:
-            raise web.HTTPServiceUnavailable(text="player is not initialized")
-        data = await request.json() if request.can_read_body else {}
-        filename = str(data.get("filename", "")).strip()
-        if not filename:
-            raise web.HTTPBadRequest(text="filename is required")
-        speed = float(data.get("speed", 1.0))
-        loop = bool(data.get("loop", False))
-        mode = str(data.get("mode", "drive"))
-        selected_topics = data.get("topics")
-        topic_remap = data.get("remap")
-        try:
-            status = await asyncio.to_thread(
-                runtime.player.play,
-                filename,
-                speed=speed,
-                loop=loop,
-                mode=mode,
-                selected_topics=selected_topics,
-                topic_remap=topic_remap,
-            )
-            return web.json_response({"ok": True, "replay": status})
-        except FileNotFoundError as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
-        except Exception as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-
-    async def pause_replay(_request: web.Request) -> web.Response:
-        if runtime.player is None:
-            raise web.HTTPServiceUnavailable(text="player is not initialized")
-        status = await asyncio.to_thread(runtime.player.pause)
-        return web.json_response({"ok": True, "replay": status})
-
-    async def resume_replay(_request: web.Request) -> web.Response:
-        if runtime.player is None:
-            raise web.HTTPServiceUnavailable(text="player is not initialized")
-        status = await asyncio.to_thread(runtime.player.resume)
-        return web.json_response({"ok": True, "replay": status})
-
-    async def stop_replay(_request: web.Request) -> web.Response:
-        if runtime.player is None:
-            raise web.HTTPServiceUnavailable(text="player is not initialized")
-        status = await asyncio.to_thread(runtime.player.stop)
-        return web.json_response({"ok": True, "replay": status})
-
-    async def replay_home(_request: web.Request) -> web.Response:
-        ros = runtime.ros
-        if runtime.player is None or ros is None or ros.status().get("state") != "running":
-            raise web.HTTPServiceUnavailable(text="回放或 ROS 控制进程尚未就绪")
-        if os.environ.get("HC_CONTROL_BACKEND") == "motion":
-            raise web.HTTPConflict(text="当前 Motion 后端请使用现有的回零流程")
-        control_status = runtime.control_runtime.status()
-        if runtime._safety_reason:
-            raise web.HTTPConflict(text="安全停机仍有效，请先人工恢复控制")
-        if runtime._stopping or runtime.control_runtime.enabled and control_status["state"] != "running":
-            raise web.HTTPConflict(text="控制进程尚未就绪")
-        isolated = getattr(ros, 'isolated_control_process', False) is True
-        fence = ros.authorization_fence() if isolated else None
-
-        def request_home(output_resumed):
-            if runtime._stopping or runtime._safety_reason:
-                raise ValueError("安全停机仍有效")
-            options = {"expected_fence": fence} if isolated else {}
-            return ros.request_replay_home(output_resumed=output_resumed, **options)
-
-        try:
-            status = await asyncio.to_thread(runtime.player.return_home, request_home)
-        except (ValueError, RuntimeError) as exc:
-            raise web.HTTPConflict(text=str(exc)) from exc
-        return web.json_response({"accepted": True, "replay": status}, status=202)
-
-    async def get_replay_status(_request: web.Request) -> web.Response:
-        if runtime.player is None:
-            return web.json_response({"state": "idle", "is_active": False})
-        return web.json_response(runtime.player.status())
-
-    async def import_mcap_file(request: web.Request) -> web.Response:
-        if not request.can_read_body:
-            raise web.HTTPBadRequest(text="multipart form data required")
-        reader = await request.multipart()
-        rec_dir = runtime.recorder.directory if runtime.recorder else store.path.parent / "runtime/topic_recordings"
-        rec_dir.mkdir(parents=True, exist_ok=True)
-        uploaded_name = ""
-        while True:
-            field = await reader.next()
-            if field is None:
-                break
-            if field.name in {"file", "archive"}:
-                filename = field.filename or "imported.mcap"
-                if not filename.endswith(".mcap"):
-                    filename += ".mcap"
-                filename = Path(filename).name
-                target_path = rec_dir / filename
-                if target_path.exists():
-                    stem = target_path.stem
-                    target_path = rec_dir / f"{stem}_{int(time.time())}.mcap"
-                with target_path.open("wb") as f:
-                    while True:
-                        chunk = await field.read_chunk()
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                uploaded_name = target_path.name
-
-        if not uploaded_name:
-            raise web.HTTPBadRequest(text="no file uploaded")
-        return web.json_response({"ok": True, "filename": uploaded_name}, status=201)
-
-    async def stream_simulation_frames():
-        last_frame = None
-        while True:
-            await asyncio.sleep(1.0 / 30.0)
-            frame = simulation.latest_frame
-            if frame is last_frame or frame is None or simulation.state != 'running':
-                continue
-            last_frame = frame
-            event = {'type': 'simulation_frame', 'data': {**frame, 'profile_id': simulation.profile_id}}
-            for viewer in tuple(simulation.viewers):
-                try:
-                    await asyncio.wait_for(viewer.send_json(event), timeout=0.5)
-                except (ConnectionError, RuntimeError, asyncio.TimeoutError):
-                    simulation.set_viewer(viewer, False)
-                    try:
-                        await asyncio.wait_for(viewer.close(), timeout=0.2)
-                    except (ConnectionError, RuntimeError, asyncio.TimeoutError):
-                        pass
-
-    viewer_sender = None
+    viewer_sender: asyncio.Task | None = None
 
     async def startup(_app: web.Application) -> None:
         nonlocal viewer_sender
@@ -1890,12 +740,9 @@ def create_app(store: ConfigStore) -> web.Application:
         logging.getLogger().addHandler(diagnostic_handler)
         try:
             await runtime.start()
-            viewer_sender = asyncio.create_task(stream_simulation_frames())
+            viewer_sender = asyncio.create_task(_stream_simulation_frames(simulation))
         except BaseException:
-            # aiohttp does not complete normal startup/cleanup if a startup
-            # signal raises. Do not leave a handler/worker attached to a failed
-            # application (or duplicate them on the next launch).
-            logging.getLogger(__name__).exception('middleware startup failed')
+            logging.getLogger(__name__).exception("middleware startup failed")
             logging.getLogger().removeHandler(diagnostic_handler)
             await asyncio.to_thread(diagnostics.close)
             raise
@@ -1904,8 +751,7 @@ def create_app(store: ConfigStore) -> web.Application:
         if viewer_sender is not None:
             viewer_sender.cancel()
             await asyncio.gather(viewer_sender, return_exceptions=True)
-        for ws in tuple(runtime.websockets):
-            await ws.close(code=1001, message=b"server shutdown")
+        await runtime.broadcaster.close_all()
         async with simulation.lock:
             await simulation.stop()
         await runtime.stop()
@@ -1917,6 +763,7 @@ def create_app(store: ConfigStore) -> web.Application:
     async def options(_request: web.Request) -> web.Response:
         return web.Response(status=204)
 
+    # 核心页面、状态、配置与 WebSocket
     app.router.add_get("/", index)
     app.router.add_get("/dashboard/", index)
     app.router.add_static("/static/", static_dir)
@@ -1924,133 +771,20 @@ def create_app(store: ConfigStore) -> web.Application:
     app.router.add_get("/health", get_status)
     app.router.add_get("/api/config", get_config)
     app.router.add_put("/api/config", put_config)
-    register_profile_routes(app, store, runtime, profiles)
-    app.router.add_get("/api/ros/topics", get_topics)
-    app.router.add_post("/api/ros/publish", publish)
-    app.router.add_post("/api/safety/stop", emergency_stop)
-    app.router.add_post("/api/safety/resume", safety_resume)
-    app.router.add_post("/api/teleop/home", teleop_home)
-    app.router.add_post("/api/teleop/source", set_control_source)
-    try:
-        from .uploads.upload_api import register_upload_routes
-
-        class UploadProxy:
-            def status(self):
-                if runtime.platform is not None and not runtime.platform.state.get('uploads_enabled', False):
-                    return {
-                        'enabled': False, 'running': False, 'auto_enqueue': False,
-                        'jobs': [], 'scan_errors': {}, 'platform_backoffs': {},
-                        'processes': {'artifacts': {'running': False}, 'upload': {'running': False}},
-                    }
-                if runtime.uploads is None:
-                    raise web.HTTPServiceUnavailable(
-                        text=json.dumps({'enabled': False, 'state': 'unavailable',
-                                         'error': runtime.upload_error or 'upload service unavailable'}),
-                        content_type='application/json',
-                    )
-                return runtime.uploads.status()
-
-            def __getattr__(self, key):
-                if runtime.uploads is None:
-                    raise web.HTTPServiceUnavailable(
-                        text=json.dumps({"enabled": False, "state": "unavailable",
-                                         "error": runtime.upload_error or "upload service unavailable"}),
-                        content_type="application/json",
-                    )
-                return getattr(runtime.uploads, key)
-
-        async def update_upload_settings(body):
-            from humanoid_upload.common import UploadError
-            from .uploads.upload_service import UploadService
-            if set(body) != {"enabled", "auto_enqueue"} or any(type(v) is not bool for v in body.values()):
-                raise ValueError()
-            async with runtime._restart_lock:
-                if runtime.recorder is None:
-                    raise UploadError("UPLOAD_UNAVAILABLE", "录制服务尚未就绪")
-                if runtime.recorder.status().get("recording"):
-                    raise UploadError("ARTIFACT_BUSY", "请停止当前录制后修改上传设置")
-                proposed = copy.deepcopy(store.value)
-                proposed["uploads"].update(body)
-                if runtime.platform is not None:
-                    saved = store.save(proposed)
-                    runtime.config['uploads'] = copy.deepcopy(saved['uploads'])
-                    platform = runtime.platform
-                    await asyncio.to_thread(platform.set_enabled, body['enabled'])
-                    if body['enabled']:
-                        await asyncio.to_thread(platform.set_auto, body['auto_enqueue'])
-                    return {**UploadProxy().status(), **body}
-                upload_config = copy.deepcopy(proposed["uploads"])
-                queue_path = Path(upload_config["queue_directory"]).expanduser()
-                upload_config["queue_directory"] = str((store.path.parent / queue_path).resolve())
-                candidate = UploadService(upload_config,
-                    artifact_state_dir=runtime.recorder.artifact_state_dir,
-                    data_directory=runtime.recorder.directory)
-                old = runtime.uploads
-                if old is not None:
-                    stopped = await asyncio.to_thread(old.stop)
-                    if not stopped.get("stopped"):
-                        raise UploadError("ARTIFACT_BUSY", "上传请求尚未结束，请稍后重试")
-                try:
-                    saved = store.save(proposed)
-                except Exception:
-                    if old is not None:
-                        old.start()
-                    raise
-                if old is not None:
-                    await asyncio.to_thread(old.close)
-                runtime.config["uploads"] = copy.deepcopy(saved["uploads"])
-                runtime.uploads = candidate
-                runtime.upload_error = None
-                runtime.recorder.upload_service = candidate
-                runtime.recorder.binding_snapshot = (candidate.binding_snapshot
-                    if body["enabled"] and body["auto_enqueue"] else None)
-                candidate.start()
-                return candidate.status()
-
-        register_upload_routes(app, UploadProxy(), update_settings=update_upload_settings)
-    except ImportError:
-        async def upload_unavailable(request):
-            return web.json_response(
-                {"enabled": False, "state": "unavailable", "error": "upload module is not installed"},
-                status=503,
-            )
-        app.router.add_get("/api/uploads", upload_unavailable)
-        app.router.add_post("/api/uploads/{operation}", upload_unavailable)
-    app.router.add_post("/api/recording/precheck", precheck_recording)
-    app.router.add_get("/api/recording/precheck", precheck_recording)
-    app.router.add_post("/api/recording/start", start_recording)
-    app.router.add_post("/api/recording/stop", stop_recording)
-    from .uploads.platform_api import register_platform_routes
-    register_platform_routes(app, runtime)
-    app.router.add_get("/api/recording/status", get_recording_status)
-    app.router.add_get("/api/recordings", get_recordings)
-    app.router.add_post("/api/recordings/upload", import_mcap_file)
-    from .recording.recording_downloads import register_download_routes
-    register_download_routes(app, lambda: runtime.recorder)
-    app.router.add_get("/api/recordings/{filename}/download", download_recording)
-    app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)
-    app.router.add_delete("/api/recordings/{filename}", delete_recording)
-    app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
-    app.router.add_post("/api/recordings/batch-convert-lerobot", batch_convert_lerobot)
-    app.router.add_post("/api/recordings/batch-download", batch_download_recordings)
-    app.router.add_post("/api/replay/start", start_replay)
-    app.router.add_post("/api/replay/pause", pause_replay)
-    app.router.add_post("/api/replay/resume", resume_replay)
-    app.router.add_post("/api/replay/stop", stop_replay)
-    app.router.add_post("/api/replay/home", replay_home)
-    app.router.add_get("/api/replay/status", get_replay_status)
     app.router.add_get("/ws", websocket)
-    app.router.add_post("/api/webrtc/offer", webrtc_offer)
-    app.router.add_post("/api/webrtc/offer/{camera_id}", webrtc_offer)
-    app.router.add_post("/offer", webrtc_offer)
-    app.router.add_post("/offer/{camera_id}", webrtc_offer)
-    app.router.add_post("/api/webrtc/receiver/{camera_id}", receiver_report)
-    app.router.add_get("/api/camera/status", get_camera_status)
-    app.router.add_get("/api/camera/status/{camera_id}", get_camera_status)
-    app.router.add_get("/api/camera/snapshot", get_camera_snapshot)
-    app.router.add_get("/api/camera/snapshot/{camera_id}", get_camera_snapshot)
-    app.router.add_get("/api/camera/stream", get_camera_stream)
-    app.router.add_get("/api/camera/stream/{camera_id}", get_camera_stream)
+
+    # 按领域模块注册其余 API 路由
+    register_log_routes(app, diagnostics)
+    register_intervention_routes(app, runtime)
+    register_simulation_routes(app, simulation)
+    register_profile_routes(app, store, runtime, profiles)
+    register_teleop_routes(app, store, runtime)
+    register_runtime_upload_routes(app, store, runtime)
+    register_platform_routes(app, runtime)
+    register_recording_routes(app, store, runtime)
+    register_replay_routes(app, runtime)
+    register_camera_routes(app, runtime)
+
     app.router.add_options("/{tail:.*}", options)
     app.on_startup.append(startup)
     app.on_shutdown.append(shutdown)
