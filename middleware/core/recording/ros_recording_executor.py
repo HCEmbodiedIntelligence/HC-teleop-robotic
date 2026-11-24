@@ -155,20 +155,7 @@ class RateGate:
             return True
 
 
-def _put_latest(target: Any, value: dict[str, Any]) -> None:
-    try:
-        target.put_nowait(value)
-        return
-    except queue.Full:
-        pass
-    try:
-        target.get_nowait()
-    except queue.Empty:
-        pass
-    try:
-        target.put_nowait(value)
-    except queue.Full:
-        pass
+from ..control.control_worker import _offer_latest as _put_latest
 
 
 def _health_snapshot(
