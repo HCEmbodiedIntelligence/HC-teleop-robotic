@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+export PYTHONPATH="$root:$root/upload_client:${HC_DEVICE_DEPS:-$root/.deps}${PYTHONPATH:+:$PYTHONPATH}"
+python_bin="${HC_DEVICE_PYTHON:-python3}"
+case "${1:-}" in
+    bench) shift; exec "$python_bin" -m middleware.platform_device.bench "$@" ;;
+    observe) shift; exec "$python_bin" -m middleware.platform_device "$@" ;;
+    *) echo "Usage: tools/platform-device bench [--seconds 15 --hz 90] | observe --config /path/device.json" >&2; exit 2 ;;
+esac

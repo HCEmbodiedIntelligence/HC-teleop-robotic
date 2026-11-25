@@ -141,7 +141,7 @@ class CameraService:
                 self._record_capture_frame(topic)
                 # 没有 VR 客户端观看该路画面时，只统计输入帧率，不做 JPEG
                 # 解码。多相机总开关关闭后可立即释放 CPU。
-                if not self._pcs:
+                if not self._pcs and not self._frame_waiters:
                     return
                 with self._lock:
                     if self._encoded_latest is not None:
@@ -153,7 +153,7 @@ class CameraService:
                 return
             elif hasattr(msg, "data") and hasattr(msg, "encoding"):
                 self._record_capture_frame(topic)
-                if not self._pcs:
+                if not self._pcs and not self._frame_waiters:
                     return
                 if np is not None and cv2 is not None:
                     if msg.encoding in ("bgr8", "8UC3"):
@@ -615,6 +615,10 @@ class CameraService:
                     pass
             if self.status()["state"] != "error":
                 self._set_status(state="stopped")
+
+    def platform_video_track(self):
+        """Subscribe to the native latest-frame buffer of this camera."""
+        return self._create_video_track()
 
     def _create_video_track(self):
         import av
