@@ -21,7 +21,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import JointState, Joy
-from std_msgs.msg import Bool, Float64MultiArray, Header, String
+from std_msgs.msg import Bool, Empty, Float64MultiArray, Header, String
 from std_srvs.srv import Trigger
 import yaml
 
@@ -421,6 +421,12 @@ class RobotArmTeleopNode(Node):
         self.command_pub = cmd_node.create_publisher(
             JointState, self.control["command_topic"], command_pub_qos
         )
+        self._home_gesture_reset_pub = None
+        reset_topic = self.control.get("home_gesture_reset_topic")
+        if reset_topic:
+            if self.backend not in {"v23", "generic"}:
+                raise ValueError("control.home_gesture_reset_topic requires v23 or generic")
+            self._home_gesture_reset_pub = self.create_publisher(Empty, reset_topic, 1)
         if self.backend == "motion":
             self.motion_home_pub = self.create_publisher(Header, "/internal/vr/home", 1)
             self.motion_home_cancel_pub = self.create_publisher(
@@ -1483,6 +1489,23 @@ class RobotArmTeleopNode(Node):
 
     def _home_gesture_triggered(self, now: float) -> bool:
         return home_gesture_triggered(self, now)
+
+    def _request_home_gesture_reset(self) -> bool:
+        publisher = self._home_gesture_reset_pub
+        if publisher is None:
+            return False
+        if not publisher.get_subscription_count():
+            self.get_logger().warning("scene reset skipped: no subscriber")
+            return True
+
+        self._cancel_solver_clutch()
+        with self._command_state_lock:
+            self.homing = False
+            self.solver_rearm.start_homing()
+            self._release_all(send_base_zero=True)
+        publisher.publish(Empty())
+        self.get_logger().info("both sticks outward: scene reset requested")
+        return True
 
     def _homing_joint_names(self) -> list[str]:
         return homing_joint_names(self)

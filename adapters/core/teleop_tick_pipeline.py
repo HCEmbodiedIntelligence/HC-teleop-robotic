@@ -551,6 +551,9 @@ def generic_control_tick(
 
     node._ensure_generic_targets()
     if node._home_gesture_triggered(now):
+        if node._request_home_gesture_reset():
+            node._publish_status(now, feedback_fresh)
+            return
         node._set_generic_home_targets()
     if node.homing:
         if node.backend == "motion":

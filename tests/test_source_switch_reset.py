@@ -58,13 +58,15 @@ def change(rig, source):
     for node in rig: node._control_source_callback(String(data=source))
 
 
-def right_input(teleop, *, a=False, grip=True, outward=False):
+def right_input(teleop, *, a=False, grip=True, outward=False, left_outward=None):
     from std_msgs.msg import String
+    if left_outward is None:
+        left_outward = outward
     pose = {'position': [.1, .2, .3], 'quaternion': [0, 0, 0, 1]}
     teleop._vr_data_callback(String(data=json.dumps({
         'tracking': {'head': True, 'right': True}, 'poses': {'head': pose, 'right': pose},
         'inputs': {'right': {'held_mask': int(a), 'grip': float(grip), 'primary_axis': [int(outward), 0]},
-                   'left': {'primary_axis': [-int(outward), 0]}}})))
+                   'left': {'primary_axis': [-int(left_outward), 0]}}})))
 
 
 @pytest.mark.parametrize('resume', ['vr', 'enable_topic'])
@@ -122,6 +124,57 @@ def test_resume_with_grip_after_replay_starts_at_measured_pose(rig, resume):
     right_input(teleop, grip=False, outward=True)
     teleop._control_tick()
     assert teleop.homing  # A new intentional home gesture still works.
+
+
+def test_scene_reset_gesture_requires_both_sticks_and_recenter(rig):
+    from std_msgs.msg import Bool, Empty
+
+    teleop, solver = rig
+    reset = teleop._home_gesture_reset_pub = Mock()
+    reset.get_subscription_count.return_value = 1
+    teleop._joint_state_callback(feedback(*rig))
+    right_input(teleop, grip=False, outward=True, left_outward=False)
+    teleop._control_tick()
+    reset.publish.assert_not_called()
+
+    right_input(teleop, outward=True)
+    teleop._control_tick()
+    reset.publish.assert_called_once_with(Empty())
+    assert not teleop.homing and teleop.solver_rearm.blocked
+    assert not any(arm.active for arm in teleop.arms.values())
+
+    # The simulator's ready transition recaptures its pose and resets the solver.
+    teleop._hardware_ready_callback(Bool(data=False))
+    fresh = feedback(*rig, offset=.3)
+    teleop._joint_state_callback(fresh)
+    teleop._hardware_ready_callback(Bool(data=True))
+    teleop.solver_reset_pub.publish.assert_called_once_with(Bool(data=True))
+    solver._reset_callback(Bool(data=True))
+    solver._joint_callback(feedback(*rig, offset=.3))
+    teleop._solver_reset_ack_callback(solver.reset_ack_pub.publish.call_args.args[0])
+
+    teleop.controller_target_pub = Mock()
+    for left_outward in (True, False, True):
+        right_input(teleop, outward=True, left_outward=left_outward)
+        teleop._control_tick()
+    reset.publish.assert_called_once_with(Empty())
+    target = teleop.controller_target_pub.publish.call_args.args[0]
+    target.header.stamp = solver.get_clock().now().to_msg()
+    assert solver._ee_callback(target)
+    solver._tick()
+    teleop._generic_command_callback(solver.command_pub.publish.call_args.args[0])
+    assert teleop.solver_rearm.blocked
+
+    right_input(teleop, grip=False)
+    teleop._control_tick()
+    right_input(teleop)
+    teleop._control_tick()
+    assert teleop.arms['right'].active and not teleop.solver_rearm.blocked
+
+    right_input(teleop, grip=False, outward=True)
+    teleop._control_tick()
+    assert reset.publish.call_count == 2
+    assert not teleop.homing
 
 
 def test_feedback_loss_waits_and_reanchors_without_solver_output(rig):
