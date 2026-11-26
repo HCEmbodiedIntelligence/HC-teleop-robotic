@@ -309,10 +309,11 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
                 handles.append(node.create_subscription(cls, source, callback, recording_subscription_qos(item), raw=True))
 
         def make_action(slot, evidence):
+            from .recording_cdr import trim_joint_state_cdr
             msg = JointState(name=evidence['names'], position=evidence['positions'])
             msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(evidence['stamp_ns'], 1_000_000_000)
             return enqueue_record(resources[slot], dict(topic='/action/joint_states', msg_type='sensor_msgs/msg/JointState',
-                _raw=bytes(serialize_message(msg)), stamp_ns=evidence['stamp_ns'],
+                _raw=trim_joint_state_cdr(bytes(serialize_message(msg))), stamp_ns=evidence['stamp_ns'],
                 _provenance=dict(key=evidence['key'], command_seq=evidence['command_seq'], action_boundary='hc_final')))
 
         last_health = 0.

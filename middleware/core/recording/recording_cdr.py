@@ -74,7 +74,7 @@ def read_event(raw, message_encoding, schema_name=''):
     raise ValueError('unsupported recording event encoding/schema')
 
 
-def read_joint_state(raw):
+def _parse_joint_state(raw):
     reader = Reader(raw)
     if len(raw) < 12:
         raise ValueError('truncated CDR Header')
@@ -94,7 +94,24 @@ def read_joint_state(raw):
     padding_budget = 4*sum(not values for values in (positions, velocity, effort))
     if not 0 <= len(raw)-reader.offset <= padding_budget:
         raise ValueError('unexpected trailing JointState data')
-    return JointFields(names, positions, prefix)
+    return JointFields(names, positions, prefix), reader.offset
+
+
+def read_joint_state(raw):
+    return _parse_joint_state(raw)[0]
+
+
+def trim_joint_state_cdr(raw):
+    """Strip ROS 2 Humble over-allocated alignment bytes from JointState CDR.
+
+    ``rclpy.serialization.serialize_message`` reserves 4-byte alignment slack
+    for empty ``float64[]`` sequences and leaves those unused bytes at the end
+    of the returned buffer, whereas native DDS ``Publisher.publish(msg)``
+    omits them. Strict CDR readers such as Foxglove flag the extra bytes as a
+    schema mismatch.
+    """
+    _, end_offset = _parse_joint_state(raw)
+    return raw if end_offset == len(raw) else raw[:end_offset]
 
 
 def position_label(header_prefix, names, positions):

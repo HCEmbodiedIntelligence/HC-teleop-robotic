@@ -10,7 +10,10 @@ from rclpy.serialization import deserialize_message, serialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from middleware.core.recording.recording_cdr import read_joint_state, read_string, position_label, write_string, read_event
+from middleware.core.recording.recording_cdr import (
+    Reader, read_joint_state, read_string, position_label,
+    trim_joint_state_cdr, write_string, read_event,
+)
 
 
 @pytest.mark.parametrize('count', [0, 1, 7, 14, 27])
@@ -102,3 +105,37 @@ assert 'numpy' not in sys.modules
 assert 'rclpy' not in sys.modules
 """
     subprocess.run([sys.executable, '-c', code], check=True, timeout=10)
+
+
+@pytest.mark.parametrize('count', [0, 1, 7, 11, 14, 16, 17])
+@pytest.mark.parametrize('motion_fields', [False, True])
+def test_trim_joint_state_cdr_strips_humble_trailing_padding(count, motion_fields):
+    from middleware.core.recording.publication_capture import JointSnapshot, serialize_snapshot
+
+    for frame in ('', 'base_link'):
+        message = JointState(
+            name=[f'Joint{i}_R' for i in range(1, count + 1)],
+            position=[0.1 * i for i in range(count)],
+        )
+        message.header.stamp.sec = 1795654056
+        message.header.stamp.nanosec = 739000000
+        message.header.frame_id = frame
+        if motion_fields:
+            message.velocity = [0.01 * i for i in range(count)]
+            message.effort = [0.02 * i for i in range(count)]
+
+        for candidate in (
+            trim_joint_state_cdr(bytes(serialize_message(message))),
+            serialize_snapshot(JointSnapshot.copy(message, 1795654056739000000)),
+        ):
+            reader = Reader(candidate)
+            reader.offset = 12
+            reader.string()
+            n = reader.uint()
+            for _ in range(n):
+                reader.string()
+            reader.doubles()
+            reader.doubles()
+            reader.doubles()
+            assert reader.offset == len(candidate), 'JointState CDR must have zero trailing slack bytes'
+            assert deserialize_message(candidate, JointState) == message

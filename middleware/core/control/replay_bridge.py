@@ -409,8 +409,14 @@ class ReplayBridgeController:
         if capture_target and wire_cdr is None:
             try:
                 from rclpy.serialization import serialize_message
+                from ..recording.recording_cdr import trim_joint_state_cdr
 
-                wire_cdr = serialize_message(out_msg)
+                raw_cdr = bytes(serialize_message(out_msg))
+                wire_cdr = (
+                    trim_joint_state_cdr(raw_cdr)
+                    if type(out_msg).__name__ == "JointState"
+                    else raw_cdr
+                )
             except Exception:
                 wire_cdr = None
 
