@@ -13,7 +13,7 @@ from uuid import uuid4
 from middleware.core.protocol import decode_pose_packet
 from middleware.platform_device.bench import frame
 from middleware.platform_device.input import InputWindow
-from middleware.platform_device.local import Recording
+from middleware.platform_device.local import LocalServer, Recording
 from middleware.platform_device.sink import Live
 
 
@@ -77,6 +77,47 @@ class InputTests(unittest.TestCase):
         m["controllers"][0]["grip"]["orientation"][0] = float("nan")
         with self.assertRaises(ValueError):
             w.sample(m, "hc-pico-v2")
+
+
+class LiveInterlockTests(unittest.IsolatedAsyncioTestCase):
+    def test_only_running_control_mux_can_admit_motion(self):
+        mux = dict(enabled=True, source="vr", output_enabled=True, hardware_ready=True)
+        status = dict(state="running", command_mux=mux)
+        rt = SimpleNamespace(
+            platform=None,
+            config={"vr": {"pose_port": 1}},
+            vr=Mock(),
+            ros=Mock(),
+        )
+        rt.vr.status.return_value = {"state": "running"}
+        rt.ros.status.return_value = status
+        local = LocalServer(rt, {})
+        self.assertTrue(local.snapshot()["ready"])
+        status["state"] = "error"
+        self.assertFalse(local.snapshot()["ready"])
+        status["state"] = "running"
+        mux["enabled"] = False
+        self.assertFalse(local.snapshot()["ready"])
+
+    async def test_rearm_requires_status_read_after_local_halt(self):
+        from unittest.mock import AsyncMock
+
+        live = Live()
+        live.http = Mock()
+        live.http.post.return_value = AsyncMock()
+        live.http.post.return_value.__aenter__.return_value = Mock()
+        live.state = {"ready": True}
+        live.checked = time.monotonic()
+        self.assertTrue(live.ready())
+        live.stop()
+        self.assertFalse(live.ready())
+        pre_halt_read = time.monotonic()
+        await live.notify
+        # A delayed status response started before /halt completed.
+        live.checked = pre_halt_read
+        self.assertFalse(live.ready())
+        live.checked = time.monotonic()
+        self.assertTrue(live.ready())
 
 
 class RecordingTests(unittest.TestCase):

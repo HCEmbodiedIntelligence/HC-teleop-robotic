@@ -93,7 +93,9 @@ async def main(bundle):
         ),
         ros=SimpleNamespace(
             status=lambda: {
+                "state": "running",
                 "command_mux": {
+                    "enabled": True,
                     "source": "vr",
                     "output_enabled": True,
                     "hardware_ready": True,

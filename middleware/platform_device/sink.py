@@ -75,7 +75,8 @@ class Live:
         self.profiles = ("hc-pico-v2", "webxr") if transform else ("hc-pico-v2",)
         self.wire_seq = int(time.monotonic() * 1000) & 0xFFFFFFFF
         self.state = {}
-        self.checked = 0
+        self.checked = float("-inf")
+        self.last_halt = float("-inf")
         self.timer = self.capture = self.notify = self.delivery = None
         self.result = None
         self.udp = None
@@ -97,10 +98,11 @@ class Live:
     async def refresh(self):
         while True:
             try:
+                requested = time.monotonic()
                 async with self.http.get("http://localhost/status") as r:
                     r.raise_for_status()
                     self.state = await r.json()
-                self.checked = time.monotonic()
+                self.checked = requested
             except (OSError, aiohttp.ClientError, TimeoutError, ValueError):
                 self.state = {}
             await asyncio.sleep(0.1)
@@ -109,6 +111,7 @@ class Live:
         return (
             self.state.get("ready", False)
             and time.monotonic() - self.checked < 0.4
+            and self.checked > self.last_halt
             and not self.notify
         )
 
@@ -136,6 +139,8 @@ class Live:
         except (OSError, aiohttp.ClientError, TimeoutError):
             LOG.warning("local halt unconfirmed; native pose watchdog remains active")
         finally:
+            # An outstanding status read may still describe pre-halt readiness.
+            self.last_halt = time.monotonic()
             self.notify = None
 
     def capabilities(self):

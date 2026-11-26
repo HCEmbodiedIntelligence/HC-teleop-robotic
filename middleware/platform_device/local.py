@@ -339,12 +339,15 @@ class LocalServer:
 
     def snapshot(self):
         vr = self.rt.vr.status() if self.rt.vr else {}
-        mux = self.rt.ros.status().get("command_mux", {}) if self.rt.ros else {}
+        ros = self.rt.ros.status() if self.rt.ros else {}
+        mux = ros.get("command_mux", {})
         ready = (
             vr.get("state") == "running"
             and vr.get("active_peer") in (None, "127.0.0.2")
             and self.rt.config["vr"].get("exclusive_mode", True)
             and self.rt.config["vr"].get("publish_to_ros", True)
+            and ros.get("state") == "running"
+            and mux.get("enabled") is True
             and mux.get("source") == "vr"
             and mux.get("output_enabled")
             and mux.get("hardware_ready")
