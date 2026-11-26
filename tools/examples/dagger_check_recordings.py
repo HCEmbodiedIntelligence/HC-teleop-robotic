@@ -26,6 +26,18 @@ def stats(values):
         p95=values[math.ceil(.95*len(values))-1],p99=values[math.ceil(.99*len(values))-1],max=max(values))
 
 
+def recorded_positions(message, *, action):
+    assert len(message.name) == len(message.position) and len(set(message.name)) == len(message.name)
+    if action:
+        # v23 reserves NaN for joints omitted from a partial action.
+        assert not any(math.isinf(v) for v in message.position)
+        values = {n: v for n, v in zip(message.name, message.position) if math.isfinite(v)}
+        assert values, 'empty final action'
+        return values
+    assert all(math.isfinite(v) for v in message.position)
+    return dict(zip(message.name, message.position))
+
+
 def inspect(path):
     metadata=json.loads(path.read_text())
     mcap=path.with_suffix('').with_suffix('.mcap')
@@ -45,11 +57,10 @@ def inspect(path):
                 evidence.append(read_event(message.data,channel.message_encoding,schema.name if schema else ''))
             if channel.topic in ('/action/joint_states','/observation/joint_states'):
                 data=deserialize_message(message.data,JointState)
-                assert len(data.name)==len(data.position) and len(set(data.name))==len(data.name)
-                assert all(math.isfinite(v) for v in data.position)
+                positions = recorded_positions(data, action=channel.topic.startswith('/action'))
                 stamp=data.header.stamp.sec*10**9+data.header.stamp.nanosec
                 assert stamp==message.log_time, 'recorded source time changed'
-                (actions if channel.topic.startswith('/action') else feedback).append((stamp,dict(zip(data.name,data.position))))
+                (actions if channel.topic.startswith('/action') else feedback).append((stamp,positions))
             if channel.topic == '/observation/base/pose':
                 data = deserialize_message(message.data, PoseStamped)
                 p, q = data.pose.position, data.pose.orientation
@@ -82,12 +93,12 @@ def inspect(path):
     matched=[];unmatched=0;without_following_feedback=0;nearest_error=[]
     for stamp,target in actions:
         index=bisect.bisect_left(stamps,stamp)
-        if index<len(feedback):
+        if index<len(feedback) and target.keys() <= feedback[index][1].keys():
             nearest_error.append(max(abs(feedback[index][1][name]-q) for name,q in target.items()))
         found=None
         for t,actual in feedback[index:index+16]:
             if t-stamp>150_000_000:break
-            if all(abs(actual[name]-q)<1e-5 for name,q in target.items()):
+            if target.keys() <= actual.keys() and all(abs(actual[name]-q)<1e-5 for name,q in target.items()):
                 found=(t-stamp)/1e6;break
         if found is None:
             unmatched+=1

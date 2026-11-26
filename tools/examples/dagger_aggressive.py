@@ -33,8 +33,7 @@ def stress(s):
     s.static(started,initial,names=passive,base=base)
     frames=s.window(started,'output')
     for f in frames:
-        assert all(math.isfinite(q) for q in f['positions'])
-        for n,q in zip(f['names'],f['positions']):
+        for n,q in s.output_positions(f).items():
             spec=next(j for j in s.info['joints'] if j['public_name']==n)
             assert spec['limits']['lower']-1e-6<=q<=spec['limits']['upper']+1e-6,(n,q)
     return dict(cycles=12,hand_peak_to_peak_m=.24,program_amplitude_rad=.3,

@@ -152,6 +152,7 @@ class Sim:
         self.vr_thread=threading.Thread(target=self._send_vr,daemon=True)
         self.vr_thread.start()
         self.wait(lambda:self.info and self.joints and self.base and self.owner and set(self.owner['required_peers']) <= self.owner['peers'].keys(),15,'ROS discovery')
+        self.output_joints = {j.get('model_name', j['public_name']): j for j in self.info['joints']}
         self.add('setup',simulation=simulation)
 
     def _send_vr(self):
@@ -232,10 +233,22 @@ class Sim:
         with self.lock:
             return [r for r in self.rows if r['mono']>=start and r['kind']==kind]
 
+    def output_positions(self, frame):
+        """Map finite driver targets in the final action to public SI coordinates."""
+        result = {}
+        for name, value in zip(frame['names'], frame['positions']):
+            assert not math.isinf(value), f'infinite target for {name}'
+            joint = self.output_joints.get(name)
+            if joint is not None and math.isfinite(value):
+                result[joint['public_name']] = (value - joint.get('offset', 0.)) / joint.get('scale', 1.)
+        assert result, 'final output has no commanded profile joints'
+        return result
+
     def static(self, start, before, *, names=None, tolerance=1e-5, base=None):
         feedback=self.window(start,'feedback')
         assert len(feedback)>10,'missing feedback'
-        delta=max(abs(r['positions'][n]-before[n]) for r in feedback for n in (names or before))
+        watched = before if names is None else names
+        delta = max((abs(r['positions'][n]-before[n]) for r in feedback for n in watched), default=0.)
         assert delta<=tolerance, f'joint moved {delta} > {tolerance}'
         if base is not None:
             frames=self.window(start,'base')

@@ -135,6 +135,27 @@ def test_short_repeated_interventions_and_ordered_capture_boundaries():
     assert len([e for e in rig.effects if isinstance(e, tuple) and e[0] == 'close']) == 100
 
 
+def test_return_timing_identifies_only_the_first_final_auto_command():
+    rig = Rig()
+    rig.auto()
+    rig.input(True)
+    rig.ack()
+    rig.ack()
+    rig.input(False)
+    rig.ack()
+    rig.ack()
+    c = rig.control
+    assert c.state == 'AUTO'
+    stamp = Obj(sec=1, nanosec=234_000)
+    target = Obj(header=Obj(stamp=stamp))
+    c.sent(c.token, target, rig.ns + 10)
+    stamp.nanosec += 1
+    c.sent(c.token, target, rig.ns + 20)
+    metric = c.snapshot()['metrics'][-1]
+    assert metric['first_command_stamp_ns'] == 1_000_234_000
+    assert metric['open_to_first_final_command_ns'] == 10
+
+
 def test_release_during_takeover_does_not_open_empty_episode():
     rig = Rig()
     rig.auto()

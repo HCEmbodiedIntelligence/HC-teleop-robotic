@@ -41,7 +41,7 @@ def extremes(s):
     s.static(started,initial,names=passive,base=base)
     frames=s.window(started,'output')
     for f in frames:
-        for n,q in zip(f['names'],f['positions']):
+        for n,q in s.output_positions(f).items():
             limits=next(j for j in s.info['joints'] if j['public_name']==n)['limits']
             assert math.isfinite(q) and limits['lower']-1e-6<=q<=limits['upper']+1e-6,(n,q)
     return dict(extreme_translation_m=100,joystick_magnitude=100,finite_bounded_outputs=len(frames),

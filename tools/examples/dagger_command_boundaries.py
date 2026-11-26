@@ -12,6 +12,8 @@ def invalid(kind):
         s.session()
         spec=s.info['groups']['left_arm']
         before=s.joints.copy();base=s.base.copy();start=time.monotonic()
+        model_names = {j['public_name']: j.get('model_name', 'model_'+j['public_name'])
+                       for j in s.info['joints']}
         for _ in range(45):
             names=spec['joint_names'].copy();positions=[before[n] for n in names]
             positions[3]+=.25
@@ -24,8 +26,8 @@ def invalid(kind):
             if kind=='missing_name': message.name=[]
             if kind=='wrong_length': message.position=positions[:-1]
             if kind=='wrong_group': message.name=s.info['groups']['right_arm']['joint_names']
-            if kind=='model_names': message.name=['Joint'+str(i)+'_L' for i in range(1,8)]
-            if kind=='passive_axis': message.name.append('waist_joint_1');message.position.append(before['waist_joint_1']+.2)
+            if kind=='model_names': message.name=[model_names[name] for name in names]
+            if kind=='passive_axis': message.name.append('waist_joint_1');message.position.append(before.get('waist_joint_1', 0.)+.2)
             if kind=='nan': message.position[3]=math.nan
             if kind=='infinity': message.position[3]=math.inf
             if kind=='over_limit': message.position[3]=spec['limits'][3]['upper']+.5

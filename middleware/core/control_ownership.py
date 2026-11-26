@@ -448,6 +448,8 @@ class ControlOwnership:
             raise OwnershipConflict('command does not own the final output')
         if token.source != 'vr':
             if self.pending_auto_metric is not None and self.pending_auto_metric['epoch'] == token.epoch:
+                source_stamp = target.header.stamp
+                self.pending_auto_metric['first_command_stamp_ns'] = source_stamp.sec*1_000_000_000 + source_stamp.nanosec
                 self.pending_auto_metric['open_to_first_final_command_ns'] = max(0, stamp_ns-self.pending_auto_metric['stamp_ns'])
                 self.pending_auto_metric = None
             return None

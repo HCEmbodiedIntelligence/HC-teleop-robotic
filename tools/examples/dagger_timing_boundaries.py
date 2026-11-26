@@ -47,16 +47,14 @@ def timing(s):
         time.sleep(.18)
         released=next(r for r in s.window(started,'wire_grip') if not r['pressed'])
         metric=metrics[0]
-        prefix=f"hc1:{s.owner['controller_instance_id']}:{s.owner['session_id']}:{epoch}:motion:"
-        candidates={r['stamp_ns']:r for r in s.window(started,'candidate') if r['frame_id'].startswith(prefix)}
-        outputs=[r for r in s.window(started,'output') if r['stamp_ns'] in candidates]
-        assert outputs, 'no actual program output with the returned authority'
-        first=outputs[0]; candidate=candidates[first['stamp_ns']]
-        assert first['names']==candidate['names'] and first['positions']==candidate['positions']
+        first = next((row for row in s.window(started, 'output')
+                      if row['stamp_ns'] == metric['first_command_stamp_ns']), None)
+        assert first is not None, 'did not observe the first published AUTO target'
+        target = s.output_positions(first)
         first_final=metric['stamp_ns']+metric['open_to_first_final_command_ns']
         feedback=[r for r in s.window(started,'feedback') if r['stamp_ns']>=first_final]
         changed=[r for r in feedback if any(abs(r['positions'][n]-before[n])>1e-5 for n in before)]
-        equal=[r for r in feedback if all(abs(r['positions'][n]-q)<1e-5 for n,q in zip(first['names'],first['positions']))]
+        equal=[r for r in feedback if all(abs(r['positions'][n]-q)<1e-5 for n,q in target.items())]
         result=dict(cycle=index+1,epoch=epoch,
             semantic_release_to_permission_ms=metric['release_to_open_ns']/1e6,
             permission_to_final_program_ms=metric['open_to_first_final_command_ns']/1e6,

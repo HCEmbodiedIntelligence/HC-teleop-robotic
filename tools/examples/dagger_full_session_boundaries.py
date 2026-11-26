@@ -43,6 +43,7 @@ def full_session(s):
     mcap=path.with_suffix('').with_suffix('.mcap')
     sys.path.insert(0,str(ROOT))
     sys.path.insert(0,str(ROOT/'.deps'))
+    from dagger_check_recordings import recorded_positions
     from mcap.reader import make_reader
     from middleware.core.recording_cdr import read_event
     from rclpy.serialization import deserialize_message
@@ -62,12 +63,12 @@ def full_session(s):
             elif channel.topic in ('/action/joint_states','/observation/joint_states'):
                 value=deserialize_message(message.data,JointState)
                 stamp=value.header.stamp.sec*10**9+value.header.stamp.nanosec
-                assert len(value.name)==len(value.position) and all(math.isfinite(q) for q in value.position)
+                positions = recorded_positions(value, action=channel.topic.startswith('/action'))
                 assert -50_000_000<=message.log_time-stamp<=250_000_000, 'stale full-session joint sample'
                 ages.append((message.log_time-stamp)/1e6)
                 if channel.topic.startswith('/action'):
                     assert stamp not in actions, 'duplicate output stamp'
-                    actions[stamp]=dict(zip(value.name,value.position))
+                    actions[stamp]=positions
                 else: observations.append(stamp)
             elif channel.topic == '/observation/base/pose':
                 value = deserialize_message(message.data, PoseStamped)
