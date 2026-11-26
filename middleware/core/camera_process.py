@@ -201,10 +201,16 @@ def _camera_worker(connection, config: dict[str, Any], domain_id: int):
         async def report():
             while True:
                 status = camera.status()
+                if hasattr(camera, "platform_status"):
+                    status["platform_teleoperation"] = camera.platform_status()
                 status.update(video_process=True, video_pid=os.getpid())
                 send(("status", status))
                 await asyncio.sleep(.5)
 
+        platform_task = None
+        if os.environ.get("HC_TELEOP_DEVICE_CONFIG"):
+            from middleware.platform_device.__main__ import camera_task
+            platform_task = camera_task(camera)
         reporter = asyncio.create_task(report())
         try:
             while True:
@@ -228,6 +234,9 @@ def _camera_worker(connection, config: dict[str, Any], domain_id: int):
                 except Exception as exc:
                     send(("response", request_id, False, f"{type(exc).__name__}: {exc}"))
         finally:
+            if platform_task is not None:
+                platform_task.cancel()
+                await asyncio.gather(platform_task, return_exceptions=True)
             reporter.cancel()
             await asyncio.gather(reporter, return_exceptions=True)
             await camera.stop()

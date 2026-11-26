@@ -1,0 +1,8 @@
+{
+  "base_url": "https://robot-api.example.invalid",
+  "name": "HC teleoperation test station",
+  "mode": "observe",
+  "camera_id": "head",
+  "max_lag_ms": 100,
+  "watchdog_ms": 180
+}

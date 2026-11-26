@@ -1847,17 +1847,34 @@ def create_app(store: ConfigStore) -> web.Application:
 
     viewer_sender = None
 
+    platform_local = None
+
     async def startup(_app: web.Application) -> None:
-        nonlocal viewer_sender
+        nonlocal platform_local, viewer_sender
         await asyncio.to_thread(diagnostics.start)
         logging.getLogger().addHandler(diagnostic_handler)
         try:
+            platform_config = os.environ.get("HC_TELEOP_DEVICE_CONFIG")
+            if platform_config:
+                from middleware.platform_device.agent import credential, settings
+                from middleware.platform_device.local import LocalServer
+
+                cfg = settings(platform_config)
+                credential(cfg)
+                if cfg.get("mode") == "live":
+                    platform_local = LocalServer(runtime, cfg)
+                    await platform_local.start()
             await runtime.start()
+            if platform_config and cfg.get("camera_id", "main") not in runtime.cameras:
+                await runtime.stop()
+                raise ValueError("configured platform camera_id is not active")
             viewer_sender = asyncio.create_task(stream_simulation_frames())
         except BaseException:
             # aiohttp does not complete normal startup/cleanup if a startup
             # signal raises. Do not leave a handler/worker attached to a failed
             # application (or duplicate them on the next launch).
+            if platform_local is not None:
+                await platform_local.close()
             logging.getLogger(__name__).exception('middleware startup failed')
             logging.getLogger().removeHandler(diagnostic_handler)
             await asyncio.to_thread(diagnostics.close)
@@ -1872,6 +1889,8 @@ def create_app(store: ConfigStore) -> web.Application:
         async with simulation.lock:
             await simulation.stop()
         await runtime.stop()
+        if platform_local is not None:
+            await platform_local.close()
 
     async def close_diagnostics(_app: web.Application) -> None:
         logging.getLogger().removeHandler(diagnostic_handler)
