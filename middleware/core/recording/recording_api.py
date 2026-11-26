@@ -334,6 +334,104 @@ def register_recording_routes(
                 failure, status=upload_failure_status(failure["code"])
             )
 
+    async def update_recording(request: web.Request) -> web.Response:
+        from .dataset_metadata import RecordingConflictError
+
+        recorder = _require_recorder(runtime)
+        identifier = request.match_info["filename"]
+        if not request.can_read_body:
+            return web.json_response({"ok": False, "error": "缺少请求体"}, status=400)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "请求体不是有效的 JSON"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"ok": False, "error": "请求体必须为 JSON 对象"}, status=400)
+
+        requested_name = data.get("filename")
+        normalized_requested = requested_name.strip() if isinstance(requested_name, str) else ""
+        if normalized_requested and identifier.endswith((".mcap", ".jsonl")) and not normalized_requested.endswith(Path(identifier).suffix):
+            normalized_requested += Path(identifier).suffix
+        if (
+            normalized_requested
+            and normalized_requested != identifier
+            and runtime.player is not None
+        ):
+            replay_status = runtime.player.status()
+            if (
+                replay_status.get("is_active")
+                or replay_status.get("state") in {"playing", "paused"}
+            ) and replay_status.get("filename") == identifier:
+                return web.json_response(
+                    {"ok": False, "error": "文件正在重放中，请先停止重放后再重命名"},
+                    status=409,
+                )
+
+        try:
+            result = await asyncio.to_thread(recorder.update_recording, identifier, data)
+            return web.json_response(result)
+        except FileNotFoundError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+        except (FileExistsError, RecordingConflictError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            failure = upload_failure(exc)
+            if failure is None:
+                raise
+            return web.json_response(
+                failure, status=upload_failure_status(failure["code"])
+            )
+
+    async def batch_update_recordings(request: web.Request) -> web.Response:
+        from .dataset_metadata import validate_metadata_updates
+
+        recorder = _require_recorder(runtime)
+        if not request.can_read_body:
+            return web.json_response({"ok": False, "error": "缺少请求体"}, status=400)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "请求体不是有效的 JSON"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"ok": False, "error": "请求体必须为 JSON 对象"}, status=400)
+
+        raw_filenames = data.get("filenames")
+        updates = data.get("updates")
+        if not isinstance(raw_filenames, list) or not raw_filenames or len(raw_filenames) > 1000:
+            return web.json_response({"ok": False, "error": "请选择 1–1000 个数据集"}, status=400)
+        if not isinstance(updates, dict) or not updates:
+            return web.json_response({"ok": False, "error": "请至少指定一项需要修改的内容"}, status=400)
+        if "filename" in updates:
+            return web.json_response({"ok": False, "error": "批量修改不支持重命名文件名"}, status=400)
+        try:
+            validate_metadata_updates(updates)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        filenames = list(dict.fromkeys(str(name) for name in raw_filenames if isinstance(name, str) and name))
+        updated = []
+        failed = []
+        for fname in filenames:
+            try:
+                res = await asyncio.to_thread(recorder.update_recording, fname, updates)
+                updated.append(res["id"])
+            except Exception as exc:
+                failure = upload_failure(exc)
+                failed.append(
+                    {
+                        "filename": fname,
+                        "error": str(exc),
+                        **(
+                            {"code": failure["code"], "reason": failure["reason"]}
+                            if failure
+                            else {}
+                        ),
+                    }
+                )
+        return web.json_response({"ok": True, "updated": updated, "failed": failed})
+
     async def batch_delete_recordings(request: web.Request) -> web.Response:
         recorder = _require_recorder(runtime)
         data = await request.json() if request.can_read_body else {}
@@ -414,7 +512,9 @@ def register_recording_routes(
     register_download_routes(app, lambda: runtime.recorder)
     app.router.add_get("/api/recordings/{filename}/download", download_recording)
     app.router.add_get("/api/recordings/{filename}/video", get_dataset_video)
+    app.router.add_patch("/api/recordings/{filename}", update_recording)
     app.router.add_delete("/api/recordings/{filename}", delete_recording)
+    app.router.add_post("/api/recordings/batch-metadata", batch_update_recordings)
     app.router.add_post("/api/recordings/batch-delete", batch_delete_recordings)
     app.router.add_post("/api/recordings/batch-convert-lerobot", batch_convert_lerobot)
     app.router.add_post("/api/recordings/batch-download", batch_download_recordings)

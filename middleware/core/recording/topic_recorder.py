@@ -637,7 +637,9 @@ class TopicRecorder(CorrectionSupport):
                 if destination.exists():
                     raise ValueError('存在未完成的同名 LeRobot 目录，请先检查或删除')
                 metadata = read_recording_metadata(target)
-                task = self.lerobot_task
+                from .dataset_metadata import read_dataset_metadata
+                sidecar_meta = read_dataset_metadata(target)
+                task = sidecar_meta.get('task') if sidecar_meta.get('task') else self.lerobot_task
                 if metadata.get('platform_task'):
                     try:
                         task = json.loads(metadata['platform_task'])['task']['name']
@@ -1219,6 +1221,7 @@ class TopicRecorder(CorrectionSupport):
             else None
         )
 
+        from .dataset_metadata import apply_dataset_metadata
         for p in self.directory.iterdir() if format_filter in {'all', 'mcap'} else ():
             if not p.is_file() or p.name.startswith("."):
                 continue
@@ -1274,7 +1277,7 @@ class TopicRecorder(CorrectionSupport):
             }
             mark = self._read_mark(p)
 
-            files.append({
+            files.append(apply_dataset_metadata({
                 "id": p.name,
                 "filename": p.name,
                 "size_bytes": size,
@@ -1300,7 +1303,7 @@ class TopicRecorder(CorrectionSupport):
                 "marked": bool(mark.get("marked", False)),
                 "marked_at": str(mark.get("marked_at", "")),
                 "mark_source": str(mark.get("mark_source", "")),
-            })
+            }, p))
         from .recording_datasets import inspect_dataset
         datasets_dir = self.directory / "lerobot"
         if format_filter in {'all', 'lerobot'} and datasets_dir.is_dir() and not datasets_dir.is_symlink():
@@ -1311,10 +1314,11 @@ class TopicRecorder(CorrectionSupport):
                     try:
                         marker = dataset / 'meta/info.json'
                         stat = marker.stat()
-                        files.append(self._cached_inspection(
+                        entry = dict(self._cached_inspection(
                             'lerobot:' + str(dataset.resolve()), (stat.st_size, stat.st_mtime_ns),
                             lambda dataset=dataset: inspect_dataset(dataset),
                         ))
+                        files.append(apply_dataset_metadata(entry, dataset))
                     except (OSError, ValueError, KeyError, TypeError):
                         continue  # Incomplete/invalid exports are not ready datasets.
             from .recording_datasets import pending_datasets
@@ -1330,10 +1334,11 @@ class TopicRecorder(CorrectionSupport):
                     try:
                         marker = bundle / 'session.json'
                         stat = marker.stat()
-                        files.append(self._cached_inspection(
+                        entry = dict(self._cached_inspection(
                             'bundle:' + str(bundle.resolve()), (stat.st_size, stat.st_mtime_ns),
                             lambda bundle=bundle: inspect_bundle(bundle),
                         ))
+                        files.append(apply_dataset_metadata(entry, bundle))
                     except (OSError, ValueError, KeyError, TypeError):
                         continue
         if compact_index_queue:
@@ -1357,6 +1362,94 @@ class TopicRecorder(CorrectionSupport):
             if self.takeovers and not self._reusable:
                 self.takeovers.shutdown()
 
+    def update_recording(self, identifier: str, updates: dict[str, Any]) -> dict[str, Any]:
+        """Update editable dataset metadata and/or safely rename a dataset."""
+        from .artifact_state import atomic_json
+        from .dataset_metadata import (
+            RecordingConflictError,
+            merge_metadata_updates,
+            read_dataset_metadata,
+            rename_dataset_files,
+            validate_metadata_updates,
+            validate_new_filename,
+            write_dataset_metadata,
+        )
+        from .export_progress import progress_path, read_progress
+        from .recording_datasets import resolve_dataset
+
+        cleaned = validate_metadata_updates(updates)
+        target = resolve_dataset(self.directory, identifier)
+        resolved_target = target.resolve()
+
+        if self.is_recording() and self.path and resolved_target == self.path.resolve():
+            raise RecordingConflictError("文件正在录制中，不能修改信息")
+        if self._export_state == "exporting" and (
+            (self._lerobot_path and resolved_target == Path(self._lerobot_path).resolve())
+            or (self.path and resolved_target == self.path.resolve())
+        ):
+            raise RecordingConflictError("数据集正在转换中，不能修改信息")
+
+        is_dataset_dir = identifier.startswith(("lerobot:", "bundle:"))
+        if identifier.startswith("lerobot:") and read_progress(progress_path(target)).get("state") == "exporting":
+            raise RecordingConflictError("数据集正在转换中，不能修改信息")
+
+        current_target = target
+        new_identifier = identifier
+        renamed = False
+        if "filename" in cleaned:
+            validated_name, candidate_id = validate_new_filename(identifier, target, cleaned["filename"])
+            if validated_name != target.name:
+                if self._artifacts.is_rename_blocked(target):
+                    raise RecordingConflictError("该数据集已生成上传记录或正在整理，不能重命名文件名；仍可修改任务、标签和备注")
+                old_resolved = resolved_target
+                current_target, new_identifier = rename_dataset_files(
+                    self.directory,
+                    identifier,
+                    target,
+                    validated_name,
+                    mark_path_fn=self._mark_path,
+                    inspection_cache_path_fn=self._inspection_cache_path,
+                )
+                renamed = True
+                if identifier.startswith("lerobot:"):
+                    self._inspection_cache.pop("lerobot:" + str(old_resolved), None)
+                elif identifier.startswith("bundle:"):
+                    self._inspection_cache.pop("bundle:" + str(old_resolved), None)
+                else:
+                    cached = self._inspection_cache.pop("file:" + str(old_resolved), None)
+                    if cached is not None:
+                        self._inspection_cache["file:" + str(current_target.resolve())] = cached
+
+        existing_meta = read_dataset_metadata(current_target)
+        merged_meta = merge_metadata_updates(existing_meta, cleaned, is_dataset_dir=is_dataset_dir)
+        write_dataset_metadata(current_target, merged_meta)
+
+        if "marked" in cleaned and not is_dataset_dir:
+            mark_file = self._mark_path(current_target)
+            if cleaned["marked"]:
+                existing_mark = self._read_mark(current_target)
+                atomic_json(mark_file, {
+                    "recording": False,
+                    "filename": current_target.name,
+                    "path": str(current_target.resolve()),
+                    "marked": True,
+                    "marked_at": existing_mark.get("marked_at") or datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "mark_source": existing_mark.get("mark_source") or "ui",
+                })
+            else:
+                mark_file.unlink(missing_ok=True)
+
+        fmt = "lerobot" if new_identifier.startswith("lerobot:") else "bundle" if new_identifier.startswith("bundle:") else "mcap"
+        items = self.list_recordings(fmt, new_identifier, compact=True)
+        item = items[0] if items else {"id": new_identifier, "filename": current_target.name}
+        return {
+            "ok": True,
+            "id": new_identifier,
+            "previous_id": identifier,
+            "renamed": renamed,
+            "item": item,
+        }
+
     def delete_recording(self, filename: str) -> None:
         from .recording_datasets import resolve_dataset
         target = resolve_dataset(self.directory, filename)
@@ -1371,6 +1464,7 @@ class TopicRecorder(CorrectionSupport):
             self._delete_recording(filename, target)
 
     def _delete_recording(self, filename: str, target: Path) -> None:
+        from .dataset_metadata import remove_dataset_metadata
         if filename.startswith(("lerobot:", "bundle:")):
             from .export_progress import read_progress, progress_path
             if read_progress(progress_path(target)).get('state') == 'exporting':
@@ -1379,6 +1473,7 @@ class TopicRecorder(CorrectionSupport):
             dataset_files(target)  # Refuse symlink-containing trees.
             import shutil
             shutil.rmtree(target)
+            remove_dataset_metadata(target)
             return
         active_path = (
             self.path.resolve()
@@ -1390,6 +1485,7 @@ class TopicRecorder(CorrectionSupport):
         target.unlink()
         if target.suffix == '.mcap':
             takeover_path(target).unlink(missing_ok=True)
+        remove_dataset_metadata(target)
         self._inspection_cache.pop("file:" + str(target.resolve()), None)
         try:
             self._inspection_cache_path(target).unlink()

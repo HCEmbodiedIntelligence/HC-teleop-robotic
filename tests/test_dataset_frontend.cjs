@@ -4,10 +4,44 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 function element(tag='div') {
-  return {tag,children:[],style:{},dataset:{},textContent:'',append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},setAttribute(key,value){this[key]=value;},removeAttribute(key){delete this[key];},remove(){this.removed=true;},showModal(){this.open=true;},pause(){this.paused=true;},load(){this.loaded=true;}};
+  let _text = '';
+  return {
+    tag,children:[],style:{},dataset:{},
+    get textContent(){return _text;},
+    set textContent(v){_text=String(v??'');if(_text==='')this.children=[];},
+    append(...items){this.children.push(...items);},
+    prepend(...items){this.children.unshift(...items);},
+    setAttribute(key,value){this[key]=value;},
+    removeAttribute(key){delete this[key];},
+    remove(){this.removed=true;},
+    showModal(){this.open=true;},
+    close(){this.open=false;},
+    pause(){this.paused=true;},
+    load(){this.loaded=true;},
+  };
 }
 function setup(files=[]) {
-  const fields=Object.fromEntries(['batchDownloadDatasets','datasetDownloadPanel','datasetDownloadJobs','datasetRows','datasetsSummary','datasetsTitle','datasetFormatTabs','datasetMcapCount','datasetLerobotCount','datasetBundleCount','selectAllDatasets','selectedDatasetCount','batchDeleteDatasets','datasetDetailDialog','datasetDetailTitle','datasetDetailMeta','datasetDetailSummary','datasetDetailChannelRows','datasetDetailVideos'].map(key=>['#'+key,element()]));
+  const fields=Object.fromEntries([
+    'batchEditDatasets','batchDownloadDatasets','datasetDownloadPanel','datasetDownloadJobs',
+    'datasetRows','datasetsSummary','datasetsTitle','datasetFormatTabs','datasetMcapCount',
+    'datasetLerobotCount','datasetBundleCount','selectAllDatasets','selectedDatasetCount',
+    'batchDeleteDatasets','datasetDetailDialog','datasetDetailTitle','datasetDetailMeta',
+    'datasetDetailSummary','datasetDetailAnnotations','datasetDetailEditBtn',
+    'datasetDetailChannelRows','datasetDetailVideos',
+    'datasetSearchInput','datasetFilterRobot','datasetFilterStatus','datasetFilterTag',
+    'datasetFilterDuration','datasetFilterTime','datasetDateRange','datasetFilterDateFrom',
+    'datasetFilterDateTo','datasetSortSelect','datasetFilterReset',
+    'datasetEditDialog','datasetEditForm','datasetEditId','datasetEditTitle','datasetEditSubtitle',
+    'datasetEditFilename','datasetEditFilenameHint','datasetEditTask','datasetEditRobot',
+    'datasetEditRobotHint','datasetEditQuality','datasetEditMarked','datasetEditNotes',
+    'datasetEditTagChips','datasetEditTagInput','datasetEditTagSuggestions','datasetEditError',
+    'saveDatasetEdit','datasetTaskSuggestions','datasetRobotSuggestions',
+    'datasetBatchEditDialog','datasetBatchEditForm','datasetBatchEditSubtitle',
+    'datasetBatchTaskMode','datasetBatchTaskValue','datasetBatchRobotMode','datasetBatchRobotValue',
+    'datasetBatchQuality','datasetBatchMarked','datasetBatchAddTags','datasetBatchRemoveTags',
+    'datasetBatchEditError','saveDatasetBatchEdit',
+  ].map(key=>['#'+key,element()]));
+  fields['#datasetSortSelect'].value='time_desc';
   const calls=[];
   const ctx=vm.createContext({document:{querySelector:s=>fields[s]||null,querySelectorAll:()=>[],createElement:element,body:element('body')},confirm:()=>true});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../middleware/core/static/app.js'),'utf8').replace(/init\(\);\s*$/,''),ctx);
@@ -15,7 +49,7 @@ function setup(files=[]) {
   ctx.toast=()=>{};
   return {ctx,fields,calls};
 }
-const dataset={id:'lerobot:teleop test',filename:'teleop test',format:'LeRobot',frames:122,total_episodes:1,fps:15,camera_count:3,tasks:['搬箱子'],channels:[{topic:'observation.state',type:'float32',count:122,rate_hz:15}],videos:[{feature:'observation.images.left',url:'/api/recordings/lerobot%3Ateleop%20test/video?feature=left'}]};
+const dataset={id:'lerobot:teleop test',filename:'teleop test',format:'LeRobot',frames:122,total_episodes:1,fps:15,camera_count:3,tasks:['搬箱子'],task:'搬箱子',channels:[{topic:'observation.state',type:'float32',count:122,rate_hz:15}],videos:[{feature:'observation.images.left',url:'/api/recordings/lerobot%3Ateleop%20test/video?feature=left'}]};
 test('LeRobot list uses opaque identifier, ZIP download and details without ROS replay',async()=>{
   const {ctx,fields,calls}=setup([dataset]);
   await vm.runInContext('loadDatasets()',ctx);
@@ -24,9 +58,9 @@ test('LeRobot list uses opaque identifier, ZIP download and details without ROS 
   assert.match(cells[5].textContent,/122 帧.*1 episode/);
   assert.match(cells[6].textContent,/3 路相机.*15 FPS/);
   const actions=cells[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['详情','下载','选择任务后上传','删除']);
-  assert.equal(actions[1].href,'/api/recordings/lerobot%3Ateleop%20test/download?with_tags=1');
-  assert.equal(actions[1].download,''); // Server Content-Disposition selects the ZIP filename.
+  assert.deepEqual(actions.map(el=>el.textContent),['详情','编辑','下载','选择任务后上传','删除']);
+  assert.equal(actions[2].href,'/api/recordings/lerobot%3Ateleop%20test/download?with_tags=1');
+  assert.equal(actions[2].download,''); // Server Content-Disposition selects the ZIP filename.
   await actions.find(el=>el.textContent==='删除').onclick();
   assert.equal(calls.find(call=>call.options?.method==='DELETE').url,'/api/recordings/lerobot%3Ateleop%20test');
 });
@@ -39,14 +73,19 @@ test('LeRobot details show aligned frame statistics, task, features and camera p
   assert.equal(fields['#datasetDetailChannelRows'].children[0].children[2].textContent,'122 帧');
   assert.equal(fields['#datasetDetailVideos'].hidden,false);
   assert.equal(fields['#datasetDetailVideos'].children[1].src,dataset.videos[0].url);
+  // Detail dialog edit button hands off cleanly to the edit dialog.
+  fields['#datasetDetailEditBtn'].onclick();
+  assert.equal(fields['#datasetDetailDialog'].open,false);
+  assert.equal(fields['#datasetEditDialog'].open,true);
+  assert.equal(fields['#datasetEditFilename'].value,dataset.filename);
 });
 test('MCAP keeps replay and a server-named download with optional tags',async()=>{
   const {ctx,fields}=setup([{filename:'test.mcap',format:'MCAP',message_count:12,channels:[{topic:'/clock'}]}]);
   await vm.runInContext('loadDatasets()',ctx);
   const actions=fields['#datasetRows'].children[0].children[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','下载','选择任务后上传','删除']);
-  assert.equal(actions[2].href,'/api/recordings/test.mcap/download?with_tags=1');
-  assert.equal(actions[2].download,''); // Tagged MCAP may be returned as a ZIP.
+  assert.deepEqual(actions.map(el=>el.textContent),['重放','详情','编辑','下载','选择任务后上传','删除']);
+  assert.equal(actions[3].href,'/api/recordings/test.mcap/download?with_tags=1');
+  assert.equal(actions[3].download,''); // Tagged MCAP may be returned as a ZIP.
 });
 
 test('pending export appears immediately with stage, percentage and counters; operations disabled',async()=>{
@@ -59,9 +98,9 @@ test('pending export appears immediately with stage, percentage and counters; op
   assert.match(progress.children[0].textContent,/编码相机视频.*62%.*1 \/ 3 路视频/);
   assert.equal(progress.children[1].value,62);
   const actions=cells[9].children[0].children;
-  assert.deepEqual(actions.map(el=>el.textContent),['下载','选择任务后上传','删除']);
+  assert.deepEqual(actions.map(el=>el.textContent),['编辑','下载','选择任务后上传','删除']);
   assert.ok(actions.every(el=>el.disabled));
-  assert.equal(actions[0].href,undefined);
+  assert.equal(actions[1].href,undefined);
 });
 test('failed export exposes reason and cannot download, delete or open details',async()=>{
   const {ctx,fields}=setup([{...dataset,is_current:false,export_state:'error',export_progress:{state:'error',error:'编码失败'}}]);
@@ -114,7 +153,7 @@ test('historical recording opens task selection without asking for artifact IDs'
 test('row download starts a tracked single job without navigating or fetching a ZIP', async()=>{
   const {ctx,fields,calls}=setup([dataset]);
   await vm.runInContext('loadDatasets()',ctx);
-  const download=fields['#datasetRows'].children[0].children[9].children[0].children[1];
+  const download=fields['#datasetRows'].children[0].children[9].children[0].children[2];
   ctx.api=async(url,options)=>{calls.push({url,options});return {job:{id:'single-1',state:'queued',selection_count:1}};};
   let prevented=false;
   await download.onclick({preventDefault(){prevented=true;}});
@@ -313,4 +352,130 @@ test('completed job automatically closes its card and hides the panel after 5 se
   assert.equal(frame.removed,true);
   assert.equal(fields['#datasetDownloadPanel'].hidden,true);
   assert.deepEqual(JSON.parse(saved),[]);
+});
+
+test('dataset search, multi-facet filters, sorting and reset filter rows cleanly',async()=>{
+  const nowSec=Math.floor(Date.UTC(2026,10,26,12,0,0)/1000);
+  const items=[
+    {id:'a.mcap',filename:'pick_box_01.mcap',format:'MCAP',profile_id:'x1',profile_display_name:'HC-X1',size_bytes:5000,size_human:'5.0 KB',duration_sec:8,duration_human:'8.0s',message_count:200,timestamp:nowSec-3600,created_at:'2026-11-26 11:00:00',task:'搬运箱子',tags:['高质量','双臂'],notes:'流畅抓取',quality:'good',marked:true},
+    {id:'b.mcap',filename:'pour_water_02.mcap',format:'MCAP',profile_id:'openarm',profile_display_name:'OpenArm',size_bytes:25000,size_human:'25.0 KB',duration_sec:45,duration_human:'45.0s',message_count:900,timestamp:nowSec-3*86400,created_at:'2026-11-23 12:00:00',task:'倒水',tags:['待复查'],notes:'左手轻微抖动',quality:'review',marked:false},
+    {id:'c.mcap',filename:'legacy_03.mcap',format:'MCAP',profile_id:'',profile_display_name:'',size_bytes:1000,size_human:'1.0 KB',duration_sec:90,duration_human:'1m 30s',message_count:50,timestamp:nowSec-40*86400,created_at:'2026-10-17 12:00:00',task:'',tags:[],notes:'',quality:'discard',marked:false},
+  ];
+  const {ctx,fields}=setup(items);
+  await vm.runInContext('loadDatasets()',ctx);
+  assert.equal(fields['#datasetRows'].children.length,3);
+  assert.equal(fields['#datasetFilterReset'].hidden,true);
+  // Multi-keyword search across filename, task, notes and robot.
+  const searchRes=vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, query: 'x1 流畅'}, ${nowSec*1000})`,ctx);
+  assert.deepEqual(searchRes.map(x=>x.id),['a.mcap']);
+  // Filter by robot (including unknown legacy).
+  const unknownRobot=vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, robot: '__unknown__'}, ${nowSec*1000})`,ctx);
+  assert.deepEqual(unknownRobot.map(x=>x.id),['c.mcap']);
+  // Filter by status / quality / tag / duration / time.
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, status: 'marked'}, ${nowSec*1000})`,ctx).map(x=>x.id),['a.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, status: 'quality:review'}, ${nowSec*1000})`,ctx).map(x=>x.id),['b.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, tag: '双臂'}, ${nowSec*1000})`,ctx).map(x=>x.id),['a.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, duration: 'medium'}, ${nowSec*1000})`,ctx).map(x=>x.id),['b.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, duration: 'long'}, ${nowSec*1000})`,ctx).map(x=>x.id),['c.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, time: '7d'}, ${nowSec*1000})`,ctx).map(x=>x.id),['a.mcap','b.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, time: 'custom', dateFrom: '2026-11-20', dateTo: '2026-11-25'}, ${nowSec*1000})`,ctx).map(x=>x.id),['b.mcap']);
+  // Sort by size descending and name ascending.
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, sort: 'size_desc'}, ${nowSec*1000})`,ctx).map(x=>x.id),['b.mcap','a.mcap','c.mcap']);
+  assert.deepEqual(vm.runInContext(`filterAndSortDatasets(datasetsData.files, {...datasetFilters, sort: 'name_asc'}, ${nowSec*1000})`,ctx).map(x=>x.id),['c.mcap','a.mcap','b.mcap']);
+  // Empty filter result shows reset button and resetting restores all rows.
+  vm.runInContext("datasetFilters.query='不存在的关键字'; renderDatasetTable();",ctx);
+  assert.equal(fields['#datasetRows'].children.length,1);
+  assert.match(fields['#datasetRows'].children[0].children[0].children[0].textContent,/没有符合当前搜索或筛选条件/);
+  assert.equal(fields['#datasetFilterReset'].hidden,false);
+  fields['#datasetRows'].children[0].children[0].children[1].onclick();
+  assert.equal(fields['#datasetRows'].children.length,3);
+  assert.equal(fields['#datasetFilterReset'].hidden,true);
+});
+
+test('quick star toggle and tag chip click work directly from dataset rows',async()=>{
+  const item={id:'run_1.mcap',filename:'run_1.mcap',format:'MCAP',size_bytes:100,size_human:'100 B',tags:['高质量'],marked:false};
+  const {ctx,fields,calls}=setup([item]);
+  await vm.runInContext('loadDatasets()',ctx);
+  const nameCell=fields['#datasetRows'].children[0].children[1];
+  const starBtn=nameCell.children[0].children[0];
+  assert.equal(starBtn.textContent,'☆');
+  ctx.api=async(url,options)=>{
+    calls.push({url,options});
+    return {ok:true,id:'run_1.mcap',item:{...item,marked:true}};
+  };
+  await starBtn.onclick({});
+  const patch=calls.find(c=>c.options?.method==='PATCH');
+  assert.equal(patch.url,'/api/recordings/run_1.mcap');
+  assert.deepEqual(JSON.parse(patch.options.body),{marked:true});
+  assert.equal(fields['#datasetRows'].children[0].children[1].children[0].children[0].textContent,'★');
+  // Clicking tag chip filters by that tag; clicking again clears.
+  const tagChip=fields['#datasetRows'].children[0].children[1].children[1].children[0];
+  tagChip.onclick({});
+  assert.equal(vm.runInContext('datasetFilters.tag',ctx),'高质量');
+  fields['#datasetRows'].children[0].children[1].children[1].children[0].onclick({});
+  assert.equal(vm.runInContext('datasetFilters.tag',ctx),'');
+});
+
+test('single edit dialog saves metadata without sending unchanged filename, and supports rename',async()=>{
+  const item={id:'old.mcap',filename:'old.mcap',format:'MCAP',profile_id:'x1',task:'旧任务',tags:['初始'],notes:'旧备注',quality:'',marked:false,details_available:true};
+  const {ctx,fields,calls}=setup([item]);
+  await vm.runInContext('loadDatasets()',ctx);
+  const editBtn=fields['#datasetRows'].children[0].children[9].children[0].children.find(b=>b.textContent==='编辑');
+  editBtn.onclick();
+  assert.equal(fields['#datasetEditDialog'].open,true);
+  assert.equal(fields['#datasetEditFilename'].value,'old.mcap');
+  // Edit metadata without changing filename.
+  fields['#datasetEditTask'].value='双臂装配';
+  fields['#datasetEditRobot'].value='X1-一号机';
+  fields['#datasetEditQuality'].value='good';
+  fields['#datasetEditMarked'].checked=true;
+  fields['#datasetEditNotes'].value='动作平稳';
+  fields['#datasetEditTagInput'].value='优选, 双臂';
+  ctx.api=async(url,options)=>{
+    calls.push({url,options});
+    if(options?.method==='PATCH') return {ok:true,id:'old.mcap',renamed:false,item:{...item,task:'双臂装配',robot_label:'X1-一号机',quality:'good',marked:true,tags:['初始','优选','双臂'],notes:'动作平稳'}};
+    return {files:[{...item,task:'双臂装配'}]};
+  };
+  await vm.runInContext('saveDatasetEdit()',ctx);
+  const patchCall=calls.find(c=>c.options?.method==='PATCH');
+  assert.equal(patchCall.url,'/api/recordings/old.mcap');
+  const sent=JSON.parse(patchCall.options.body);
+  assert.equal('filename' in sent,false);
+  assert.deepEqual(sent,{task:'双臂装配',robot_label:'X1-一号机',quality:'good',marked:true,tags:['初始','优选','双臂'],notes:'动作平稳'});
+  assert.equal(fields['#datasetEditDialog'].open,false);
+
+  // Reopen and rename filename.
+  ctx.item=item;
+  vm.runInContext('openDatasetEditDialog(item)',ctx);
+  fields['#datasetEditFilename'].value='renamed.mcap';
+  calls.length=0;
+  await vm.runInContext('saveDatasetEdit()',ctx);
+  const renamePatch=calls.find(c=>c.options?.method==='PATCH');
+  assert.equal(JSON.parse(renamePatch.options.body).filename,'renamed.mcap');
+});
+
+test('batch edit dialog submits only modified fields to batch-metadata endpoint',async()=>{
+  const {ctx,fields,calls}=setup([dataset]);
+  ctx.document.querySelectorAll=s=>s.includes(':checked') ? [{dataset:{filename:'a.mcap'}},{dataset:{filename:'b.mcap'}}] : [];
+  vm.runInContext('openDatasetBatchEditDialog()',ctx);
+  assert.equal(fields['#datasetBatchEditDialog'].open,true);
+  fields['#datasetBatchTaskMode'].value='set';
+  fields['#datasetBatchTaskValue'].value='抓取瓶子';
+  fields['#datasetBatchQuality'].value='good';
+  fields['#datasetBatchMarked'].value='true';
+  fields['#datasetBatchAddTags'].value='批量标签, 合格';
+  fields['#datasetBatchRemoveTags'].value='草稿';
+  ctx.api=async(url,options)=>{
+    calls.push({url,options});
+    if(options?.method==='POST') return {ok:true,updated:['a.mcap','b.mcap'],failed:[]};
+    return {files:[]};
+  };
+  await vm.runInContext('saveDatasetBatchEdit()',ctx);
+  const post=calls.find(c=>c.options?.method==='POST');
+  assert.equal(post.url,'/api/recordings/batch-metadata');
+  assert.deepEqual(JSON.parse(post.options.body),{
+    filenames:['a.mcap','b.mcap'],
+    updates:{task:'抓取瓶子',quality:'good',marked:true,add_tags:['批量标签','合格'],remove_tags:['草稿']},
+  });
+  assert.equal(fields['#datasetBatchEditDialog'].open,false);
 });

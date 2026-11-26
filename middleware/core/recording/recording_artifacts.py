@@ -188,6 +188,17 @@ class RecordingArtifacts:
             item['upload_error'] = job.get('error')
         return items
 
+    def is_rename_blocked(self, target) -> bool:
+        target = Path(target).resolve()
+        with self.lock:
+            for job in self.jobs.values():
+                for kind, key in (('hc_mcap', 'source'), ('hc_lerobot', 'destination')):
+                    if Path(job[key]).resolve() != target:
+                        continue
+                    if job['artifacts'].get(kind) != 'deleted':
+                        return True
+        return False
+
     @contextmanager
     def deleting(self, target):
         from contextlib import ExitStack

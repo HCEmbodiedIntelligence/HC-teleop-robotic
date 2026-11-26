@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>HC Teleop Middleware</title>
-  <link rel="stylesheet" href="/static/styles.css?v=30-replay-controls">
+  <link rel="stylesheet" href="/static/styles.css?v=31-dataset-manage">
   <link rel="stylesheet" href="/static/diagnostic_logs.css?v=4-compact">
 </head>
 <body>
@@ -174,8 +174,64 @@
           <button type="button" data-dataset-format="bundle" role="tab" aria-selected="false" hidden>MCAP＋MP4 <span id="datasetBundleCount">0</span></button>
         </div>
 
+        <div class="dataset-filter-bar" id="datasetFilterBar" role="search" aria-label="数据集搜索与筛选">
+          <div class="dataset-search-wrap">
+            <input id="datasetSearchInput" type="search" placeholder="搜索文件名、任务、标签、备注、机器人…" aria-label="搜索数据集" autocomplete="off">
+          </div>
+          <select id="datasetFilterRobot" aria-label="按机器人筛选">
+            <option value="">全部机器人</option>
+          </select>
+          <select id="datasetFilterStatus" aria-label="按状态或质量筛选">
+            <option value="">全部状态</option>
+            <option value="marked">★ 已星标</option>
+            <option value="unmarked">未星标</option>
+            <option value="quality:good">质量：合格</option>
+            <option value="quality:review">质量：待复查</option>
+            <option value="quality:discard">质量：废弃</option>
+            <option value="quality:unset">质量：未评估</option>
+            <option value="annotated">含任务 / 标签 / 备注</option>
+            <option value="ready">就绪</option>
+            <option value="active">正在写入 / 转换中</option>
+            <option value="error">异常 / 失败</option>
+          </select>
+          <select id="datasetFilterTag" aria-label="按标签筛选">
+            <option value="">全部标签</option>
+          </select>
+          <select id="datasetFilterDuration" aria-label="按时长筛选">
+            <option value="">全部时长</option>
+            <option value="short">短片段 (&lt; 10s)</option>
+            <option value="medium">中等 (10s–60s)</option>
+            <option value="long">长片段 (≥ 60s)</option>
+          </select>
+          <select id="datasetFilterTime" aria-label="按时间范围筛选">
+            <option value="">全部时间</option>
+            <option value="today">今天</option>
+            <option value="7d">近 7 天</option>
+            <option value="30d">近 30 天</option>
+            <option value="custom">自定义日期</option>
+          </select>
+          <div class="dataset-date-range" id="datasetDateRange" hidden>
+            <input id="datasetFilterDateFrom" type="date" aria-label="开始日期">
+            <span>至</span>
+            <input id="datasetFilterDateTo" type="date" aria-label="结束日期">
+          </div>
+          <select id="datasetSortSelect" aria-label="排序方式">
+            <option value="time_desc">时间：最新优先</option>
+            <option value="time_asc">时间：最早优先</option>
+            <option value="name_asc">文件名：A → Z</option>
+            <option value="name_desc">文件名：Z → A</option>
+            <option value="size_desc">大小：从大到小</option>
+            <option value="size_asc">大小：从小到大</option>
+            <option value="duration_desc">时长：从长到短</option>
+            <option value="duration_asc">时长：从短到长</option>
+            <option value="count_desc">消息 / 帧数：从多到少</option>
+          </select>
+          <button id="datasetFilterReset" type="button" class="btn-sm" hidden>重置筛选</button>
+        </div>
+
         <div class="dataset-sticky-tools">
           <div class="dataset-batch-toolbar" role="group" aria-label="批量数据集操作">
+            <button id="batchEditDatasets" type="button" disabled>批量编辑</button>
             <button id="batchConvertLerobot" type="button" disabled>批量转为 LeRobot</button>
             <button id="batchUploadDatasets" type="button" disabled>批量上传</button>
             <button id="batchDownloadDatasets" type="button" disabled>批量下载</button>
@@ -350,6 +406,7 @@
           <button class="dialog-close" type="button" onclick="document.getElementById('datasetDetailDialog').close()">×</button>
         </div>
         <div class="profile-summary" id="datasetDetailSummary" style="margin-top:14px;grid-template-columns:repeat(4,1fr);"></div>
+        <div id="datasetDetailAnnotations" class="dataset-detail-annotations" hidden></div>
         <div class="table-wrap" style="margin-top:16px;max-height:260px;">
           <table>
             <thead>
@@ -360,7 +417,124 @@
         </div>
         <div id="datasetDetailVideos" hidden style="margin-top:16px;"></div>
         <div class="dialog-actions">
+          <button type="button" id="datasetDetailEditBtn">编辑信息</button>
           <button type="button" onclick="document.getElementById('datasetDetailDialog').close()">关闭</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="datasetEditDialog">
+      <form id="datasetEditForm" style="max-width:620px;">
+        <div class="dialog-title">
+          <div>
+            <h2 id="datasetEditTitle">编辑数据集信息</h2>
+            <p id="datasetEditSubtitle">修改文件名、任务描述、标签、质量评估与备注</p>
+          </div>
+          <button type="button" class="dialog-close" id="closeDatasetEdit" aria-label="关闭">×</button>
+        </div>
+        <input type="hidden" id="datasetEditId">
+        <div class="form-grid" style="margin-top:14px;">
+          <label>文件名
+            <input id="datasetEditFilename" required maxlength="200" placeholder="输入文件名">
+            <small id="datasetEditFilenameHint">支持重命名；不修改文件名时仅更新元信息。</small>
+          </label>
+          <label>任务 / 动作描述
+            <input id="datasetEditTask" list="datasetTaskSuggestions" maxlength="200" placeholder="例如：双臂搬运箱子">
+            <datalist id="datasetTaskSuggestions"></datalist>
+            <small>用于检索分类，MCAP 转为 LeRobot 时也将沿用此描述。</small>
+          </label>
+          <label>机器人名称
+            <input id="datasetEditRobot" list="datasetRobotSuggestions" maxlength="100" placeholder="留空则使用自动识别结果">
+            <datalist id="datasetRobotSuggestions"></datalist>
+            <small id="datasetEditRobotHint">可为旧数据补充或自定义机器人显示名。</small>
+          </label>
+          <label>数据质量
+            <select id="datasetEditQuality">
+              <option value="">未评估</option>
+              <option value="good">合格</option>
+              <option value="review">待复查</option>
+              <option value="discard">废弃</option>
+            </select>
+            <small>便于按质量状态筛选和清理低质量片段。</small>
+          </label>
+        </div>
+        <div class="dataset-tag-editor">
+          <span class="dataset-field-label">标签</span>
+          <div id="datasetEditTagChips" class="dataset-tag-chips"></div>
+          <div class="dataset-tag-input-row">
+            <input id="datasetEditTagInput" type="text" maxlength="40" placeholder="输入标签后按 Enter 或点击添加（支持逗号分隔）">
+            <button type="button" id="datasetEditAddTagBtn" class="btn-sm">添加</button>
+          </div>
+          <div id="datasetEditTagSuggestions" class="dataset-tag-suggestions"></div>
+        </div>
+        <label class="toggle" style="margin-top:14px;">
+          <input type="checkbox" id="datasetEditMarked">
+          <span></span>★ 星标标记（重点数据）
+        </label>
+        <label style="margin-top:12px;">备注
+          <textarea id="datasetEditNotes" rows="3" maxlength="2000" placeholder="记录采集环境、特殊情况、动作细节或质检意见…"></textarea>
+        </label>
+        <div id="datasetEditError" class="dialog-error" role="alert"></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancelDatasetEdit">取消</button>
+          <button type="submit" id="saveDatasetEdit" class="primary">保存修改</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="datasetBatchEditDialog">
+      <form id="datasetBatchEditForm" style="max-width:600px;">
+        <div class="dialog-title">
+          <div>
+            <h2>批量编辑数据集</h2>
+            <p id="datasetBatchEditSubtitle">将以下设置应用到选中的数据集（保持“不修改”的项不会变动）</p>
+          </div>
+          <button type="button" class="dialog-close" id="closeDatasetBatchEdit" aria-label="关闭">×</button>
+        </div>
+        <div class="form-grid" style="margin-top:14px;">
+          <label>任务 / 动作描述
+            <select id="datasetBatchTaskMode">
+              <option value="keep">不修改</option>
+              <option value="set">设为指定内容</option>
+              <option value="clear">清空任务描述</option>
+            </select>
+            <input id="datasetBatchTaskValue" list="datasetTaskSuggestions" maxlength="200" placeholder="输入任务描述" hidden style="margin-top:8px;">
+          </label>
+          <label>机器人名称
+            <select id="datasetBatchRobotMode">
+              <option value="keep">不修改</option>
+              <option value="set">设为指定名称</option>
+              <option value="clear">恢复自动识别</option>
+            </select>
+            <input id="datasetBatchRobotValue" list="datasetRobotSuggestions" maxlength="100" placeholder="输入机器人显示名" hidden style="margin-top:8px;">
+          </label>
+          <label>数据质量
+            <select id="datasetBatchQuality">
+              <option value="keep">不修改</option>
+              <option value="">未评估</option>
+              <option value="good">合格</option>
+              <option value="review">待复查</option>
+              <option value="discard">废弃</option>
+            </select>
+          </label>
+          <label>星标标记
+            <select id="datasetBatchMarked">
+              <option value="keep">不修改</option>
+              <option value="true">设为 ★ 已星标</option>
+              <option value="false">取消星标</option>
+            </select>
+          </label>
+          <label>追加标签（逗号分隔）
+            <input id="datasetBatchAddTags" maxlength="300" placeholder="例如：高质量, 双臂">
+            <small>保留原标签，仅追加新标签。</small>
+          </label>
+          <label>移除标签（逗号分隔）
+            <input id="datasetBatchRemoveTags" maxlength="300" placeholder="例如：待复查, 测试">
+            <small>从选中数据集中移除指定标签。</small>
+          </label>
+        </div>
+        <div id="datasetBatchEditError" class="dialog-error" role="alert"></div>
+        <div class="dialog-actions">
+          <button type="button" id="cancelDatasetBatchEdit">取消</button>
+          <button type="submit" id="saveDatasetBatchEdit" class="primary">应用修改</button>
         </div>
       </form>
     </dialog>
@@ -488,6 +662,6 @@
   </dialog>
   <script src="/static/platform_panel.js?v=16-format-sync"></script>
   <script src="/static/diagnostic_logs.js?v=7-compact"></script>
-  <script src="/static/app.js?v=replay-home-state-20261120"></script>
+  <script src="/static/app.js?v=dataset-manage-20261126"></script>
 </body>
 </html>

@@ -1088,14 +1088,270 @@ body.marquee-selecting * {
   -ms-user-select: none !important;
 }
 
-#datasets ::selection {
+#datasets .table-wrap ::selection {
   background: transparent !important;
   color: inherit !important;
 }
 
-#datasets *::-moz-selection {
+#datasets .table-wrap *::-moz-selection {
   background: transparent !important;
   color: inherit !important;
+}
+
+
+/* 数据集搜索、筛选栏与元信息标签样式 */
+.dataset-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: #fafafa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+}
+.dataset-search-wrap {
+  flex: 1 1 240px;
+  min-width: 190px;
+}
+.dataset-filter-bar input,
+.dataset-filter-bar select {
+  margin: 0;
+  min-height: 32px;
+  padding: 5px 10px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  border-color: #d9d9d9;
+  background: #fff;
+}
+.dataset-filter-bar select {
+  width: auto;
+  max-width: 185px;
+}
+.dataset-date-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dataset-date-range input[type="date"] {
+  width: auto;
+}
+.dataset-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dataset-star-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: #bfbfbf;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dataset-star-btn:hover:not(:disabled) {
+  background: #fffbe6;
+  border-color: transparent;
+  color: #faad14;
+}
+.dataset-star-btn.active {
+  color: #faad14;
+}
+.dataset-star-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dataset-meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  padding-left: 28px;
+  font-size: 11px;
+}
+.dataset-task-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 260px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: #f0f5ff;
+  border: 1px solid #d6e4ff;
+  color: #1d39c4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dataset-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 20px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid #d9d9d9;
+  background: #fafafa;
+  color: #595959;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: none;
+  cursor: pointer;
+}
+.dataset-tag-chip:hover {
+  border-color: #91caff;
+  background: #e6f4ff;
+  color: #0958d9;
+}
+.dataset-tag-chip.active {
+  border-color: #1677ff;
+  background: #e6f4ff;
+  color: #0958d9;
+  font-weight: 500;
+}
+.dataset-note-preview {
+  display: inline-block;
+  max-width: 260px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dataset-status-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.dataset-quality-tag {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid #d9d9d9;
+  white-space: nowrap;
+}
+.dataset-quality-tag.quality-good {
+  color: #237804;
+  border-color: #b7eb8f;
+  background: #f6ffed;
+}
+.dataset-quality-tag.quality-review {
+  color: #ad6800;
+  border-color: #ffe58f;
+  background: #fffbe6;
+}
+.dataset-quality-tag.quality-discard {
+  color: #cf1322;
+  border-color: #ffccc7;
+  background: #fff2f0;
+}
+.dataset-tag-editor {
+  margin-top: 12px;
+}
+.dataset-field-label {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.dataset-tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  margin-bottom: 8px;
+}
+.dataset-tag-chip-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: #e6f4ff;
+  border: 1px solid #91caff;
+  color: #0958d9;
+  font-size: 12px;
+}
+.dataset-tag-chip-edit button {
+  padding: 0 2px;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #0958d9;
+  font-size: 14px;
+  line-height: 1;
+}
+.dataset-tag-chip-edit button:hover {
+  color: #cf1322;
+  background: transparent;
+}
+.dataset-tag-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.dataset-tag-input-row input {
+  margin: 0;
+  flex: 1;
+}
+.dataset-tag-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.dataset-detail-annotations {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  font-size: 12px;
+  display: grid;
+  gap: 8px;
+}
+.dataset-detail-annotations-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.dataset-detail-annotations-label {
+  color: var(--muted);
+  min-width: 44px;
+}
+.dataset-detail-notes {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  line-height: 1.55;
+}
+@media (max-width: 680px) {
+  .dataset-filter-bar select {
+    flex: 1 1 140px;
+    max-width: none;
+  }
+  .dataset-meta-line {
+    padding-left: 0;
+  }
 }
 
 

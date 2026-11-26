@@ -384,8 +384,8 @@ class TaskRecorder(CorrectionSupport):
             job = self.jobs.get(identity)
             if job is None:
                 job = next((j for j in self.jobs.values() if Path(j['path']).name == identity
-                            or 'lerobot:' + Path(j['path']).stem == identity
-                            or 'bundle:' + Path(j['path']).stem == identity
+                            or 'lerobot:' + (Path(j['dataset_path']).name if j.get('dataset_path') else Path(j['path']).stem) == identity
+                            or 'bundle:' + (Path(j['bundle_path']).name if j.get('bundle_path') else Path(j['path']).stem) == identity
                             or any(artifact_identity(j, fmt) == identity for fmt in job_artifact_formats(j))), None)
             if job is None:
                 job = self.adopt_history(identity)
@@ -671,8 +671,10 @@ class TaskRecorder(CorrectionSupport):
             for job in self.jobs.values():
                 source = Path(job['path'])
                 by_identifier[source.name] = job
-                by_identifier['lerobot:' + source.stem] = job
-                by_identifier['bundle:' + source.stem] = job
+                lerobot_name = Path(job['dataset_path']).name if job.get('dataset_path') else source.stem
+                by_identifier['lerobot:' + lerobot_name] = job
+                bundle_name = Path(job['bundle_path']).name if job.get('bundle_path') else source.stem
+                by_identifier['bundle:' + bundle_name] = job
             for item in files:
                 identifier = item.get('id') or item['filename']
                 job = by_identifier.get(identifier)
@@ -686,12 +688,84 @@ class TaskRecorder(CorrectionSupport):
                     item['platform_recording'] = projection
         return files
 
+    def update_recording(self, identifier, updates):
+        from ..recording.dataset_metadata import (
+            RecordingConflictError,
+            validate_metadata_updates,
+            validate_new_filename,
+        )
+        from ..recording.recording_datasets import resolve_dataset
+
+        cleaned = validate_metadata_updates(updates)
+        with self.lock:
+            target = resolve_dataset(self.directory, identifier)
+            resolved_target = target.resolve()
+            fmt = 'lerobot' if identifier.startswith('lerobot:') else 'mcap_mp4' if identifier.startswith('bundle:') else 'mcap'
+            job = next((
+                j for j in self.jobs.values()
+                if Path(j['path']).name == identifier
+                or 'lerobot:' + (Path(j['dataset_path']).name if j.get('dataset_path') else Path(j['path']).stem) == identifier
+                or 'bundle:' + (Path(j['bundle_path']).name if j.get('bundle_path') else Path(j['path']).stem) == identifier
+            ), None)
+            if job and job['state'] in ('starting', 'armed', 'recording', 'stopping'):
+                raise RecordingConflictError('录制尚未结束，不能修改信息')
+
+            wants_rename = False
+            new_name = target.name
+            if 'filename' in cleaned:
+                new_name, _ = validate_new_filename(identifier, target, cleaned['filename'])
+                wants_rename = new_name != target.name
+
+            if wants_rename:
+                for queued_job in self.platform.upload.queue.jobs():
+                    root = Path(queued_job['root'])
+                    if root.resolve() == resolved_target or any(
+                        (root / a['path']).resolve() == resolved_target
+                        for a in queued_job['manifest']['assets']
+                    ):
+                        raise RecordingConflictError('录制仍被上传队列引用，不能重命名文件名；仍可修改任务、标签和备注')
+                if job:
+                    if job['state'] in ('finalizing', 'upload_pending') or job['recording_id'] in self.pending:
+                        raise RecordingConflictError('录制仍在整理中，不能重命名文件名；仍可修改任务、标签和备注')
+                    if job.get('binding'):
+                        raise RecordingConflictError('录制已绑定平台上传任务，不能重命名文件名；仍可修改任务、标签和备注')
+                    ids = {artifact_identity(job, f) for f in job_artifact_formats(job)}
+                    queued = any(j.get('local_recording_id') in ids for j in self.platform.upload.queue.jobs())
+                    if queued:
+                        raise RecordingConflictError('录制有上传记录，不能重命名文件名；仍可修改任务、标签和备注')
+
+            result = self.recorder.update_recording(identifier, updates)
+            if result.get('renamed') and job:
+                new_id = result['id']
+                if new_id.startswith('lerobot:'):
+                    job['dataset_path'] = str((self.directory / 'lerobot' / new_name).resolve())
+                elif new_id.startswith('bundle:'):
+                    job['bundle_path'] = str((self.directory / 'bundles' / new_name).resolve())
+                else:
+                    job['path'] = str((self.directory / new_name).resolve())
+                    job['chosen_filename'] = new_name
+                descriptor_path = self.platform.upload.state_dir / (artifact_identity(job, fmt) + '.json')
+                if descriptor_path.is_file() and not descriptor_path.is_symlink():
+                    try:
+                        descriptor = read_json(descriptor_path)
+                        if not descriptor.get('binding_id'):
+                            descriptor_path.unlink(missing_ok=True)
+                    except (OSError, ValueError, TypeError):
+                        pass
+                self.save(job)
+
+        list_fmt = 'lerobot' if result['id'].startswith('lerobot:') else 'bundle' if result['id'].startswith('bundle:') else 'mcap'
+        items = self.list_recordings(list_fmt, result['id'], compact=True)
+        if items:
+            result['item'] = items[0]
+        return result
+
     def delete_recording(self, filename):
         with self.lock:
             from ..recording.recording_datasets import resolve_dataset
             job = next((job for job in self.jobs.values() if Path(job['path']).name == filename
-                        or 'lerobot:' + Path(job['path']).stem == filename
-                        or 'bundle:' + Path(job['path']).stem == filename), None)
+                        or 'lerobot:' + (Path(job['dataset_path']).name if job.get('dataset_path') else Path(job['path']).stem) == filename
+                        or 'bundle:' + (Path(job['bundle_path']).name if job.get('bundle_path') else Path(job['path']).stem) == filename), None)
             try:
                 target = resolve_dataset(self.directory, filename)
             except FileNotFoundError:

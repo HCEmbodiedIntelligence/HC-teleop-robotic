@@ -1334,6 +1334,23 @@ let datasetLoading = false;
 let datasetPollTimer = null;
 let datasetFormat = 'mcap';
 const datasetFormatLabels = {mcap: 'MCAP', lerobot: 'LeRobot', bundle: 'MCAP＋MP4'};
+const DATASET_QUALITY_LABELS = {good: '合格', review: '待复查', discard: '废弃'};
+const DATASET_PRESET_TAGS = ['高质量', '待复查', 'DAgger', '测试', '异常'];
+const datasetFilters = {
+  query: '',
+  robot: '',
+  status: '',
+  tag: '',
+  duration: '',
+  time: '',
+  dateFrom: '',
+  dateTo: '',
+  sort: 'time_desc',
+};
+let datasetEditTags = [];
+let currentEditDataset = null;
+let currentDetailDataset = null;
+let batchEditTargets = [];
 
 // Job metadata stays small; archives are streamed by the browser, never held in JS memory.
 const datasetDownloadJobs = new Map();
@@ -1623,18 +1640,22 @@ async function fetchDatasetDetails(file) {
 
 function datasetSummaryValues(file) {
   const profile = file.profile_display_name || file.profile_id || file.robot_name || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
+  const qualityLabel = DATASET_QUALITY_LABELS[file.quality] || '';
   if (isLeRobotDataset(file)) return [
     ['机器人', profile], ['数据大小', file.size_human || '--'],
     ['时长', file.duration_human || '--'], ['总帧数', String(file.frames ?? file.total_frames ?? 0)],
     ['Episode', String(file.total_episodes ?? 0)], ['采样帧率', `${file.fps || 0} FPS`],
     ['相机', `${file.camera_count || 0} 路`],
     ['任务', (file.tasks || (file.task ? [file.task] : [])).join('；') || '--'],
+    ...(qualityLabel ? [['数据质量', qualityLabel]] : []),
   ];
   return [
     ['机器人', profile], ['文件大小', file.size_human || '--'],
     ['录制时长', file.duration_human || '--'],
     ['总消息数', file.message_count ? `${file.message_count.toLocaleString()} 条` : '--'],
     ['总平均吞吐', file.avg_rate_hz ? `${file.avg_rate_hz} msg/s` : '--'],
+    ...(file.task ? [['任务', file.task]] : []),
+    ...(qualityLabel ? [['数据质量', qualityLabel]] : []),
   ];
 }
 
@@ -1674,6 +1695,7 @@ function updateSelectedDatasetCount() {
   const checked = $$('#datasetRows input[type=checkbox]:checked');
   const count = checked.length;
   if ($('#selectedDatasetCount')) $('#selectedDatasetCount').textContent = count;
+  if ($('#batchEditDatasets')) $('#batchEditDatasets').disabled = count === 0;
   if ($('#batchDeleteDatasets')) $('#batchDeleteDatasets').disabled = count === 0;
   if ($('#batchDownloadDatasets')) $('#batchDownloadDatasets').disabled = count === 0;
   if ($('#batchUploadDatasets')) $('#batchUploadDatasets').disabled = count === 0;
@@ -2043,6 +2065,831 @@ function initDatasetMarqueeSelection() {
   });
 }
 
+function datasetRobotValue(file) {
+  return String(file.profile_display_name || file.profile_id || file.robot_name || '').trim();
+}
+
+function datasetRobotFilterKey(file) {
+  return datasetRobotValue(file) || '__unknown__';
+}
+
+function datasetFileTimestampMs(file) {
+  const ts = Number(file.timestamp);
+  if (Number.isFinite(ts) && ts > 0) return ts * 1000;
+  const raw = file.created_at || file.modified_at;
+  if (!raw) return 0;
+  const parsed = Date.parse(String(raw).replace(' ', 'T'));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function localDateKey(ms) {
+  if (!ms) return '';
+  const date = new Date(ms);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function hasActiveDatasetFilters(filters = datasetFilters) {
+  return Boolean(
+    (filters.query && filters.query.trim()) ||
+    filters.robot ||
+    filters.status ||
+    filters.tag ||
+    filters.duration ||
+    filters.time ||
+    (filters.sort && filters.sort !== 'time_desc')
+  );
+}
+
+function filterAndSortDatasets(files, filters = datasetFilters, nowMs = Date.now()) {
+  const keywords = String(filters.query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const todayKey = localDateKey(nowMs);
+  const dayMs = 86400 * 1000;
+
+  const filtered = (files || []).filter(file => {
+    if (keywords.length) {
+      const haystack = [
+        file.filename,
+        file.id,
+        file.task,
+        ...(Array.isArray(file.tasks) ? file.tasks : []),
+        file.notes,
+        ...(Array.isArray(file.tags) ? file.tags : []),
+        file.profile_display_name,
+        file.profile_id,
+        file.robot_name,
+        file.detected_profile_display_name,
+        file.robot_label,
+        file.platform_recording?.binding?.task?.name,
+        file.created_at,
+        file.modified_at,
+        DATASET_QUALITY_LABELS[file.quality] || '',
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (!keywords.every(word => haystack.includes(word))) return false;
+    }
+
+    if (filters.robot && datasetRobotFilterKey(file) !== filters.robot) return false;
+
+    if (filters.status) {
+      const s = filters.status;
+      if (s === 'marked' && !file.marked) return false;
+      if (s === 'unmarked' && file.marked) return false;
+      if (s === 'quality:good' && file.quality !== 'good') return false;
+      if (s === 'quality:review' && file.quality !== 'review') return false;
+      if (s === 'quality:discard' && file.quality !== 'discard') return false;
+      if (s === 'quality:unset' && file.quality) return false;
+      if (s === 'annotated' && !(file.task || file.notes || (Array.isArray(file.tags) && file.tags.length))) return false;
+      if (s === 'ready' && datasetUnavailable(file)) return false;
+      if (s === 'active' && !(file.is_current || file.export_state === 'exporting')) return false;
+      if (s === 'error' && !['error', 'failed'].includes(file.export_state)) return false;
+    }
+
+    if (filters.tag) {
+      const tags = Array.isArray(file.tags) ? file.tags : [];
+      if (!tags.includes(filters.tag)) return false;
+    }
+
+    if (filters.duration) {
+      if (file.is_current || file.inspection_pending) return false;
+      const dur = Number(file.duration_sec);
+      if (!Number.isFinite(dur)) return false;
+      if (filters.duration === 'short' && !(dur < 10)) return false;
+      if (filters.duration === 'medium' && !(dur >= 10 && dur < 60)) return false;
+      if (filters.duration === 'long' && !(dur >= 60)) return false;
+    }
+
+    if (filters.time) {
+      const ts = datasetFileTimestampMs(file);
+      if (!ts) return false;
+      if (filters.time === 'today' && localDateKey(ts) !== todayKey) return false;
+      if (filters.time === '7d' && ts < nowMs - 7 * dayMs) return false;
+      if (filters.time === '30d' && ts < nowMs - 30 * dayMs) return false;
+      if (filters.time === 'custom') {
+        const key = localDateKey(ts);
+        if (filters.dateFrom && key < filters.dateFrom) return false;
+        if (filters.dateTo && key > filters.dateTo) return false;
+      }
+    }
+
+    return true;
+  });
+
+  const sortBy = filters.sort || 'time_desc';
+  const sorted = filtered.slice();
+  sorted.sort((a, b) => {
+    if (sortBy === 'time_asc') return datasetFileTimestampMs(a) - datasetFileTimestampMs(b);
+    if (sortBy === 'name_asc') return String(a.filename || '').localeCompare(String(b.filename || ''), 'zh-CN');
+    if (sortBy === 'name_desc') return String(b.filename || '').localeCompare(String(a.filename || ''), 'zh-CN');
+    if (sortBy === 'size_desc') return (Number(b.size_bytes) || 0) - (Number(a.size_bytes) || 0);
+    if (sortBy === 'size_asc') return (Number(a.size_bytes) || 0) - (Number(b.size_bytes) || 0);
+    if (sortBy === 'duration_desc') return (Number(b.duration_sec) || 0) - (Number(a.duration_sec) || 0);
+    if (sortBy === 'duration_asc') return (Number(a.duration_sec) || 0) - (Number(b.duration_sec) || 0);
+    if (sortBy === 'count_desc') return (Number(b.message_count ?? b.frames ?? 0) || 0) - (Number(a.message_count ?? a.frames ?? 0) || 0);
+    return datasetFileTimestampMs(b) - datasetFileTimestampMs(a);
+  });
+  return sorted;
+}
+
+function syncDatasetFilterControls() {
+  if ($('#datasetSearchInput') && $('#datasetSearchInput').value !== datasetFilters.query) {
+    $('#datasetSearchInput').value = datasetFilters.query;
+  }
+  if ($('#datasetFilterRobot')) $('#datasetFilterRobot').value = datasetFilters.robot;
+  if ($('#datasetFilterStatus')) $('#datasetFilterStatus').value = datasetFilters.status;
+  if ($('#datasetFilterTag')) $('#datasetFilterTag').value = datasetFilters.tag;
+  if ($('#datasetFilterDuration')) $('#datasetFilterDuration').value = datasetFilters.duration;
+  if ($('#datasetFilterTime')) $('#datasetFilterTime').value = datasetFilters.time;
+  if ($('#datasetDateRange')) $('#datasetDateRange').hidden = datasetFilters.time !== 'custom';
+  if ($('#datasetFilterDateFrom')) $('#datasetFilterDateFrom').value = datasetFilters.dateFrom;
+  if ($('#datasetFilterDateTo')) $('#datasetFilterDateTo').value = datasetFilters.dateTo;
+  if ($('#datasetSortSelect')) $('#datasetSortSelect').value = datasetFilters.sort;
+  if ($('#datasetFilterReset')) $('#datasetFilterReset').hidden = !hasActiveDatasetFilters();
+}
+
+function syncDatasetFilterOptions(files) {
+  const robotSelect = $('#datasetFilterRobot');
+  if (robotSelect) {
+    const counts = new Map();
+    for (const file of files || []) {
+      const key = datasetRobotFilterKey(file);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const keys = [...counts.keys()].sort((a, b) => {
+      if (a === '__unknown__') return 1;
+      if (b === '__unknown__') return -1;
+      return a.localeCompare(b, 'zh-CN');
+    });
+    if (datasetFilters.robot && !counts.has(datasetFilters.robot)) keys.push(datasetFilters.robot);
+    robotSelect.textContent = '';
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = '全部机器人';
+    robotSelect.append(allOpt);
+    for (const key of keys) {
+      const opt = document.createElement('option');
+      opt.value = key;
+      const label = key === '__unknown__' ? '未知（旧数据）' : key;
+      const count = counts.get(key);
+      opt.textContent = count ? `${label} (${count})` : label;
+      robotSelect.append(opt);
+    }
+    robotSelect.value = datasetFilters.robot;
+  }
+
+  const tagSelect = $('#datasetFilterTag');
+  if (tagSelect) {
+    const tagCounts = new Map();
+    for (const file of files || []) {
+      for (const tag of Array.isArray(file.tags) ? file.tags : []) {
+        tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+      }
+    }
+    const tags = [...tagCounts.keys()].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    if (datasetFilters.tag && !tagCounts.has(datasetFilters.tag)) tags.push(datasetFilters.tag);
+    tagSelect.textContent = '';
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = tags.length ? '全部标签' : '暂无标签';
+    tagSelect.append(allOpt);
+    for (const tag of tags) {
+      const opt = document.createElement('option');
+      opt.value = tag;
+      const count = tagCounts.get(tag);
+      opt.textContent = count ? `${tag} (${count})` : tag;
+      tagSelect.append(opt);
+    }
+    tagSelect.value = datasetFilters.tag;
+  }
+}
+
+function resetDatasetFilters() {
+  datasetFilters.query = '';
+  datasetFilters.robot = '';
+  datasetFilters.status = '';
+  datasetFilters.tag = '';
+  datasetFilters.duration = '';
+  datasetFilters.time = '';
+  datasetFilters.dateFrom = '';
+  datasetFilters.dateTo = '';
+  datasetFilters.sort = 'time_desc';
+  syncDatasetFilterControls();
+  renderDatasetTable();
+}
+
+function updateDatasetEntryInCache(previousId, item) {
+  if (!item || !Array.isArray(datasetsData.files)) return;
+  const idx = datasetsData.files.findIndex(entry => datasetIdentifier(entry) === previousId);
+  if (idx >= 0) {
+    datasetsData.files[idx] = { ...datasetsData.files[idx], ...item };
+  }
+}
+
+async function toggleDatasetMark(file) {
+  if (datasetUnavailable(file)) return;
+  const id = datasetIdentifier(file);
+  const nextMarked = !file.marked;
+  try {
+    const res = await api(`/api/recordings/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ marked: nextMarked }),
+    });
+    updateDatasetEntryInCache(id, res.item || { ...file, marked: nextMarked });
+    syncDatasetFilterOptions(datasetsData.files || []);
+    renderDatasetTable();
+    toast(nextMarked ? `已星标：${file.filename}` : `已取消星标：${file.filename}`);
+  } catch (error) {
+    toast(`更新星标失败：${error.message}`, true);
+  }
+}
+
+function parseTagList(raw) {
+  return String(raw || '')
+    .split(/[,，\n]+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function populateDatasetDatalists() {
+  const files = datasetsData.files || [];
+  const taskList = $('#datasetTaskSuggestions');
+  if (taskList) {
+    taskList.textContent = '';
+    const tasks = new Set();
+    for (const file of files) {
+      if (file.task) tasks.add(file.task);
+    }
+    for (const task of [...tasks].sort((a, b) => a.localeCompare(b, 'zh-CN'))) {
+      const opt = document.createElement('option');
+      opt.value = task;
+      taskList.append(opt);
+    }
+  }
+  const robotList = $('#datasetRobotSuggestions');
+  if (robotList) {
+    robotList.textContent = '';
+    const robots = new Set();
+    for (const profile of profilesData.profiles || []) {
+      if (profile.display_name) robots.add(profile.display_name);
+      if (profile.id) robots.add(profile.id);
+    }
+    for (const file of files) {
+      const val = datasetRobotValue(file);
+      if (val) robots.add(val);
+    }
+    for (const robot of [...robots].sort((a, b) => a.localeCompare(b, 'zh-CN'))) {
+      const opt = document.createElement('option');
+      opt.value = robot;
+      robotList.append(opt);
+    }
+  }
+}
+
+function renderDatasetEditTagChips() {
+  const chipsWrap = $('#datasetEditTagChips');
+  if (chipsWrap) {
+    chipsWrap.textContent = '';
+    if (!datasetEditTags.length) {
+      const empty = document.createElement('span');
+      empty.style.cssText = 'font-size:11px;color:var(--muted);align-self:center;';
+      empty.textContent = '暂无标签，可在下方输入或点选常用标签';
+      chipsWrap.append(empty);
+    } else {
+      for (const tag of datasetEditTags) {
+        const chip = document.createElement('span');
+        chip.className = 'dataset-tag-chip-edit';
+        const text = document.createElement('span');
+        text.textContent = tag;
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.textContent = '×';
+        removeBtn.setAttribute('aria-label', `移除标签 ${tag}`);
+        removeBtn.onclick = () => {
+          datasetEditTags = datasetEditTags.filter(item => item !== tag);
+          renderDatasetEditTagChips();
+        };
+        chip.append(text, removeBtn);
+        chipsWrap.append(chip);
+      }
+    }
+  }
+
+  const suggestionsWrap = $('#datasetEditTagSuggestions');
+  if (suggestionsWrap) {
+    suggestionsWrap.textContent = '';
+    const pool = new Set(DATASET_PRESET_TAGS);
+    for (const file of datasetsData.files || []) {
+      for (const tag of Array.isArray(file.tags) ? file.tags : []) pool.add(tag);
+    }
+    const existingKeys = new Set(datasetEditTags.map(tag => tag.toLowerCase()));
+    const available = [...pool].filter(tag => !existingKeys.has(tag.toLowerCase()));
+    if (available.length) {
+      const label = document.createElement('span');
+      label.textContent = '快捷标签：';
+      suggestionsWrap.append(label);
+      for (const tag of available.slice(0, 12)) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'dataset-tag-chip';
+        btn.textContent = `+ ${tag}`;
+        btn.onclick = () => addDatasetEditTags(tag);
+        suggestionsWrap.append(btn);
+      }
+    }
+  }
+}
+
+function addDatasetEditTags(raw) {
+  const incoming = parseTagList(raw);
+  if (!incoming.length) return;
+  const seen = new Set(datasetEditTags.map(item => item.toLowerCase()));
+  for (const tag of incoming) {
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    if (datasetEditTags.length >= 20) {
+      toast('最多支持 20 个标签', true);
+      break;
+    }
+    datasetEditTags.push(tag.slice(0, 40));
+    seen.add(key);
+  }
+  if ($('#datasetEditTagInput')) $('#datasetEditTagInput').value = '';
+  renderDatasetEditTagChips();
+}
+
+function openDatasetEditDialog(file) {
+  if (!file || datasetUnavailable(file)) return;
+  const dialog = $('#datasetEditDialog');
+  if (!dialog) return;
+  currentEditDataset = file;
+  populateDatasetDatalists();
+
+  const id = datasetIdentifier(file);
+  const formatLabel = isLeRobotDataset(file) ? 'LeRobot' : file.format === 'CAPTURE_BUNDLE' ? 'MCAP＋MP4' : (file.format || 'MCAP');
+  if ($('#datasetEditId')) $('#datasetEditId').value = id;
+  if ($('#datasetEditTitle')) $('#datasetEditTitle').textContent = '编辑数据集信息';
+  if ($('#datasetEditSubtitle')) $('#datasetEditSubtitle').textContent = `${formatLabel} · ${file.filename}`;
+  if ($('#datasetEditFilename')) $('#datasetEditFilename').value = file.filename || '';
+  if ($('#datasetEditFilenameHint')) {
+    if (file.platform_recording?.binding) {
+      $('#datasetEditFilenameHint').textContent = '该数据集已关联平台上传任务，不可重命名文件名，但可修改任务、标签、质量与备注。';
+    } else if (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE' && String(file.filename || '').endsWith('.mcap')) {
+      $('#datasetEditFilenameHint').textContent = 'MCAP 文件重命名时将自动保留 .mcap 后缀。';
+    } else {
+      $('#datasetEditFilenameHint').textContent = '支持重命名；不修改文件名时仅更新元信息。';
+    }
+  }
+  if ($('#datasetEditTask')) $('#datasetEditTask').value = file.task || '';
+  if ($('#datasetEditRobot')) {
+    $('#datasetEditRobot').value = file.robot_label || '';
+    const detected = file.detected_profile_display_name || file.profile_id || file.robot_name || '未知（旧数据）';
+    $('#datasetEditRobot').placeholder = `留空则使用自动识别：${detected}`;
+    if ($('#datasetEditRobotHint')) {
+      $('#datasetEditRobotHint').textContent = `自动识别值：${detected}（留空可恢复默认）`;
+    }
+  }
+  if ($('#datasetEditQuality')) $('#datasetEditQuality').value = file.quality || '';
+  if ($('#datasetEditMarked')) $('#datasetEditMarked').checked = Boolean(file.marked);
+  if ($('#datasetEditNotes')) $('#datasetEditNotes').value = file.notes || '';
+  if ($('#datasetEditTagInput')) $('#datasetEditTagInput').value = '';
+  if ($('#datasetEditError')) $('#datasetEditError').textContent = '';
+
+  datasetEditTags = Array.isArray(file.tags) ? [...file.tags] : [];
+  renderDatasetEditTagChips();
+  dialog.showModal();
+}
+
+async function saveDatasetEdit(event) {
+  event?.preventDefault?.();
+  if (!currentEditDataset) return;
+  const dialog = $('#datasetEditDialog');
+  const errorBox = $('#datasetEditError');
+  const submitBtn = $('#saveDatasetEdit');
+  if (errorBox) errorBox.textContent = '';
+
+  // Commit any typed tag still sitting in the tag input before saving.
+  const pendingTagText = $('#datasetEditTagInput')?.value?.trim();
+  if (pendingTagText) addDatasetEditTags(pendingTagText);
+
+  const id = $('#datasetEditId')?.value || datasetIdentifier(currentEditDataset);
+  const newFilename = String($('#datasetEditFilename')?.value || '').trim();
+  if (!newFilename) {
+    if (errorBox) errorBox.textContent = '文件名不能为空';
+    return;
+  }
+
+  const payload = {
+    task: String($('#datasetEditTask')?.value || '').trim(),
+    robot_label: String($('#datasetEditRobot')?.value || '').trim(),
+    quality: String($('#datasetEditQuality')?.value || ''),
+    marked: Boolean($('#datasetEditMarked')?.checked),
+    tags: [...datasetEditTags],
+    notes: String($('#datasetEditNotes')?.value || '').trim(),
+  };
+  if (newFilename !== currentEditDataset.filename) {
+    payload.filename = newFilename;
+  }
+
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const res = await api(`/api/recordings/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+    updateDatasetEntryInCache(id, res.item);
+    currentEditDataset = null;
+    dialog?.close?.();
+    toast(res.renamed ? `已重命名并更新：${res.item?.filename || newFilename}` : `已保存数据集信息：${res.item?.filename || newFilename}`);
+    await loadDatasets();
+  } catch (error) {
+    if (errorBox) errorBox.textContent = error.message;
+    toast(`保存失败：${error.message}`, true);
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+function openDatasetBatchEditDialog() {
+  const checked = $$('#datasetRows input[type=checkbox]:checked')
+    .map(cb => cb.dataset.filename)
+    .filter(Boolean);
+  if (!checked.length) return;
+  const dialog = $('#datasetBatchEditDialog');
+  if (!dialog) return;
+  batchEditTargets = checked;
+  populateDatasetDatalists();
+  if ($('#datasetBatchEditSubtitle')) {
+    $('#datasetBatchEditSubtitle').textContent = `已选择 ${checked.length} 个数据集（保持“不修改”的字段不会变动）`;
+  }
+  if ($('#datasetBatchTaskMode')) $('#datasetBatchTaskMode').value = 'keep';
+  if ($('#datasetBatchTaskValue')) { $('#datasetBatchTaskValue').value = ''; $('#datasetBatchTaskValue').hidden = true; }
+  if ($('#datasetBatchRobotMode')) $('#datasetBatchRobotMode').value = 'keep';
+  if ($('#datasetBatchRobotValue')) { $('#datasetBatchRobotValue').value = ''; $('#datasetBatchRobotValue').hidden = true; }
+  if ($('#datasetBatchQuality')) $('#datasetBatchQuality').value = 'keep';
+  if ($('#datasetBatchMarked')) $('#datasetBatchMarked').value = 'keep';
+  if ($('#datasetBatchAddTags')) $('#datasetBatchAddTags').value = '';
+  if ($('#datasetBatchRemoveTags')) $('#datasetBatchRemoveTags').value = '';
+  if ($('#datasetBatchEditError')) $('#datasetBatchEditError').textContent = '';
+  dialog.showModal();
+}
+
+async function saveDatasetBatchEdit(event) {
+  event?.preventDefault?.();
+  if (!batchEditTargets.length) return;
+  const dialog = $('#datasetBatchEditDialog');
+  const errorBox = $('#datasetBatchEditError');
+  const submitBtn = $('#saveDatasetBatchEdit');
+  if (errorBox) errorBox.textContent = '';
+
+  const updates = {};
+  const taskMode = $('#datasetBatchTaskMode')?.value || 'keep';
+  if (taskMode === 'set') updates.task = String($('#datasetBatchTaskValue')?.value || '').trim();
+  else if (taskMode === 'clear') updates.task = '';
+
+  const robotMode = $('#datasetBatchRobotMode')?.value || 'keep';
+  if (robotMode === 'set') updates.robot_label = String($('#datasetBatchRobotValue')?.value || '').trim();
+  else if (robotMode === 'clear') updates.robot_label = '';
+
+  const qualityVal = $('#datasetBatchQuality')?.value;
+  if (qualityVal !== undefined && qualityVal !== 'keep') updates.quality = qualityVal;
+
+  const markedVal = $('#datasetBatchMarked')?.value;
+  if (markedVal === 'true') updates.marked = true;
+  else if (markedVal === 'false') updates.marked = false;
+
+  const addTags = parseTagList($('#datasetBatchAddTags')?.value);
+  if (addTags.length) updates.add_tags = addTags;
+  const removeTags = parseTagList($('#datasetBatchRemoveTags')?.value);
+  if (removeTags.length) updates.remove_tags = removeTags;
+
+  if (!Object.keys(updates).length) {
+    if (errorBox) errorBox.textContent = '请至少选择一项需要修改的内容';
+    return;
+  }
+
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const res = await api('/api/recordings/batch-metadata', {
+      method: 'POST',
+      body: JSON.stringify({ filenames: batchEditTargets, updates }),
+    });
+    const okCount = res.updated?.length || 0;
+    const failCount = res.failed?.length || 0;
+    dialog?.close?.();
+    toast(`已批量更新 ${okCount} 个数据集${failCount ? `，失败 ${failCount} 个` : ''}`, failCount > 0 && okCount === 0);
+    await loadDatasets();
+  } catch (error) {
+    if (errorBox) errorBox.textContent = error.message;
+    toast(`批量修改失败：${error.message}`, true);
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+function renderDatasetTable(preservedSelected = null) {
+  const body = $('#datasetRows');
+  const summary = $('#datasetsSummary');
+  if (!body) return;
+
+  const selected = preservedSelected instanceof Set
+    ? preservedSelected
+    : new Set($$('#datasetRows input[type=checkbox]:checked').map(check => check.dataset.filename));
+
+  const allFiles = datasetsData.files || [];
+  const filteredActive = hasActiveDatasetFilters();
+  const files = filterAndSortDatasets(allFiles, datasetFilters);
+
+  syncDatasetFilterControls();
+  body.textContent = '';
+
+  if (summary) {
+    const totalCount = datasetsData.total_count ?? allFiles.length;
+    const totalSize = datasetsData.total_size_human || '0 B';
+    if (filteredActive) {
+      const filteredBytes = files.reduce((acc, item) => acc + (Number(item.size_bytes) || 0), 0);
+      summary.textContent = `${datasetFormatLabels[datasetFormat]} 显示 ${files.length} / ${totalCount} 个（已筛选 · ${datasetDownloadBytes(filteredBytes)}） · 总大小 ${totalSize} · 存储目录: ${datasetsData.directory || ''}`;
+    } else {
+      summary.textContent = `${datasetFormatLabels[datasetFormat]} 共 ${totalCount} 个 · 总大小 ${totalSize} · 存储目录: ${datasetsData.directory || ''} · 提示: 可鼠标拖动框选（Alt 批量取消，Shift 连选）`;
+    }
+  }
+  if ($('#selectAllDatasets')) $('#selectAllDatasets').checked = false;
+
+  if (!allFiles.length) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 10;
+    cell.style.textAlign = 'center';
+    cell.style.color = 'var(--muted)';
+    cell.style.padding = '24px 0';
+    cell.textContent = '暂无录制数据集文件。可在“话题录制”页面点击“开始录制”生成 MCAP 或 LeRobot 数据集。';
+    row.append(cell);
+    body.append(row);
+    updateSelectedDatasetCount();
+    return;
+  }
+
+  if (!files.length) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 10;
+    cell.style.textAlign = 'center';
+    cell.style.color = 'var(--muted)';
+    cell.style.padding = '24px 0';
+    const msg = document.createElement('span');
+    msg.textContent = '没有符合当前搜索或筛选条件的数据集。';
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'btn-sm';
+    resetBtn.style.marginLeft = '10px';
+    resetBtn.textContent = '重置筛选';
+    resetBtn.onclick = resetDatasetFilters;
+    cell.append(msg, resetBtn);
+    row.append(cell);
+    body.append(row);
+    updateSelectedDatasetCount();
+    return;
+  }
+
+  for (const file of files) {
+    const row = document.createElement('tr');
+
+    const selectCell = document.createElement('td');
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.dataset.filename = datasetIdentifier(file);
+    check.dataset.sourceFormat = isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP';
+    check.dataset.displayName = file.filename;
+    check.dataset.uploadIdentity = file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file);
+    check.dataset.convertible = String(!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE' && String(file.filename).endsWith('.mcap'));
+    check.disabled = datasetUnavailable(file);
+    check.checked = !check.disabled && selected.has(datasetIdentifier(file));
+    check.onchange = updateSelectedDatasetCount;
+    selectCell.append(check);
+
+    const nameCell = document.createElement('td');
+    const nameLine = document.createElement('div');
+    nameLine.className = 'dataset-name-line';
+
+    const starBtn = document.createElement('button');
+    starBtn.type = 'button';
+    starBtn.className = `dataset-star-btn${file.marked ? ' active' : ''}`;
+    starBtn.textContent = file.marked ? '★' : '☆';
+    starBtn.title = datasetUnavailable(file) ? '数据生成完成后可标记' : file.marked ? '取消星标' : '设为星标';
+    starBtn.setAttribute('aria-label', file.marked ? `取消星标 ${file.filename}` : `星标 ${file.filename}`);
+    starBtn.disabled = datasetUnavailable(file);
+    starBtn.onclick = (e) => {
+      e?.stopPropagation?.();
+      return toggleDatasetMark(file);
+    };
+
+    const nameCode = document.createElement('code');
+    nameCode.textContent = file.filename;
+    nameCode.title = '双击可复制文件名';
+    nameCode.style.cursor = 'pointer';
+    nameCode.ondblclick = (e) => {
+      e.stopPropagation();
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(file.filename);
+        toast(`已复制文件名：${file.filename}`);
+      }
+    };
+    const formatTag = document.createElement('span');
+    formatTag.className = 'tag';
+    formatTag.style.cssText = 'font-size:11px;';
+    formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : file.format === 'CAPTURE_BUNDLE' ? 'MCAP＋MP4' : 'MCAP';
+    nameLine.append(starBtn, nameCode, formatTag);
+    nameCell.append(nameLine);
+
+    const tags = Array.isArray(file.tags) ? file.tags : [];
+    if (file.task || tags.length || file.notes) {
+      const metaLine = document.createElement('div');
+      metaLine.className = 'dataset-meta-line';
+      if (file.task) {
+        const taskPill = document.createElement('span');
+        taskPill.className = 'dataset-task-pill';
+        taskPill.textContent = `任务：${file.task}`;
+        taskPill.title = file.task;
+        metaLine.append(taskPill);
+      }
+      for (const tag of tags) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = `dataset-tag-chip${datasetFilters.tag === tag ? ' active' : ''}`;
+        chip.textContent = tag;
+        chip.title = datasetFilters.tag === tag ? '点击取消按此标签筛选' : `点击按标签“${tag}”筛选`;
+        chip.onclick = (e) => {
+          e?.stopPropagation?.();
+          datasetFilters.tag = datasetFilters.tag === tag ? '' : tag;
+          renderDatasetTable();
+        };
+        metaLine.append(chip);
+      }
+      if (file.notes) {
+        const noteSpan = document.createElement('span');
+        noteSpan.className = 'dataset-note-preview';
+        noteSpan.textContent = `📝 ${file.notes}`;
+        noteSpan.title = file.notes;
+        metaLine.append(noteSpan);
+      }
+      nameCell.append(metaLine);
+    }
+
+    const profileCell = document.createElement('td');
+    const profileTag = document.createElement('span');
+    profileTag.className = 'tag';
+    profileTag.textContent = file.profile_display_name || file.profile_id || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
+    profileTag.title = file.robot_label
+      ? `自定义名称: ${file.robot_label}${file.profile_id ? ` · 原始 Profile: ${file.profile_id}` : ''}`
+      : file.profile_id
+        ? `Profile: ${file.profile_id}${file.robot_name ? ` · Robot: ${file.robot_name}` : ''}`
+        : file.inspection_pending ? '后台正在读取 MCAP 元数据' : '该文件没有 HC Teleop Profile metadata';
+    if (!file.profile_id && !file.robot_label) {
+      profileTag.style.color = 'var(--muted)';
+      profileTag.style.borderColor = 'var(--border)';
+    }
+    profileCell.append(profileTag);
+
+    const sizeCell = document.createElement('td');
+    sizeCell.style.font = '12px monospace';
+    sizeCell.textContent = file.size_human;
+
+    const durationCell = document.createElement('td');
+    durationCell.style.font = '12px monospace';
+    durationCell.textContent = file.inspection_pending ? '分析中…' : (file.duration_human || '--');
+
+    const msgCountCell = document.createElement('td');
+    msgCountCell.style.font = '12px monospace';
+    msgCountCell.style.color = 'var(--cyan)';
+    msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--');
+
+    const topicsCell = document.createElement('td');
+    topicsCell.style.fontSize = '12px';
+    if (isLeRobotDataset(file)) {
+      topicsCell.textContent = `${file.camera_count || 0} 路相机 · ${file.fps || 0} FPS`;
+    } else if (file.topic_count) {
+      topicsCell.textContent = `${file.topic_count} 个话题 (${file.avg_rate_hz || 0} Hz)`;
+    } else {
+      topicsCell.textContent = file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--';
+    }
+
+    const timeCell = document.createElement('td');
+    timeCell.style.fontSize = '12px';
+    timeCell.textContent = file.created_at || file.modified_at;
+
+    const statusCell = document.createElement('td');
+    if (isLeRobotDataset(file) && datasetUnavailable(file)) {
+      renderDatasetExportProgress(statusCell, file);
+    } else {
+      const statusWrap = document.createElement('div');
+      statusWrap.className = 'dataset-status-cell';
+      const primaryBadge = document.createElement('span');
+      if (file.is_current) {
+        primaryBadge.className = 'recording-badge active';
+        primaryBadge.style.cssText = 'padding:2px 6px;font-size:10px;';
+        primaryBadge.innerHTML = `<i></i>${file.marked ? '已标记 · ' : ''}正在写入`;
+      } else if (file.marked) {
+        primaryBadge.className = 'tag';
+        primaryBadge.style.cssText = 'border-color:#f5a344;color:#f5a344;';
+        primaryBadge.textContent = '★ 已标记';
+      } else {
+        primaryBadge.className = 'tag';
+        primaryBadge.style.cssText = 'border-color:#1c664b;color:#55d98b;';
+        primaryBadge.textContent = '就绪';
+      }
+      statusWrap.append(primaryBadge);
+      if (file.quality && DATASET_QUALITY_LABELS[file.quality]) {
+        const qualityBadge = document.createElement('span');
+        qualityBadge.className = `dataset-quality-tag quality-${file.quality}`;
+        qualityBadge.textContent = DATASET_QUALITY_LABELS[file.quality];
+        statusWrap.append(qualityBadge);
+      }
+      statusCell.append(statusWrap);
+    }
+
+    const actionCell = document.createElement('td');
+    actionCell.style.textAlign = 'right';
+    const group = document.createElement('div');
+    group.className = 'btn-group';
+
+    if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.details_available || file.channels?.length || file.message_count)) {
+      if (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') {
+        const replayBtn = document.createElement('button');
+        replayBtn.className = 'primary btn-sm';
+        replayBtn.textContent = '重放';
+        replayBtn.onclick = async () => {
+          try { openStartReplayDialog(await fetchDatasetDetails(file)); }
+          catch (error) { toast(`读取 MCAP 详情失败：${error.message}`, true); }
+        };
+        group.append(replayBtn);
+      }
+
+      const detailBtn = document.createElement('button');
+      detailBtn.className = 'btn-sm';
+      detailBtn.textContent = '详情';
+      detailBtn.onclick = async () => {
+        try { showDatasetDetails(await fetchDatasetDetails(file)); }
+        catch (error) { toast(`读取数据集详情失败：${error.message}`, true); }
+      };
+      group.append(detailBtn);
+    }
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn-sm';
+    editBtn.textContent = '编辑';
+    editBtn.disabled = datasetUnavailable(file);
+    editBtn.title = datasetUnavailable(file) ? '数据生成完成后可编辑' : '修改文件名、任务、标签、质量与备注';
+    editBtn.onclick = () => openDatasetEditDialog(file);
+
+    const downloadLink = document.createElement(datasetUnavailable(file) ? 'button' : 'a');
+    downloadLink.className = 'btn-sm';
+    if (datasetUnavailable(file)) {
+      downloadLink.disabled = true;
+      downloadLink.title = '数据集生成完成后可下载';
+    } else {
+      downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download?with_tags=1`;
+      downloadLink.setAttribute('download', '');
+      downloadLink.onclick = event => {
+        event.preventDefault();
+        return startDatasetDownload([datasetIdentifier(file)], true);
+      };
+    }
+    downloadLink.textContent = '下载';
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'danger btn-sm';
+    deleteBtn.textContent = '删除';
+    deleteBtn.disabled = datasetUnavailable(file);
+    deleteBtn.onclick = async () => {
+      if (datasetUnavailable(file)) return;
+      if (!confirm(`确认删除数据集 “${file.filename}”${isLeRobotDataset(file) ? ' 及其全部视频和数据' : ''}？`)) return;
+      try {
+        await api(`/api/recordings/${encodeURIComponent(datasetIdentifier(file))}`, { method: 'DELETE' });
+        toast(`已删除数据集：${file.filename}`);
+        await loadDatasets();
+      } catch (err) {
+        toast(`删除失败：${err.message}`, true);
+      }
+    };
+
+    const platformBtn = document.createElement('button');
+    platformBtn.className = 'btn-sm';
+    platformBtn.textContent = file.platform_recording?.binding ? '另选任务上传' : '选择任务后上传';
+    platformBtn.disabled = datasetUnavailable(file);
+    platformBtn.title = datasetUnavailable(file) ? '数据生成完成后可上传' : '选择目标任务和上传；已有上传记录保持不变';
+    platformBtn.onclick = () => window.platformUploadHistory?.(
+      file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file),
+      file.filename,
+      isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP');
+    group.append(editBtn, downloadLink, platformBtn, deleteBtn);
+    actionCell.append(group);
+
+    row.append(selectCell, nameCell, profileCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
+    body.append(row);
+  }
+  updateSelectedDatasetCount();
+}
+
 async function loadDatasets() {
   const body = $('#datasetRows');
   const summary = $('#datasetsSummary');
@@ -2050,189 +2897,9 @@ async function loadDatasets() {
   datasetLoading = true;
   try {
     datasetsData = await api(`/api/recordings?format=${encodeURIComponent(datasetFormat)}&compact=1`);
-    const files = datasetsData.files || [];
     renderDatasetFormatTabs(datasetsData.format_counts);
-    const selected = new Set($$('#datasetRows input[type=checkbox]:checked').map(check => check.dataset.filename));
-    body.textContent = '';
-    if (summary) {
-      summary.textContent = `${datasetFormatLabels[datasetFormat]} 共 ${datasetsData.total_count || 0} 个 · 总大小 ${datasetsData.total_size_human || '0 B'} · 存储目录: ${datasetsData.directory || ''} · 提示: 可鼠标拖动框选（Alt 批量取消，Shift 连选）`;
-    }
-    if ($('#selectAllDatasets')) $('#selectAllDatasets').checked = false;
-    updateSelectedDatasetCount();
-
-    if (!files.length) {
-      const row = document.createElement('tr');
-      const cell = document.createElement('td');
-      cell.colSpan = 10;
-      cell.style.textAlign = 'center';
-      cell.style.color = 'var(--muted)';
-      cell.style.padding = '24px 0';
-      cell.textContent = '暂无录制数据集文件。可在“话题录制”页面点击“开始录制”生成 MCAP 或 LeRobot 数据集。';
-      row.append(cell);
-      body.append(row);
-      return;
-    }
-
-    for (const file of files) {
-      const row = document.createElement('tr');
-
-      const selectCell = document.createElement('td');
-      const check = document.createElement('input');
-      check.type = 'checkbox';
-      check.dataset.filename = datasetIdentifier(file);
-      check.dataset.sourceFormat = isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP';
-      check.dataset.displayName = file.filename;
-      check.dataset.uploadIdentity = file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file);
-      check.dataset.convertible = String(!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE' && String(file.filename).endsWith('.mcap'));
-      check.disabled = datasetUnavailable(file);
-      check.checked = !check.disabled && selected.has(datasetIdentifier(file));
-      check.onchange = updateSelectedDatasetCount;
-      selectCell.append(check);
-
-      const nameCell = document.createElement('td');
-      const nameCode = document.createElement('code');
-      nameCode.textContent = `${file.marked ? '★ ' : ''}${file.filename}`;
-      nameCode.title = '双击可复制文件名';
-      nameCode.style.cursor = 'pointer';
-      nameCode.ondblclick = (e) => {
-        e.stopPropagation();
-        if (navigator.clipboard?.writeText) {
-          navigator.clipboard.writeText(file.filename);
-          toast(`已复制文件名：${file.filename}`);
-        }
-      };
-      nameCell.append(nameCode);
-      const formatTag = document.createElement('span');
-      formatTag.className = 'tag';
-      formatTag.style.cssText = 'margin-left:8px;font-size:11px;';
-      formatTag.textContent = isLeRobotDataset(file) ? 'LeRobot' : file.format === 'CAPTURE_BUNDLE' ? 'MCAP＋MP4' : 'MCAP';
-      nameCell.append(formatTag);
-
-      const profileCell = document.createElement('td');
-      const profileTag = document.createElement('span');
-      profileTag.className = 'tag';
-      profileTag.textContent = file.profile_display_name || file.profile_id || (file.inspection_pending ? '分析中…' : '未知（旧数据）');
-      profileTag.title = file.profile_id
-        ? `Profile: ${file.profile_id}${file.robot_name ? ` · Robot: ${file.robot_name}` : ''}`
-        : file.inspection_pending ? '后台正在读取 MCAP 元数据' : '该文件没有 HC Teleop Profile metadata';
-      if (!file.profile_id) {
-        profileTag.style.color = 'var(--muted)';
-        profileTag.style.borderColor = 'var(--border)';
-      }
-      profileCell.append(profileTag);
-
-      const sizeCell = document.createElement('td');
-      sizeCell.style.font = '12px monospace';
-      sizeCell.textContent = file.size_human;
-
-      const durationCell = document.createElement('td');
-      durationCell.style.font = '12px monospace';
-      durationCell.textContent = file.inspection_pending ? '分析中…' : (file.duration_human || '--');
-
-      const msgCountCell = document.createElement('td');
-      msgCountCell.style.font = '12px monospace';
-      msgCountCell.style.color = 'var(--cyan)';
-      msgCountCell.textContent = isLeRobotDataset(file) ? `${Number(file.frames ?? file.total_frames ?? 0).toLocaleString()} 帧 · ${file.total_episodes || 0} episode` : file.message_count ? `${file.message_count.toLocaleString()} 条` : (file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--');
-
-      const topicsCell = document.createElement('td');
-      topicsCell.style.fontSize = '12px';
-      if (isLeRobotDataset(file)) {
-        topicsCell.textContent = `${file.camera_count || 0} 路相机 · ${file.fps || 0} FPS`;
-      } else if (file.topic_count) {
-        topicsCell.textContent = `${file.topic_count} 个话题 (${file.avg_rate_hz || 0} Hz)`;
-      } else {
-        topicsCell.textContent = file.is_current ? '录制中…' : file.inspection_pending ? '分析中…' : '--';
-      }
-
-      const timeCell = document.createElement('td');
-      timeCell.style.fontSize = '12px';
-      timeCell.textContent = file.created_at || file.modified_at;
-
-      const statusCell = document.createElement('td');
-      if (isLeRobotDataset(file) && datasetUnavailable(file)) {
-        renderDatasetExportProgress(statusCell, file);
-      } else if (file.is_current) {
-        statusCell.innerHTML = `<span class="recording-badge active" style="padding:2px 6px;font-size:10px;"><i></i>${file.marked ? '已标记 · ' : ''}正在写入</span>`;
-      } else if (file.marked) {
-        statusCell.innerHTML = '<span class="tag" style="border-color:#f5a344;color:#f5a344;">★ 已标记</span>';
-      } else {
-        statusCell.innerHTML = '<span class="tag" style="border-color:#1c664b;color:#55d98b;">就绪</span>';
-      }
-
-      const actionCell = document.createElement('td');
-      actionCell.style.textAlign = 'right';
-      const group = document.createElement('div');
-      group.className = 'btn-group';
-
-      if (!datasetUnavailable(file) && (isLeRobotDataset(file) || file.details_available || file.channels?.length || file.message_count)) {
-        if (!isLeRobotDataset(file) && file.format !== 'CAPTURE_BUNDLE') {
-          const replayBtn = document.createElement('button');
-          replayBtn.className = 'primary btn-sm';
-          replayBtn.textContent = '重放';
-          replayBtn.onclick = async () => {
-            try { openStartReplayDialog(await fetchDatasetDetails(file)); }
-            catch (error) { toast(`读取 MCAP 详情失败：${error.message}`, true); }
-          };
-          group.append(replayBtn);
-        }
-
-        const detailBtn = document.createElement('button');
-        detailBtn.className = 'btn-sm';
-        detailBtn.textContent = '详情';
-        detailBtn.onclick = async () => {
-          try { showDatasetDetails(await fetchDatasetDetails(file)); }
-          catch (error) { toast(`读取数据集详情失败：${error.message}`, true); }
-        };
-        group.append(detailBtn);
-      }
-
-      const downloadLink = document.createElement(datasetUnavailable(file) ? 'button' : 'a');
-      downloadLink.className = 'btn-sm';
-      if (datasetUnavailable(file)) {
-        downloadLink.disabled = true;
-        downloadLink.title = '数据集生成完成后可下载';
-      } else {
-        downloadLink.href = `/api/recordings/${encodeURIComponent(datasetIdentifier(file))}/download?with_tags=1`;
-        downloadLink.setAttribute('download', '');
-        downloadLink.onclick = event => {
-          event.preventDefault();
-          return startDatasetDownload([datasetIdentifier(file)], true);
-        };
-      }
-      downloadLink.textContent = '下载';
-
-      const deleteBtn = document.createElement('button');
-      deleteBtn.className = 'danger btn-sm';
-      deleteBtn.textContent = '删除';
-      deleteBtn.disabled = datasetUnavailable(file);
-      deleteBtn.onclick = async () => {
-        if (datasetUnavailable(file)) return;
-        if (!confirm(`确认删除数据集 “${file.filename}”${isLeRobotDataset(file) ? ' 及其全部视频和数据' : ''}？`)) return;
-        try {
-          await api(`/api/recordings/${encodeURIComponent(datasetIdentifier(file))}`, { method: 'DELETE' });
-          toast(`已删除数据集：${file.filename}`);
-          await loadDatasets();
-        } catch (err) {
-          toast(`删除失败：${err.message}`, true);
-        }
-      };
-
-      const platformBtn = document.createElement('button');
-      platformBtn.className = 'btn-sm';
-      platformBtn.textContent = file.platform_recording?.binding ? '另选任务上传' : '选择任务后上传';
-      platformBtn.disabled = datasetUnavailable(file);
-      platformBtn.title = datasetUnavailable(file) ? '数据生成完成后可上传' : '选择目标任务和上传；已有上传记录保持不变';
-      platformBtn.onclick = () => window.platformUploadHistory?.(
-        file.platform_recording?.source_recording_id || file.platform_recording?.recording_id || datasetIdentifier(file),
-        file.filename,
-        isLeRobotDataset(file) ? 'LEROBOT_V3' : file.format === 'CAPTURE_BUNDLE' ? 'CAPTURE_BUNDLE' : 'MCAP');
-      group.append(downloadLink, platformBtn, deleteBtn);
-      actionCell.append(group);
-
-      row.append(selectCell, nameCell, profileCell, sizeCell, durationCell, msgCountCell, topicsCell, timeCell, statusCell, actionCell);
-      body.append(row);
-    }
-    updateSelectedDatasetCount();
+    syncDatasetFilterOptions(datasetsData.files || []);
+    renderDatasetTable();
   } catch (error) {
     if (summary) summary.textContent = `读取数据集列表失败: ${error.message}`;
     toast(`加载数据集失败：${error.message}`, true);
@@ -2245,6 +2912,7 @@ async function loadDatasets() {
 function showDatasetDetails(file) {
   const dialog = $('#datasetDetailDialog');
   if (!dialog) return;
+  currentDetailDataset = file;
   $('#datasetDetailTitle').textContent = file.filename;
   const profileLabel = file.profile_display_name || file.profile_id || '未知（旧数据）';
   $('#datasetDetailMeta').textContent = `机器人: ${profileLabel} · Profile: ${file.profile_id || '--'} · 生成时间: ${file.created_at || file.modified_at} · 文件格式: ${file.format || 'MCAP'}`;
@@ -2258,6 +2926,81 @@ function showDatasetDetails(file) {
     const b = document.createElement('b'); b.textContent = val;
     span.append(small, b);
     summary.append(span);
+  }
+
+  const annotations = $('#datasetDetailAnnotations');
+  if (annotations) {
+    annotations.textContent = '';
+    const tags = Array.isArray(file.tags) ? file.tags : [];
+    const hasMeta = Boolean(file.marked || file.quality || tags.length || file.notes || file.meta_updated_at);
+    annotations.hidden = !hasMeta;
+    if (hasMeta) {
+      if (file.marked || file.quality || file.meta_updated_at) {
+        const row = document.createElement('div');
+        row.className = 'dataset-detail-annotations-row';
+        const lbl = document.createElement('span');
+        lbl.className = 'dataset-detail-annotations-label';
+        lbl.textContent = '标记';
+        row.append(lbl);
+        if (file.marked) {
+          const star = document.createElement('span');
+          star.className = 'tag';
+          star.style.cssText = 'border-color:#f5a344;color:#f5a344;';
+          star.textContent = '★ 已星标';
+          row.append(star);
+        }
+        if (file.quality && DATASET_QUALITY_LABELS[file.quality]) {
+          const q = document.createElement('span');
+          q.className = `dataset-quality-tag quality-${file.quality}`;
+          q.textContent = `质量：${DATASET_QUALITY_LABELS[file.quality]}`;
+          row.append(q);
+        }
+        if (file.meta_updated_at) {
+          const ts = document.createElement('span');
+          ts.style.cssText = 'color:var(--muted);margin-left:auto;font-size:11px;';
+          ts.textContent = `信息更新于 ${file.meta_updated_at}`;
+          row.append(ts);
+        }
+        annotations.append(row);
+      }
+      if (tags.length) {
+        const row = document.createElement('div');
+        row.className = 'dataset-detail-annotations-row';
+        const lbl = document.createElement('span');
+        lbl.className = 'dataset-detail-annotations-label';
+        lbl.textContent = '标签';
+        row.append(lbl);
+        for (const tag of tags) {
+          const chip = document.createElement('span');
+          chip.className = 'dataset-tag-chip';
+          chip.textContent = tag;
+          row.append(chip);
+        }
+        annotations.append(row);
+      }
+      if (file.notes) {
+        const row = document.createElement('div');
+        row.className = 'dataset-detail-annotations-row';
+        row.style.alignItems = 'flex-start';
+        const lbl = document.createElement('span');
+        lbl.className = 'dataset-detail-annotations-label';
+        lbl.textContent = '备注';
+        const notesEl = document.createElement('p');
+        notesEl.className = 'dataset-detail-notes';
+        notesEl.textContent = file.notes;
+        row.append(lbl, notesEl);
+        annotations.append(row);
+      }
+    }
+  }
+
+  const detailEditBtn = $('#datasetDetailEditBtn');
+  if (detailEditBtn) {
+    detailEditBtn.disabled = datasetUnavailable(file);
+    detailEditBtn.onclick = () => {
+      dialog.close?.();
+      openDatasetEditDialog(file);
+    };
   }
 
   const tbody = $('#datasetDetailChannelRows');
@@ -2619,6 +3362,104 @@ async function init() {
     };
   }
   if($('#refreshDatasets')) $('#refreshDatasets').onclick = loadDatasets;
+  if($('#datasetSearchInput')) {
+    $('#datasetSearchInput').oninput = () => {
+      datasetFilters.query = $('#datasetSearchInput').value;
+      renderDatasetTable();
+    };
+    $('#datasetSearchInput').onkeydown = (e) => {
+      if (e.key === 'Escape' && datasetFilters.query) {
+        datasetFilters.query = '';
+        $('#datasetSearchInput').value = '';
+        renderDatasetTable();
+      }
+    };
+  }
+  if($('#datasetFilterRobot')) {
+    $('#datasetFilterRobot').onchange = () => {
+      datasetFilters.robot = $('#datasetFilterRobot').value;
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterStatus')) {
+    $('#datasetFilterStatus').onchange = () => {
+      datasetFilters.status = $('#datasetFilterStatus').value;
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterTag')) {
+    $('#datasetFilterTag').onchange = () => {
+      datasetFilters.tag = $('#datasetFilterTag').value;
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterDuration')) {
+    $('#datasetFilterDuration').onchange = () => {
+      datasetFilters.duration = $('#datasetFilterDuration').value;
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterTime')) {
+    $('#datasetFilterTime').onchange = () => {
+      datasetFilters.time = $('#datasetFilterTime').value;
+      if (datasetFilters.time !== 'custom') {
+        datasetFilters.dateFrom = '';
+        datasetFilters.dateTo = '';
+      }
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterDateFrom')) {
+    $('#datasetFilterDateFrom').onchange = () => {
+      datasetFilters.dateFrom = $('#datasetFilterDateFrom').value;
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterDateTo')) {
+    $('#datasetFilterDateTo').onchange = () => {
+      datasetFilters.dateTo = $('#datasetFilterDateTo').value;
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetSortSelect')) {
+    $('#datasetSortSelect').onchange = () => {
+      datasetFilters.sort = $('#datasetSortSelect').value || 'time_desc';
+      renderDatasetTable();
+    };
+  }
+  if($('#datasetFilterReset')) {
+    $('#datasetFilterReset').onclick = resetDatasetFilters;
+  }
+  if($('#closeDatasetEdit')) $('#closeDatasetEdit').onclick = () => $('#datasetEditDialog')?.close?.();
+  if($('#cancelDatasetEdit')) $('#cancelDatasetEdit').onclick = () => $('#datasetEditDialog')?.close?.();
+  if($('#datasetEditAddTagBtn')) {
+    $('#datasetEditAddTagBtn').onclick = () => addDatasetEditTags($('#datasetEditTagInput')?.value || '');
+  }
+  if($('#datasetEditTagInput')) {
+    $('#datasetEditTagInput').onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+        e.preventDefault();
+        addDatasetEditTags($('#datasetEditTagInput').value);
+      }
+    };
+  }
+  if($('#datasetEditForm')) $('#datasetEditForm').onsubmit = saveDatasetEdit;
+
+  if($('#batchEditDatasets')) $('#batchEditDatasets').onclick = openDatasetBatchEditDialog;
+  if($('#datasetBatchTaskMode')) {
+    $('#datasetBatchTaskMode').onchange = () => {
+      if ($('#datasetBatchTaskValue')) $('#datasetBatchTaskValue').hidden = $('#datasetBatchTaskMode').value !== 'set';
+    };
+  }
+  if($('#datasetBatchRobotMode')) {
+    $('#datasetBatchRobotMode').onchange = () => {
+      if ($('#datasetBatchRobotValue')) $('#datasetBatchRobotValue').hidden = $('#datasetBatchRobotMode').value !== 'set';
+    };
+  }
+  if($('#closeDatasetBatchEdit')) $('#closeDatasetBatchEdit').onclick = () => $('#datasetBatchEditDialog')?.close?.();
+  if($('#cancelDatasetBatchEdit')) $('#cancelDatasetBatchEdit').onclick = () => $('#datasetBatchEditDialog')?.close?.();
+  if($('#datasetBatchEditForm')) $('#datasetBatchEditForm').onsubmit = saveDatasetBatchEdit;
+
   $$('[data-dataset-format]').forEach(button => {
     button.onclick = async () => {
       const selected = button.dataset.datasetFormat;
