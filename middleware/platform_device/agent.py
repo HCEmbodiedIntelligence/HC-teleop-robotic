@@ -8,9 +8,10 @@ import stat
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import aiohttp
+
+from middleware.platform_sessions import PlatformHTTPError, RobotPlatform, platform_url
 
 from .peer import Peer
 
@@ -19,24 +20,7 @@ LOG = logging.getLogger("platform-device")
 
 def settings(path):
     cfg = json.loads(Path(path).expanduser().read_text())
-    base = cfg["base_url"].rstrip("/")
-    url = urlsplit(base)
-    if (
-        (
-            url.scheme != "https"
-            and not (
-                url.scheme == "http"
-                and url.hostname in ("localhost", "127.0.0.1", "::1")
-            )
-        )
-        or not url.hostname
-        or url.username
-        or url.password
-        or url.query
-        or url.fragment
-    ):
-        raise ValueError("base_url must be an HTTPS API origin or loopback test server")
-    cfg["base_url"] = base
+    cfg["base_url"] = platform_url(cfg["base_url"])
     cfg.setdefault("max_lag_ms", 100)
     cfg.setdefault("watchdog_ms", 180)
     if not 10 <= cfg["max_lag_ms"] <= cfg["watchdog_ms"] <= 1000:
@@ -68,28 +52,14 @@ class Agent:
         self.peer = self.negotiation = self.answer = None
         self.confirmed = 0
         self.status = {"state": "starting"}
-        self.http = None
+        self.session_id = None
         self.ack_sent = False
-        self.token = credential(cfg)
+        self.platform = RobotPlatform(cfg["base_url"], credential(cfg))
 
     async def sync(self, **fields):
-        payload = dict(
-            instance_id=self.instance,
-            name=self.cfg["name"],
-            **self.sink.capabilities(),
-            **fields,
+        return await self.platform.sync(
+            self.instance, self.cfg["name"], **self.sink.capabilities(), **fields
         )
-        async with self.http.post(
-            self.cfg["base_url"] + "/api/v1/robot-ingest/teleoperation/sync",
-            json=payload,
-            headers={"Authorization": "Bearer " + self.token},
-            allow_redirects=False,
-        ) as res:
-            if res.status != 200:
-                raise RuntimeError(
-                    f"robot sync HTTP {res.status} (check API ingress and robot identity)"
-                )
-            return await res.json()
 
     async def drop(self):
         if self.negotiation:
@@ -98,7 +68,9 @@ class Agent:
         if self.peer:
             LOG.info("final metrics %s", json.dumps(self.peer.metrics()))
             await self.peer.close()
-            await self.sink.end(self.peer.id)
+        if self.session_id:
+            await self.sink.end(self.session_id)
+        self.session_id = None
         self.peer = self.negotiation = self.answer = None
         self.ack_sent = False
 
@@ -121,28 +93,31 @@ class Agent:
         if self.peer and self.answer and not self.ack_sent:
             fields.update(session_id=self.peer.id, answer=self.answer)
         receipt = self.sink.receipt()
-        if receipt and (not fields or fields.get("session_id") == receipt[0]):
+        if receipt and not fields:
             fields.update(session_id=receipt[0], capture_result=receipt[1])
         else:
             receipt = None
         start = time.monotonic()
         try:
             reply = await self.sync(**fields)
-        except RuntimeError as exc:
-            if "HTTP 409" in str(exc):
-                if receipt:
-                    await self.sink.ack(receipt)
-                else:
-                    await self.drop()
-            raise
+        except PlatformHTTPError as exc:
+            if exc.status != 409:
+                raise
+            if not receipt:
+                await self.drop()
+                raise
+            # Distinguish a superseded recording slot from a competing instance.
+            # Only retire a stale receipt after this identity can still sync.
+            reply = await self.sync()
         self.confirmed = start
-        if receipt:
-            await self.sink.ack(receipt)
         if fields.get("answer"):
             self.ack_sent = True
         sid = reply.get("session_id")
-        if self.peer and self.peer.id != sid:
+        if self.session_id != sid:
             await self.drop()
+            self.session_id = sid
+        if receipt:
+            await self.sink.ack(receipt)
         if sid and reply.get("offer") and not self.peer:
             self.peer = Peer(
                 sid, reply.get("ice_servers", []), self.track, self.sink, self.cfg
@@ -156,9 +131,7 @@ class Agent:
             self.sink.command(command)
 
     async def run(self):
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=3)
-        ) as self.http:
+        async with self.platform:
             await self.sink.open()
             last_log = 0
             try:
@@ -187,7 +160,7 @@ class Agent:
                     ) as exc:
                         LOG.warning("rendezvous: %s", exc)
                         self.status = {"state": "unavailable", "error": str(exc)[:240]}
-                        if self.peer and time.monotonic() - self.confirmed > 4:
+                        if self.session_id and time.monotonic() - self.confirmed > 4:
                             await self.drop()
                     if self.peer and time.monotonic() - last_log > 2:
                         self.status["metrics"] = self.peer.metrics()
@@ -198,7 +171,7 @@ class Agent:
                         last_log = time.monotonic()
                     await asyncio.sleep(0.25 if self.peer and not self.ack_sent else 1)
             finally:
-                sid = self.peer.id if self.peer else None
+                sid = self.session_id
                 await self.drop()
                 if sid:
                     try:
