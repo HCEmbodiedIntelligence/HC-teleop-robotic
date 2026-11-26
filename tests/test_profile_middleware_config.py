@@ -160,6 +160,37 @@ def test_x1_records_smoother_final_joint_command_without_throttling():
     assert item['max_hz'] == 0.0
 
 
+def test_x1_records_hand_joint_states_and_disables_tactile_vibration_by_default():
+    from middleware.core.recording.recording_controller import check_recording_topics
+
+    profile_path = Path(__file__).resolve().parents[1] / 'adapters/robots/x1/middleware.yaml'
+    profile = yaml.safe_load(profile_path.read_text())
+    all_subscriptions = {
+        item['topic']: item for item in profile['ros']['subscriptions']
+    }
+    selected = {
+        item['topic']: item for item in recording_subscriptions(profile['ros'])
+    }
+
+    assert '/observation/hands/joint_states' in selected
+    assert selected['/observation/hands/joint_states']['type'] == 'sensor_msgs/msg/JointState'
+    assert selected['/observation/hands/joint_states']['max_hz'] == 0.0
+
+    vibration = all_subscriptions['/observation/hands/vibration_feedback']
+    assert vibration['enabled'] is False
+    assert '/observation/hands/vibration_feedback' not in selected
+
+    recording_topics, _checked, issues = check_recording_topics(
+        profile['ros']['subscriptions'], {}, detailed=True
+    )
+    assert '/observation/hands/vibration_feedback' not in {
+        item['topic'] for item in recording_topics
+    }
+    assert '/observation/hands/vibration_feedback' not in {
+        item['topic'] for item in issues
+    }
+
+
 def test_legacy_profile_without_middleware_file_retains_host_settings(deployment):
     store, path = deployment
     path.unlink()

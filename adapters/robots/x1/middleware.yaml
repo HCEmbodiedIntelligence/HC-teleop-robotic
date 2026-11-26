@@ -102,7 +102,7 @@ ros:
   - topic: /observation/hands/vibration_feedback
     description: 外骨骼手部振动反馈数据
     type: std_msgs/msg/Float64MultiArray
-    enabled: true
+    enabled: false
     outputs:
     - record
     max_hz: 0.0
