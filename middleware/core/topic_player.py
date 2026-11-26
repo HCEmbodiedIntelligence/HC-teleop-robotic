@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -12,6 +14,50 @@ from .topic_recorder import read_recording_metadata
 
 
 logger = logging.getLogger("hc_teleop_middleware.player")
+
+
+# The eight x1 profile inputs at dbdee2498e50f0efba069fea998111a02348203b
+# hash to this revision. Both arm chains and the waist have identity SI scales.
+_X1_MOTION_REVISION = '0098e3161b52f196aabbaa869067e770fd9e61b4775fbc120c3e0fc75b9bc16c'
+_X1_MOTION_JOINTS = {
+    f'{side}_joint_{i}': f'Joint{i}_{suffix}'
+    for side, suffix in (('left', 'L'), ('right', 'R')) for i in range(1, 8)
+}
+_X1_MOTION_JOINTS.update(zip(('waist_joint_1', 'waist_joint_2', 'waist_joint_3'),
+                             ('leg_1', 'leg_2', 'zhi')))
+_ARM_ACTION = '/action/joint_states'
+_PUBLISHED_ACTION = '/internal/recording/published_action'
+
+
+class _X1MotionReplay:
+    """Translate verified, public-name X1 movements to the v23 model at playback."""
+
+    def __init__(self, recording, active):
+        if (recording.get('robot_api_schema') != 'hc-robot-api/v1'
+                or recording.get('robot_api_revision') != _X1_MOTION_REVISION):
+            raise ValueError('X1 drive replay needs a verified historical joint mapping revision')
+        current = json.loads(active.get('robot_api_info') or '{}')
+        joints = {j['public_name']: j for j in current.get('joints', [])}
+        for public, model in _X1_MOTION_JOINTS.items():
+            joint = joints.get(public, {})
+            if (joint.get('model_name'), joint.get('unit'), joint.get('scale'), joint.get('offset')) != (
+                    model, 'rad', 1., 0.):
+                raise ValueError(f'active X1 joint mapping differs for {public}')
+        self.layout = None
+
+    def command(self, data):
+        from rclpy.serialization import deserialize_message, serialize_message
+        from sensor_msgs.msg import JointState
+        msg = deserialize_message(data, JointState)
+        if (not msg.name or len(msg.position) != len(msg.name)
+                or not all(math.isfinite(q) for q in msg.position)):
+            raise ValueError('X1 public drive replay requires finite recorded action positions')
+        if self.layout is None or msg.name != self.layout[0]:
+            if len(set(msg.name)) != len(msg.name) or any(n not in _X1_MOTION_JOINTS for n in msg.name):
+                raise ValueError(f'unverified or duplicate X1 actuator names: {msg.name}')
+            self.layout = (msg.name, [_X1_MOTION_JOINTS[n] for n in msg.name])
+        msg.name = self.layout[1]
+        return serialize_message(msg)
 
 
 class TopicPlayer:
@@ -123,11 +169,19 @@ class TopicPlayer:
                     f"{recorded_profile}, active={active_profile}"
                 )
 
+            public_replay = None
+            if mode == 'drive' and active_profile == 'x1' and not active_api.get('robot_api_schema'):
+                schema = recording_metadata.get('robot_api_schema')
+                revision = recording_metadata.get('robot_api_revision')
+                if schema or revision:
+                    if recorded_profile != 'x1':
+                        raise ValueError('public X1 drive replay requires the recorded profile_id')
+                    public_replay = _X1MotionReplay(recording_metadata, active_api)
+
             self._filename = filename
             self._recorded_profile_id = recorded_profile
             self._speed = max(0.1, min(10.0, float(speed)))
             self._loop = bool(loop)
-            self._state = "playing"
             self._requires_reset = False
             self._error = None
             self._current_time_sec = 0.0
@@ -146,6 +200,37 @@ class TopicPlayer:
                 self._duration_sec = (end_ns - start_ns) / 1e9 if end_ns > start_ns else 0.0
 
                 avail_topics = {c.topic for c in summary.channels.values()}
+                x1_default = (mode == 'drive' and selected_topics is None
+                              and 'x1' in {recorded_profile, active_profile})
+                if public_replay or x1_default:
+                    counts = stats.channel_message_counts
+                    action_topics = {c.topic for c in summary.channels.values() if counts.get(c.id, 0)
+                                     and c.message_encoding == 'cdr' and c.schema_id in summary.schemas
+                                     and summary.schemas[c.schema_id].name == 'sensor_msgs/msg/JointState'}
+
+                    record_only = {m.metadata.get('topic') for m in reader.iter_metadata()
+                                   if m.name == 'hc_teleop.record_only'}
+                if x1_default:
+                    if _PUBLISHED_ACTION in avail_topics:
+                        source = _PUBLISHED_ACTION
+                    elif '/io_teleop/joint_cmd' in avail_topics:
+                        source = '/io_teleop/joint_cmd'
+                    else:
+                        source = _ARM_ACTION
+                    if source not in action_topics or source in record_only or (
+                            source == _ARM_ACTION and '/events/recording/action_provenance' in avail_topics):
+                        raise ValueError('X1 drive replay needs recorded final actions; '
+                                         'observations and training labels can be inspected without driving')
+                    if (not recording_metadata.get('robot_api_schema')
+                            and not active_api.get('robot_api_schema')):
+                        # Platform-selected MCAPs can omit the session metadata.
+                        # Model-name CDR stays on the normal fast path after this check.
+                        from .recording_cdr import read_joint_state
+                        first = next(reader.iter_messages(topics=[source]), None)
+                        if first is None:
+                            raise ValueError('X1 drive replay command stream is empty')
+                        if any(n in _X1_MOTION_JOINTS for n in read_joint_state(first[2].data).name):
+                            raise ValueError('public X1 command names require a verified historical mapping revision')
 
             if selected_topics is not None:
                 self._selected_topics = list(selected_topics)
@@ -225,6 +310,23 @@ class TopicPlayer:
                 ):
                     self._topic_remap["/internal/recording/published_action"] = "/action/joint_states"
 
+            if public_replay:
+                # Old DAgger public recordings use /action for final commands.
+                # Ordinary X1 captures may also store feedback/NaN training labels there.
+                source = (_PUBLISHED_ACTION if _PUBLISHED_ACTION in avail_topics else _ARM_ACTION)
+                if (source not in action_topics or source in record_only
+                        or (source == _ARM_ACTION and (
+                            '/events/recording/action_provenance' in avail_topics
+                            or recording_metadata.get('capture_mode') not in {'full_session', 'corrections_only'}))):
+                    raise ValueError('X1 drive replay needs recorded final actions; this file has no verified command stream')
+                if (source not in self._selected_topics or self._topic_remap.get(source, source) != _ARM_ACTION
+                        or any(self._topic_remap.get(t, t) == _ARM_ACTION
+                               for t in self._selected_topics if t != source)):
+                    raise ValueError('public X1 drive replay requires the original final command stream')
+                if any(self._topic_remap.get(t, t) in {'/action/left_hand/joint_states',
+                           '/action/right_hand/joint_states', '/action/hands/joint_targets'}
+                       for t in self._selected_topics):
+                    raise ValueError('public X1 drive replay has no verified historical hand mapping')
             # Pause live teleop controller to prevent conflict over /action/joint_states
             ros = self._get_ros()
             if ros is not None and hasattr(ros, "begin_replay"):
@@ -243,9 +345,11 @@ class TopicPlayer:
             self._pause_event = threading.Event()
             self._pause_event.set()
             generation = self._play_generation
+            self._state = "playing"
             self._thread = threading.Thread(
                 target=self._run,
-                args=(target, self._stop_event, self._pause_event, generation),
+                args=(target, self._stop_event, self._pause_event, generation,
+                      frozenset(self._selected_topics), self._topic_remap, public_replay),
                 name=f"TopicPlayer-{filename}",
                 daemon=True,
             )
@@ -328,7 +432,8 @@ class TopicPlayer:
         with self._lock:
             return generation == self._play_generation and not stop_event.is_set()
 
-    def _run(self, target_path: Path, stop_event, pause_event, generation) -> None:
+    def _run(self, target_path: Path, stop_event, pause_event, generation,
+             selected, remap, public_replay) -> None:
         try:
             while not stop_event.is_set():
                 with target_path.open("rb") as stream:
@@ -384,16 +489,21 @@ class TopicPlayer:
                             '/status/base',
                             '/vrdata',
                         ))
-                    channels = {
-                        c_id: (c.topic, schemas.get(c.schema_id, "std_msgs/msg/String"))
-                        for c_id, c in summary.channels.items()
-                        if (c.topic not in record_only or (
-                            c.topic == "/observation/joint_states"
-                            and self._topic_remap.get(c.topic) == "/action/joint_states"
-                        ))
-                        and "/msg/" in schemas.get(c.schema_id, "std_msgs/msg/String")
-                        and (not getattr(c, "message_encoding", "") or c.message_encoding == "cdr")
-                    }
+                    channels = {}
+                    for channel_id, c in summary.channels.items():
+                        dst = remap.get(c.topic, c.topic)
+                        if c.topic in record_only and not (c.topic == "/observation/joint_states" and dst == _ARM_ACTION):
+                            continue
+                        if selected and c.topic not in selected and dst not in selected:
+                            continue
+                        if live_x1 and dst not in {
+                            _ARM_ACTION, "/action/base/command", "/action/hands/joint_targets",
+                            "/action/left_hand/joint_states", "/action/right_hand/joint_states",
+                        }:
+                            continue
+                        msg_type = schemas.get(c.schema_id, "std_msgs/msg/String")
+                        if "/msg/" in msg_type and (not c.message_encoding or c.message_encoding == "cdr"):
+                            channels[channel_id] = (dst, msg_type)
 
                     with self._lock:
                         if not self._replay_current(generation, stop_event):
@@ -439,30 +549,22 @@ class TopicPlayer:
 
                         chan_info = channels.get(channel.id)
                         if chan_info:
-                            orig_topic, msg_type = chan_info
-                            with self._lock:
-                                remap = dict(self._topic_remap)
-                                selected = set(self._selected_topics)
-
-                            target_topic = remap.get(orig_topic, orig_topic)
-                            # Check the destination after remapping: a bag must
-                            # never impersonate feedback, safety or solver nodes.
-                            if live_x1 and target_topic not in {
-                                "/action/joint_states", "/action/base/command",
-                                "/action/hands/joint_targets",
-                                "/action/left_hand/joint_states",
-                                "/action/right_hand/joint_states",
-                            }:
-                                continue
-                            if not selected or (orig_topic in selected) or (target_topic in selected):
-                                ros = self._get_ros()
-                                # The provider may have waited while stop/reset
-                                # revoked this producer. Recheck its own lease,
-                                # never acquire a new replay's current fence.
-                                if not self._replay_current(generation, stop_event):
-                                    return
-                                if ros is not None and hasattr(ros, "publish_raw"):
-                                    ros.publish_raw(target_topic, msg_type, message.data)
+                            target_topic, msg_type = chan_info
+                            ros = self._get_ros()
+                            # The provider may have waited while stop/reset
+                            # revoked this producer. Recheck its own lease,
+                            # never acquire a new replay's current fence.
+                            if not self._replay_current(generation, stop_event):
+                                return
+                            if ros is not None and hasattr(ros, "publish_raw"):
+                                data = message.data
+                                if public_replay and target_topic == _ARM_ACTION:
+                                    if msg_type != 'sensor_msgs/msg/JointState':
+                                        raise ValueError('invalid X1 drive action message type')
+                                    data = public_replay.command(data)
+                                accepted = ros.publish_raw(target_topic, msg_type, data)
+                                if public_replay and target_topic == _ARM_ACTION and accepted is False:
+                                    raise RuntimeError('X1 drive replay command was refused by the control bridge')
 
                         msg_idx += 1
                         cur_time = log_offset
