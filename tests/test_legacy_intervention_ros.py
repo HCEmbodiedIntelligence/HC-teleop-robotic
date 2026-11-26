@@ -82,13 +82,16 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
     probe.create_subscription(Header, '/control/motion/permit', on_permit, 10)
     probe.create_subscription(String, '/control/source', lambda m: sources.append(m.data),
                               QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+    commanded = []
+    probe.create_subscription(JointState, '/status/motion/commanded_joint_states', commanded.append, 100)
     public_status, robot_info = [], []
     feedback_by_topic = {'/status/motion/joint_states': public_status}
     probe.create_subscription(JointState, '/status/motion/joint_states', public_status.append, 10)
     probe.create_subscription(String, '/status/robot/info', lambda m: robot_info.append(json.loads(m.data)),
                               QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
     servo = probe.create_publisher(JointState, '/control/motion/whole_body/servo_j', 1)
-    servo_hands, public_hand_names, hand_goals = {}, {}, {}
+    servo_hands, public_hand_names = {}, {}
+    grip_bit = 1.
     public_names = {model: f'{side}_joint_{i}' for side in ('left', 'right')
                     for i, model in enumerate(cfg['arms'][side]['joint_names'], 1)}
     public_names.update({model: f'waist_joint_{i}' for i, model in enumerate(cfg['body']['waist_joint_names'], 1)})
@@ -117,10 +120,9 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
         in_state = cfg['grippers'].get('feedback_in_joint_state', False)
         state=msg({**values, **hand_values} if in_state else values,stamp);state.velocity=[0.]*len(state.name)
         state_pub.publish(state)
-        # Real X1 feedback can be outside the calibrated command interval.
-        # The recent final command still provides a legal continuity reference.
         if profile_id == 'x1':
-            hands_pub.publish(msg({**hand_values, 'L_thumb_roll_joint':.0252},stamp))
+            # The real X1 thumb may report a sample just outside its command interval.
+            hands_pub.publish(msg({**hand_values, 'L_thumb_roll_joint': .0252}, stamp))
         elif not in_state:
             names = [n for side in ('left', 'right') for n in cfg['grippers'][side]['feedback_joint_names']]
             hands_pub.publish(msg({n: hand_values[n] for n in names}, stamp))
@@ -138,7 +140,7 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
             program.publish(target)
         if public_program:
             for side, publisher in servo_hands.items():
-                target = msg(dict(zip(public_hand_names[side], hand_goals[side].values())), stamp)
+                target = msg({public_hand_names[side]: grip_bit}, stamp)
                 target.header.frame_id = 'test_public_hand_servoj'
                 publisher.publish(target)
         elif legacy_inputs:
@@ -171,25 +173,16 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
         until(lambda:bridge._boundary is not None and control.required_peers<=control.peers.keys())
         until(lambda: robot_info)
         info = robot_info[-1]
-        unit = {'HC_REALMAN': 'fraction', 'openarmx': 'm', 'x1': 'rad'}[profile_id]
         for side in ('left', 'right'):
             group = info['groups'][side+'_hand']
-            grip = cfg['grippers'][side]
-            models = grip.get('feedback_joint_names', grip['finger_joint_names'])
-            names = group['joint_names']
-            assert len(names) == len(models) and group['units'] == [unit] * len(names)
+            assert group['joint_names'] == [side+'_grip'] and group['units'] == ['1']
+            assert group['values'] == {'open': 0, 'closed': 1}
             hand_status_topic = group['joint_states']
-            expected_topic = ('/status/motion/joint_states' if cfg['grippers'].get('feedback_in_joint_state')
-                              else '/status/motion/hand_joint_states')
-            assert hand_status_topic == expected_topic
+            assert hand_status_topic == '/status/motion/hand_joint_states'
             if hand_status_topic not in feedback_by_topic:
                 feedback_by_topic[hand_status_topic] = []
                 probe.create_subscription(JointState, hand_status_topic, feedback_by_topic[hand_status_topic].append, 10)
-            public_hand_names[side] = names
-            hand_goals[side] = {model: .75*closed + .25*opened
-                                for model, closed, opened in zip(grip['finger_joint_names'],
-                                                               grip['finger_closed'], grip['finger_open'])
-                                if model in models}
+            public_hand_names[side] = group['joint_names'][0]
             servo_hands[side] = probe.create_publisher(JointState, group['endpoints']['servo_j'], 1)
         until(lambda: all(pub.get_subscription_count() == 1 for pub in servo_hands.values()))
         control.enable()
@@ -228,21 +221,32 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
         assert set(public_names) <= command_values.keys()
         assert all(math.isfinite(command_values[model]) for model in public_names)
         assert images and bytes(images[-1].data)==b'unchanged-depth-bytes'
-        def reached_hand_goal(side):
-            return all(abs(hand_values[n]-v)<1e-5 for n,v in hand_goals[side].items())
-        until(lambda: all(reached_hand_goal(side) for side in ('left', 'right')))
-        for side, names in public_hand_names.items():
-            expected = dict(zip(names, hand_goals[side].values()))
-            if profile_id == 'x1' and side == 'left':
-                expected[names[0]] = .0252  # actual sensor sample injected above
-            def measured_hand():
-                topic = info['groups'][side+'_hand']['joint_states']
-                for state in reversed(feedback_by_topic[topic]):
-                    positions = dict(zip(state.name, state.position))
-                    if all(abs(positions.get(n, math.inf)-v) < 1e-5 for n,v in expected.items()):
-                        return True
-                return False
-            until(measured_hand)
+        def native_expected(side, bit):
+            grip = cfg['grippers'][side]
+            physical = grip.get('feedback_joint_names', grip['finger_joint_names'])
+            positions = dict(zip(grip['finger_joint_names'], grip['finger_closed' if bit else 'finger_open']))
+            expected = {name: positions[name] for name in physical}
+            if grip.get('binary_state_joint'):
+                expected[grip['binary_state_joint']] = bit
+            return expected
+        def native_published(side, bit, since):
+            expected = native_expected(side, bit)
+            return any(channel == side and message.header.frame_id == 'test_public_hand_servoj'
+                       and set(message.name) == set(expected)
+                       and all(abs(q - expected[n]) < 1e-5 for n, q in zip(message.name, message.position))
+                       for _, channel, message, _ in outputs[since:])
+        def public_bit(frames, name, bit):
+            return any(name in m.name and m.position[m.name.index(name)] == bit for m in frames)
+        hand_status = feedback_by_topic['/status/motion/hand_joint_states']
+        for grip_bit in (0., 1.):
+            start, measured_start, sent_start = len(outputs), len(hand_status), len(commanded)
+            for side, name in public_hand_names.items():
+                until(lambda: native_published(side, grip_bit, start))
+                until(lambda: public_bit(hand_status[measured_start:], name, grip_bit))
+                until(lambda: public_bit(commanded[sent_start:], name, grip_bit))
+        assert all(not set(m.name).intersection(public_hand_names.values()) for m in public_status)
+        assert all(not m.velocity and not m.effort and set(m.name) <= set(public_hand_names.values())
+                   for m in hand_status)
         assert {channel for _,channel,_,state in outputs if state=='AUTO'} == {'arms','left','right'}
         assert not solver.intervention.authorized()
         def assert_grant(source, offset, previous_epoch):
@@ -295,6 +299,12 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
         assert not opened and not control.recording_error
         if bridge_kind=='legacy_thread':
             assert not control.segment_open
+        # The live training tap must see AUTO arm/hand commands and manual VR.
+        for tag in ('test_public_servoj', 'test_public_hand_servoj'):
+            assert any(m.header.frame_id == tag for m in commanded)
+        manual_stamps = {(m.header.stamp.sec, m.header.stamp.nanosec)
+                         for _, channel, m, mode in outputs if mode == 'MANUAL' and channel == 'arms'}
+        assert any((m.header.stamp.sec, m.header.stamp.nanosec) in manual_stamps for m in commanded)
         assert len(control.metrics)==3
         # The gateway and the public API converge on one arbiter.
         assert len(probe.get_publishers_info_by_topic('/hc_teleop/joint_cmd'))==1
@@ -316,7 +326,7 @@ def test_v23_own_topic_takeover_and_return_without_recording(monkeypatch, profil
 
 
 @pytest.mark.parametrize('profile_id', ['x1', 'openarmx', 'HC_REALMAN'])
-def test_public_arm_servoj_and_measured_status(profile_id):
+def test_public_arm_servoj_and_measured_status(profile_id, tmp_path):
     """An external client discovers the endpoint and uses only public joint names."""
     import rclpy
     from rclpy.executors import SingleThreadedExecutor
@@ -355,10 +365,13 @@ def test_public_arm_servoj_and_measured_status(profile_id):
         while time.monotonic() < deadline:
             executor.spin_once(timeout_sec=.02)
         assert set(probe.get_node_names()) == {probe.get_name()}
-        infos, feedback, actions, health = [], [], [], []
+        infos, feedback, actions, health, commanded = [], [], [], [], []
+        probe.create_subscription(JointState, '/status/motion/commanded_joint_states', commanded.append, 100)
         probe.create_subscription(String, '/status/robot/info', lambda msg: infos.append(json.loads(msg.data)),
                                   QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         probe.create_subscription(JointState, '/action/joint_states', actions.append, 10)
+        raw_hands = []
+        probe.create_subscription(JointState, '/action/right_hand/joint_states', raw_hands.append, 10)
         states = probe.create_publisher(JointState, '/observation/joint_states', 1)
         ready = probe.create_publisher(Bool, '/status/hardware/ready', 1)
         probe.create_subscription(Status, '/status/motion/status', health.append,
@@ -431,10 +444,74 @@ def test_public_arm_servoj_and_measured_status(profile_id):
                     any(f.get(right[0]) == right_target.position[0] for f in frames))
 
         wait_for(received_both)
+        wait_for(lambda: len([m for m in commanded if m.header.stamp == paired_stamp]) == 2)
+        mapping = {j['model_name']: j['public_name'] for j in info['joints']}
+        comparison = [{mapping[n]: q for n, q in values.items()} for values in paired_outputs()]
+        live = [dict(zip(m.name, m.position)) for m in commanded if m.header.stamp == paired_stamp]
+        assert len(comparison) == len(live) == 2
+        assert all(values in live for values in comparison)
         if profile_id == 'HC_REALMAN':
             merged = paired_outputs()[-1]
             assert [merged[n] for n in left] == pytest.approx(list(target.position))
             assert [merged[n] for n in right] == pytest.approx(list(right_target.position))
+        # Run the actual MCAP player through its replay lease and the fake actuator.
+        from mcap.writer import Writer
+        from rclpy.serialization import serialize_message
+        from middleware.core.topic_player import TopicPlayer
+        with (tmp_path/'old.mcap').open('wb') as stream:
+            writer = Writer(stream)
+            writer.start(profile='ros2')
+            schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+            channel = writer.register_channel('/action/joint_states', 'cdr', schema)
+            hand_channel = writer.register_channel('/action/right_hand/joint_states', 'cdr', schema)
+            hand_cfg = cfg['grippers']['right']
+            native_names = hand_cfg.get('feedback_joint_names', hand_cfg['finger_joint_names'])
+            hand = JointState(name=list(native_names))
+            hand.header.frame_id = 'mcap_native_hand'
+            native = JointState(name=left, position=[home[n] for n in left])
+            native.header.frame_id = 'mcap_native'
+            for i in range(3):
+                bit = float(i % 2)
+                positions = dict(zip(hand_cfg['finger_joint_names'], hand_cfg['finger_closed' if bit else 'finger_open']))
+                hand.name = list(native_names)
+                hand.position = [float(positions[n]) for n in native_names]
+                if hand_cfg.get('binary_state_joint'):
+                    hand.name.append(hand_cfg['binary_state_joint'])
+                    hand.position.append(bit)
+                writer.add_message(hand_channel, 100_000_000*i+1, serialize_message(hand), 100_000_000*i+1)
+                writer.add_message(channel, 100_000_000*i+1, serialize_message(native), 100_000_000*i+1)
+            writer.finish()
+        player = TopicPlayer(tmp_path, lambda: bridge, active_profile_provider=lambda: profile_id)
+        try:
+            player.play('old.mcap')
+            replayed = lambda msg: msg.header.frame_id == 'mcap_native'
+            wait_for(lambda: any(map(replayed, commanded)) and any(map(replayed, actions)))
+            real = next(m for m in actions if replayed(m))
+            wait_for(lambda: any(m.header == real.header for m in commanded))
+            report = next(m for m in commanded if m.header == real.header)
+            assert report.name == [mapping[n] for n in real.name]
+            assert list(report.position) == list(real.position)
+            def matched_hand_bits():
+                reports = {(m.header.stamp.sec, m.header.stamp.nanosec): m for m in commanded
+                           if m.header.frame_id == 'mcap_native_hand'}
+                bits = set()
+                for msg in raw_hands:
+                    public = reports.get((msg.header.stamp.sec, msg.header.stamp.nanosec))
+                    if public is None:
+                        continue
+                    assert public.name == ['right_grip'] and list(public.position) in ([0.], [1.])
+                    bit = public.position[0]
+                    native = dict(zip(msg.name, msg.position))
+                    assert all(native[n] == q for n, q in zip(hand_cfg['finger_joint_names'],
+                               hand_cfg['finger_closed' if bit else 'finger_open']) if n in native_names)
+                    if hand_cfg.get('binary_state_joint'):
+                        assert native[hand_cfg['binary_state_joint']] == bit
+                    bits.add(bit)
+                return bits == {0., 1.}
+            wait_for(matched_hand_bits)
+
+        finally:
+            player.stop(require_reset=False)
         send_feedback = False
         wait_for(lambda: health[-1].code == Status.STATE_STALE)
         hardware_ready = False

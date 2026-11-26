@@ -9,12 +9,85 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from middleware.core.binary_grip import BinaryGrip
 from middleware.core.robot_api import RobotApiProfile, selected_profile
 from middleware.core.robot_profiles import RobotProfileError, RobotProfileManager
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = [ROOT / 'adapters/robots' / n for n in ('openarmx', 'x1')]
 PROFILES.append(ROOT / 'tests/fixtures/robot_api_six_dof')
+
+
+@pytest.mark.parametrize('robot,arms,native_unit,physical_count', [
+    ('x1', 7, 'rad', 10), ('openarmx', 7, 'm', 1), ('HC_REALMAN', 6, 'fraction', 1),
+])
+def test_v23_recording_discovery(robot, arms, native_unit, physical_count):
+    profile = ROOT/'adapters/robots'/robot
+    api = RobotApiProfile(profile)
+    ros = yaml.safe_load((profile/'middleware.yaml').read_text())['ros']
+    info = api.describe_servo_j(ros)
+    rec = info['recording']
+    assert rec['schema'] == 'hc-servoj-recording/v1'
+    assert rec['timing'] == dict(grid_clock='ros_epoch', grid_rounding='nearest_ns_half_up',
+                                 joint_max_age_ns=200_000_000, camera_max_age_ns=250_000_000,
+                                 selection='latest_not_after_grid')
+    sides = ('right', 'left') if robot == 'x1' else ('left', 'right')
+    expected = [f'{side}_joint_{i}' for side in sides for i in range(1, arms + 1)]
+    if robot == 'x1':
+        expected.extend(f'waist_joint_{i}' for i in range(1, 4))
+        assert rec['cameras'][0]['topic'] == '/observation/cameras/head/color/compressed'
+    assert rec['body']['joint_names'] == expected
+    mapped = {j['model_name']: j for j in info['joints']}
+    assert [mapped[n]['public_name'] for n in rec['body']['model_names']] == expected
+    assert rec['body']['units'] == ['rad'] * len(expected)
+    commanded = info['endpoints']['commanded_joint_states']
+    assert rec['commanded_state']['topic'] == commanded == '/status/motion/commanded_joint_states'
+    assert rec['commanded_state']['idle_republish'] is False
+    for group in info['groups'].values():
+        assert group['commanded_joint_states'] == commanded
+    assert set(rec['hands']) == {'left_hand', 'right_hand'}
+    for group in rec['hands']:
+        hand = info['groups'][group]
+        name = group.removesuffix('_hand') + '_grip'
+        assert hand['joint_names'] == [name] and hand['units'] == ['1']
+        assert hand['command_semantics'] == 'binary_grasp' and hand['values'] == {'open': 0, 'closed': 1}
+        assert hand['joint_states'] == '/status/motion/hand_joint_states'
+        assert hand['endpoints']['servo_j'] != commanded
+        joint = next(j for j in info['joints'] if j['public_name'] == name)
+        assert joint['model_name'] is joint['scale'] is joint['offset'] is None
+        grip = BinaryGrip.from_description(name, hand['grip_calibration'])
+        assert len(grip.native_names) == physical_count and grip.native_unit == native_unit
+        assert set(grip.native_names).isdisjoint(mapped)
+        for bit in (0, 1):
+            native = grip.encode(bit)
+            assert grip.decode(grip.command_names, native, use_marker=True) == bit
+            assert grip.decode(grip.native_names, native[:physical_count]) == bit
+        with pytest.raises(ValueError):
+            grip.encode(.5)
+        if robot == 'x1':
+            assert grip.decode([grip.marker], [1.0], use_marker=True) == 1
+            assert grip.decode([grip.marker], [1.0]) is None
+        else:
+            assert grip.opened[0] > grip.closed[0]
+            assert grip.decode(grip.native_names, [(grip.opened[0] + grip.closed[0])/2]) == 1
+
+
+def test_v23_camera_discovery_uses_active_recording_selection():
+    api = RobotApiProfile(ROOT/'adapters/robots/HC_REALMAN')
+    image = 'sensor_msgs/msg/Image'
+    compressed = 'sensor_msgs/msg/CompressedImage'
+    topics = [('/head/color', image), ('/head/color/compressed', compressed),
+              ('/head/depth/compressed', compressed), ('/left/color', image)]
+    inputs = [dict(topic=t, type=k, outputs=['record']) for t, k in topics]
+    inputs.extend([dict(topic='/disabled', type=image, outputs=['record'], enabled=False),
+                   dict(topic='/preview', type=image, outputs=['websocket'])])
+    cams = api.describe_servo_j({'subscriptions': inputs})['recording']['cameras']
+    assert cams == [dict(feature='observation.images.head_color', topic='/head/color/compressed',
+                         type=compressed),
+                    dict(feature='observation.images.left_color', topic='/left/color', type=image)]
+    # The isolated owner receives the discovery result and opens no camera subscriptions.
+    assert api.describe_servo_j({'_recording_cameras': cams, 'subscriptions': []})['recording']['cameras'] == cams
+    assert api.describe_servo_j({'subscriptions': []})['recording']['cameras'] == []
 
 
 def modified(tmp_path, mutate, file='robot_api.yaml'):

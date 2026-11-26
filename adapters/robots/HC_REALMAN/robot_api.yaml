@@ -34,15 +34,11 @@ auxiliary_joints:
   hand_wide_loop_joint: right_gripper_joint_8
 hand_servo_j:
   left:
-    command_semantics: absolute_normalized_opening
-    unit: fraction
-    joints:
-      left_gripper: left_gripper_opening
+    native_joints_from: feedback_joint_names
+    native_unit: fraction
   right:
-    command_semantics: absolute_normalized_opening
-    unit: fraction
-    joints:
-      right_gripper: right_gripper_opening
+    native_joints_from: feedback_joint_names
+    native_unit: fraction
 joint_overrides: {}
 poses:
   home:

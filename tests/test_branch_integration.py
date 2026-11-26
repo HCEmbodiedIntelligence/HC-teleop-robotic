@@ -46,12 +46,42 @@ def test_legacy_default_and_explicit_motion_use_matching_recording_names(robot, 
     assert not unified_profile(profile)
     legacy = runtime._load_session_profile_metadata()
     assert 'robot_api_schema' not in legacy
+    if robot == 'x1':
+        contract = json.loads(legacy['x1_joint_contract'])
+        assert contract['schema'] == 'hc-x1-native-joints/v1'
+        axes = [f'Joint{i}_{side}' for side in ('R', 'L') for i in range(1, 8)]
+        assert contract['body_training_order'] == axes + ['leg_1', 'leg_2', 'zhi']
+        topics = contract['topics']
+        action = topics['/action/joint_states']
+        assert action['position_overrides']['R_ban']['unit'] == 'rad'
+        assert topics['/internal/recording/published_action']['wire_copy_of'] == '/action/joint_states'
+        assert topics['/control/joint_cmd']['source'] == 'post_smoother_command'
+        right = topics['/action/right_hand/joint_states']
+        assert right['position_overrides']['R_ban'] == dict(quantity='grip_state', unit='1', open=0, closed=1)
+        assert len(right['physical_joints']) == 10 and 'R_ban' not in right['physical_joints']
+        assert {s['topic'] for s in yaml.safe_load((profile/'middleware.yaml').read_text())['ros']['subscriptions']
+                if s['type'] == 'sensor_msgs/msg/JointState' and s.get('enabled', True)
+                and 'record' in s['outputs']} == set(topics) - {'/internal/recording/published_action'}
+    else:
+        assert 'x1_joint_contract' not in legacy
     monkeypatch.setenv('HC_CONTROL_BACKEND', 'motion')
     assert unified_profile(profile)
     public = runtime._load_session_profile_metadata()
     assert public['robot_api_schema'] == 'hc-robot-api/v1'
+    assert 'x1_joint_contract' not in public
     assert 'left_joint_1' in json.loads(public['free_joints'])
     assert public['free_joints'] != legacy['free_joints']
+
+
+@pytest.mark.parametrize('mode', ['corrections_only', 'full_session'])
+def test_ordinary_x1_label_contract_is_not_advertised_in_dagger(mode):
+    from types import SimpleNamespace
+    from middleware.core.correction_recording import CorrectionSession
+
+    metadata = dict(profile_id='x1', x1_joint_contract='ordinary', robot_api_info='public')
+    capture = CorrectionSession(SimpleNamespace(config={}), metadata, capture_mode=mode)
+    assert capture.metadata == dict(profile_id='x1', robot_api_info='public')
+    assert 'x1_joint_contract' in metadata
 
 
 def test_unified_profile_round_trip_keeps_main_middleware_settings(tmp_path):

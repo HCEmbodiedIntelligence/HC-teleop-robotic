@@ -33,6 +33,12 @@ class ReplaySafetyTests(unittest.TestCase):
             )
         )
 
+    def test_commanded_observations_are_read_only(self):
+        topic = '/status/motion/commanded_joint_states'
+        msg_type = 'sensor_msgs/msg/JointState'
+        self.assertFalse(self.bridge.publish(topic, msg_type, {'name': ['j'], 'position': [.1]}))
+        self.assertFalse(self.bridge.publish_raw(topic, msg_type, b'data'))
+
     def test_replay_requires_readiness_and_disables_live_output_afterwards(self):
         self.assertFalse(self.bridge.begin_replay())
         self.bridge.receive_hardware_ready(True)

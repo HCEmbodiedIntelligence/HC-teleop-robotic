@@ -50,6 +50,22 @@ class TopicRecorderTests(unittest.TestCase):
             spec = json.loads(spec_path.read_text())
             self.assertEqual([Path(item['source']).name for item in spec['items']], ['one.mcap', 'two.mcap'])
             self.assertEqual([item['fps'] for item in spec['items']], [20, 20])
+    def test_frozen_capture_omits_implicit_public_topics_and_resets_on_next_start(self):
+        kind = 'std_msgs/msg/String'
+        topics = [dict(topic='/original', type=kind),
+                  dict(topic='/implicit', type=kind, ordinary_public=True)]
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = TopicRecorder({}, Path(directory), topics=topics)
+            for name, metadata, expected in [('task', {'capture_snapshot': '{}'}, ['/original']),
+                                             ('ordinary', {}, ['/original', '/implicit'])]:
+                recorder.start(name+'.mcap', metadata)
+                for item in topics:
+                    recorder.record(dict(kind='ros_message', topic=item['topic'], msg_type=kind,
+                                         _raw=serialize_message(String(data=name))))
+                recorder.stop()
+                with recorder.path.open('rb') as stream:
+                    self.assertEqual([c.topic for _, c, _ in make_reader(stream).iter_messages()], expected)
+
     def test_records_16bit_png_depth_as_ros2_cdr(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = TopicRecorder({"directory": "recordings"}, Path(directory))

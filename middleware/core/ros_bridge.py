@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import queue
 import math
 import re
@@ -12,6 +13,7 @@ from collections import Counter, deque
 from typing import Any, Callable
 
 from .protocol import envelope
+from .robot_api import SERVO_J_COMMANDED_STATE
 
 
 EventCallback = Callable[[dict[str, Any], list[str]], None]
@@ -406,7 +408,7 @@ class RosBridge:
         return {topic: tracker.status(now) for topic, tracker in trackers}
 
     def publish(self, topic: str, msg_type: str, data: dict[str, Any]) -> bool:
-        if str(topic) == "/control/joint_cmd" or "/msg/" not in str(msg_type):
+        if str(topic) in ("/control/joint_cmd", SERVO_J_COMMANDED_STATE) or "/msg/" not in str(msg_type):
             return False
         if self.ownership.active and self._ownership_control_topic(topic):
             return False
@@ -1011,6 +1013,8 @@ class RosBridge:
             self._command_interval(timing, 'dds_publish', commit_done, publish_done)
             self._command_interval(timing, 'send_accounting', publish_done, released)
             self._command_checkpoint(timing, 'commit_publish')
+            if published is not None:
+                self._report_commanded(published)
             if ticket is not None:
                 if published is not None and wire_cdr is not None:
                     capture.complete(ticket, serialized_cdr=wire_cdr,
@@ -1024,6 +1028,16 @@ class RosBridge:
                 # action evidence before any subsequent manual-close hook, but
                 # never invoke this ingress while holding the final send gate.
                 self._action_sink(evidence)
+
+    def _report_commanded(self, message):
+        reporter = getattr(self._boundary, 'servo_j', None)
+        if reporter is not None:
+            try:
+                reporter.commanded(message)
+            except Exception:
+                # The actuator has already accepted publication. Telemetry failures
+                # must not change that result or suppress recording bookkeeping.
+                logging.getLogger(__name__).exception("Failed to publish the v23 commanded joint state")
 
     def _enqueue(self, command: str, data: Any) -> bool:
         item = (command, data)
@@ -2007,6 +2021,7 @@ class RosBridge:
                                 if self._legacy_enabled:
                                     message = prepared[0]
                             publisher.publish(message)
+                        self._report_commanded(message)
                     else:
                         self._actor_checkpoint()
                         if self._actor_queue_item_allowed(item):

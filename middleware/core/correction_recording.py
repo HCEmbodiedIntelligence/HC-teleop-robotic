@@ -19,6 +19,7 @@ import time
 import uuid
 
 from .topic_recorder import TopicRecorder, enqueue_record
+from .x1_recording import X1_JOINT_CONTRACT_KEY
 from .ros_recording_executor import recording_inputs, recording_subscriptions, _put_latest
 
 
@@ -267,10 +268,10 @@ def _capture_process(config, resources, shared_bounds, boundaries, actions, comp
                 late_ns=int(options.get('late_message_sec', .2)*1e9),
                 cache_bytes=int(options.get('observation_cache_bytes', 64*1024**2)),
                 long_gap_ns=int(options.get('long_gap_sec', .2)*1e9))
-        observations = [item for item in recording_subscriptions(config)
+        observations = [item for item in recording_subscriptions(config, include_public=False)
                          if not item['topic'].startswith(('/action/', '/control/', '/events/', '/status/'))
                          and item['type'].startswith(('sensor_msgs/', 'geometry_msgs/'))]
-        subscriptions = recording_subscriptions(config) if full_session else observations
+        subscriptions = recording_subscriptions(config, include_public=False) if full_session else observations
         if full_session:
             for topic in ('/status/control/ownership', '/events/control/intervention'):
                 if not any(item['topic'] == topic for item in subscriptions):
@@ -352,6 +353,8 @@ class CorrectionSession:
         self.capture_mode = capture_mode
         self.full_session = capture_mode == 'full_session'
         self.service, self.metadata = service, copy.deepcopy(metadata)
+        # DAgger records ownership-selected commands under its own capture mode.
+        self.metadata.pop(X1_JOINT_CONTRACT_KEY, None)
         self.task_managed = hasattr(service, 'platform')
         self.jobs = {}
         self.selection = copy.deepcopy(service.platform.recording_selection()) if self.task_managed else None

@@ -14,13 +14,26 @@ from .capture_window import SensorPreroll, buffered_sensor
 from .config import isolated_control_process_enabled
 
 
-def recording_subscriptions(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return enabled ROS subscriptions explicitly selected for MCAP recording."""
+def recording_subscriptions(config: dict[str, Any], *, include_public=True) -> list[dict[str, Any]]:
+    """Select native MCAP channels and the matching public publication evidence."""
     selected = [
         dict(item)
         for item in config.get("subscriptions", [])
         if item.get("enabled", True) and "record" in item.get("outputs", [])
     ]
+    # New ordinary native-body captures also retain the exact public grip
+    # feedback and selected targets that the independent live recorder sees.
+    # Explicitly excluded streams stay excluded; a custom single-topic capture
+    # and frozen snapshots keep their original selection.
+    if include_public and config.get('servo_j_profile'):
+        from .robot_api import SERVO_J_COMMANDED_STATE, SERVO_J_HAND_STATE
+        names = {item['topic'] for item in selected}
+        configured = {item['topic'] for item in config.get('subscriptions', [])}
+        if {'/action/joint_states', '/observation/joint_states'} <= names:
+            for topic in (SERVO_J_COMMANDED_STATE, SERVO_J_HAND_STATE):
+                if topic not in configured:
+                    selected.append(dict(topic=topic, type='sensor_msgs/msg/JointState',
+                                         enabled=True, outputs=['record'], max_hz=0., ordinary_public=True))
     from .recording_action_labels import action_label_policy, OWNERSHIP_TOPIC
     if action_label_policy(config) and not any(item['topic'] == OWNERSHIP_TOPIC for item in selected):
         # Required provenance for derived labels, never an actuator input.

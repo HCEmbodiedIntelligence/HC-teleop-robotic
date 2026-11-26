@@ -586,6 +586,9 @@ def test_preserved_snapshot_keeps_log_clock_when_first_headers_differ(tmp_path):
     from middleware.core.topic_recorder import RECORDING_METADATA_NAME
 
     task = task_document(source_format='LEROBOT_V3')
+    features = task['capture_plan']['output']['features']
+    for feature, axis_names in [('observation.state', ['b', 'a']), ('action', ['a', 'b'])]:
+        features[feature].update(names=axis_names, units=['rad', 'rad'], shape=[2])
     snapshot = snapshot_document(task, dict(recording_id='preserved-clock',
         expected_plan_revision=1, source_format='LEROBOT_V3'))
     source = tmp_path / 'preserved-clock.mcap'
@@ -604,7 +607,7 @@ def test_preserved_snapshot_keeps_log_clock_when_first_headers_differ(tmp_path):
         for index, receive_ns in enumerate(times):
             for channel, offset_ns, value in ((state, -50_000_000, index),
                                               (action, -30_000_000, index + 10)):
-                message = JointState(name=['joint'], position=[float(value)])
+                message = JointState(name=['a', 'b'], position=[float(value), float(30 + value)])
                 message.header.stamp.sec, message.header.stamp.nanosec = divmod(
                     receive_ns + offset_ns, 1_000_000_000)
                 writer.add_message(channel, receive_ns, bytes(serialize_message(message)), receive_ns)
@@ -618,7 +621,260 @@ def test_preserved_snapshot_keeps_log_clock_when_first_headers_differ(tmp_path):
     rows = manifest['episodes'][0]
     assert len(rows) == len(times)
     assert [row['grid_time'] for row in rows] == [(stamp - times[0]) / 1e9 for stamp in times]
-    assert [row['values']['observation.state'] for row in rows] == [[float(i)] for i in range(6)]
-    assert [row['values']['action'] for row in rows] == [[float(i + 10)] for i in range(6)]
+    assert [row['values']['observation.state'] for row in rows] == [[float(i + 30), float(i)] for i in range(6)]
+    assert [row['values']['action'] for row in rows] == [[float(i + 10), float(i + 40)] for i in range(6)]
     assert all(row['source_available'] == row['source_valid'] == [1., 1.] for row in rows)
     assert all(row['source_age'] == [0., 0.] for row in rows)
+
+
+@pytest.mark.parametrize('first', ['state', 'action'])
+def test_x1_body_export_keeps_one_named_layout_across_wire_shapes(tmp_path, first):
+    import json
+    from mcap.writer import Writer
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import JointState
+    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.x1_recording import X1_BODY_JOINTS
+
+    names = list(X1_BODY_JOINTS)
+    arms, waist = names[:14], names[14:]
+    extra = ['head_1', 'head_2', 'R_ban', 'L_ban']
+    source = tmp_path / 'x1.mcap'
+    with source.open('wb') as stream:
+        writer = Writer(stream)
+        writer.start(profile='ros2')
+        writer.add_metadata('hc_teleop.session', {'profile_id': 'x1'})
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        channels = {key: writer.register_channel(topic, 'cdr', schema) for key, topic in (
+            ('action', '/action/joint_states'), ('state', '/observation/joint_states'),
+            ('hand', '/action/right_hand/joint_states'))}
+        commands = [(arms + waist + extra, list(range(17)) + [float('nan'), float('nan'), 1.57, 0.]),
+                    (arms[::-1] + ['R_ban', 'L_ban', 'head_1', 'head_2'],
+                     list(reversed(range(14))) + [1.57, 0., 0., 0.]),
+                    (['leg_2', 'leg_1'], [float('nan'), .25])]
+        for idx, (axis_names, values) in enumerate(commands):
+            stamp = 1_000_000_000 + idx * 100_000_000
+            state_names = (arms[::-1] if idx == 0 else names[::-1])
+            readings = dict(zip(names, (100. + j for j in range(17))))
+            if idx == 2:
+                readings['leg_2'] = float('nan')
+            messages = {'action': JointState(name=axis_names, position=[float(v) for v in values]),
+                        'state': JointState(name=state_names, position=[readings[n] for n in state_names]),
+                        'hand': JointState(name=['R_ban'], position=[1.])}
+            order = (first, 'action' if first == 'state' else 'state', 'hand')
+            for key in order:
+                writer.add_message(channels[key], stamp, serialize_message(messages[key]), stamp)
+        writer.finish()
+    stage = tmp_path / 'stage'; stage.mkdir()
+    sources = [dict(topic='/action/right_hand/joint_states', names=['R_ban'], units=['unitless'], max_age_sec=.2)]
+    result = json.loads(prepare_mcap(source, stage, 10, 'training', 'x1', action_sources=sources).read_text())
+    assert result['joint_names'] == names + ['right_grip']
+    assert result['action_joint_names'] == names + ['right_grip']
+    assert result['source_keys'] == sorted(result['source_keys'])
+    assert result['joint_units']['action'] == ['rad'] * 17 + ['1']
+    rows = result['episodes'][0]
+    assert rows[0]['values']['observation.state'] == list(range(100, 114)) + [0.] * 4
+    assert rows[0]['state_valid'] == [True] * 14 + [False] * 4
+    assert rows[1]['state_valid'] == [True] * 17 + [False]
+    assert rows[2]['values']['observation.state'] == list(range(100, 117)) + [0.]
+    assert rows[2]['state_valid'] == [True] * 15 + [False, True, False]
+    assert rows[0]['observation.state_time_ns'][-1] == -1
+    assert rows[0]['action.source_time_ns'][-1] == 1_000_000_000
+    assert rows[0]['values']['action'] == list(range(17)) + [1.]
+    assert rows[0]['action_valid'] == [True] * 18
+    assert rows[1]['values']['action'] == list(range(17)) + [1.]
+    assert rows[1]['action_valid'] == [True] * 14 + [False] * 3 + [True]
+    assert rows[2]['values']['action'][14:17] == [.25, 15., 16.]
+    assert rows[2]['action_valid'] == [False] * 14 + [True, False, False, True]
+
+
+def test_correction_inactive_nan_revokes_only_its_own_axis():
+    from middleware.core.lerobot_export import _project_joint_stream
+    messages = [(1, SimpleNamespace(name=['b', 'a'], position=[2., 1.])),
+                (2, SimpleNamespace(name=['a'], position=[float('nan')]))]
+    values, times = _project_joint_stream(messages, ['a', 'b'], correction=True)
+    assert values[-1] == (2, [1., 2.])
+    assert times[-1] == (2, [-1, 1])
+
+
+@pytest.mark.parametrize('unit,valid', [('rad', True), ('radians', True), ('deg', False)])
+def test_x1_snapshot_verifies_recorded_units(tmp_path, unit, valid):
+    import json
+    from mcap.writer import Writer
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import JointState
+    from capture_contract_support import snapshot_document, task_document
+    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.x1_recording import X1_BODY_JOINTS
+
+    source = tmp_path / 'frozen.mcap'
+    task = task_document(source_format='LEROBOT_V3')
+    plan = task['capture_plan']['output']['features']
+    for key in ('observation.state', 'action'):
+        plan[key].update(names=['Joint1_R'], units=[unit])
+    snapshot = snapshot_document(task, dict(recording_id='frozen-units', expected_plan_revision=1,
+                                            source_format='LEROBOT_V3'))
+    with source.open('wb') as fp:
+        writer = Writer(fp); writer.start(profile='ros2')
+        writer.add_metadata('hc_teleop.session', {'profile_id': 'x1', 'recording_id': 'frozen-units',
+                                                  'capture_snapshot': json.dumps(snapshot)})
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        for topic in ('/observation/joint_states', '/action/joint_states'):
+            chan = writer.register_channel(topic, 'cdr', schema)
+            sample = serialize_message(JointState(name=list(X1_BODY_JOINTS), position=[.1]*17))
+            writer.add_message(chan, 1_000_000_000, sample, 1_000_000_000)
+        writer.finish()
+    stage = tmp_path / 'stage'; stage.mkdir()
+    if valid:
+        result = json.loads(prepare_mcap(source, stage, 15, 'frozen', 'x1').read_text())
+        assert result['joint_names'] == result['action_joint_names'] == ['Joint1_R']
+    else:
+        with pytest.raises(ValueError, match='X1 source uses rad, frozen schema declares deg'):
+            prepare_mcap(source, stage, 15, 'frozen', 'x1')
+
+
+@pytest.mark.parametrize(('robot', 'empty_wire'), [
+    ('HC_REALMAN', False), ('openarmx', False), ('x1', False), ('x1', True),
+])
+def test_live_recording_uses_captured_body_and_command_source(tmp_path, robot, empty_wire):
+    import json
+    from pathlib import Path
+    from mcap.writer import Writer
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import JointState
+    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.robot_api import RobotApiProfile
+
+    # Model names, public names and units in the archive are independent of the
+    # currently active profile on the machine doing the off-line conversion.
+    profile = RobotApiProfile(Path(__file__).resolve().parents[1] / 'adapters/robots' / robot)
+    info = profile.describe_servo_j()
+    names = info['recording']['body']['model_names']
+    finger = next(iter(profile.teleop['grippers']['left']['finger_joint_names']))
+    source = tmp_path / 'recorded.mcap'
+    published = '/internal/recording/published_action'
+    with source.open('wb') as stream:
+        writer = Writer(stream)
+        writer.start(profile='ros2')
+        writer.add_metadata('hc_teleop.session', {'profile_id': robot, 'robot_api_info': json.dumps(info)})
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        state = writer.register_channel('/observation/joint_states', 'cdr', schema)
+        action = writer.register_channel('/action/joint_states', 'cdr', schema)
+        wire = writer.register_channel(published, 'cdr', schema) if robot == 'x1' else None
+
+        for index in range(3):
+            stamp = 1_000_000_000 + 100_000_000 * index
+            commands = {n: float(j) / 10 for j, n in enumerate(names)}
+            current = [names[-1], names[0]] if index == 1 else list(reversed(names))
+            def add(channel, joint_names, positions):
+                msg = JointState(name=joint_names, position=positions)
+                msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(stamp, 10**9)
+                writer.add_message(channel, stamp, serialize_message(msg), stamp)
+            feedback = [n for n in reversed(names) if index != 1 or n != names[0]]
+            feedback_values = [commands[n] + 1. for n in feedback]
+            if robot == 'openarmx':
+                # The original feedback includes a finger outside the command group.
+                feedback += [finger]
+                feedback_values += [.021]
+            add(state, feedback, feedback_values)
+            if wire is not None:
+                add(action, names, [12.] * len(names))  # independently recorded training labels
+                if not empty_wire:
+                    add(wire, current, [commands[n] for n in current])
+            else:
+                add(action, current, [commands[n] for n in current])
+        writer.finish()
+
+    stage = tmp_path / 'staging'
+    stage.mkdir()
+    manifest = json.loads(prepare_mcap(source, stage, 10, 'record', 'x1').read_text())
+    assert manifest['robot_type'] == robot
+    assert manifest['robot_api_info'] == info
+    assert manifest['joint_names'] == manifest['action_joint_names'] == names
+    assert manifest['joint_units']['action'] == info['recording']['body']['units']
+    assert manifest['source_topics']['action'] == (published if robot == 'x1' else '/action/joint_states')
+    row = manifest['episodes'][0][1]
+    if empty_wire:
+        assert not any(row['action_valid'])
+        assert row['values']['action'] == [0.] * len(names)
+        assert manifest['action_semantics'] == 'no published target observed'
+    else:
+        assert row['values']['action'] == [float(j) / 10 for j in range(len(names))]
+        assert row['action_valid'] == [True] + [False] * (len(names)-2) + [True]
+    assert row['values']['observation.state'] == [1. + float(j)/10 for j in range(len(names))]
+    assert row['state_valid'] == [False] + [True] * (len(names)-1)
+
+
+@pytest.mark.parametrize('robot', ['x1', 'openarmx', 'HC_REALMAN'])
+@pytest.mark.parametrize('public', [False, True])
+def test_record_optional_binary_grips_from_captured_evidence(tmp_path, robot, public):
+    import json
+    from pathlib import Path
+    from mcap.writer import Writer
+    from rclpy.serialization import serialize_message
+    from sensor_msgs.msg import JointState
+    from middleware.core.lerobot_export import prepare_mcap
+    from middleware.core.robot_api import RobotApiProfile
+
+    source = tmp_path / 'grips.mcap'
+    profile = RobotApiProfile(Path(__file__).resolve().parents[1] / 'adapters/robots' / robot)
+    info = profile.describe_servo_j()
+    left, right = (info['groups'][side+'_hand'] for side in ('left','right'))
+    names = info['recording']['body']['model_names']
+    public_names = info['recording']['body']['joint_names']
+    with source.open('wb') as f:
+        writer = Writer(f); writer.start(profile='ros2')
+        writer.add_metadata('hc_teleop.session', {'profile_id':robot, 'robot_api_info':json.dumps(info)})
+        schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        channels = {}
+        for idx in range(2):
+            stamp = 1_000_000_000 + idx * 100_000_000
+            def add(topic, axes, q):
+                if topic not in channels:
+                    channels[topic] = writer.register_channel(topic, 'cdr', schema)
+                msg = JointState(name=list(axes), position=[float(v) for v in q])
+                msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(stamp,10**9)
+                writer.add_message(channels[topic],stamp,serialize_message(msg),stamp)
+            # Body backend sometimes measures OpenArmX's finger in this same message.
+            axes, positions = list(names), [0.]*len(names)
+            lc, rc = left['grip_calibration'], right['grip_calibration']
+            raw = [lc['opened'], lc['closed']][idx]
+            if left['native_state_topic']=='/observation/joint_states':
+                axes.extend(lc['native_names']); positions.extend(raw)
+            else:
+                add(left['native_state_topic'],lc['native_names'],raw)
+            add('/observation/joint_states', axes, positions)
+            add('/action/joint_states', names, [9.]*len(names))
+            # Both hand actions change; only left has a measurement. Public bits
+            # intentionally conflict with native calibration to test source choice.
+            for side, spec in [('left', left), ('right', right)]:
+                cal = spec['grip_calibration']
+                bit = idx if side=='left' else 1-idx
+                q = list(cal['closed'] if bit else cal['opened'])
+                n = list(cal['native_names'])
+                if cal['marker']:
+                    q = list(cal['opened']) + [bit]
+                    n.append(cal['marker'])
+                add(spec['native_command_topic'], n, q)
+            if public:
+                add(info['endpoints']['commanded_joint_states'], ['right_grip','left_grip'], [idx,1-idx])
+                add(left['joint_states'], ['left_grip'], [1-idx])
+                if idx:
+                    add(info['endpoints']['commanded_joint_states'], [public_names[-1]], [.27])
+        writer.finish()
+    dest=tmp_path/'stage'; dest.mkdir()
+    manifest=json.loads(prepare_mcap(source,dest,10,'demo',robot, record_hands='both').read_text())
+    assert manifest['joint_names']==manifest['action_joint_names']==names+['left_grip','right_grip']
+    assert manifest['joint_units']['action'][-2:]==manifest['joint_units']['observation.state'][-2:]==['1','1']
+    rows=manifest['episodes'][0]
+    for i,row in enumerate(rows):
+        leftbit = 1-i if public else i
+        assert row['values']['observation.state'][-2:]==[leftbit,0.]
+        assert row['state_valid'][-2:]==[True,False]
+        assert row['values']['action'][-2:]==[leftbit,1-leftbit]
+        assert row['action_valid'][-2:]==[True,True]
+        assert row['observation.state_time_ns'][-2:]==[1_000_000_000+i*100_000_000,-1]
+        assert row['action.source_time_ns'][-2:]==[1_000_000_000+i*100_000_000]*2
+    if public:
+        assert not any(rows[0]['action_valid'][:-2])
+        assert rows[1]['values']['action'][-3] == .27

@@ -10,6 +10,9 @@ from typing import Any, Callable
 
 from mcap.reader import make_reader
 
+from .binary_grip import BinaryGrip
+from .recording_cdr import position_label, read_joint_state
+from .robot_api import SERVO_J_COMMANDED_STATE
 from .topic_recorder import read_recording_metadata
 
 
@@ -27,6 +30,46 @@ _X1_MOTION_JOINTS.update(zip(('waist_joint_1', 'waist_joint_2', 'waist_joint_3')
                              ('leg_1', 'leg_2', 'zhi')))
 _ARM_ACTION = '/action/joint_states'
 _PUBLISHED_ACTION = '/internal/recording/published_action'
+
+
+class _GripReplay:
+    """Replace native hand commands independently where the MCAP contains published public bits."""
+
+    def __init__(self, groups):
+        self.sides = {}
+        for side in ('left', 'right'):
+            group = groups.get(side + '_hand', {})
+            if group.get('command_semantics') == 'binary_grasp':
+                name = side + '_grip'
+                self.sides[name] = (group['native_command_topic'],
+                                    BinaryGrip.from_description(name, group['grip_calibration']))
+
+    def bits(self, data):
+        # Most messages on the shared public target topic contain only arms.
+        if b'left_grip\0' not in data and b'right_grip\0' not in data:
+            return
+        fields = read_joint_state(data)
+        if len(fields.name) != len(fields.position) or len(set(fields.name)) != len(fields.name):
+            raise ValueError('malformed public commanded JointState')
+        for name, bit in zip(fields.name, fields.position):
+            if name in self.sides:
+                if bit not in (0.0, 1.0):
+                    raise ValueError(f'invalid recorded {name}: expected 0 or 1')
+                yield name, bit, fields.header_prefix
+
+    def native_topics_to_replace(self, reader, available, needs_hand_evidence):
+        # Only scan for a side if an alternative recorded source actually competes.
+        # If no arm command exists, also confirm that the file contains a hand command.
+        needed = {name for name, (topic, _) in self.sides.items()
+                  if topic in available or '/io_teleop/joint_cmd_finger_' + name.split('_')[0] in available}
+        found = set()
+        if needed or needs_hand_evidence:
+            for schema, channel, message in reader.iter_messages(topics=[SERVO_J_COMMANDED_STATE]):
+                if schema and schema.name == 'sensor_msgs/msg/JointState' and channel.message_encoding == 'cdr':
+                    found.update(name for name, _, _ in self.bits(message.data))
+                    if found and needed <= found:
+                        break
+        return {self.sides[name][0] for name in found}
 
 
 class _X1MotionReplay:
@@ -202,7 +245,16 @@ class TopicPlayer:
                 avail_topics = {c.topic for c in summary.channels.values()}
                 x1_default = (mode == 'drive' and selected_topics is None
                               and 'x1' in {recorded_profile, active_profile})
-                if public_replay or x1_default:
+                grips = None
+                replaced_hands = set()
+                hand_only = False
+                wants_public = selected_topics is None or SERVO_J_COMMANDED_STATE in selected_topics
+                if (mode == 'drive' and wants_public and not public_replay
+                        and not active_api.get('robot_api_schema') and SERVO_J_COMMANDED_STATE in avail_topics):
+                    info = json.loads(active_api.get('robot_api_info') or '{}')
+                    if info.get('recording', {}).get('name_domain') == 'public_name':
+                        grips = _GripReplay(info['groups'])
+                if public_replay or x1_default or grips:
                     counts = stats.channel_message_counts
                     action_topics = {c.topic for c in summary.channels.values() if counts.get(c.id, 0)
                                      and c.message_encoding == 'cdr' and c.schema_id in summary.schemas
@@ -210,22 +262,25 @@ class TopicPlayer:
 
                     record_only = {m.metadata.get('topic') for m in reader.iter_metadata()
                                    if m.name == 'hc_teleop.record_only'}
-                if x1_default:
-                    if _PUBLISHED_ACTION in avail_topics:
-                        source = _PUBLISHED_ACTION
-                    elif '/io_teleop/joint_cmd' in avail_topics:
-                        source = '/io_teleop/joint_cmd'
+                if x1_default or grips:
+                    source = next((t for t in (_PUBLISHED_ACTION, '/io_teleop/joint_cmd')
+                                   if t in avail_topics), _ARM_ACTION)
+                    has_arm = source in action_topics and source not in record_only and not (
+                        x1_default and source == _ARM_ACTION and '/events/recording/action_provenance' in avail_topics)
+                if grips:
+                    if SERVO_J_COMMANDED_STATE in action_topics and SERVO_J_COMMANDED_STATE not in record_only:
+                        replaced_hands = grips.native_topics_to_replace(reader, action_topics, not has_arm)
+                        hand_only = not has_arm and bool(replaced_hands)
                     else:
-                        source = _ARM_ACTION
-                    if source not in action_topics or source in record_only or (
-                            source == _ARM_ACTION and '/events/recording/action_provenance' in avail_topics):
+                        grips = None
+                if x1_default and not hand_only:
+                    if not has_arm:
                         raise ValueError('X1 drive replay needs recorded final actions; '
                                          'observations and training labels can be inspected without driving')
                     if (not recording_metadata.get('robot_api_schema')
                             and not active_api.get('robot_api_schema')):
                         # Platform-selected MCAPs can omit the session metadata.
                         # Model-name CDR stays on the normal fast path after this check.
-                        from .recording_cdr import read_joint_state
                         first = next(reader.iter_messages(topics=[source]), None)
                         if first is None:
                             raise ValueError('X1 drive replay command stream is empty')
@@ -256,7 +311,10 @@ class TopicPlayer:
                     "/io_teleop/joint_cmd_finger_right": "/action/right_hand/joint_states",
                 }
                 drive_passthrough.update(legacy_drive_remap)
-                if "/internal/recording/published_action" in avail_topics:
+                if hand_only:
+                    self._selected_topics = [t for t in avail_topics if t in drive_passthrough]
+                    self._topic_remap = dict(legacy_drive_remap)
+                elif "/internal/recording/published_action" in avail_topics:
                     self._selected_topics = [t for t in avail_topics if t in drive_passthrough
                                              or t == '/internal/recording/published_action']
                     self._topic_remap = dict(legacy_drive_remap)
@@ -310,6 +368,11 @@ class TopicPlayer:
                 ):
                     self._topic_remap["/internal/recording/published_action"] = "/action/joint_states"
 
+            if grips:
+                self._selected_topics = [t for t in self._selected_topics
+                                         if self._topic_remap.get(t, t) not in replaced_hands]
+                if SERVO_J_COMMANDED_STATE not in self._selected_topics:
+                    self._selected_topics.append(SERVO_J_COMMANDED_STATE)
             if public_replay:
                 # Old DAgger public recordings use /action for final commands.
                 # Ordinary X1 captures may also store feedback/NaN training labels there.
@@ -349,7 +412,7 @@ class TopicPlayer:
             self._thread = threading.Thread(
                 target=self._run,
                 args=(target, self._stop_event, self._pause_event, generation,
-                      frozenset(self._selected_topics), self._topic_remap, public_replay),
+                      frozenset(self._selected_topics), self._topic_remap, public_replay, grips),
                 name=f"TopicPlayer-{filename}",
                 daemon=True,
             )
@@ -433,7 +496,7 @@ class TopicPlayer:
             return generation == self._play_generation and not stop_event.is_set()
 
     def _run(self, target_path: Path, stop_event, pause_event, generation,
-             selected, remap, public_replay) -> None:
+             selected, remap, public_replay, grips) -> None:
         try:
             while not stop_event.is_set():
                 with target_path.open("rb") as stream:
@@ -496,6 +559,10 @@ class TopicPlayer:
                             continue
                         if selected and c.topic not in selected and dst not in selected:
                             continue
+                        if grips and c.topic == SERVO_J_COMMANDED_STATE:
+                            if schemas.get(c.schema_id) == 'sensor_msgs/msg/JointState' and c.message_encoding == 'cdr':
+                                channels[channel_id] = (SERVO_J_COMMANDED_STATE, schemas[c.schema_id])
+                            continue
                         if live_x1 and dst not in {
                             _ARM_ACTION, "/action/base/command", "/action/hands/joint_targets",
                             "/action/left_hand/joint_states", "/action/right_hand/joint_states",
@@ -548,7 +615,16 @@ class TopicPlayer:
                             break
 
                         chan_info = channels.get(channel.id)
-                        if chan_info:
+                        if chan_info and grips and channel.topic == SERVO_J_COMMANDED_STATE:
+                            for name, bit, header in grips.bits(message.data):
+                                hand_topic, grip = grips.sides[name]
+                                raw = position_label(header, grip.command_names, grip.encode(bit))
+                                ros = self._get_ros()
+                                if not self._replay_current(generation, stop_event):
+                                    return
+                                if ros is None or ros.publish_raw(hand_topic, chan_info[1], raw) is False:
+                                    raise RuntimeError(f'control bridge refused replay of {name}')
+                        elif chan_info:
                             target_topic, msg_type = chan_info
                             ros = self._get_ros()
                             # The provider may have waited while stop/reset

@@ -17,11 +17,16 @@ from xml.etree import ElementTree
 import yaml
 
 from .robot_profiles import RobotProfileError, UrdfModel, validate_profile_id
+from .binary_grip import BinaryGrip
+from .recording_cameras import recording_cameras
+from .recording_time import CAMERA_MAX_AGE_NS, JOINT_MAX_AGE_NS
+from .x1_recording import X1_BODY_JOINTS
 
 SCHEMA = "hc-robot-api/v1"
 INTERNAL_STATE = "/internal/robot/joint_states"
 INTERNAL_COMMAND = "/internal/robot/joint_commands"
 SERVO_J_STATE = "/status/motion/joint_states"
+SERVO_J_COMMANDED_STATE = "/status/motion/commanded_joint_states"
 SERVO_J_HAND_STATE = "/status/motion/hand_joint_states"
 SERVO_J_STATUS = "/status/motion/status"
 ENDPOINTS = {
@@ -125,8 +130,8 @@ class RobotApiProfile:
                 self.groups['whole_body'] + self.groups.get('waist', [])))
         self.servo_j_joints = dict(self.joints)
         self.servo_j_public = dict(self.public)
-        self.hand_state_endpoint = (SERVO_J_STATE if self.teleop.get("grippers", {}).get("feedback_in_joint_state")
-                                    else SERVO_J_HAND_STATE)
+        self.hand_state_endpoint = SERVO_J_HAND_STATE
+        self.binary_grips = {}
         self._resolve_hand_servo_j()
         self.poses = self._resolve_poses()
         self.driver = self._resolve_driver()
@@ -291,27 +296,27 @@ class RobotApiProfile:
                 raise RobotProfileError(f"unified arm {group} requires ServoJ, ServoP and MoveJ")
 
     def _resolve_hand_servo_j(self):
+        native_hand_names = set()
         for side, spec in self.config.get("hand_servo_j", {}).items():
-            config = self.teleop["grippers"][side]
             group = side + "_hand"
-            mapping = spec["joints"]
-            self.servo_j_members[group] = tuple(mapping)
+            grippers = self.teleop["grippers"]
+            hand = grippers[side]
+            # Archived profiles list the same native controlled axes in their old joint map.
+            if "native_joints_from" in spec:
+                names = hand[spec["native_joints_from"]]
+                unit = spec["native_unit"]
+            else:
+                names = tuple(spec["joints"])
+                unit = spec["unit"]
+            grip = BinaryGrip.from_profile(side, grippers, names, unit)
+            self.binary_grips[group] = grip
+            self.servo_j_members[group] = grip.native_names
             self.servo_j_endpoints[group] = f"/control/motion/{group}/servo_j"
-            for name, public in mapping.items():
-                index = config["finger_joint_names"].index(name)
-                existing = self.servo_j_public.get(public)
-                if ((existing and existing["model_name"] != name) or
-                        (name in self.joints and self.joints[name]["public_name"] != public)):
-                    raise RobotProfileError(f"conflicting hand joint mapping: {name}")
-                scale = existing["scale"] if existing else 1.
-                offset = existing["offset"] if existing else 0.
-                endpoints = (config["finger_open"][index], config["finger_closed"][index])
-                lower, upper = sorted((value - offset) / scale for value in endpoints)
-                limits = dict(lower=lower, upper=upper, velocity=self.teleop["grippers"]["max_velocity"] / abs(scale),
-                              acceleration=None, jerk=None, effort=None)
-                joint = dict(model_name=name, public_name=public, unit=spec["unit"],
-                             scale=scale, offset=offset, limits=limits)
-                self.servo_j_public[public] = self.servo_j_joints[name] = joint
+            native_hand_names.update(hand["finger_joint_names"])
+            native_hand_names.update(n for n in (hand.get("sim_joint"), grip.marker) if n)
+            native_hand_names.update(n for n, j in self.joints.items()
+                                     if j["public_name"].startswith(side + "_gripper_"))
+        self.native_hand_names = frozenset(native_hand_names)
 
     def _resolve_poses(self):
         poses = {}
@@ -452,28 +457,67 @@ class RobotApiProfile:
                     servo={k: self.motion[k] for k in ("control_frequency_hz", "servo_lease_ms",
                            "feedback_max_age_ms", "input_stamp_max_age_s", "input_stamp_future_tolerance_s")})
 
-    def describe_servo_j(self):
+    def describe_servo_j(self, ros_config=None):
         info = self.describe()
         info['servo']['requires_measured_velocity'] = False
-        info['endpoints'].update(joint_states=SERVO_J_STATE, status=SERVO_J_STATUS)
+        info['endpoints'].update(joint_states=SERVO_J_STATE, status=SERVO_J_STATUS,
+                                 commanded_joint_states=SERVO_J_COMMANDED_STATE)
         info['joints'] = [{k: copy.deepcopy(j[k]) for k in ('model_name', 'public_name', 'unit', 'limits', 'scale', 'offset')}
-                          for j in self.servo_j_joints.values()]
+                          for n, j in self.servo_j_joints.items() if n not in self.native_hand_names]
         groups = dict(self.groups)
         groups.update(self.servo_j_members)
-        hands = self.config.get("hand_servo_j", {})
-        if hands:
+        if self.binary_grips:
             info['endpoints']['hand_joint_states'] = self.hand_state_endpoint
         for name, names in groups.items():
             spec = info['groups'].setdefault(name, dict(base_frame=None, tip_frame=None))
-            joints = [self.servo_j_joints[n] for n in names]
+            grip = self.binary_grips.get(name)
+            if grip is not None:
+                limits = dict(lower=0.0, upper=1.0, velocity=None, acceleration=None, jerk=None, effort=None)
+                # A binary grasp is a calibrated posture, not an affine rename of one actuator.
+                joints = [dict(public_name=grip.name, model_name=None, unit='1', limits=limits,
+                               scale=None, offset=None, command_semantics='binary_grasp')]
+                info['joints'].extend(joints)
+                grippers = self.teleop['grippers']
+                spec.update(command_semantics='binary_grasp', values={'open': 0, 'closed': 1},
+                            state_semantics='thresholded_measured_position', grip_calibration=grip.describe(),
+                            native_command_topic=grippers[name[:-5]]['finger_topic'],
+                            native_state_topic=('/observation/joint_states' if grippers.get('feedback_in_joint_state')
+                                                else '/observation/hands/joint_states'))
+            else:
+                joints = [self.servo_j_joints[n] for n in names]
             spec.update(joint_names=[j['public_name'] for j in joints], count=len(joints),
                         units=[j['unit'] for j in joints], limits=[j['limits'] for j in joints],
                         commands=['servo_j'] if name in self.servo_j_endpoints else [],
                         endpoints={'servo_j': self.servo_j_endpoints[name]} if name in self.servo_j_endpoints else {},
-                        joint_states=SERVO_J_STATE, fk_pose_topic=None)
-            if name.endswith('_hand') and name[:-5] in hands:
-                spec['joint_states'] = self.hand_state_endpoint
-                spec['command_semantics'] = hands[name[:-5]]['command_semantics']
+                        joint_states=self.hand_state_endpoint if grip else SERVO_J_STATE,
+                        commanded_joint_states=SERVO_J_COMMANDED_STATE, fk_pose_topic=None)
+
+        models = groups.get('whole_body', ())
+        historical_x1 = self.profile_id == 'x1' and set(models) == set(X1_BODY_JOINTS)
+        if historical_x1:
+            models = X1_BODY_JOINTS
+        body = [self.servo_j_joints[n] for n in models]
+        info['recording'] = {
+            'schema': 'hc-servoj-recording/v1',
+            'timing': {'grid_clock': 'ros_epoch', 'grid_rounding': 'nearest_ns_half_up',
+                       'joint_max_age_ns': JOINT_MAX_AGE_NS, 'camera_max_age_ns': CAMERA_MAX_AGE_NS,
+                       'selection': 'latest_not_after_grid'},
+            'message_type': 'sensor_msgs/msg/JointState',
+            'name_domain': 'public_name',
+            'cameras': recording_cameras(ros_config),
+            'hands': [name for name in groups if name.endswith('_hand')],
+            'body': {'order': 'x1_training' if historical_x1 else 'whole_body_group',
+                     'model_names': list(models), 'joint_names': [j['public_name'] for j in body],
+                     'units': [j['unit'] for j in body]},
+            'state': {'group_topic_field': 'joint_states', 'quantity': 'measured_position',
+                      'stamp': 'feedback_header.stamp'},
+            'commanded_state': {
+                'topic': SERVO_J_COMMANDED_STATE, 'quantity': 'published_target_position',
+                'trigger': 'driver_command_publication', 'stamp': 'published_command_header.stamp',
+                'position_layout': 'finite_named_subset', 'absent_joint': 'no_target_in_message',
+                'velocity': 'empty', 'effort': 'empty', 'idle_republish': False,
+            },
+        }
         return info
 
     def write_runtime(self, directory):

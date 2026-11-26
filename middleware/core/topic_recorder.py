@@ -546,12 +546,20 @@ class TopicRecorder(CorrectionSupport):
         self.config, self.config_dir = dict(config), config_dir
         self.publication_capture = None
         self.action_label_policy = None
-        self._recording_topics = (None if topics is None else tuple(dict.fromkeys(
-            (str(item['topic']), str(item['type'])) for item in topics)))
+        selected = None if topics is None else {
+            (str(item['topic']), str(item['type'])): bool(item.get('ordinary_public')) for item in topics}
+        self._ordinary_topics = None if selected is None else tuple(selected)
+        self._frozen_topics = (None if selected is None else
+                               tuple(pair for pair, ordinary_only in selected.items() if not ordinary_only))
+        self._recording_topics = self._ordinary_topics
         directory = Path(str(config.get("directory", "runtime/topic_recordings"))).expanduser()
         if not directory.is_absolute():
             directory = config_dir / directory
         self.directory = directory.resolve()
+        from .recording_grips import hand_selection
+        sides = hand_selection(config.get('record_hands', 'none'))
+        self.record_hands = (None if config.get('record_hands') is None else
+                             'both' if len(sides) == 2 else next(iter(sides), 'none'))
         self.action_sources = config.get("action_sources", [])
         self.save_format = str(config.get("format", "mcap"))
         self.lerobot_fps = int(config.get("lerobot_fps", 15))
@@ -647,7 +655,7 @@ class TopicRecorder(CorrectionSupport):
                 items.append({'source': str(target.resolve()), 'destination': str(destination.resolve()),
                               'fps': self.lerobot_fps, 'task': str(task),
                               'robot_type': str(robot_type),
-                              'action_sources': deepcopy(self.action_sources)})
+                              'action_sources': deepcopy(self.action_sources), 'record_hands': self.record_hands})
                 accepted.append(identifier)
             except (ValueError, FileNotFoundError) as error:
                 skipped.append({'id': identifier, 'reason': str(error)})
@@ -717,6 +725,8 @@ class TopicRecorder(CorrectionSupport):
             for key, value in (metadata or {}).items()
             if value is not None
         }
+        frozen = self._active_metadata.get('capture_snapshot') or self._active_metadata.get('capture_snapshots')
+        self._recording_topics = self._frozen_topics if frozen else self._ordinary_topics
         # Snapshot/PRESERVE and intervention slots retain their existing capture
         # contract. The shared sensor window is only for ordinary local X1 MCAP.
         self._capture_window.reset(ordinary_x1_capture(self._active_metadata)
@@ -941,6 +951,8 @@ class TopicRecorder(CorrectionSupport):
                    str(self.path), str(destination), "--fps", str(fps),
                    "--task", task, "--robot-type",
                    self._active_metadata.get("profile_id", "robot"), "--action-sources", json.dumps(self.action_sources)]
+        if self.record_hands is not None:
+            command.extend(["--record-hands", self.record_hands])
         try:
             # Export runs outside the ROS and video workers at lower priority.
             if sys.platform.startswith("linux"):

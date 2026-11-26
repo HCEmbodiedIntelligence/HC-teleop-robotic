@@ -25,6 +25,7 @@ from .profile_api import register_profile_routes
 from .protocol import envelope
 from .robot_profiles import RobotProfileManager
 from .robot_api import RobotApiProfile, selected_profile, selected_profile_root
+from .x1_recording import X1_JOINT_CONTRACT_KEY, native_joint_contract
 from adapters.core.runtime_config import unified_profile
 from .ros_bridge import RosBridge
 from .ros_recording_executor import RosRecordingExecutor, recording_subscriptions
@@ -160,8 +161,12 @@ class MiddlewareRuntime:
                             free_joints=json.dumps([j["public_name"] for j in api.joints.values()]))
         elif (profile_dir / "robot_api.yaml").is_file():
             # Existing v23 recordings and replay continue to use model joint names.
-            info = RobotApiProfile(profile_dir).describe_servo_j()
+            api = RobotApiProfile(profile_dir)
+            info = api.describe_servo_j(self.config.get("ros"))
             metadata["robot_api_info"] = json.dumps(info, separators=(",", ":"))
+            if profile_id == "x1":
+                metadata[X1_JOINT_CONTRACT_KEY] = json.dumps(
+                    native_joint_contract(api.teleop), separators=(",", ":"))
         return metadata
 
     async def start(self) -> None:

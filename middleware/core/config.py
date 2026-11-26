@@ -321,6 +321,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         number = corrections.setdefault(key, default)
         if isinstance(number, bool) or not isinstance(number, (float, int)) or not .01 <= number <= 2.:
             raise ConfigError('recording.corrections.'+key+' must be between .01 and 2 seconds')
+    from .recording_grips import hand_selection
+    try:
+        hand_selection(recording.get('record_hands'))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     sources = recording.setdefault("action_sources", [])
     if not isinstance(sources, list):
         raise ConfigError("action_sources must be a list")

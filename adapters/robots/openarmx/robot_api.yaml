@@ -18,15 +18,11 @@ auxiliary_joints:
   openarmx_right_finger_joint2: right_gripper_joint_2
 hand_servo_j:
   left:
-    command_semantics: absolute_main_finger_position
-    unit: m
-    joints:
-      openarmx_left_finger_joint1: left_gripper_joint_1
+    native_joints_from: finger_joint_names
+    native_unit: m
   right:
-    command_semantics: absolute_main_finger_position
-    unit: m
-    joints:
-      openarmx_right_finger_joint1: right_gripper_joint_1
+    native_joints_from: finger_joint_names
+    native_unit: m
 joint_overrides: {}
 poses:
   home:

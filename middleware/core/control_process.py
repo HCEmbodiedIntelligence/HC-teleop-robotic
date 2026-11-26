@@ -162,7 +162,9 @@ def _control_worker(config, channels, capture_spec, bridge_factory=None):
     from .ros_bridge import RosBridge
     bridge_factory = bridge_factory or RosBridge
     core_config = copy.deepcopy(config)
-    core_config.update(_control_actor_mode=True, subscriptions=[])
+    # Keep recording discovery available while isolating the control node from camera payloads.
+    from .recording_cameras import recording_cameras
+    core_config.update(_control_actor_mode=True, subscriptions=[], _recording_cameras=recording_cameras(config))
     core_config['node_name'] = config.get('node_name', 'hc_teleop_middleware')+'_control_owner'
     core_config['dataset_topics'] = {'enabled': False}
     counters = {'observer_dropped': 0, 'observer_ros_dropped': 0,

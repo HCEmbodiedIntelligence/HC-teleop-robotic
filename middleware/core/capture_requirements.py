@@ -1,5 +1,5 @@
 """Check configured capture inputs and observed health without driving devices."""
-import re
+from .recording_cameras import camera_feature
 
 from humanoid_upload.common import UploadError
 from humanoid_upload.capture_plan import LEROBOT_GENERATED_FEATURES, validate_snapshot
@@ -14,10 +14,6 @@ NUMERIC_TOPICS = {
     'action.right_arm.ee_pose': '/action/right_arm/ee_pose',
     'action.base.velocity': '/action/base/velocity',
 }
-
-
-def camera_feature(topic):
-    return 'observation.images.' + re.sub(r'[^a-zA-Z0-9_]', '_', topic.strip('/').removesuffix('/compressed'))
 
 
 def check_device(snapshot, config, recorder, health):

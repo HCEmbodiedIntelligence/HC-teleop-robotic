@@ -44,6 +44,20 @@ class RosRecordingExecutorTests(unittest.TestCase):
         )
         self.assertEqual([item["topic"] for item in selected], ["/keep"])
 
+    def test_public_grip_and_command_evidence_is_scoped_to_ordinary_body_capture(self):
+        body = [dict(topic='/'+kind+'/joint_states', type='sensor_msgs/msg/JointState', outputs=['record'])
+                for kind in ('observation', 'action')]
+        cfg = dict(servo_j_profile='x1', subscriptions=body)
+        command = '/status/motion/commanded_joint_states'
+        hand = '/status/motion/hand_joint_states'
+        self.assertEqual([x['topic'] for x in recording_subscriptions(cfg) if x.get('ordinary_public')],
+                         [command, hand])
+        self.assertEqual(recording_subscriptions(cfg, include_public=False), body)
+        cfg['subscriptions'] = body[:1]
+        self.assertEqual(recording_subscriptions(cfg), body[:1])
+        cfg['subscriptions'] = [*body, dict(body[0], topic=command), dict(body[0], topic=hand, enabled=False)]
+        self.assertEqual([x['topic'] for x in recording_subscriptions(cfg)], [x['topic'] for x in body]+[command])
+
     def test_idle_monitor_keeps_only_dashboard_and_proprioception(self):
         subscriptions = [
             {
@@ -192,6 +206,8 @@ class RosRecordingExecutorTests(unittest.TestCase):
             'rclpy.executors': SimpleNamespace(SingleThreadedExecutor=Executor),
             'rclpy.qos': SimpleNamespace(qos_profile_sensor_data=object()),
             'rosidl_runtime_py.utilities': SimpleNamespace(get_message=lambda x: bytes),
+            'middleware.core.ros_executor': SimpleNamespace(
+                create_single_threaded_executor=lambda factory, **kw: factory(**kw)),
             'middleware.core.ros_qos': SimpleNamespace(
                 recording_subscription_qos=lambda item: object()),
         }
