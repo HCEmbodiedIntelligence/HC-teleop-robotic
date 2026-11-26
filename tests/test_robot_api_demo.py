@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -98,3 +99,21 @@ def test_dagger_servoj_permit_uses_its_source_and_generation(source, phase, acce
     node.latest[PERMIT_TOPIC][0].frame_id = f'hc1:controller:session:7:{source}:#{phase}#solver#teleop'
     assert (RobotDemo.gate_problem(node, ['a']) is None) == accepted
     assert RobotDemo.gate_problem(node, ['a'], ordinary_move=True) is not None
+
+
+@pytest.mark.parametrize('group,expected', [
+    (None, '/status/motion/joint_states'),
+    ('left_arm', '/status/motion/joint_states'),
+    ('left_hand', '/status/motion/hand_joint_states'),
+])
+def test_client_selects_one_measured_stream_for_the_requested_group(group, expected):
+    main = '/status/motion/joint_states'
+    hand = '/status/motion/hand_joint_states'
+    profile = dict(state_topic=main, permit_topic=PERMIT_TOPIC, channels=[],
+                   info=dict(endpoints=dict(hand_joint_states=hand), groups={
+                       'left_arm': {'joint_states': main}, 'left_hand': {'joint_states': hand}}))
+    node = Mock()
+    RobotDemo.subscribe_profile(node, profile, group)
+    assert node.state_topic == expected
+    assert [(args[0], args[1]) for args, _ in node.subscribe.call_args_list] == [
+        (JointState, expected), (Header, PERMIT_TOPIC)]

@@ -127,8 +127,10 @@ class RobotDemo(Node):
         if profile:
             self.subscribe_profile(profile)
 
-    def subscribe_profile(self, profile):
-        self.state_topic = profile['state_topic']
+    def subscribe_profile(self, profile, group=None):
+        hand_topic = profile['info']['endpoints'].get('hand_joint_states')
+        group_topic = profile['info']['groups'].get(group, {}).get('joint_states')
+        self.state_topic = hand_topic if hand_topic and group_topic == hand_topic else profile['state_topic']
         self.permit_topic = profile['permit_topic']
         self.subscribe(JointState, self.state_topic)
         self.subscribe(Header, self.permit_topic)
@@ -136,11 +138,11 @@ class RobotDemo(Node):
         for topic in {c['fk_pose_topic'] for c in profile['channels'] if c.get('fk_pose_topic')}:
             self.subscribe(PoseStamped, topic)
 
-    def discover(self, timeout):
+    def discover(self, timeout, group=None):
         self.wait_for(lambda: INFO_TOPIC in self.latest, timeout)
         info = json.loads(self.latest[INFO_TOPIC][0].data)
         self.profile = capability_profile(info)
-        self.subscribe_profile(self.profile)
+        self.subscribe_profile(self.profile, group)
         return info
 
     def subscribe(self, message_type, topic, qos=qos_profile_sensor_data):
@@ -415,9 +417,11 @@ def main(argv=None):
         rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
         initialized = True
         node = RobotDemo()
-        info = node.discover(args.wait)
+        info = node.discover(args.wait, getattr(args, 'group', None))
         if args.command == 'subscribe':
             node.subscribe(JointState, COMMAND_TOPIC)
+            if info['endpoints'].get('hand_joint_states'):
+                node.subscribe(JointState, info['endpoints']['hand_joint_states'])
         if args.command == 'subscribe' and info['endpoints'].get('status'):
             from humanoid_motion_interfaces.msg import Status
             node.subscribe(Status, info['endpoints']['status'], QoSProfile(
