@@ -31,6 +31,7 @@ def main() -> int:
                 export_mcap(
                     item["source"], destination, int(item["fps"]), item["task"],
                     item["robot_type"], item.get("action_sources", []), item.get("record_hands"),
+                    item.get("training_schema", "auto"),
                 )
             except Exception as error:
                 progress.update(

@@ -612,12 +612,22 @@ class TopicRecorder(CorrectionSupport):
                 self._accepted, self._queued_bytes, self._byte_budget, self._ingress_stats,
                 None if self._reusable else self._bulk_queue)
 
-    def convert_recordings_to_lerobot(self, identifiers):
+    def convert_recordings_to_lerobot(self, identifiers, training_schema='auto', record_hands=None):
         """Validate and enqueue a sequential, detached historical conversion batch."""
         from .export_progress import progress_path, read_progress
         from .lerobot_export import ensure_export_available
         from .recording_datasets import resolve_dataset
 
+        if training_schema not in ('auto', 'shared'):
+            raise ValueError('training_schema must be auto or shared')
+        from .recording_grips import HAND_COMMANDS, SIDES, hand_selection
+        hands = self.record_hands if record_hands is None else record_hands
+        if hands is None:
+            inferred = {HAND_COMMANDS.get(source['topic']) for source in self.action_sources}
+            sides = tuple(side for side in SIDES if side in inferred)
+        else:
+            sides = hand_selection(hands)
+        hand_label = 'both' if len(sides) == 2 else next(iter(sides), 'none')
         if not isinstance(identifiers, list) or not identifiers or len(identifiers) > 100:
             raise ValueError('请选择 1–100 个数据集')
         ensure_export_available()
@@ -630,7 +640,10 @@ class TopicRecorder(CorrectionSupport):
                     raise ValueError('仅 MCAP 文件可以转换为 LeRobot')
                 if active_path and target.resolve() == active_path:
                     raise ValueError('文件仍在录制中')
-                destination = self.directory / 'lerobot' / target.stem
+                suffix = ('.shared' if training_schema == 'shared' else '')
+                if suffix and sides:
+                    suffix += '-' + hand_label
+                destination = self.directory / 'lerobot' / (target.stem + suffix)
                 if (destination / 'meta/info.json').is_file():
                     skipped.append({'id': identifier, 'reason': 'LeRobot 数据集已存在'})
                     continue
@@ -655,7 +668,8 @@ class TopicRecorder(CorrectionSupport):
                 items.append({'source': str(target.resolve()), 'destination': str(destination.resolve()),
                               'fps': self.lerobot_fps, 'task': str(task),
                               'robot_type': str(robot_type),
-                              'action_sources': deepcopy(self.action_sources), 'record_hands': self.record_hands})
+                              'action_sources': deepcopy(self.action_sources), 'record_hands': hands,
+                              'training_schema': training_schema})
                 accepted.append(identifier)
             except (ValueError, FileNotFoundError) as error:
                 skipped.append({'id': identifier, 'reason': str(error)})

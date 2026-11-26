@@ -826,6 +826,13 @@ def test_record_optional_binary_grips_from_captured_evidence(tmp_path, robot, pu
         writer = Writer(f); writer.start(profile='ros2')
         writer.add_metadata('hc_teleop.session', {'profile_id':robot, 'robot_api_info':json.dumps(info)})
         schema = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
+        # Unselected channels stay in the source archive. They must not add
+        # training features or require an expensive image decode.
+        for topic, msg_type in (('/observation/headset/pose','geometry_msgs/msg/PoseStamped'),
+                                ('/observation/cameras/undeclared/compressed','sensor_msgs/msg/CompressedImage')):
+            aux_schema = writer.register_schema(msg_type, 'ros2msg', b'')
+            aux = writer.register_channel(topic, 'cdr', aux_schema)
+            writer.add_message(aux,1_000_000_000,b'unneeded',1_000_000_000)
         channels = {}
         for idx in range(2):
             stamp = 1_000_000_000 + idx * 100_000_000
@@ -866,8 +873,12 @@ def test_record_optional_binary_grips_from_captured_evidence(tmp_path, robot, pu
     manifest=json.loads(prepare_mcap(source,dest,10,'demo',robot, record_hands='both').read_text())
     assert manifest['joint_names']==manifest['action_joint_names']==names+['left_grip','right_grip']
     assert manifest['joint_units']['action'][-2:]==manifest['joint_units']['observation.state'][-2:]==['1','1']
+    assert manifest['live_source_keys'] == ['action','observation.state']
+    assert not manifest['dimensions'] and not manifest['numeric_names']
     rows=manifest['episodes'][0]
     for i,row in enumerate(rows):
+        assert not {'source_available','source_valid','source_times','source_age','grid_time'} & row.keys()
+        assert row['observation.source_timestamp_ns'] == [1_000_000_000+i*100_000_000]*2
         leftbit = 1-i if public else i
         assert row['values']['observation.state'][-2:]==[leftbit,0.]
         assert row['state_valid'][-2:]==[True,False]
@@ -878,3 +889,34 @@ def test_record_optional_binary_grips_from_captured_evidence(tmp_path, robot, pu
     if public:
         assert not any(rows[0]['action_valid'][:-2])
         assert rows[1]['values']['action'][-3] == .27
+    if robot == 'x1' and public:
+        from middleware.core.lerobot_export import ROOT, writer_python
+        import os, subprocess
+        executable = writer_python()
+        if executable.is_file():
+            script = '''
+from pathlib import Path
+import sys, json
+import pyarrow as pa, pyarrow.parquet as pq
+from middleware.core.lerobot_export import write_dataset
+manifest = Path(sys.argv[1]); output = manifest.parent / 'official'
+write_dataset(manifest, output)
+features = json.loads((output/'meta/info.json').read_text())['features']
+assert set(features) == {'action','observation.state','action.valid','observation.state_valid',
+    'action.source_time_ns','observation.state_time_ns','observation.timestamp_ns','observation.source_timestamp_ns',
+    'timestamp','frame_index','episode_index','task_index','index'}
+assert features['action']['hc.hand_semantics'] == {'left_hand':'binary_grasp','right_hand':'binary_grasp'}
+assert features['observation.timestamp_ns']['names'] == ['ros_epoch']
+assert features['observation.source_timestamp_ns']['names'] == ['action','observation.state']
+data = pq.read_schema(next((output/'data').rglob('*.parquet')))
+stats = pq.read_schema(next((output/'meta/episodes').rglob('*.parquet')))
+assert data.field('action.source_time_ns').type.value_type == pa.int64()
+assert data.field('action.valid').type.value_type == pa.bool_()
+assert stats.field('stats/action.valid/min').type.value_type == pa.float64()
+assert stats.field('stats/action.source_time_ns/max').type.value_type == pa.float64()
+assert stats.field('stats/action.source_time_ns/count').type.value_type == pa.int64()
+'''
+            env = {key: value for key,value in os.environ.items() if key not in ('PYTHONPATH','PYTHONHOME')}
+            result = subprocess.run([str(executable), '-c', script, str(dest/'manifest.json')], cwd=ROOT,
+                                    env=env, capture_output=True, text=True, timeout=180)
+            assert result.returncode == 0, result.stderr

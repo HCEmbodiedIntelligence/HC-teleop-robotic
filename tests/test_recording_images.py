@@ -20,16 +20,19 @@ def recording(path, sizes):
     api = RobotApiProfile(Path(__file__).resolve().parents[1] / 'adapters/robots/openarmx')
     base_ns = 1_700_000_000_000_000_000
     payloads = []
+    camera_topic = '/observation/cameras/head/color/compressed'
+    config = {'subscriptions': [dict(topic=camera_topic, type='sensor_msgs/msg/CompressedImage',
+                                     outputs=['record'])]}
     with path.open('wb') as file:
         writer = Writer(file)
         writer.start(profile='ros2')
         writer.add_metadata('hc_teleop.session', {'profile_id': 'openarmx',
-                            'robot_api_info': json.dumps(api.describe_servo_j())})
+                            'robot_api_info': json.dumps(api.describe_servo_j(config))})
         joints = writer.register_schema('sensor_msgs/msg/JointState', 'ros2msg', b'')
         rgb = writer.register_schema('sensor_msgs/msg/CompressedImage', 'ros2msg', b'')
         state = writer.register_channel('/observation/joint_states', 'cdr', joints)
         action = writer.register_channel('/action/joint_states', 'cdr', joints)
-        camera = writer.register_channel('/observation/cameras/head/color/compressed', 'cdr', rgb)
+        camera = writer.register_channel(camera_topic, 'cdr', rgb)
         names = api.groups['left_arm'] + api.groups['right_arm']
         for offset in (0, 100, 200):
             stamp = base_ns + offset * 1_000_000
@@ -67,7 +70,7 @@ def test_live_selection_reuses_original_compressed_frames_and_header(tmp_path):
     assert values[1].read_bytes() == original[1]
     assert values[2] == values[3] == values[4] and values[2].read_bytes() == original[2]
     assert {p for p in (stage / key).glob('*.image')} == {values[1], values[2]}
-    assert rows[1]['source_times'][manifest['source_keys'].index(key)] == pytest.approx(.025)
+    assert rows[1]['observation.camera_time_ns'] == [1_700_000_000_025_000_000]
 
 
 def test_resolution_change_is_detected_on_a_skipped_source_frame(tmp_path):

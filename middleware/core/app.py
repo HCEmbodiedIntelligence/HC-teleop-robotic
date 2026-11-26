@@ -1713,7 +1713,8 @@ def create_app(store: ConfigStore) -> web.Application:
         data = await request.json() if request.can_read_body else {}
         try:
             result = await asyncio.to_thread(
-                runtime.recorder.convert_recordings_to_lerobot, data.get('filenames')
+                runtime.recorder.convert_recordings_to_lerobot, data.get('filenames'),
+                data.get('training_schema', 'auto'), data.get('record_hands')
             )
             return web.json_response(result, status=202 if result.get('accepted') else 200)
         except (ValueError, RuntimeError, FileNotFoundError) as exc:

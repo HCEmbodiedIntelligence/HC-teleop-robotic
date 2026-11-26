@@ -326,7 +326,7 @@ def decode_rgb(message: Any, compressed: bool):
     return image[:, :, :3]
 
 
-def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: str, progress: ExportProgress | None = None, action_sources: list | None = None, record_hands=None) -> Path:
+def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: str, progress: ExportProgress | None = None, action_sources: list | None = None, record_hands=None, training_schema='auto') -> Path:
     import cv2
     from mcap.reader import make_reader
     from rclpy.serialization import deserialize_message
@@ -360,6 +360,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     dimensions = {}
     source_topics = {}
     source_frame_ids = {}
+    joint_frame_variants = {}
     message_classes = {}
     numeric_names = {}
     numeric_topics = {
@@ -384,8 +385,13 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     ordinary = not (snapshot or session or correction or metadata.get('capture_mode'))
     robot_info = json.loads(metadata.get('robot_api_info') or '{}') if ordinary else {}
     live_recording = _recording_body(robot_info)
+    from .historical_x1_projection import HistoricalLabels, historical_body
+    historical = historical_body(training_schema, live_recording, ordinary and not (
+        metadata.get('capture_snapshot') or metadata.get('capture_snapshots')), metadata)
     if live_recording:
         profile = robot_info.get('profile_id') or profile
+    if historical:
+        live_recording = historical
     ordinary_x1 = profile == 'x1' and ordinary
     requested_hands = hand_selection(record_hands)
     mapped_hands = {HAND_COMMANDS[t] for t in action_map if t in HAND_COMMANDS}
@@ -395,9 +401,14 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
              if sides and ordinary and (live_recording or ordinary_x1) else None)
     if requested_hands and ordinary and grips is None:
         raise ValueError('This recording has no verified hand calibration')
-    public_body = _PublishedBody(robot_info) if live_recording else None
+    camera_topics = None
+    if live_recording is not None:
+        numeric_topics.clear()
+        if not historical:
+            camera_topics = {camera['topic'] for camera in live_recording.get('cameras', ())}
+    public_body = _PublishedBody(robot_info) if live_recording and not historical else None
     public_command_topic = robot_info.get('endpoints', {}).get('commanded_joint_states')
-    if live_recording and public_command_topic:
+    if public_body and public_command_topic:
         joint_keys[public_command_topic] = 'public_command'
     published_topic = '/internal/recording/published_action'
     if live_recording and ordinary_x1:
@@ -409,6 +420,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     source_clocks: dict[str, str] = {}
     deferred_image_topics = {}
     recording_start = recording_end = None
+    label_log, label_headers = [], []
     with source.open('rb') as handle:
         reader = make_reader(handle)
         # Prefer compressed over raw when both versions of a camera are recorded.
@@ -443,13 +455,22 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             if channel.message_encoding != 'cdr' or schema is None:
                 continue
             kind = schema.name
+            if historical and topic == '/action/joint_states' and topic not in joint_keys:
+                # The emitted wire stream is decoded separately. Only the unchanged
+                # label's header is needed to validate its provenance for the audit.
+                from .capture_window import header_stamp_ns as cdr_header_ns
+                label_log.append((message.log_time, None))
+                label_headers.append(cdr_header_ns(message.data, kind))
+                continue
             joint_key = joint_keys.get(topic)
             is_camera = kind in ('sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage') and 'depth' not in topic.lower()
+            if is_camera and camera_topics is not None and topic not in camera_topics:
+                continue
             numeric_key = numeric_topics.get(topic)
             hand_tracks = grips.by_topic.get(topic, ()) if grips and kind == 'sensor_msgs/msg/JointState' else ()
             if joint_key is None and not is_camera and numeric_key is None and not hand_tracks:
                 continue
-            if is_camera and topic + '/compressed' in topics:
+            if is_camera and topic + '/compressed' in topics and (camera_topics is None or topic + '/compressed' in camera_topics):
                 continue
             if is_camera and defer_compressed and kind == 'sensor_msgs/msg/CompressedImage':
                 from .recording_images import compressed_fields, rgb_shape
@@ -488,8 +509,13 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 frame_id = str(header.frame_id)
                 previous_frame = source_frame_ids.get(topic)
                 if previous_frame is not None and previous_frame != frame_id:
-                    raise ValueError(f'Reference frame changed during recording: {topic}')
-                source_frame_ids[topic] = frame_id
+                    if not (live_recording and joint_key in ('action', 'observation.state', 'public_command', 'published')):
+                        raise ValueError(f'Reference frame changed during recording: {topic}')
+                    # JointState coordinates are defined per named joint. The X1
+                    # controller also puts solver/ownership labels in frame_id.
+                    joint_frame_variants.setdefault(topic, {previous_frame}).add(frame_id)
+                else:
+                    source_frame_ids[topic] = frame_id
             if numeric_key:
                 if kind == 'geometry_msgs/msg/PoseStamped':
                     pose = decoded.pose
@@ -539,6 +565,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     # also freeze a PRESERVE contract: keep the original state log_time samples
     # and causal lookup clock instead of moving the first state before action.
     if session or correction:
+        if training_schema == 'shared':
+            raise ValueError('Shared training projection requires an ordinary recording')
         live_recording = None
     wire_actions = raw_cameras.pop('published', [])
     wire_headers = header_stamps.pop('published', [])
@@ -548,13 +576,20 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     source_topics.pop('public_command', None)
     use_public = bool(live_recording and public_actions)
     use_wire = bool(live_recording and ordinary_x1 and (
-        published_topic in topics or wire_actions or PROVENANCE_TOPIC in topics))
+        published_topic in topics or wire_actions or (not historical and PROVENANCE_TOPIC in topics)))
+    if historical:
+        label_samples = raw_cameras.get('action', label_log)
+        label_headers = header_stamps.get('action', label_headers)
+        historical_labels = HistoricalLabels(label_samples, label_headers, origin_index, apply_source_clock)
     if use_public:
         raw_cameras['action'], header_stamps['action'] = public_actions, public_headers
         source_topics['action'] = public_command_topic
     elif use_wire:
         raw_cameras['action'], header_stamps['action'] = wire_actions, wire_headers
         source_topics['action'] = published_topic
+    elif historical:
+        raw_cameras['action'], header_stamps['action'] = historical_labels.published(label_samples, label_headers)
+        source_topics['action'] = '/action/joint_states'
     elif live_recording and public_command_topic in topics:
         # Hand-only or empty public command channel documents no body target.
         raw_cameras['action'], header_stamps['action'] = [], []
@@ -588,6 +623,8 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     tagged_x1 = (metadata.get('profile_id') or metadata.get('robot_name')) == 'x1'
     native_x1 = profile == 'x1' and (set(X1_BODY_JOINTS[:14]).issubset(names)
                                      or (tagged_x1 and not set(X1_BODY_JOINTS).isdisjoint(names)))
+    if historical and not native_x1:
+        raise ValueError('Historical shared projection requires native X1 model joint names on /observation/joint_states')
     canonical_x1 = ordinary_x1 and native_x1 and not (session or correction)
     fixed_body = live_recording is not None or canonical_x1
     if grips and not fixed_body:
@@ -694,15 +731,18 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     for key in streams:
         source_clocks.setdefault(key, 'log_time')
     audit['source_clocks'] = source_clocks
+    if joint_frame_variants:
+        audit['joint_frame_id_variants'] = {topic: sorted(values) for topic, values in joint_frame_variants.items()}
     if canonical_x1:
         aligned_origins = (dict.fromkeys((stamp for stamp, _ in streams['action']), 'published_action')
-                           if use_public or use_wire else origin_index.align(original_actions, header_stamps.get('action', []),
+                           if use_public or use_wire or historical else origin_index.align(original_actions, header_stamps.get('action', []),
                                                                source_clocks['action']))
         audit['primary_action_origin_ranges'] = []
     live_camera_keys = []
     if live_recording is not None:
         declared = [camera['feature'] for camera in live_recording.get('cameras', ())]
         live_camera_keys = [key for key in declared if key in dimensions] if declared else sorted(dimensions)
+        live_source_keys = sorted(['action', 'observation.state', *live_camera_keys])
         audit['grid_clock'] = 'ros_epoch'
     aligned = (preserved_episode(streams, fps, audit) if snapshot else
                synchronized_episodes(streams, fps, audit, (recording_start, recording_end), max_ages,
@@ -722,19 +762,19 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 values['action'] = values['action'] + [v for key in extra_keys.values() for v in values[key]]
             if output_order is not None:
                 values['action'] = [values['action'][i] for i in output_order]
-            ages = [(stamp - selected[key][0]) / 1e9 if selected[key] is not None else -1.0 for key in keys]
-            row = {'values': values,
-                         'source_times': [(selected[key][0] - origin) / 1e9 if selected[key] is not None else -1.0 for key in keys],
-                         'source_available': [float(selected[key] is not None) for key in keys],
-                         'source_valid': [float(selected[key] is not None and ages[i] <= max_ages.get(key, sample_max_age(key)) / 1e9) for i, key in enumerate(keys)],
-                         'source_age': ages, 'grid_time': (stamp - origin) / 1e9}
+            row = {'values': values}
+            if live_recording is None:
+                ages = [(stamp - selected[key][0]) / 1e9 if selected[key] is not None else -1.0 for key in keys]
+                row.update({
+                    'source_times': [(selected[key][0] - origin) / 1e9 if selected[key] is not None else -1.0 for key in keys],
+                    'source_available': [float(selected[key] is not None) for key in keys],
+                    'source_valid': [float(selected[key] is not None and ages[i] <= max_ages.get(key, sample_max_age(key)) / 1e9) for i, key in enumerate(keys)],
+                    'source_age': ages, 'grid_time': (stamp - origin) / 1e9})
             if fixed_body:
                 state_axis = latest_sample(state_axis_samples, stamp, sample_max_age('observation.state'))
                 row['state_valid'] = state_axis[1] if state_axis else [False] * len(names)
             if live_recording is not None or grips:
                 row['observation.timestamp_ns'] = [stamp]
-                row['observation.source_timestamp_ns'] = [
-                    selected[key][0] if selected[key] is not None else -1 for key in keys]
                 for key, field, width in (('observation.state', 'observation.state_time_ns', len(names)),
                                           ('action', 'action.source_time_ns', len(action_names))):
                     sample = latest_sample(axis_source_times[key], stamp, None)
@@ -777,14 +817,23 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                         axis = latest_sample(extra_axis_samples[key], stamp, max_ages[key])
                         valid = axis[1] if axis else [False] * len(action_map[topic]['names'])
                     else:
-                        valid = [bool(row['source_valid'][keys.index(key)])] * len(action_map[topic]['names'])
+                        sample = selected[key]
+                        available = sample is not None and stamp - sample[0] <= max_ages[key]
+                        valid = [available] * len(action_map[topic]['names'])
                     row['action_valid'].extend(valid)
                 if output_order is not None:
                     row['action_valid'] = [row['action_valid'][i] for i in output_order]
+            if historical:
+                historical_labels.note_grid(len(rows), stamp, JOINT_MAX_AGE_NS)
             if canonical_x1:
                 append_origin_range(origin_ranges, len(rows), selected['action'], aligned_origins)
             if grips:
                 grips.append(row, stamp, sample_max_age('action'))
+            if live_recording is not None:
+                source_ns = dict(zip(live_camera_keys, row.get('observation.camera_time_ns', ())))
+                source_ns['observation.state'] = max(row['observation.state_time_ns'])
+                source_ns['action'] = max(row['action.source_time_ns'])
+                row['observation.source_timestamp_ns'] = [source_ns[key] for key in live_source_keys]
             rows.append(row)
         if rows:
             episodes.append(rows)
@@ -797,11 +846,22 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     manifest = {'action_sources': action_sources, 'action_semantics': 'upstream_command_not_execution', 'action_axis_validity': bool(partial_action), 'fps': fps, 'task': task, 'robot_type': robot_type, 'joint_names': names, 'action_joint_names': output_names, 'dimensions': dimensions, 'numeric_names': numeric_names, 'source_keys': keys, 'source_topics': source_topics, 'source_frame_ids': source_frame_ids, 'sync_audit': audit, 'progress_path': str(progress.path) if progress.path else None, 'origin_log_time_ns': origin, 'episodes': episodes}
     if live_recording:
         manifest['live_camera_keys'] = live_camera_keys
+        manifest['live_source_keys'] = live_source_keys
         manifest['robot_type'] = profile
-        manifest['robot_api_info'] = robot_info
+        if historical:
+            audit['historical_x1_projection'] = {
+                'schema': 'hc-x1-historical-shared/v1',
+                'body_evidence': ('published_wire_copy' if use_wire else
+                                  'matched_publication_markers' if original_actions else 'no_verified_publication'),
+                'published_body_samples': len(original_actions),
+                'raw_label_counts': historical_labels.counts,
+                'raw_label_origin_ranges': historical_labels.ranges,
+            }
+        else:
+            manifest['robot_api_info'] = robot_info
         manifest['action_semantics'] = ('published pre-smoother target; measured state is observation.state'
-                                        if use_public or (use_wire and wire_actions) else
-                                        'no published target observed' if use_wire or source_topics['action'] == public_command_topic else
+                                        if use_public or (use_wire and wire_actions) or (historical and original_actions) else
+                                        'no published target observed' if historical or use_wire or source_topics['action'] == public_command_topic else
                                         'native published action target; measured state is observation.state')
     if fixed_body:
         body_units = live_recording['body']['units'] if live_recording else ['rad'] * len(names)
@@ -896,12 +956,14 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
             features[key]['hc.hand_semantics'] = {
                 name.removesuffix('_grip')+'_hand': 'binary_grasp'
                 for name in manifest['binary_hand_sources'][key]}
+    shared_training = 'live_camera_keys' in manifest
     for key, names in manifest.get('numeric_names', {}).items():
         features[key] = {'dtype': 'float32', 'shape': (len(names),), 'names': names}
     for key, shape in manifest['dimensions'].items():
         features[key] = {'dtype': 'video', 'shape': tuple(shape), 'names': ['height', 'width', 'channels']}
-    features['observation.source_time'] = {'dtype': 'float64', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
-    features['observation.recording_time'] = {'dtype': 'float64', 'shape': (1,), 'names': ['seconds_since_first_log_time']}
+    if not shared_training:
+        features['observation.source_time'] = {'dtype': 'float64', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
+        features['observation.recording_time'] = {'dtype': 'float64', 'shape': (1,), 'names': ['seconds_since_first_log_time']}
     if manifest.get('correction') or manifest.get('session'):
         features['intervention'] = {'dtype': 'bool', 'shape': (1,), 'names': ['human_action']}
     if manifest.get('correction') or manifest.get('action_axis_validity'):
@@ -913,18 +975,18 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     if manifest.get('binary_hand_sources'):
         live_fields = {'observation.state_time_ns': joint_names['observation.state'], 'action.source_time_ns': joint_names['action']}
     if 'live_camera_keys' in manifest:
-        live_fields = {'observation.timestamp_ns': ['ros_time_ns'],
-                       'observation.source_timestamp_ns': manifest['source_keys'],
+        live_fields = {'observation.timestamp_ns': ['ros_epoch'],
+                       'observation.source_timestamp_ns': manifest.get('live_source_keys', manifest['source_keys']),
                        'observation.state_time_ns': joint_names['observation.state'],
                        'action.source_time_ns': joint_names['action']}
         if manifest['live_camera_keys']:
-            camera_names = [key.removeprefix('observation.images.') for key in manifest['live_camera_keys']]
+            camera_names = manifest['live_camera_keys']
             live_fields['observation.camera_time_ns'] = camera_names
             live_fields['observation.camera_valid'] = camera_names
     for field, axes in live_fields.items():
         dtype = 'bool' if field == 'observation.camera_valid' else 'int64'
         features[field] = {'dtype': dtype, 'shape': (len(axes),), 'names': axes}
-    if 'sync_audit' in manifest:
+    if not shared_training and 'sync_audit' in manifest:
         for field in ('source_available', 'source_valid', 'source_age'):
             features['observation.' + field] = {'dtype': 'float32', 'shape': (len(manifest['source_keys']),), 'names': manifest['source_keys']}
     if manifest.get('capture_snapshot'):
@@ -962,6 +1024,18 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     dataset = TeleopLeRobotDataset.create(repo_id=repo_id, root=destination, fps=manifest['fps'],
                                          robot_type=manifest['robot_type'], features=features,
                                          use_videos=True, vcodec="h264", video_backend="pyav")
+    if shared_training:
+        # 0.7.1 writes floating extrema even for integer and boolean features.
+        # Cast only episode statistics before 0.4.3 serializes them to Parquet/JSON.
+        save_metadata = dataset.meta.save_episode
+
+        def save_shared_metadata(episode_index, episode_length, episode_tasks, episode_stats, episode_metadata):
+            for stats in episode_stats.values():
+                for key in ('min', 'max'):
+                    stats[key] = np.asarray(stats[key], dtype=np.float64)
+            return save_metadata(episode_index, episode_length, episode_tasks, episode_stats, episode_metadata)
+
+        dataset.meta.save_episode = save_shared_metadata
     image_cache = {}
     for episode in manifest['episodes']:
         for row in episode:
@@ -976,15 +1050,16 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
                     frame[key] = cached[1]
                 else:
                     frame[key] = np.asarray(value, dtype=features[key]['dtype'])
-            frame['observation.source_time'] = np.asarray(row['source_times'], dtype=np.float64)
-            frame['observation.recording_time'] = np.asarray([row['grid_time']], dtype=np.float64)
+            if not shared_training:
+                frame['observation.source_time'] = np.asarray(row['source_times'], dtype=np.float64)
+                frame['observation.recording_time'] = np.asarray([row['grid_time']], dtype=np.float64)
             if manifest.get('correction') or manifest.get('session'):
                 frame['intervention'] = np.asarray([True if manifest.get('correction') else row['intervention']], dtype=bool)
             if manifest.get('correction') or manifest.get('action_axis_validity'):
                 frame['action.valid'] = np.asarray(row['action_valid'], dtype=bool)
             if manifest.get('state_axis_validity'):
                 frame['observation.state_valid'] = np.asarray(row['state_valid'], dtype=bool)
-            if 'sync_audit' in manifest:
+            if not shared_training and 'sync_audit' in manifest:
                 for field in ('source_available', 'source_valid', 'source_age'):
                     frame['observation.' + field] = np.asarray(row[field], dtype=np.float32)
             for field in live_fields:
@@ -1032,7 +1107,9 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     if 'live_camera_keys' in manifest:
         synchronization.update(clock='per sample: plausible ROS header stamp, otherwise MCAP receive time',
                                grid='integer ROS epoch, nearest nanosecond (half up)',
-                               timestamp_units='absolute ROS nanoseconds; missing source=-1')
+                               timestamp_units='absolute ROS nanoseconds; missing source=-1',
+                               missing_policy='last finite value and source stamp per axis; before first use zero and -1; validity masks mark missing/stale axes',
+                               auxiliary_policy='training columns follow the recorded body, optional selected hands, explicit extra action sources and declared RGB cameras')
     if manifest.get('capture_snapshot'):
         synchronization.update(clock='MCAP log_time (wall receive time), preserved for all snapshot streams',
             selection='original state log_time samples, original frame count and frequency',
@@ -1050,7 +1127,7 @@ def write_dataset(manifest_path: Path, destination: Path) -> dict:
     return {'path': str(destination), 'format': 'lerobot', 'frames': len(loaded), 'episodes': len(manifest['episodes']), 'fps': manifest['fps'], 'cameras': list(manifest['dimensions']), 'episode_lengths': [len(episode) for episode in manifest['episodes']], 'image_storage': 'mp4_h264', 'sync_audit': manifest.get('sync_audit', {})}
 
 
-def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x1', action_sources=None, record_hands=None) -> dict:
+def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x1', action_sources=None, record_hands=None, training_schema='auto') -> dict:
     executable = ensure_export_available()
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 120:
@@ -1061,7 +1138,7 @@ def export_mcap(source, destination, fps=20, task='teleoperation', robot_type='x
     progress = ExportProgress(progress_path(destination))
     progress.update('等待转换', 0, force=True, reset=True)
     with tempfile.TemporaryDirectory(prefix='.lerobot-staging-', dir=destination.parent) as directory:
-        manifest = prepare_mcap(source, Path(directory), fps, task, robot_type, progress, action_sources, record_hands)
+        manifest = prepare_mcap(source, Path(directory), fps, task, robot_type, progress, action_sources, record_hands, training_schema)
         staged_dataset = Path(directory) / 'dataset'
         writer_env = {key: value for key, value in os.environ.items() if key not in ('PYTHONPATH', 'PYTHONHOME')}
         process = subprocess.run([executable, str(Path(__file__).resolve()), '--write-manifest', str(manifest), str(staged_dataset)], capture_output=True, text=True, env=writer_env)
@@ -1098,11 +1175,13 @@ def main():
     parser.add_argument('--task', default='teleoperation')
     parser.add_argument('--robot-type', default='x1')
     parser.add_argument('--action-sources', default='[]', help='JSON action topic/name/unit/age mappings')
+    parser.add_argument('--training-schema', choices=('auto', 'shared'), default='auto',
+                        help='shared projects historical native X1 into the ordinary ServoJ training schema; unverifiable body labels are masked')
     parser.add_argument('--record-hands', choices=('none', 'left', 'right', 'both'), help='binary hand axes (default: infer configured hand action sources)')
     parser.add_argument('--write-manifest', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        result = write_dataset(Path(args.source), Path(args.destination)) if args.write_manifest else export_mcap(args.source, args.destination, args.fps, args.task, args.robot_type, json.loads(args.action_sources), args.record_hands)
+        result = write_dataset(Path(args.source), Path(args.destination)) if args.write_manifest else export_mcap(args.source, args.destination, args.fps, args.task, args.robot_type, json.loads(args.action_sources), args.record_hands, args.training_schema)
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:
         if not args.write_manifest:
