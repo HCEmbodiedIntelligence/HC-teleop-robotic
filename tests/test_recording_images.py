@@ -16,7 +16,7 @@ from middleware.core.lerobot_export import prepare_mcap
 from middleware.core.robot_api import RobotApiProfile
 
 
-def recording(path, sizes):
+def recording(path, sizes, frame_ids=('rgb_optical',) * 3):
     api = RobotApiProfile(Path(__file__).resolve().parents[1] / 'adapters/robots/openarmx')
     base_ns = 1_700_000_000_000_000_000
     payloads = []
@@ -48,7 +48,7 @@ def recording(path, sizes):
             Image.new('RGB', size, (60*i, 20, 21)).save(file, format='PNG')
             payloads.append(file.getvalue())
             frame = CompressedImage(format='png', data=payloads[-1])
-            frame.header.frame_id = 'rgb_optical'
+            frame.header.frame_id = frame_ids[i]
             frame.header.stamp.sec, frame.header.stamp.nanosec = divmod(stamp, 1_000_000_000)
             writer.add_message(camera, receipt, serialize_message(frame), receipt)
         writer.finish()
@@ -77,4 +77,11 @@ def test_resolution_change_is_detected_on_a_skipped_source_frame(tmp_path):
     source = tmp_path / 'video.mcap'
     recording(source, [(18, 10), (16, 12), (16, 12)])
     with pytest.raises(ValueError, match='Camera resolution changed'):
+        prepare_mcap(source, tmp_path, 20, 'task', 'openarmx')
+
+
+def test_compressed_image_empty_frame_remains_significant(tmp_path):
+    source = tmp_path / 'video.mcap'
+    recording(source, [(16, 12)] * 3, ('rgb_optical', '', 'rgb_optical'))
+    with pytest.raises(ValueError, match='Reference frame changed'):
         prepare_mcap(source, tmp_path, 20, 'task', 'openarmx')

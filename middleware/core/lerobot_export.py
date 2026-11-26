@@ -360,7 +360,7 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     dimensions = {}
     source_topics = {}
     source_frame_ids = {}
-    joint_frame_variants = {}
+    unstated_joint_frames = set()
     message_classes = {}
     numeric_names = {}
     numeric_topics = {
@@ -496,6 +496,15 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
             decoded = deserialize_message(message.data, message_classes[kind])
             header = getattr(decoded, 'header', None)
             header_ns = header_stamp_ns(decoded)
+            if header is not None:
+                frame_id = header.frame_id
+                if not frame_id and kind == 'sensor_msgs/msg/JointState' and decoded.name:
+                    # Older X1 publishers omit the frame on some named joint layouts.
+                    unstated_joint_frames.add(topic)
+                else:
+                    previous = source_frame_ids.setdefault(topic, frame_id)
+                    if previous != frame_id:
+                        raise ValueError(f'Reference frame changed during recording: {topic} ({previous!r} to {frame_id!r})')
             if hand_tracks:
                 for track in hand_tracks:
                     track.observe(decoded, message.log_time, header_ns)
@@ -505,17 +514,6 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
                 decoded = public_body.select(decoded)
                 if decoded is None:  # e.g. left_grip only
                     continue
-            if header is not None:
-                frame_id = str(header.frame_id)
-                previous_frame = source_frame_ids.get(topic)
-                if previous_frame is not None and previous_frame != frame_id:
-                    if not (live_recording and joint_key in ('action', 'observation.state', 'public_command', 'published')):
-                        raise ValueError(f'Reference frame changed during recording: {topic}')
-                    # JointState coordinates are defined per named joint. The X1
-                    # controller also puts solver/ownership labels in frame_id.
-                    joint_frame_variants.setdefault(topic, {previous_frame}).add(frame_id)
-                else:
-                    source_frame_ids[topic] = frame_id
             if numeric_key:
                 if kind == 'geometry_msgs/msg/PoseStamped':
                     pose = decoded.pose
@@ -731,8 +729,13 @@ def prepare_mcap(source: Path, staging: Path, fps: int, task: str, robot_type: s
     for key in streams:
         source_clocks.setdefault(key, 'log_time')
     audit['source_clocks'] = source_clocks
+    joint_frame_variants = {}
+    for topic in unstated_joint_frames:
+        declared = source_frame_ids.setdefault(topic, '')
+        if declared:
+            joint_frame_variants[topic] = ['', declared]
     if joint_frame_variants:
-        audit['joint_frame_id_variants'] = {topic: sorted(values) for topic, values in joint_frame_variants.items()}
+        audit['joint_frame_id_variants'] = joint_frame_variants
     if canonical_x1:
         aligned_origins = (dict.fromkeys((stamp for stamp, _ in streams['action']), 'published_action')
                            if use_public or use_wire or historical else origin_index.align(original_actions, header_stamps.get('action', []),
