@@ -88,7 +88,8 @@ class InterventionTeleop:
         self.last_hand_step = 0.0
         if node.backend == 'v23':
             from rclpy.qos import qos_profile_sensor_data
-            node.create_subscription(JointState, '/observation/hands/joint_states', self.hands, qos_profile_sensor_data)
+            if not node.config['grippers'].get('feedback_in_joint_state', False):
+                node.create_subscription(JointState, '/observation/hands/joint_states', self.hands, qos_profile_sensor_data)
             for side in ('right', 'left'):
                 topic = node.config['grippers'][side]['finger_topic']
                 node.create_subscription(JointState, topic,
@@ -247,7 +248,7 @@ class InterventionTeleop:
                     q = node.joint_state[name]
                     opened, closed = cfg['finger_open'][index], cfg['finger_closed'][index]
                     previous = q
-                    if node.backend == 'v23':
+                    if node.backend == 'v23' and not node.config['grippers'].get('feedback_in_joint_state', False):
                         measured = self.hand_feedback.get(name)
                         if not measured or now-measured[1] > .25:
                             continue

@@ -23,6 +23,7 @@ if [[ "${1:-}" == --fake ]]; then
 fi
 [[ $# == 0 ]] || { echo 'Unrecognized driver argument' >&2; exit 2; }
 case "$DRIVER_KIND" in
+  external_ros_topics) echo "This profile uses the separately started hardware driver." ;;
   openarmx_hc_robot_adapter) exec ros2 run openarmx_hc_robot_adapter openarmx_hc_robot_adapter "${ARGS[@]}" ;;
   humanoid_driver_runtime) exec ros2 run humanoid_driver_runtime humanoid_driver_runtime_node "${ARGS[@]}" ;;
   *) echo "Unsupported profile driver: $DRIVER_KIND" >&2; exit 2 ;;

@@ -4,6 +4,7 @@ set -euo pipefail
 
 COMPONENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${COMPONENT_DIR}/.." && pwd)"
+source "${PROJECT_ROOT}/tools/runtime/motion_paths.sh"
 CONFIG_PATH="${HC_MIDDLEWARE_CONFIG:-${COMPONENT_DIR}/config.yaml}"
 LOG_DIR=""
 START_MONITOR=true
@@ -84,6 +85,12 @@ if [[ -f "${PROJECT_ROOT}/../../setup_hc.bash" ]]; then
 elif [[ -f /opt/ros/humble/setup.bash ]]; then
   set +u
   source /opt/ros/humble/setup.bash
+  set -u
+fi
+
+if [[ -f "${HC_MOTION_INSTALL}/setup.bash" ]]; then
+  set +u
+  source "${HC_MOTION_INSTALL}/setup.bash"
   set -u
 fi
 

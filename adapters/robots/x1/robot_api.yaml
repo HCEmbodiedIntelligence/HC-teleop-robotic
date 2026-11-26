@@ -27,6 +27,35 @@ auxiliary_joints:
   right_wheel_2: right_wheel_joint_2
   right_wheel_3: right_wheel_joint_3
   right_wheel_4: right_wheel_joint_4
+hand_servo_j:
+  left:
+    command_semantics: absolute_joint_position
+    unit: rad
+    joints:
+      L_thumb_roll_joint: left_thumb_roll_joint
+      L_thumb_abad_joint: left_thumb_abad_joint
+      L_thumb_mcp_joint: left_thumb_mcp_joint
+      L_index_abad_joint: left_index_abad_joint
+      L_index_pip_joint: left_index_pip_joint
+      L_middle_pip_joint: left_middle_pip_joint
+      L_ring_abad_joint: left_ring_abad_joint
+      L_ring_pip_joint: left_ring_pip_joint
+      L_pinky_abad_joint: left_pinky_abad_joint
+      L_pinky_pip_joint: left_pinky_pip_joint
+  right:
+    command_semantics: absolute_joint_position
+    unit: rad
+    joints:
+      R_thumb_roll_joint: right_thumb_roll_joint
+      R_thumb_abad_joint: right_thumb_abad_joint
+      R_thumb_mcp_joint: right_thumb_mcp_joint
+      R_index_abad_joint: right_index_abad_joint
+      R_index_pip_joint: right_index_pip_joint
+      R_middle_pip_joint: right_middle_pip_joint
+      R_ring_abad_joint: right_ring_abad_joint
+      R_ring_pip_joint: right_ring_pip_joint
+      R_pinky_abad_joint: right_pinky_abad_joint
+      R_pinky_pip_joint: right_pinky_pip_joint
 joint_overrides: {}
 poses:
   home:

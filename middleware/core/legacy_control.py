@@ -37,18 +37,28 @@ class LegacyTopicControl:
         if not all(math.isfinite(x) and x > 0 for x in (self.arm_velocity, self.max_error)):
             raise ValueError('legacy velocity and target error must be finite and positive')
         self.arms = tuple(n for side in ('right', 'left') for n in self.teleop['arms'][side]['joint_names'])
+        layout = self.teleop['control'].get('arm_command_layout')
+        self.driver_arm_groups = ()
+        if layout == 'dual_arm':
+            self.driver_arm_groups = (self.arms,)
+        elif layout == 'single_arm':
+            self.driver_arm_groups = tuple(tuple(self.teleop['arms'][side]['joint_names']) for side in ('right', 'left'))
+        self.hold_epoch = None
         self.waist = tuple(self.teleop['body']['waist_joint_names'])
         self.feedback_order = self.arms + self.waist
         self.home_joints = self.feedback_order + tuple(self.teleop['body'].get('neck_joint_names', []))
         self.hands = {side: tuple(self.teleop['grippers'][side]['finger_joint_names']) for side in ('right','left')}
         self.hand_names = set().union(*map(set, self.hands.values()))
+        self.hand_feedback_names = {side: tuple(self.teleop['grippers'][side].get('feedback_joint_names', names))
+                                    for side, names in self.hands.items()}
         self.sim_joints = {self.teleop['grippers'][side]['sim_joint'] for side in self.hands
-                           if self.teleop['grippers'][side].get('sim_joint')}
+                           if self.teleop['grippers'].get('include_sim_joints', True) and self.teleop['grippers'][side].get('sim_joint')}
         # The dataset layout includes configured model joints even when their
         # controller is disabled. Missing commands are NaN, never feedback.
         self.arm_fields = (self.arms + tuple(n for n in self.teleop['robot']['initial_joints']
                                             if n not in self.arms)
-                           + tuple(self.teleop['grippers'][s]['sim_joint'] for s in ('right', 'left')))
+                           + tuple(self.teleop['grippers'][s]['sim_joint'] for s in ('right', 'left')
+                                   if self.teleop['grippers'][s]['sim_joint'] in self.sim_joints))
         self.model_only_joints = set(self.arm_fields) - set(self.home_joints) - self.sim_joints
         self.positions, self.sample_ns, self.received, self.speeds = {}, {}, {}, {}
         self.last_command_stamp, self.last_command, self.command_time = {}, {}, {}
@@ -105,16 +115,28 @@ class LegacyTopicControl:
         receiver = feedback_node or node
         feedback_group = (bridge._ownership_callback_group if feedback_node is not None
                           else bridge._command_callback_group)
-        for topic, callback in [('/observation/joint_states', self.state),
-                                ('/observation/hands/joint_states', self.hand_state)]:
+        self.servo_j = None
+        if bridge.config.get('servo_j_profile'):
+            from .servo_j import ProfileServoJ
+            self.servo_j = ProfileServoJ(node, self, bridge.config['servo_j_profile'], receiver)
+        feedback_topics = [('/observation/joint_states', self.state)]
+        self.state_fields = self.limits.keys() - self.hand_names
+        if self.teleop['grippers'].get('feedback_in_joint_state', False):
+            self.state_fields = self.limits.keys()
+        else:
+            feedback_topics.append(('/observation/hands/joint_states', self.hand_state))
+        for topic, callback in feedback_topics:
             self.subscriptions.append(receiver.create_subscription(
                 JointState, topic, (bridge._timed_callback('feedback:'+topic, callback)
                                     if bridge._control_actor_mode else callback), qos_profile_sensor_data,
                 callback_group=feedback_group))
-        subscribe(JointState, '/hc_teleop/joint_cmd', lambda msg: self.program(msg, 'arms'))
+        legacy_inputs = self.servo_j is None or self.settings.get('legacy_topics', False)
+        if legacy_inputs:
+            subscribe(JointState, '/hc_teleop/joint_cmd', lambda msg: self.program(msg, 'arms'))
         hand_fields = {side: self.hand_fields(side) for side in self.hands}
         for side in self.hands:
-            subscribe(JointState, '/hc_teleop/joint_cmd_finger_'+side,
+            if legacy_inputs:
+                subscribe(JointState, '/hc_teleop/joint_cmd_finger_'+side,
                       lambda msg, side=side: self.program(msg, side), hand=True)
             fields = hand_fields[side]
             subscribe(JointState, f'/control/vr/{side}_hand/joint_states',
@@ -189,13 +211,17 @@ class LegacyTopicControl:
 
     def state(self, message):
         try:
-            self.update_state(message, self.limits.keys()-self.hand_names)
+            self.update_state(message, self.state_fields)
+            if self.servo_j:
+                self.servo_j.feedback(message, "joints")
         except (ValueError, TypeError):
             return
 
     def hand_state(self, message):
         try:
             self.update_state(message, self.hand_names)
+            if self.servo_j:
+                self.servo_j.feedback(message, "hands")
         except (ValueError, TypeError):
             return
 
@@ -275,7 +301,8 @@ class LegacyTopicControl:
                     continue
                 markers = (set() if home else self.sim_joints if group == self.arm_fields else
                            {self.teleop['grippers'][side]['binary_state_joint']
-                            for side in self.hands if group == self.hands[side]})
+                            for side in self.hands if group == self.hands[side]
+                            and self.teleop['grippers'][side].get('binary_state_joint')})
                 target = self.select(message, [n for n in message.name
                     if n in set(group) | markers and not math.isnan(values[n])])
                 if frame_id is not None:
@@ -360,6 +387,8 @@ class LegacyTopicControl:
             values.update(labels)
             values.update(model)
             names = self.arm_fields if active and set(values).intersection(self.arms) else message.name
+            if self.driver_arm_groups and any(n in values for n in self.arms):
+                names = tuple(n for group in self.driver_arm_groups if any(j in values for j in group) for n in group)
             target = self.target_message(message, names, [values.get(n, math.nan) for n in names])
             # A rate-limited position target must not carry the original speed.
             target.velocity, target.effort = [], []
@@ -374,16 +403,27 @@ class LegacyTopicControl:
         # Final validation still samples the real ROS clock afresh; never
         # reuse the preparation timestamp across collision/authority work.
         now, wall_ns = time.monotonic(), self.clock_now_ns()
-        if (not self.fresh(physical-self.hand_names, now=now, wall_ns=wall_ns)
+        # Fill only the axes required by this hardware driver, under the same
+        # lock as publication so concurrent single-arm streams cannot overwrite each other.
+        missing = [i for i, q in enumerate(target.position) if math.isnan(q)] if self.driver_arm_groups else ()
+        required = physical - self.hand_names
+        if missing:
+            required.update(target.name[i] for i in missing)
+        if (not self.fresh(required, now=now, wall_ns=wall_ns)
                 or generation != self.bridge.ownership.token
                 or not -.05 <= (wall_ns-stamp)*1e-9 <= self.max_age
                 or any(stamp <= self.last_command_stamp.get(n, 0) for n in physical)):
             self.reject('commit freshness or authority changed')
             return False
-        if generation != self.generation:
+        epoch = self.bridge._output_epoch
+        if generation != self.generation or epoch != self.hold_epoch:
             self.last_command.clear()
             self.command_time.clear()
-        self.generation = generation
+        self.generation, self.hold_epoch = generation, epoch
+        for i in missing:
+            name = target.name[i]
+            target.position[i] = (self.last_command[name] if now-self.command_time.get(name, -math.inf) <= self.max_age
+                                  else self.positions[name])
         self.last_command_stamp.update(dict.fromkeys(physical, stamp))
         self.last_command.update((n, v) for n, v in zip(target.name, target.position) if n in physical)
         self.command_time.update(dict.fromkeys(physical, time.monotonic()))
@@ -397,8 +437,11 @@ class LegacyTopicControl:
 
         Only native publishers owned by this router are optimized. A caller's
         custom publication callback retains its existing message contract.
-        ``commit`` validates state but does not alter the prepared target.
+        Complete commands can be serialized before entering the publication lock.
         """
+        if self.driver_arm_groups and any(math.isnan(q) for q in message.position):
+            # commit() merges disjoint commands immediately before the DDS send.
+            return publish, None
         track_arm = False
         if publish == self.output.publish:
             publisher = self.output
@@ -461,7 +504,7 @@ class LegacyTopicControl:
                     feedback_ready=self.fresh(self.feedback_order, now=now, wall_ns=wall),
                     feedback_timing_ms=timing,
                     hands_ready={side:self.fresh(names, now=now, wall_ns=wall)
-                                 for side,names in self.hands.items()})
+                                 for side,names in self.hand_feedback_names.items()})
 
     def close(self):
         self._clock.close()

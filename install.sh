@@ -33,10 +33,12 @@ elif [[ "${1:-}" == "--camera" ]]; then
 elif [[ "${1:-}" == "--sim" ]]; then
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements-sim.txt"
   install_controller_environment
+  bash "${SCRIPT_DIR}/bootstrap_colcon.sh" build
   install_upload_client
 else
   "${PYTHON_BIN}" -m pip install --upgrade --target "${DEPS_DIR}" -r "${SCRIPT_DIR}/requirements.txt"
   install_controller_environment
+  bash "${SCRIPT_DIR}/bootstrap_colcon.sh" build
   install_upload_client
 fi
 

@@ -4,6 +4,7 @@ set -euo pipefail
 
 COMPONENT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${COMPONENT_DIR}/.." && pwd)"
+source "${PROJECT_ROOT}/tools/runtime/motion_paths.sh"
 MIDDLEWARE_CONFIG="${HC_MIDDLEWARE_CONFIG:-${PROJECT_ROOT}/middleware/config.yaml}"
 LOG_DIR=""
 PIDS=()

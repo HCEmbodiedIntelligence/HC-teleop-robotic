@@ -87,6 +87,7 @@ grippers:
   right:
     sim_joint: hand_narrow1_joint
     sim_closed_position: 0.0
+    feedback_joint_names: [right_gripper]
     finger_topic: /action/right_hand/joint_states
     finger_joint_names:
     - hand_narrow1_joint
@@ -121,6 +122,7 @@ grippers:
   left:
     sim_joint: Z_hand_narrow1_joint
     sim_closed_position: 0.0
+    feedback_joint_names: [left_gripper]
     finger_topic: /action/left_hand/joint_states
     finger_joint_names:
     - Z_hand_narrow1_joint
@@ -153,6 +155,8 @@ grippers:
     - 0.0
     - 0.0
 control:
+  legacy_intervention: true
+  arm_command_layout: dual_arm
   backend: v23
   enabled_on_start: false
   home_on_start: false

@@ -16,6 +16,7 @@ def snapshot_rig():
     boundary.bridge = bridge
     boundary.feedback_order = ['Joint1_R']
     boundary.hands = {'left': ['left_finger'], 'right': ['right_finger']}
+    boundary.hand_feedback_names = boundary.hands
     names = ['Joint1_R', 'left_finger', 'right_finger']
     wall, mono = time.time_ns(), time.monotonic()
     boundary.positions = dict.fromkeys(names, .1)

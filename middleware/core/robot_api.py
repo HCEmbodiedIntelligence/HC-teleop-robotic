@@ -21,6 +21,9 @@ from .robot_profiles import RobotProfileError, UrdfModel, validate_profile_id
 SCHEMA = "hc-robot-api/v1"
 INTERNAL_STATE = "/internal/robot/joint_states"
 INTERNAL_COMMAND = "/internal/robot/joint_commands"
+SERVO_J_STATE = "/status/motion/joint_states"
+SERVO_J_HAND_STATE = "/status/motion/hand_joint_states"
+SERVO_J_STATUS = "/status/motion/status"
 ENDPOINTS = {
     "joint_states": "/observation/joint_states",
     "joint_commands": "/action/joint_states",
@@ -101,7 +104,10 @@ class RobotApiProfile:
         for item in xml.findall("joint"):
             limit = item.find("limit")
             if item.get("name") in self.model and limit is not None and limit.get("effort"):
-                self.model[item.get("name")]["effort"] = _finite(float(limit.get("effort")), "URDF effort", True)
+                effort = _finite(float(limit.get("effort")), "URDF effort")
+                if effort < 0 or (effort == 0 and item.get("name") not in self.config.get("auxiliary_joints", {})):
+                    raise RobotProfileError(f"invalid URDF effort for {item.get('name')}")
+                self.model[item.get("name")]["effort"] = effort
         self.motion = self._yaml("motion/motion.yaml")["humanoid_motion_control"]["ros__parameters"]
         self.sdk = self._yaml("motion/sdk.yaml")
         self.channels = self._yaml("motion/channels.yaml")["channels"]
@@ -111,6 +117,17 @@ class RobotApiProfile:
         self.groups = {}
         self._resolve_groups()
         self._validate_motion(model.links)
+        self.servo_j_endpoints = {c['group']: c['endpoint'] for c in self.channels if c['kind'] == 'servo_j'}
+        self.servo_j_members = {g: tuple(self.groups[g]) for g in self.servo_j_endpoints}
+        if 'whole_body' in self.groups:
+            self.servo_j_endpoints['whole_body'] = '/control/motion/whole_body/servo_j'
+            self.servo_j_members['whole_body'] = tuple(dict.fromkeys(
+                self.groups['whole_body'] + self.groups.get('waist', [])))
+        self.servo_j_joints = dict(self.joints)
+        self.servo_j_public = dict(self.public)
+        self.hand_state_endpoint = (SERVO_J_STATE if self.teleop.get("grippers", {}).get("feedback_in_joint_state")
+                                    else SERVO_J_HAND_STATE)
+        self._resolve_hand_servo_j()
         self.poses = self._resolve_poses()
         self.driver = self._resolve_driver()
         self.revision = hashlib.sha256(b"".join(
@@ -198,7 +215,11 @@ class RobotApiProfile:
             value = self.motion.get(param) if unit == "rad" else None
             if key == "velocity" and model.get("velocity") is not None:
                 value = min(value, model["velocity"]) if value is not None else model["velocity"]
-            limits[key] = None if value is None else _finite(value, param, True) / abs(scale)
+            # Passive URDF linkages can explicitly have zero maximum speed.
+            if key == "velocity" and model.get("velocity") == 0 and model_name in self.config.get("auxiliary_joints", {}):
+                limits[key] = 0.0
+            else:
+                limits[key] = None if value is None else _finite(value, param, True) / abs(scale)
         limits["effort"] = None if "effort" not in model else model["effort"] * abs(scale)
         joint = dict(model_name=model_name, public_name=public_name, scale=scale, offset=offset,
                      unit=unit, limits=limits, model_lower=lower, model_upper=upper)
@@ -269,6 +290,29 @@ class RobotApiProfile:
             if any(f"/control/motion/{group}/{kind}" not in seen for kind in ("servo_j", "servo_p", "move_j")):
                 raise RobotProfileError(f"unified arm {group} requires ServoJ, ServoP and MoveJ")
 
+    def _resolve_hand_servo_j(self):
+        for side, spec in self.config.get("hand_servo_j", {}).items():
+            config = self.teleop["grippers"][side]
+            group = side + "_hand"
+            mapping = spec["joints"]
+            self.servo_j_members[group] = tuple(mapping)
+            self.servo_j_endpoints[group] = f"/control/motion/{group}/servo_j"
+            for name, public in mapping.items():
+                index = config["finger_joint_names"].index(name)
+                existing = self.servo_j_public.get(public)
+                if ((existing and existing["model_name"] != name) or
+                        (name in self.joints and self.joints[name]["public_name"] != public)):
+                    raise RobotProfileError(f"conflicting hand joint mapping: {name}")
+                scale = existing["scale"] if existing else 1.
+                offset = existing["offset"] if existing else 0.
+                endpoints = (config["finger_open"][index], config["finger_closed"][index])
+                lower, upper = sorted((value - offset) / scale for value in endpoints)
+                limits = dict(lower=lower, upper=upper, velocity=self.teleop["grippers"]["max_velocity"] / abs(scale),
+                              acceleration=None, jerk=None, effort=None)
+                joint = dict(model_name=name, public_name=public, unit=spec["unit"],
+                             scale=scale, offset=offset, limits=limits)
+                self.servo_j_public[public] = self.servo_j_joints[name] = joint
+
     def _resolve_poses(self):
         poses = {}
         for name, spec in _mapping(self.config.get("poses"), "poses").items():
@@ -309,6 +353,9 @@ class RobotApiProfile:
                     raise RobotProfileError(f"driver requires {key}")
             params.update(hc_feedback_topic=INTERNAL_STATE, hc_command_topic=INTERNAL_COMMAND,
                           enable_topic="/control/hardware/enabled")
+        elif kind == "external_ros_topics":
+            # Hardware bringup owns this process and already uses the v23 model-name topics.
+            pass
         elif kind == "humanoid_driver_runtime":
             names, groups = [], []
             for group in _names(driver.get("groups"), "driver.groups"):
@@ -377,7 +424,8 @@ class RobotApiProfile:
         return output
 
     def convert_message(self, message, *, to_model=False, group=None):
-        result = copy.deepcopy(message)
+        result = type(message)()
+        result.header = copy.deepcopy(message.header)
         for field, values in self.convert(message.name, message.position, message.velocity,
                                           message.effort, to_model=to_model, group=group).items():
             setattr(result, field, values)
@@ -403,6 +451,30 @@ class RobotApiProfile:
                     poses=copy.deepcopy(self.poses), endpoints=dict(ENDPOINTS),
                     servo={k: self.motion[k] for k in ("control_frequency_hz", "servo_lease_ms",
                            "feedback_max_age_ms", "input_stamp_max_age_s", "input_stamp_future_tolerance_s")})
+
+    def describe_servo_j(self):
+        info = self.describe()
+        info['servo']['requires_measured_velocity'] = False
+        info['endpoints'].update(joint_states=SERVO_J_STATE, status=SERVO_J_STATUS)
+        info['joints'] = [{k: copy.deepcopy(j[k]) for k in ('model_name', 'public_name', 'unit', 'limits', 'scale', 'offset')}
+                          for j in self.servo_j_joints.values()]
+        groups = dict(self.groups)
+        groups.update(self.servo_j_members)
+        hands = self.config.get("hand_servo_j", {})
+        if hands:
+            info['endpoints']['hand_joint_states'] = self.hand_state_endpoint
+        for name, names in groups.items():
+            spec = info['groups'].setdefault(name, dict(base_frame=None, tip_frame=None))
+            joints = [self.servo_j_joints[n] for n in names]
+            spec.update(joint_names=[j['public_name'] for j in joints], count=len(joints),
+                        units=[j['unit'] for j in joints], limits=[j['limits'] for j in joints],
+                        commands=['servo_j'] if name in self.servo_j_endpoints else [],
+                        endpoints={'servo_j': self.servo_j_endpoints[name]} if name in self.servo_j_endpoints else {},
+                        joint_states=SERVO_J_STATE, fk_pose_topic=None)
+            if name.endswith('_hand') and name[:-5] in hands:
+                spec['joint_states'] = self.hand_state_endpoint
+                spec['command_semantics'] = hands[name[:-5]]['command_semantics']
+        return info
 
     def write_runtime(self, directory):
         """Generate inspectable, immutable-per-launch parameters. No live activation."""

@@ -1,0 +1,52 @@
+schema: hc-robot-api/v1
+groups:
+  left_arm:
+    model_joints_from: arms.left.joint_names
+    public_name_prefix: left_joint_
+  right_arm:
+    model_joints_from: arms.right.joint_names
+    public_name_prefix: right_joint_
+  whole_body:
+    combine:
+    - left_arm
+    - right_arm
+auxiliary_joints:
+  ZZJ_Joint: lift_joint_1
+  XJZJ1_Joint: head_slide_joint_1
+  XJZJ2_Joint: head_rotation_joint_1
+  ZB_Joint: left_arm_slide_joint_1
+  YB_Joint: right_arm_slide_joint_1
+  Z_hand_narrow1_joint: left_gripper_joint_1
+  Z_hand_narrow2_joint: left_gripper_joint_2
+  Z_hand_narrow3_joint: left_gripper_joint_3
+  Z_hand_narrow_loop_joint: left_gripper_joint_4
+  Z_hand_wide1_joint: left_gripper_joint_5
+  Z_hand_wide2_joint: left_gripper_joint_6
+  Z_hand_wide3_joint: left_gripper_joint_7
+  Z_hand_wide_loop_joint: left_gripper_joint_8
+  hand_narrow1_joint: right_gripper_joint_1
+  hand_narrow2_joint: right_gripper_joint_2
+  hand_narrow3_joint: right_gripper_joint_3
+  hand_narrow_loop_joint: right_gripper_joint_4
+  hand_wide1_joint: right_gripper_joint_5
+  hand_wide2_joint: right_gripper_joint_6
+  hand_wide3_joint: right_gripper_joint_7
+  hand_wide_loop_joint: right_gripper_joint_8
+hand_servo_j:
+  left:
+    command_semantics: absolute_normalized_opening
+    unit: fraction
+    joints:
+      left_gripper: left_gripper_opening
+  right:
+    command_semantics: absolute_normalized_opening
+    unit: fraction
+    joints:
+      right_gripper: right_gripper_opening
+joint_overrides: {}
+poses:
+  home:
+    model_positions_from: robot.initial_joints
+driver:
+  kind: external_ros_topics
+  parameters: {}

@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.core.runtime_config import unified_profile
 from middleware.core.robot_profiles import RobotProfileError, RobotProfileManager
 from middleware.core.robot_api import RobotApiProfile, selected_profile
 
@@ -59,7 +60,8 @@ def main() -> None:
             import json
             api = RobotApiProfile(profile_dir)
             if arguments.field == "api":
-                print(json.dumps(api.describe(), indent=2, allow_nan=False))
+                info = api.describe() if unified_profile(profile_dir) else api.describe_servo_j()
+                print(json.dumps(info, indent=2, allow_nan=False))
             elif not arguments.output:
                 raise RobotProfileError("generate requires --output")
             else:

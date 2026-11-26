@@ -1139,6 +1139,7 @@ class IsolatedRosBridge:
         self._legacy_enabled = bool(config.get('legacy_control_profile'))
         telemetry_config = copy.deepcopy(config)
         telemetry_config.pop('legacy_control_profile', None)
+        telemetry_config.pop('servo_j_profile', None)
         telemetry_config.pop('robot_api_profile', None)
         telemetry_config['command_mux'] = {**telemetry_config.get('command_mux', {}), 'enabled': False}
         self._telemetry = RosBridge(telemetry_config, on_event, on_frame, camera_topic, camera_topics)

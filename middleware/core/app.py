@@ -158,6 +158,10 @@ class MiddlewareRuntime:
             metadata.update(robot_api_schema="hc-robot-api/v1", robot_api_revision=api.revision,
                             robot_api_info=json.dumps(api.describe(), separators=(",", ":")),
                             free_joints=json.dumps([j["public_name"] for j in api.joints.values()]))
+        elif (profile_dir / "robot_api.yaml").is_file():
+            # Existing v23 recordings and replay continue to use model joint names.
+            info = RobotApiProfile(profile_dir).describe_servo_j()
+            metadata["robot_api_info"] = json.dumps(info, separators=(",", ":"))
         return metadata
 
     async def start(self) -> None:
@@ -183,9 +187,13 @@ class MiddlewareRuntime:
                        if os.environ.get("HC_ROBOT_NAME") or self.config.get("robot_profiles", {}).get("active") else None)
         self.config["ros"].pop("robot_api_profile", None)
         self.config["ros"].pop("legacy_control_profile", None)
+        self.config["ros"].pop("servo_j_profile", None)
         if profile_dir is not None and unified_profile(profile_dir):
             RobotApiProfile(profile_dir)
             self.config["ros"]["robot_api_profile"] = str(profile_dir)
+        elif profile_dir is not None and (profile_dir / "robot_api.yaml").is_file():
+            self.config["ros"]["servo_j_profile"] = str(profile_dir)
+            self.config["ros"]["legacy_control_profile"] = str(profile_dir)
         elif profile_dir is not None and self.config["ros"].get("intervention", {}).get("legacy_topics", False):
             self.config["ros"]["legacy_control_profile"] = str(profile_dir)
         recorder = TopicRecorder(self.config["ros"]["recording"], self.config_dir,

@@ -2,6 +2,7 @@
 # Optional motion workspace; the main middleware/install.sh remain unchanged.
 set -euo pipefail
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${PROJECT_ROOT}/tools/runtime/motion_paths.sh"
 MODE="${1:-build}"
 if [[ "${MODE}" == --help || "${MODE}" == -h ]]; then
   echo 'Usage: ./bootstrap_colcon.sh [deps|build|test]'; exit 0

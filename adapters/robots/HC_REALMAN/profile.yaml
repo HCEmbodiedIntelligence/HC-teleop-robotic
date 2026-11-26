@@ -12,6 +12,11 @@ config_files:
 - arm_teleop.yaml
 - controller_v23.yml
 - vr_configs.yml
+- robot_api.yaml
+- motion/motion.yaml
+- motion/channels.yaml
+- motion/sdk.yaml
+- motion/tools.yaml
 link_count: 49
 joint_count: 48
 movable_joint_count: 33

@@ -2,6 +2,7 @@
 # Motion only; does not start a driver, camera, VR receiver or middleware.
 set -euo pipefail
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${PROJECT_ROOT}/tools/runtime/motion_paths.sh"
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   echo 'Usage: ./tools/run_motion.sh [ROS launch arguments, e.g. urdf_file:=...]'
   echo 'Use --profile adapters/robots/x1 or the effective HC_ROBOT_NAME/config.yaml selection.'

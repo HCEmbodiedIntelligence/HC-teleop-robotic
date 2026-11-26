@@ -194,6 +194,9 @@ class RosBridge:
         self._qos_event_observer = None
         self._public_api = None
         self._legacy_enabled = bool(config.get("legacy_control_profile"))
+        self._command_channels = self.COMMAND_CHANNELS
+        if config.get("servo_j_profile"):
+            self._command_channels += ('left_arm', 'right_arm')
         if config.get("robot_api_profile"):
             from .robot_api import RobotApiProfile
             self._public_api = RobotApiProfile(config["robot_api_profile"])
@@ -252,10 +255,10 @@ class RosBridge:
             "vr": deque(maxlen=300), "exoskeleton": deque(maxlen=300), "motion": deque(maxlen=300)
         }
         self._mux_forwarded_times: deque[float] = deque(maxlen=300)
-        self._mux_channel_received = dict.fromkeys(self.COMMAND_CHANNELS, 0)
-        self._mux_channel_forwarded = dict.fromkeys(self.COMMAND_CHANNELS, 0)
-        self._mux_channel_received_times = {channel: deque(maxlen=300) for channel in self.COMMAND_CHANNELS}
-        self._mux_channel_forwarded_times = {channel: deque(maxlen=300) for channel in self.COMMAND_CHANNELS}
+        self._mux_channel_received = dict.fromkeys(self._command_channels, 0)
+        self._mux_channel_forwarded = dict.fromkeys(self._command_channels, 0)
+        self._mux_channel_received_times = {channel: deque(maxlen=300) for channel in self._command_channels}
+        self._mux_channel_forwarded_times = {channel: deque(maxlen=300) for channel in self._command_channels}
         self._command_channel_boundary = object()
         self._command_channel_cache = {}
         self._mux_forwarded = 0
@@ -376,7 +379,7 @@ class RosBridge:
                 channel: (self._mux_channel_received[channel], self._mux_channel_forwarded[channel],
                           list(self._mux_channel_received_times[channel]),
                           list(self._mux_channel_forwarded_times[channel]))
-                for channel in self.COMMAND_CHANNELS
+                for channel in self._command_channels
             }
         result['command_mux']['channels'] = {}
         for channel, (received, forwarded, receives, publishes) in channel_samples.items():
@@ -727,7 +730,7 @@ class RosBridge:
         self._mux_channel_received[channel] += 1
         self._mux_channel_received_times[channel].append(now)
 
-    def _queue_actor_target(self, source, message, publish, token):
+    def _queue_actor_target(self, source, message, publish, token, *, transfer=False):
         # Fixed source/channel keys prevent arbitrary identities from growing a
         # queue or an unselected producer from evicting the selected source.
         if source not in self._mux_received:
@@ -737,7 +740,7 @@ class RosBridge:
         with self._lock:
             self._count_live_input_locked(source, channel, now)
         try:
-            target = _copy_actor_message(message)
+            target = message if transfer else _copy_actor_message(message)
             names = tuple(target.name)
             stamp = target.header.stamp.sec + target.header.stamp.nanosec * 1e-9
             valid = (bool(names) and len(names) == len(target.position)
@@ -774,7 +777,7 @@ class RosBridge:
                 return
             ready = []
             for source in ('vr', 'exoskeleton', 'motion'):
-                for channel in self.COMMAND_CHANNELS:
+                for channel in self._command_channels:
                     pending = self._actor_targets.pop((source, channel), None)
                     if pending is not None and pending[1] == self._output_epoch:
                         ready.append((source, pending))
@@ -791,10 +794,10 @@ class RosBridge:
                 self._actor_dispatching = False
                 self._actor_dispatch_epoch = None
 
-    def forward_live_command(self, source: str, message: Any, publish: Callable, token=None) -> bool:
+    def forward_live_command(self, source: str, message: Any, publish: Callable, token=None, *, transfer=False) -> bool:
         if (self._control_actor_mode and not (self._actor_dispatching
                 and self._actor_thread_ident == threading.get_ident())):
-            return self._queue_actor_target(source, message, publish, token)
+            return self._queue_actor_target(source, message, publish, token, transfer=transfer)
         # Sample one in eight callbacks. Clock/serialization waits need wall
         # and thread CPU time to distinguish native/GIL waiting from compute.
         # Aggregation happens after all final-send locks have been released.
@@ -872,6 +875,12 @@ class RosBridge:
                 hands = {}
             if any(name in arms for name in key):
                 channel = 'arms'
+                server = getattr(boundary, 'servo_j', None)
+                if server is not None:
+                    for arm in ('left_arm', 'right_arm'):
+                        if all(name in server.members.get(arm, ()) for name in key):
+                            channel = arm
+                            break
             else:
                 sides = [side for side in ('right', 'left')
                          if any(name in hands.get(side, ()) for name in key)]
@@ -1214,25 +1223,6 @@ class RosBridge:
                 )
                 subscription_names.append(hardware_ready_topic)
 
-                control_source_topic = str(
-                    mux_config.get(
-                        "control_source_topic", "/control/source"
-                    )
-                )
-                control_source_qos = QoSProfile(
-                    reliability=ReliabilityPolicy.RELIABLE,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                    history=HistoryPolicy.KEEP_LAST,
-                    depth=1,
-                )
-                control_source_publisher = node.create_publisher(
-                    String, control_source_topic, control_source_qos
-                )
-                publishers[(control_source_topic, "std_msgs/msg/String")] = (
-                    control_source_publisher
-                )
-                control_source_publisher.publish(String(data=self._command_source))
-
                 output_topic = str(
                     mux_config.get("output_topic", "/action/joint_states")
                 )
@@ -1293,13 +1283,13 @@ class RosBridge:
                         ),
                     ),
                 ):
+                    if self._legacy_enabled and source == "motion":
+                        continue
                     def mux_callback(
                         message: Any,
                         *,
                         source: str = source,
                     ) -> None:
-                        if self._legacy_enabled and source == "motion":
-                            return  # Program input is exclusively the own topic adapter.
                         self.forward_live_command(source, message, output_publisher.publish)
 
                     subscriptions.append(
@@ -1636,6 +1626,14 @@ class RosBridge:
         from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
         from .control_ownership import ControlToken
 
+        mux_config = self.config.get("command_mux", {})
+        source_topic = str(mux_config.get("control_source_topic", "/control/source"))
+        source_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        control_source_publisher = node.create_publisher(String, source_topic, source_qos)
+        publishers[(source_topic, "std_msgs/msg/String")] = control_source_publisher
+        control_source_publisher.publish(String(data=self._command_source))
+
         observer_hook = (getattr(self, '_observer_ros_publish', None)
                          if self._control_actor_mode else None)
         observer_hook = observer_hook if callable(observer_hook) else None
@@ -1763,7 +1761,9 @@ class RosBridge:
                                   manual_ready=ownership.input_valid and ownership.gripped)
                 if (ownership.state in {'AUTO', 'MANUAL'} and not self._command_output_enabled
                         and not self._actor_output_blocked()):
-                    self._command_source = ownership.token.source
+                    if self._command_source != ownership.token.source:
+                        self._command_source = ownership.token.source
+                        control_source_publisher.publish(String(data=self._command_source))
                     self._source_cutoff = ownership.cutoff_ns * 1e-9
                     self._command_output_enabled = True
                     # Normal handover fences Motion and this final sender.

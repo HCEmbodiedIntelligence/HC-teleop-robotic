@@ -44,13 +44,13 @@ def message(values, stamp=None):
 
 
 class Rig:
-    def __init__(self):
+    def __init__(self, profile='x1'):
         self.wire = []
         node = Mock()
         node.get_clock.return_value.now.side_effect = lambda: SimpleNamespace(nanoseconds=time.time_ns())
         node.create_publisher.side_effect = lambda kind, topic, qos: SimpleNamespace(
             publish=lambda msg: self.wire.append((topic, copy.deepcopy(msg))))
-        self.bridge = RosBridge({'legacy_control_profile': str(ROOT/'adapters/robots/x1'),
+        self.bridge = RosBridge({'legacy_control_profile': str(ROOT/'adapters/robots'/profile),
             'intervention': {'automatic_recording': False}}, lambda *a: None)
         self.bridge._command_callback_group = self.bridge._telemetry_callback_group = None
         with patch('adapters.core.collision_safety.ModelCollisionGuard') as guard:
@@ -525,3 +525,39 @@ def test_final_commit_uses_new_clock_and_rejects_elapsed_command():
         nanoseconds=b.stamp(msg)+300_000_000)
     assert not b.commit(prepared)
     assert b.last_rejection == 'commit freshness or authority changed'
+
+
+@pytest.mark.parametrize('profile,joint_count', [('HC_REALMAN', 12), ('openarmx', 7)])
+def test_interleaved_servoj_preserves_driver_layout_and_epoch_hold(profile, joint_count):
+    rig = Rig(profile)
+    boundary = rig.boundary
+    # Prepare both samples before either reaches the final actuator lock.
+    a, b = boundary.teleop['arms']['right']['joint_names'][:2]
+    qa, qb = boundary.positions[a], boundary.positions[b]
+    first = boundary.prepare(message({a: qa + .001}))
+    second = boundary.prepare(message({b: qb - .001}))
+    assert first is not None and second is not None
+    assert boundary.commit(first)
+    assert boundary.commit(second)
+    result = dict(zip(second[0].name, second[0].position))
+    assert len(result) == joint_count
+    assert all(map(math.isfinite, result.values()))
+    assert result[a] == pytest.approx(qa + .001)
+    assert result[b] == pytest.approx(qb - .001)
+    # Newly opened output must take held axes from measured feedback.
+    rig.bridge._output_epoch += 1
+    third = boundary.prepare(message({b: qb}))
+    assert boundary.commit(third)
+    assert dict(zip(third[0].name, third[0].position))[a] == qa
+
+
+@pytest.mark.parametrize('profile', ['HC_REALMAN', 'openarmx'])
+def test_physical_gripper_that_shares_its_sim_name_reaches_hand_output(profile):
+    rig = Rig(profile)
+    boundary = rig.boundary
+    name = boundary.teleop['grippers']['left']['sim_joint']
+    q = boundary.teleop['grippers']['left']['finger_open'][0]
+    prepared = boundary.prepare(message({name: q}))
+    assert prepared is not None and boundary.commit(prepared)
+    boundary.publish_selected(prepared[0])
+    assert rig.wire[-1][0] == '/action/left_hand/joint_states'

@@ -86,6 +86,7 @@ body:
   ik_damping: 0.05
   ik_max_update: 0.08
 grippers:
+  feedback_in_joint_state: true
   # Joy.axes[0] 的 Trigger 连续控制夹爪；位置单位为米。
   trigger_axis: 0
   max_velocity: 0.08
@@ -108,6 +109,8 @@ grippers:
     finger_closed: [0.0]
 control:
   # 使用外部 ControllerV23 求解双臂；启动即使能，控制循环为 100 Hz。
+  legacy_intervention: true
+  arm_command_layout: single_arm
   backend: v23
   enabled_on_start: true
   rate_hz: 100.0
