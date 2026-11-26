@@ -49,8 +49,10 @@ def positive(value):
 def load_profile(path):
     # Optional offline describe only; online commands never load local YAML.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from adapters.core.runtime_config import unified_profile
     from middleware.core.robot_api import RobotApiProfile
-    return capability_profile(RobotApiProfile(path).describe())
+    profile = RobotApiProfile(path)
+    return capability_profile(profile.describe() if unified_profile(path) else profile.describe_servo_j())
 
 
 def capability_profile(info):
@@ -116,34 +118,36 @@ class RobotDemo(Node):
         self.state_topic = self.profile.get('state_topic', STATE_TOPIC)
         self.permit_topic = self.profile.get('permit_topic', PERMIT_TOPIC)
         self.latest = {}
-        self.subscribe(JointState, self.state_topic)
-        self.subscribe(JointState, COMMAND_TOPIC)
+        self._subscribed_topics = set()
         self.subscribe(Bool, READY_TOPIC)
-        self.subscribe(Header, self.permit_topic)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.subscribe(String, SOURCE_TOPIC, latched)
         self.subscribe(String, INFO_TOPIC, latched)
         if profile:
-            from geometry_msgs.msg import PoseStamped
-            topics = {c['fk_pose_topic'] for c in profile['channels'] if c.get('fk_pose_topic')}
-            for topic in sorted(topics):
-                self.subscribe(PoseStamped, topic)
+            self.subscribe_profile(profile)
+
+    def subscribe_profile(self, profile):
+        self.state_topic = profile['state_topic']
+        self.permit_topic = profile['permit_topic']
+        self.subscribe(JointState, self.state_topic)
+        self.subscribe(Header, self.permit_topic)
+        from geometry_msgs.msg import PoseStamped
+        for topic in {c['fk_pose_topic'] for c in profile['channels'] if c.get('fk_pose_topic')}:
+            self.subscribe(PoseStamped, topic)
 
     def discover(self, timeout):
         self.wait_for(lambda: INFO_TOPIC in self.latest, timeout)
         info = json.loads(self.latest[INFO_TOPIC][0].data)
         self.profile = capability_profile(info)
-        if self.profile['state_topic'] != STATE_TOPIC or self.profile['permit_topic'] != PERMIT_TOPIC:
-            raise ValueError('机器人未使用标准公共端点')
-        from geometry_msgs.msg import PoseStamped
-        for topic in {c['fk_pose_topic'] for c in self.profile['channels'] if c.get('fk_pose_topic')}:
-            self.subscribe(PoseStamped, topic)
+        self.subscribe_profile(self.profile)
         return info
 
     def subscribe(self, message_type, topic, qos=qos_profile_sensor_data):
-        self.create_subscription(message_type, topic,
-                                 lambda msg: self.latest.__setitem__(topic, (msg, time.monotonic())), qos)
+        if topic not in self._subscribed_topics:
+            self.create_subscription(message_type, topic,
+                                     lambda msg: self.latest.__setitem__(topic, (msg, time.monotonic())), qos)
+            self._subscribed_topics.add(topic)
 
     def recent(self, topic, max_age, stamped=False):
         sample = self.latest.get(topic)
@@ -157,25 +161,36 @@ class RobotDemo(Node):
         age = (self.get_clock().now().nanoseconds - stamp_ns) / 1e9
         return stamp_ns > 0 and -0.05 <= age <= max_age
 
-    def gate_problem(self, names):
+    def gate_problem(self, names, *, ordinary_move=False):
         age = self.profile['params'].get('feedback_max_age_ms', 200) / 1000.0
         if not self.recent(self.state_topic, age, stamped=True):
             return '关节反馈缺失或过期；检查时间戳及两端时钟'
         try:
-            measured = joint_values(self.latest[self.state_topic][0], require_velocity=True)
+            require_velocity = ordinary_move or self.profile['params'].get('requires_measured_velocity', True)
+            measured = joint_values(self.latest[self.state_topic][0], require_velocity=require_velocity)
         except ValueError as error:
             return str(error)
         if not set(names).issubset(measured):
             return '反馈缺少在线能力描述中的关节'
         if not self.recent(READY_TOPIC, 0.5) or not self.latest[READY_TOPIC][0].data:
             return 'hardware ready 缺失、为 false 或过期'
+        if not self.recent(self.permit_topic, 0.3, stamped=True):
+            return 'Motion 许可缺失或过期；由机器人操作方检查使能及联锁'
+        permit = self.latest[self.permit_topic][0].frame_id
+        if permit.startswith('hc1:'):
+            fields = permit.split('#')
+            token = fields[0].split(':')
+            if (ordinary_move or len(fields) != 4 or fields[1] != 'grant'
+                    or len(token) != 6 or not token[1] or not token[2]
+                    or not token[3].isdigit() or token[4] != 'motion'):
+                return '当前许可未授权程序控制'
+            # DAgger's grant identifies both the source and its generation.
+            return None
         source = self.latest.get(SOURCE_TOPIC)
         if source is None or source[0].data != 'motion':
             return '当前控制源不是 motion；由机器人操作方选择程序控制'
-        if not self.recent(self.permit_topic, 0.3, stamped=True):
-            return 'Motion 许可缺失或过期；由机器人操作方检查使能及联锁'
-        if not self.latest[self.permit_topic][0].frame_id.startswith('motion:'):
-            return '当前许可不允许普通 Move 动作'
+        if not permit.startswith('motion:'):
+            return '当前许可未授权程序控制'
         return None
 
     def wait_for(self, condition, timeout, guard=None):
@@ -201,6 +216,8 @@ class RobotDemo(Node):
                     row['invalid'] = str(error)
             elif isinstance(message, (Bool, String)):
                 row['data'] = message.data
+            elif hasattr(message, 'code') and hasattr(message, 'message'):
+                row.update(code=message.code, message=message.message)
             elif isinstance(message, Header):
                 row['frame_id'] = message.frame_id
             else:
@@ -230,9 +247,9 @@ class RobotDemo(Node):
             if not client.wait_for_server(timeout_sec=args.wait):
                 raise RuntimeError('MoveJ 服务不存在；检查 motion 后端、ROS Domain 和网络')
             try:
-                self.wait_for(lambda: self.gate_problem(names) is None, args.wait)
+                self.wait_for(lambda: self.gate_problem(names, ordinary_move=True) is None, args.wait)
             except RuntimeError as error:
-                raise RuntimeError(self.gate_problem(names) or str(error)) from error
+                raise RuntimeError(self.gate_problem(names, ordinary_move=True) or str(error)) from error
             measured = joint_values(self.latest[self.state_topic][0], require_velocity=True)
             goal = MoveJ.Goal()
             goal.group_name = args.group
@@ -249,7 +266,7 @@ class RobotDemo(Node):
             permit = self.latest[self.permit_topic][0].frame_id
 
             def guard():
-                problem = self.gate_problem(names)
+                problem = self.gate_problem(names, ordinary_move=True)
                 if problem:
                     raise RuntimeError(problem)
                 if self.latest[self.permit_topic][0].frame_id != permit:
@@ -399,6 +416,13 @@ def main(argv=None):
         initialized = True
         node = RobotDemo()
         info = node.discover(args.wait)
+        if args.command == 'subscribe':
+            node.subscribe(JointState, COMMAND_TOPIC)
+        if args.command == 'subscribe' and info['endpoints'].get('status'):
+            from humanoid_motion_interfaces.msg import Status
+            node.subscribe(Status, info['endpoints']['status'], QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL))
         if args.command == 'describe':
             emit(info)
         elif args.command in ('move-j', 'home'):

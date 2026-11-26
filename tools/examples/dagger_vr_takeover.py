@@ -153,19 +153,21 @@ def main():
                     item['enabled'] = True
                     outputs.append('record')
                 item['outputs'] = outputs
+            config['ros']['intervention']['automatic_recording'] = True
             config['ros']['recording']['format'] = 'mcap'
             config['ros']['recording']['action_sources'] = []
             args.report.with_suffix('.original-config.json').write_text(json.dumps(original, ensure_ascii=False, indent=2))
             changed = True
             request('/api/config', config, 'PUT')
-        wait_for(lambda s: {'motion', 'teleop'} <= s['peers'].keys())
+        wait_for(lambda s: set(s['required_peers']) <= s['peers'].keys())
         thread = threading.Thread(target=send_vr, name='simulated-vr', daemon=True)
         thread.start()
         time.sleep(.3)
         enabled = True  # Ensure partial enable failures are also cleaned up.
         opened = action('enable')
         result['session_id'] = opened['ownership']['session_id']
-        wait_for(lambda s: s['input_valid'] and s['input_armed'] and s['capture'] and s['capture']['ready'], 25)
+        wait_for(lambda s: s['input_valid'] and s['input_armed'] and
+                 (not s['recording_enabled'] or (s['capture'] and s['capture']['ready'])), 25)
         action('return')  # Only the initial start uses HTTP; every handover uses Grip packets.
         wait_for(lambda s: s['state'] == 'AUTO')
         wait_program()

@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize('robot,joint', [
-    ('openarmx', 'left_joint_4'), ('x1', 'left_joint_4'),
+    ('openarmx', 'left_joint_4'), ('x1', 'left_joint_4'), ('HC_REALMAN', 'left_joint_4'),
 ])
 def test_same_client_reads_each_profile_and_maps_by_name(robot, joint):
     profile = load_profile(ROOT / 'adapters/robots' / robot)
@@ -32,8 +32,8 @@ def test_same_client_reads_each_profile_and_maps_by_name(robot, joint):
     target = make_target(names, joint_values(feedback, True), args, profile['params'])
     assert dict(zip(names, target))[joint] == .02
     assert sum(target) == .02
-    assert next(c for c in profile['channels'] if c['kind'] == 'move_j' and c['group'] == 'left_arm')['endpoint'] == (
-        '/control/motion/left_arm/move_j')
+    assert next(c for c in profile['channels'] if c['kind'] == 'servo_j' and c['group'] == 'left_arm')['endpoint'] == (
+        '/control/motion/left_arm/servo_j')
 
 
 def test_mapping_is_not_fixed_to_seven_joints_or_left_right_arms():
@@ -85,3 +85,16 @@ def test_motion_requires_ready_matching_names_source_and_fresh_permit():
     node = client_state()
     node.latest[PERMIT_TOPIC][0].stamp.sec = 99
     assert '许可' in RobotDemo.gate_problem(node, ['a'])
+
+
+@pytest.mark.parametrize('source,phase,accepted', [
+    ('motion', 'grant', True), ('motion', 'revoke', False),
+    ('motion', 'off', False), ('vr', 'grant', False),
+])
+def test_dagger_servoj_permit_uses_its_source_and_generation(source, phase, accepted):
+    node = client_state()
+    node.profile['params']['requires_measured_velocity'] = False
+    node.latest[STATE_TOPIC][0].velocity = []
+    node.latest[PERMIT_TOPIC][0].frame_id = f'hc1:controller:session:7:{source}:#{phase}#solver#teleop'
+    assert (RobotDemo.gate_problem(node, ['a']) is None) == accepted
+    assert RobotDemo.gate_problem(node, ['a'], ordinary_move=True) is not None

@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from dagger_program import subscribe_robot_state
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -102,6 +104,7 @@ class Sim:
             if item['topic'] in ('/observation/joint_states','/action/joint_states','/observation/base/pose'):
                 item['enabled']=True
                 item['outputs'].append('record')
+        config['ros']['intervention']['automatic_recording'] = True
         config['ros']['recording']['format']='mcap'
         self.request('/api/config',config,'PUT')
         os.environ['ROS_DOMAIN_ID']=str(simulation['ros_domain_id'])
@@ -118,7 +121,6 @@ class Sim:
         self.node=rclpy.create_node('dagger_boundary_observer')
         self.log=(self.report/'trace.jsonl').open('x',buffering=1)
         latched=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.node.create_subscription(String,'/status/robot/info',lambda m:self.info.update(json.loads(m.data)),latched)
         def ownership(m):
             value=json.loads(m.data)
             if (self.owner.get('state'),self.owner.get('epoch'))!=(value['state'],value['epoch']):
@@ -136,7 +138,7 @@ class Sim:
                 frame_id=m.header.frame_id,names=list(m.name),positions=list(m.position))
         self.node.create_subscription(String,'/status/control/ownership',ownership,latched)
         self.node.create_subscription(String,'/status/teleop',lambda m:self.teleop.update(json.loads(m.data)),10)
-        self.node.create_subscription(JointState,'/observation/joint_states',joints,qos_profile_sensor_data)
+        subscribe_robot_state(self.node, self.info, joints)
         self.node.create_subscription(PoseStamped,'/observation/base/pose',base,qos_profile_sensor_data)
         for kind,topic in [('output','/action/joint_states'),('candidate','/internal/control/joint_targets')]:
             self.node.create_subscription(JointState,topic,lambda m,k=kind:joint_message(k,m),100)
@@ -149,7 +151,7 @@ class Sim:
         self.destination=(urllib.parse.urlparse(self.url).hostname,int(config['vr']['pose_port']))
         self.vr_thread=threading.Thread(target=self._send_vr,daemon=True)
         self.vr_thread.start()
-        self.wait(lambda:self.info and self.joints and self.base and {'motion','teleop'}<=self.owner.get('peers',{}).keys(),15,'ROS discovery')
+        self.wait(lambda:self.info and self.joints and self.base and self.owner and set(self.owner['required_peers']) <= self.owner['peers'].keys(),15,'ROS discovery')
         self.add('setup',simulation=simulation)
 
     def _send_vr(self):
@@ -197,7 +199,8 @@ class Sim:
         self.sessions.append(opened['ownership']['session_id'])
         def ready():
             s=self.request('/api/control/ownership')
-            return s['input_armed'] and s['input_valid'] and s['capture'] and s['capture']['ready']
+            return (s['input_armed'] and s['input_valid'] and
+                    (not s['recording_enabled'] or (s['capture'] and s['capture']['ready'])))
         self.wait(ready,25,'recording ready')
         if auto:
             self.action('return')
