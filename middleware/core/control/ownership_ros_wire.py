@@ -148,7 +148,11 @@ def setup_ownership_ros(
             ):
                 return
             age = node.get_clock().now().nanoseconds - int(value["stamp_ns"])
-            if not -50_000_000 <= age <= 300_000_000:
+            max_ack_age_ns = max(
+                300_000_000,
+                int(getattr(bridge.ownership, "peer_heartbeat_timeout_ns", 300_000_000)),
+            )
+            if not -50_000_000 <= age <= max_ack_age_ns:
                 return
             bridge.ownership.peer(participant, instance)
             if value.get("token"):

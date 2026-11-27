@@ -24,6 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "automatic_recording": True,
             "max_arm_velocity_rad_s": 0.25,
             "max_target_error_rad": 0.30,
+            "peer_heartbeat_timeout_sec": 1.0,
         },
         "command_mux": {
             "enabled": True,
@@ -520,6 +521,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         item = intervention[key]
         if type(item) not in (int, float) or not math.isfinite(item) or item <= 0:
             raise ConfigError("ros.intervention." + key + " must be finite and positive")
+    heartbeat_timeout = intervention.setdefault("peer_heartbeat_timeout_sec", 1.0)
+    if (
+        type(heartbeat_timeout) not in (int, float)
+        or not math.isfinite(heartbeat_timeout)
+        or not 0.3 <= heartbeat_timeout <= 5.0
+    ):
+        raise ConfigError(
+            "ros.intervention.peer_heartbeat_timeout_sec must be between 0.3 and 5.0 seconds"
+        )
+    intervention["peer_heartbeat_timeout_sec"] = float(heartbeat_timeout)
     value["camera"] = cam_config
     return value
 

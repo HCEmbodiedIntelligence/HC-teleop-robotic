@@ -387,6 +387,7 @@ ros:
     automatic_recording: false
     max_arm_velocity_rad_s: 1
     max_target_error_rad: 0.3
+    peer_heartbeat_timeout_sec: 1.0
 vr:
   pose_timeout_ms: 600
   web_pose_hz: 10.0

@@ -118,12 +118,28 @@ def publish_target_poses(node: Any) -> None:
     node.controller_target_pub.publish(controller_message)
 
 
+def _publisher_has_subscribers(publisher: Any) -> bool:
+    if publisher is None:
+        return False
+    count_fn = getattr(publisher, "get_subscription_count", None)
+    if not callable(count_fn):
+        return True
+    return int(count_fn()) > 0
+
+
 def publish_actual_poses(node: Any) -> None:
-    stamp = node.get_clock().now().to_msg()
-    if node.actual_pub is None and node.record_actual_pub is None:
-        with (getattr(node, "_model_lock", None) or nullcontext()):
-            node._publish_head_tracking_poses(stamp=stamp)
+    actual_active = _publisher_has_subscribers(node.actual_pub)
+    record_active = _publisher_has_subscribers(node.record_actual_pub)
+    if not actual_active and not record_active:
+        head_pub = getattr(node, "head_visualization_pub", None)
+        if head_pub is None or _publisher_has_subscribers(head_pub):
+            stamp = node.get_clock().now().to_msg()
+            with (getattr(node, "_model_lock", None) or nullcontext()):
+                node._publish_head_tracking_poses(stamp=stamp)
+        else:
+            node._publish_head_tracking_poses()
         return
+    stamp = node.get_clock().now().to_msg()
     message = PoseArray()
     message.header.stamp = stamp
     message.header.frame_id = node._arm_base_frame()
@@ -141,16 +157,22 @@ def publish_actual_poses(node: Any) -> None:
                 link_poses[arm.ee_index] = ee_pose
             local = node._relative_pose(base_pose, ee_pose)
             message.poses.append(pose_from_tuple(local[0], local[1]))
-    if node.actual_pub:
+    if actual_active:
         node.actual_pub.publish(message)
-    if node.record_actual_pub:
+    if record_active:
         node.record_actual_pub.publish(message)
-    with (getattr(node, "_model_lock", None) or nullcontext()):
-        node._publish_head_tracking_poses(stamp=stamp)
+    head_pub = getattr(node, "head_visualization_pub", None)
+    if head_pub is None or _publisher_has_subscribers(head_pub):
+        with (getattr(node, "_model_lock", None) or nullcontext()):
+            node._publish_head_tracking_poses(stamp=stamp)
+    else:
+        node._publish_head_tracking_poses()
 
 
 def publish_head_tracking_poses(node: Any, stamp: Any = None) -> None:
     """Feedback and mapped head target, relative to the model base pose."""
+    if not _publisher_has_subscribers(getattr(node, "head_visualization_pub", None)):
+        return
     head_link = node.body_config.get("visualization_head_link")
     if head_link not in node.link_by_name:
         return

@@ -82,7 +82,7 @@ class InterventionTeleop:
         node.create_subscription(Header, '/control/motion/permit', self.permit, 1)
         self.home_pub = node.create_publisher(JointState, '/internal/vr/owned_home', 1)
         node.create_subscription(Header, '/internal/vr/home_request', self.home_request, 1)
-        node.create_timer(.1, self.heartbeat)
+        node.create_timer(.05, self.heartbeat)
         self.hand_feedback = {}
         self.hand_commands = {}
         self.last_hand_step = 0.0
@@ -166,8 +166,14 @@ class InterventionTeleop:
             self.ack_error = reason
         # Only an open grant is a lease. During revoke/HOLD the output is
         # already closed; starting capture workers must not expire a permission
-        # that was never granted. A later grant still needs a fresh token/stamp.
-        if self.active and self.phase == 'grant' and time.monotonic()-self.permit_time > .3:
+        # that was never granted. During AUTO (non-VR grant), teleop owns no
+        # output, so match the 1.0 s peer heartbeat window instead of 0.3 s.
+        permit_limit = (
+            .3
+            if (self.granted or (self.token is not None and self.token.source == 'vr'))
+            else 1.0
+        )
+        if self.active and self.phase == 'grant' and time.monotonic()-self.permit_time > permit_limit:
             self.granted = False
             self.ack_error = 'control permit timeout'
         success, reason = not self.ack_error, self.ack_error

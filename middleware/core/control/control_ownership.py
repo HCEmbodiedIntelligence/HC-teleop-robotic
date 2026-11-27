@@ -41,6 +41,7 @@ class ControlOwnership:
                  revoke=lambda: None, permit=lambda *args: None,
                  open_segment=lambda *args: None, close_segment=lambda *args: None,
                  emit=lambda event: None, transition_timeout_sec=2., input_timeout_sec=.3,
+                 peer_heartbeat_timeout_sec=None,
                  required_peers=('motion', 'teleop'), recording_enabled=True,
                  right_gripper_override=False, begin_return_hold=lambda: None,
                  begin_takeover_hold=lambda: None):
@@ -63,6 +64,12 @@ class ControlOwnership:
         self.deadline_ns = 0
         self.transition_timeout_ns = int(transition_timeout_sec * 1e9)
         self.input_timeout_ns = int(input_timeout_sec * 1e9)
+        heartbeat_timeout_sec = (
+            input_timeout_sec
+            if peer_heartbeat_timeout_sec is None
+            else peer_heartbeat_timeout_sec
+        )
+        self.peer_heartbeat_timeout_ns = int(heartbeat_timeout_sec * 1e9)
         self.peers = {}
         self.peer_times = {}
         self.acks = set()
@@ -488,10 +495,10 @@ class ControlOwnership:
                 self.input_lost('teleop input timeout')
             if self.state in {'AUTO', 'MANUAL'}:
                 for peer in self.required_peers:
-                    if self.clock()-self.peer_times.get(peer, 0) > self.input_timeout_ns:
+                    if self.clock()-self.peer_times.get(peer, 0) > self.peer_heartbeat_timeout_ns:
                         cause = self._event('heartbeat_timeout', participant=peer,
                                     gap_ms=(self.clock()-self.peer_times.get(peer, 0))/1e6,
-                                    limit_ms=self.input_timeout_ns/1e6)
+                                    limit_ms=self.peer_heartbeat_timeout_ns/1e6)
                         # Fault revokes the old epoch. Preserve the detector's
                         # identity across that boundary, rather than infer its
                         # cause later from adjacent log timestamps/reasons.

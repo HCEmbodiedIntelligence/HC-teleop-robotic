@@ -112,9 +112,61 @@ setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --
 PIDS+=("$!")
 sleep 1
 
+_resolve_teleop_cpu() {
+  local cpu="${HC_TELEOP_CPU-auto}"
+  case "${cpu,,}" in
+    off|none|false|"")
+      return 0 ;;
+    auto)
+      cpu=""
+      if [[ -r /sys/devices/system/cpu/isolated && -r /sys/devices/system/cpu/online ]]; then
+        local isolated_cpus online_cpus
+        isolated_cpus="$(cat /sys/devices/system/cpu/isolated)"
+        online_cpus="$(cat /sys/devices/system/cpu/online)"
+        if /usr/bin/python3 - "${isolated_cpus}" "${online_cpus}" <<'PY'
+import sys
+
+def parse_cpus(value):
+    cpus = set()
+    for part in value.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            start, end = (int(item) for item in part.split('-', 1))
+            cpus.update(range(start, end + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+isolated = parse_cpus(sys.argv[1])
+online = parse_cpus(sys.argv[2])
+raise SystemExit(0 if (1 in isolated and 1 in online) else 1)
+PY
+        then
+          cpu=1
+        fi
+      fi
+      ;;
+  esac
+  printf '%s' "${cpu}"
+}
+
+TELEOP_COMMAND=(
+  /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py"
+  --config "${ARM_CONFIG}" --backend "${CONTROL_BACKEND}"
+)
+# X1 reserves CPUs 1-3 with isolcpus/nohz_full (CPU 2=v23 solver, CPU 3=control
+# owner + smoother). Pin the teleop heartbeat/adapter node to CPU 1 when free so
+# camera, recording and desktop jitter cannot stall its ownership heartbeat.
+TELEOP_CPU="$(_resolve_teleop_cpu)"
+if [[ -n "${TELEOP_CPU}" ]]; then
+  log "将 VR 遥操作控制节点绑定到隔离核 CPU ${TELEOP_CPU}"
+  TELEOP_COMMAND=(taskset -c "${TELEOP_CPU}" "${TELEOP_COMMAND[@]}")
+fi
+
 log "启动 VR 到标准机器人接口控制节点..."
-setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- /usr/bin/python3 -u "${PROJECT_ROOT}/adapters/nodes/arm_controller.py" \
-  --config "${ARM_CONFIG}" --backend "${CONTROL_BACKEND}" \
+setsid /usr/bin/python3 "${PROJECT_ROOT}/tools/runtime/process_supervisor.py" --parent "$$" -- "${TELEOP_COMMAND[@]}" \
   >"${LOG_DIR}/teleop_controller.log" 2>&1 &
 PIDS+=("$!")
 

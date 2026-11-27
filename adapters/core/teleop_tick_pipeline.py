@@ -685,6 +685,28 @@ def control_tick(
         node._control_tick_sample = None
 
 
+def _publisher_has_subscribers(publisher: Any) -> bool:
+    if publisher is None:
+        return False
+    count_fn = getattr(publisher, "get_subscription_count", None)
+    if not callable(count_fn):
+        return True
+    return int(count_fn()) > 0
+
+
+def _should_sync_and_publish_actual(node: Any) -> bool:
+    """Skip idle 100 Hz PyBullet sync/FK during non-VR intervention if unobserved."""
+    intervention = getattr(node, "intervention", None)
+    if not (intervention and getattr(intervention, "active", False)):
+        return True
+    if getattr(intervention, "granted", False):
+        return True
+    return any(
+        _publisher_has_subscribers(getattr(node, attr, None))
+        for attr in ("actual_pub", "record_actual_pub", "head_visualization_pub")
+    )
+
+
 def control_tick_body(
     node: Any,
     *,
@@ -695,7 +717,7 @@ def control_tick_body(
         node.control["joint_state_timeout"]
     )
     command = node._command_seed() if feedback_fresh else None
-    if command is not None:
+    if command is not None and _should_sync_and_publish_actual(node):
         sample = getattr(node, "_control_tick_sample", None)
         if sample is None:
             node._sync_model()

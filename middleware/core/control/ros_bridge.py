@@ -92,15 +92,19 @@ class RosBridge:
 
         from .control_ownership import ControlOwnership
 
+        intervention_cfg = config.get("intervention", {})
         self.ownership = ControlOwnership(
             lock=self._lock,
             ros_clock=lambda: int(self._ros_now() * 1e9),
             revoke=self._ownership_revoke,
             permit=self._ownership_permit,
+            peer_heartbeat_timeout_sec=intervention_cfg.get(
+                "peer_heartbeat_timeout_sec"
+            ),
             required_peers=("solver", "teleop")
             if self._legacy_enabled
             else ("motion", "teleop"),
-            recording_enabled=config.get("intervention", {}).get(
+            recording_enabled=intervention_cfg.get(
                 "automatic_recording", True
             ),
             right_gripper_override=self._legacy_enabled,

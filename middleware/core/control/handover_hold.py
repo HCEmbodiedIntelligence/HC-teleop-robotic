@@ -122,7 +122,8 @@ class HandoverHoldController:
             not owner._input_fresh()
             or (spec["require_grip"] and not owner.gripped)
             or any(
-                owner.clock() - owner.peer_times.get(peer, 0) > owner.input_timeout_ns
+                owner.clock() - owner.peer_times.get(peer, 0)
+                > getattr(owner, "peer_heartbeat_timeout_ns", owner.input_timeout_ns)
                 for peer in owner.required_peers
             )
         ):
