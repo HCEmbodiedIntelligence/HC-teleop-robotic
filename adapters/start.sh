@@ -73,6 +73,7 @@ if [[ "${CONTROL_BACKEND}" != v23 ]]; then
 fi
 export HC_ARM_TELEOP_CONFIG="${ARM_CONFIG}"
 V23_SCRIPT="${PROJECT_ROOT}/adapters/v23/script/control_v2_3_ros2.py"
+V23_CPP_BIN="${PROJECT_ROOT}/adapters/v23/cpp/build/controller_v2_3_ros2_cpp"
 CONTROLLER_PREFIX="${HC_CONTROLLER_PREFIX:-${HOME}/miniconda3/envs/hc-teleop-controller}"
 CONTROLLER_COMMAND=()
 
@@ -86,7 +87,10 @@ if ! /usr/bin/python3 -c 'import numpy, pybullet, rclpy, yaml' 2>/dev/null; then
   exit 2
 fi
 
-if [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
+if [[ "${HC_V23_CPP:-1}" != "0" && -x "${V23_CPP_BIN}" ]]; then
+  "${PROJECT_ROOT}/run_generic_controller.sh" --check
+  CONTROLLER_COMMAND=("${PROJECT_ROOT}/run_generic_controller.sh" v23)
+elif [[ -x "${CONTROLLER_PREFIX}/bin/python" ]]; then
   export HC_CONTROLLER_PREFIX="${CONTROLLER_PREFIX}"
   "${PROJECT_ROOT}/run_generic_controller.sh" --check
   CONTROLLER_COMMAND=("${PROJECT_ROOT}/run_generic_controller.sh" v23)

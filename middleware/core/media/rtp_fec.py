@@ -21,9 +21,20 @@ No native receiver interoperability is asserted without an integration test.
 """
 from __future__ import annotations
 
+import os
 import struct
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+
+try:
+    if os.environ.get('HC_NATIVE_EXT', '1') != '0':
+        from . import _rtp_fec_cpp as _native
+    else:
+        _native = None
+except ImportError:
+    _native = None
+
+USING_NATIVE_EXT = _native is not None
 
 
 FEC_HEADER_SIZE = 14
@@ -246,3 +257,29 @@ def red_unwrap(packet: bytes) -> bytes:
     header = bytearray(packet[:layout.header_size])
     header[1] = (header[1] & 0x80) | payload_type
     return bytes(header) + payload + packet[layout.payload_end:]
+
+
+# Retain pure-Python reference implementations for parity testing & fallback.
+_py_rtp_layout = rtp_layout
+_py_zero_mutable_extensions = zero_mutable_extensions
+_py_encode_ulpfec = encode_ulpfec
+_py_protected_sequences = protected_sequences
+_py_recover_ulpfec = recover_ulpfec
+_py_wrap_red_payload = wrap_red_payload
+_py_unwrap_red_payload = unwrap_red_payload
+_py_red_wrap = red_wrap
+_py_red_unwrap = red_unwrap
+
+if _native is not None:
+    def rtp_layout(packet: bytes) -> RtpLayout:  # noqa: F811
+        """Validate complete plaintext RTP including CSRCs, extensions and padding."""
+        return RtpLayout(*_native.rtp_layout_tuple(packet))
+
+    zero_mutable_extensions = _native.zero_mutable_extensions
+    encode_ulpfec = _native.encode_ulpfec
+    protected_sequences = _native.protected_sequences
+    recover_ulpfec = _native.recover_ulpfec
+    wrap_red_payload = _native.wrap_red_payload
+    unwrap_red_payload = _native.unwrap_red_payload
+    red_wrap = _native.red_wrap
+    red_unwrap = _native.red_unwrap

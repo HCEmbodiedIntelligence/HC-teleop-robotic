@@ -264,6 +264,7 @@ class RobotArmTeleopNode(Node):
         if not urdf_path.is_absolute():
             urdf_path = self.config_path.parent / urdf_path
         urdf_path = urdf_path.resolve()
+        self.urdf_path = urdf_path
         self.robot_id = bullet.loadURDF(
             str(urdf_path),
             robot["base_position"],

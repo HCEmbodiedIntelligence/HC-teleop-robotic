@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import math
+import os
 from typing import Any
 
 import pybullet as bullet
 from std_msgs.msg import Bool
 
 from .collision_safety import (
+    _native_collision,
     aabb_distance,
     build_protected_pairs,
     calibrated_clearance,
@@ -40,39 +42,73 @@ def initialize_collision_safety(node: Any) -> None:
     node.collision_links = {
         index for pair in node.collision_pairs for index in pair
     }
-    aabbs = {
-        index: bullet.getAABB(
-            node.robot_id, index, physicsClientId=node.physics_client
-        )
-        for index in node.collision_links
-    }
+    node._cpp_collision_guard = None
+    urdf_path = getattr(node, "urdf_path", None)
+    use_native = (
+        _native_collision is not None
+        and urdf_path is not None
+        and os.environ.get("HC_NATIVE_EXT", "1") != "0"
+    )
     adjusted = 0
-    for pair in node.collision_pairs:
-        home_distance = None
-        if aabb_distance(aabbs[pair[0]], aabbs[pair[1]]) <= (
-            node.collision_min_distance
-        ):
-            points = bullet.getClosestPoints(
-                node.robot_id,
-                node.robot_id,
-                node.collision_min_distance,
-                linkIndexA=pair[0],
-                linkIndexB=pair[1],
-                physicsClientId=node.physics_client,
+    if use_native:
+        try:
+            pair_names = [
+                (node.link_name_by_index[a], node.link_name_by_index[b])
+                for a, b in node.collision_pairs
+            ]
+            guard = _native_collision.CppCollisionGuard(
+                str(urdf_path),
+                dict(getattr(node, "initial_joints", {})),
+                pair_names,
+                float(node.collision_min_distance),
+                float(node.collision_home_tolerance),
+                float(node.collision_escape_epsilon),
             )
-            if points:
-                home_distance = min(float(point[8]) for point in points)
-        clearance = calibrated_clearance(
-            node.collision_min_distance,
-            home_distance,
-            node.collision_home_tolerance,
-        )
-        node.collision_clearances[pair] = clearance
-        if clearance < node.collision_min_distance:
-            adjusted += 1
+            node._cpp_collision_guard = guard
+            for name_a, name_b, clearance in guard.pair_clearances():
+                pair = (node.link_by_name[name_a], node.link_by_name[name_b])
+                node.collision_clearances[pair] = float(clearance)
+                if clearance < node.collision_min_distance:
+                    adjusted += 1
+        except Exception:
+            node._cpp_collision_guard = None
+
+    if node._cpp_collision_guard is None:
+        aabbs = {
+            index: bullet.getAABB(
+                node.robot_id, index, physicsClientId=node.physics_client
+            )
+            for index in node.collision_links
+        }
+        adjusted = 0
+        for pair in node.collision_pairs:
+            home_distance = None
+            if aabb_distance(aabbs[pair[0]], aabbs[pair[1]]) <= (
+                node.collision_min_distance
+            ):
+                points = bullet.getClosestPoints(
+                    node.robot_id,
+                    node.robot_id,
+                    node.collision_min_distance,
+                    linkIndexA=pair[0],
+                    linkIndexB=pair[1],
+                    physicsClientId=node.physics_client,
+                )
+                if points:
+                    home_distance = min(float(point[8]) for point in points)
+            clearance = calibrated_clearance(
+                node.collision_min_distance,
+                home_distance,
+                node.collision_home_tolerance,
+            )
+            node.collision_clearances[pair] = clearance
+            if clearance < node.collision_min_distance:
+                adjusted += 1
+    backend = "cpp" if node._cpp_collision_guard is not None else "pybullet"
     node.get_logger().info(
         "collision avoidance ready: "
         f"{len(node.collision_pairs)} protected pairs, "
+        f"backend={backend}, "
         f"minimum_distance={node.collision_min_distance:.3f} m, "
         f"home_adjusted_pairs={adjusted}, "
         f"intra_arm={node.collision_check_intra_arm}, "
@@ -87,6 +123,12 @@ def collision_for_command(
 ) -> tuple[str, str, float, float] | None:
     if not node.collision_enabled or not node.collision_pairs:
         return None
+    cpp_guard = getattr(node, "_cpp_collision_guard", None)
+    if cpp_guard is not None:
+        base_state = getattr(node, "joint_state", None)
+        if base_state:
+            return cpp_guard.evaluate_overlay(base_state, command)
+        return cpp_guard.evaluate(command)
     previous: list[tuple[int, float]] = []
     updated: set[int] = set()
     with (getattr(node, "_model_lock", None) or nullcontext()):

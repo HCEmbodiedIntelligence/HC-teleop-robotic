@@ -52,3 +52,5 @@ log_motion/
 .deps
 .venv-lerobot
 *.so
+adapters/v23/cpp/build/
+adapters/core/cpp/build/

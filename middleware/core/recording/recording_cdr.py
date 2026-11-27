@@ -5,8 +5,19 @@ endianness are retained when selecting measured positions for a derived label.
 This module has no ROS context, publisher, or control-policy dependency.
 """
 from dataclasses import dataclass
-import struct
 import json
+import os
+import struct
+
+try:
+    if os.environ.get('HC_NATIVE_EXT', '1') != '0':
+        from . import _recording_cdr_cpp as _native
+    else:
+        _native = None
+except ImportError:
+    _native = None
+
+USING_NATIVE_EXT = _native is not None
 
 
 class Reader:
@@ -137,3 +148,62 @@ def position_label(header_prefix, names, positions):
         raw.extend(struct.pack(reader.endian+str(len(positions))+'d', *positions))
     uint(0); uint(0)  # Empty velocity/effort: measured motion is not a hold command.
     return bytes(raw)
+
+
+def serialize_joint_state(sec, nanosec, frame_id, names, positions, velocities=(), efforts=()):
+    """Encode sensor_msgs/msg/JointState as trimmed little-endian CDR1 without rclpy."""
+    sec_i = int(sec)
+    nsec_i = int(nanosec)
+    if not -2147483648 <= sec_i <= 2147483647:
+        raise ValueError('JointState header.stamp.sec out of int32 range')
+    if not 0 <= nsec_i <= 4294967295:
+        raise ValueError('JointState header.stamp.nanosec out of uint32 range')
+    raw = bytearray(b'\x00\x01\x00\x00')
+    raw.extend(struct.pack('<iI', sec_i, nsec_i))
+
+    def align(size):
+        raw.extend(b'\0' * ((-(len(raw) - 4)) % size))
+
+    def uint(value):
+        align(4)
+        raw.extend(struct.pack('<I', value))
+
+    fid = frame_id.encode('utf-8') + b'\0'
+    uint(len(fid))
+    raw.extend(fid)
+
+    names_seq = tuple(names)
+    uint(len(names_seq))
+    for name in names_seq:
+        encoded = name.encode('utf-8') + b'\0'
+        uint(len(encoded))
+        raw.extend(encoded)
+
+    for seq in (positions, velocities, efforts):
+        vals = tuple(seq)
+        uint(len(vals))
+        if vals:
+            align(8)
+            raw.extend(struct.pack('<' + str(len(vals)) + 'd', *vals))
+    return bytes(raw)
+
+
+# Retain pure-Python reference implementations for parity testing & fallback.
+_py_read_string = read_string
+_py_write_string = write_string
+_py_read_joint_state = read_joint_state
+_py_trim_joint_state_cdr = trim_joint_state_cdr
+_py_position_label = position_label
+_py_serialize_joint_state = serialize_joint_state
+
+if _native is not None:
+    read_string = _native.read_string
+    write_string = _native.write_string
+
+    def read_joint_state(raw):  # noqa: F811
+        names, positions, prefix, _ = _native.parse_joint_state(raw)
+        return JointFields(names, positions, prefix)
+
+    trim_joint_state_cdr = _native.trim_joint_state_cdr
+    position_label = _native.position_label
+    serialize_joint_state = _native.serialize_joint_state

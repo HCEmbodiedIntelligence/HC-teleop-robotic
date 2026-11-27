@@ -47,15 +47,16 @@ class CaptureTicket:
 def serialize_snapshot(snapshot):
     if isinstance(snapshot, SerializedSnapshot):
         return snapshot.raw
-    from rclpy.serialization import serialize_message
-    from sensor_msgs.msg import JointState
-    from .recording_cdr import trim_joint_state_cdr
-    message = JointState(name=list(snapshot.name), position=list(snapshot.position),
-                         velocity=list(snapshot.velocity), effort=list(snapshot.effort))
-    message.header.stamp.sec = snapshot.sec
-    message.header.stamp.nanosec = snapshot.nanosec
-    message.header.frame_id = snapshot.frame_id
-    return trim_joint_state_cdr(bytes(serialize_message(message)))
+    from .recording_cdr import serialize_joint_state
+    return serialize_joint_state(
+        snapshot.sec,
+        snapshot.nanosec,
+        snapshot.frame_id,
+        snapshot.name,
+        snapshot.position,
+        snapshot.velocity,
+        snapshot.effort,
+    )
 
 
 class PublicationCapture:

@@ -27,11 +27,21 @@ class LegacyTopicControl:
         self._clock = ControlClock(node.get_clock())
         from rclpy.publisher import Publisher
         from rclpy.serialization import serialize_message
-        from ..recording.recording_cdr import trim_joint_state_cdr
+        from ..recording.recording_cdr import serialize_joint_state
 
         def _serialize_joint_state(message):
-            raw = bytes(serialize_message(message))
-            return trim_joint_state_cdr(raw) if isinstance(message, JointState) else raw
+            if isinstance(message, JointState):
+                stamp = message.header.stamp
+                return serialize_joint_state(
+                    stamp.sec,
+                    stamp.nanosec,
+                    message.header.frame_id,
+                    message.name,
+                    message.position,
+                    message.velocity,
+                    message.effort,
+                )
+            return bytes(serialize_message(message))
 
         self._publisher_type, self._serialize_message = Publisher, _serialize_joint_state
         profile = Path(bridge.config['legacy_control_profile'])

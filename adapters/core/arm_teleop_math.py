@@ -584,3 +584,68 @@ def clutch_base_axis_mapping(axis_mapping, head_orientation, root_orientation, t
     heading_inverse = np.array([[c, s, 0.], [-s, c, 0.], [0., 0., 1.]])
     base_to_task = quaternion_to_matrix(task_orientation).T @ quaternion_to_matrix(root_orientation)
     return base_to_task @ heading_inverse @ mapping
+
+
+# Retain pure-Python reference implementations for parity testing & fallback.
+_py_binary_trigger_state = binary_trigger_state
+_py_normalize_quaternion = normalize_quaternion
+_py_quaternion_multiply = quaternion_multiply
+_py_quaternion_inverse = quaternion_inverse
+_py_quaternion_from_axis_angle = quaternion_from_axis_angle
+_py_quaternion_to_matrix = quaternion_to_matrix
+_py_matrix_to_quaternion = matrix_to_quaternion
+_py_orientation_error = orientation_error
+_py_mapped_relative_yaw = mapped_relative_yaw
+_py_mapped_relative_pitch = mapped_relative_pitch
+_py_stabilize_pose = stabilize_pose
+_py_sticks_outward = sticks_outward
+_py_joystick_base_velocity = joystick_base_velocity
+_py_joystick_yaw_velocity = joystick_yaw_velocity
+_py_adaptive_damping = adaptive_damping
+_py_joint_limit_avoidance = joint_limit_avoidance
+_py_relative_target = relative_target
+_py_clamp_step = clamp_step
+_py_head_yaw_orientation_velocity = head_yaw_orientation_velocity
+_py_hands_reach_assist_velocity = hands_reach_assist_velocity
+_py_rotate_velocity_to_base_frame = rotate_velocity_to_base_frame
+_py_project_displacement_to_heading_frame = project_displacement_to_heading_frame
+_py_blend_three_layer_base_velocity = blend_three_layer_base_velocity
+_py_clutch_base_axis_mapping = clutch_base_axis_mapping
+
+import os as _os
+
+try:
+    if _os.environ.get("HC_NATIVE_EXT", "1") != "0":
+        from . import _arm_teleop_math_cpp as _native
+    else:
+        _native = None
+except ImportError:
+    _native = None
+
+USING_NATIVE_EXT = _native is not None
+
+if _native is not None:
+    binary_trigger_state = _native.binary_trigger_state
+    normalize_quaternion = _native.normalize_quaternion
+    quaternion_multiply = _native.quaternion_multiply
+    quaternion_inverse = _native.quaternion_inverse
+    quaternion_from_axis_angle = _native.quaternion_from_axis_angle
+    quaternion_to_matrix = _native.quaternion_to_matrix
+    matrix_to_quaternion = _native.matrix_to_quaternion
+    orientation_error = _native.orientation_error
+    mapped_relative_yaw = _native.mapped_relative_yaw
+    mapped_relative_pitch = _native.mapped_relative_pitch
+    stabilize_pose = _native.stabilize_pose
+    sticks_outward = _native.sticks_outward
+    joystick_base_velocity = _native.joystick_base_velocity
+    joystick_yaw_velocity = _native.joystick_yaw_velocity
+    adaptive_damping = _native.adaptive_damping
+    joint_limit_avoidance = _native.joint_limit_avoidance
+    relative_target = _native.relative_target
+    clamp_step = _native.clamp_step
+    head_yaw_orientation_velocity = _native.head_yaw_orientation_velocity
+    hands_reach_assist_velocity = _native.hands_reach_assist_velocity
+    rotate_velocity_to_base_frame = _native.rotate_velocity_to_base_frame
+    project_displacement_to_heading_frame = _native.project_displacement_to_heading_frame
+    blend_three_layer_base_velocity = _native.blend_three_layer_base_velocity
+    clutch_base_axis_mapping = _native.clutch_base_axis_mapping

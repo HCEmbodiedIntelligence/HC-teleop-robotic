@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import math
+import os
 from itertools import combinations
 from typing import Mapping, Sequence
+from xml.etree import ElementTree
+
+try:
+    from . import _collision_guard_cpp as _native_collision
+except ImportError:
+    _native_collision = None
+
+USING_NATIVE_EXT = (
+    _native_collision is not None and os.environ.get("HC_NATIVE_EXT", "1") != "0"
+)
 
 
 Aabb = tuple[Sequence[float], Sequence[float]]
@@ -128,6 +139,44 @@ def improves_collision_clearance(
     return collision_deficit(candidate) <= collision_deficit(current) - epsilon
 
 
+def _parse_urdf_kinematics(
+    urdf_path: str | os.PathLike[str],
+) -> tuple[dict[str, int], dict[int, str], dict[str, int], dict[int, int], set[int]]:
+    """Parse URDF link/joint graph and collision links without starting PyBullet."""
+    root = ElementTree.parse(urdf_path).getroot()
+    link_names: list[str] = []
+    collision_link_names: set[str] = set()
+    for link in root.findall("link"):
+        name = link.attrib["name"]
+        link_names.append(name)
+        if link.find("collision") is not None:
+            collision_link_names.add(name)
+
+    joint_elems = root.findall("joint")
+    child_links = {j.find("child").attrib["link"] for j in joint_elems}
+    base_candidates = [name for name in link_names if name not in child_links]
+    if not base_candidates:
+        raise RuntimeError(f"URDF has no root link: {urdf_path}")
+    base_name = base_candidates[0]
+
+    names: dict[int, str] = {-1: base_name}
+    links: dict[str, int] = {base_name: -1}
+    joints: dict[str, int] = {}
+    parent_by_child_name: list[tuple[int, str]] = []
+    for index, joint in enumerate(joint_elems):
+        child = joint.find("child").attrib["link"]
+        parent = joint.find("parent").attrib["link"]
+        if joint.attrib.get("type", "") != "fixed":
+            joints[joint.attrib["name"]] = index
+        names[index] = child
+        links[child] = index
+        parent_by_child_name.append((index, parent))
+
+    parents = {index: links[parent] for index, parent in parent_by_child_name}
+    shapes = {links[name] for name in collision_link_names if name in links}
+    return joints, names, links, parents, shapes
+
+
 class ModelCollisionGuard:
     """Profile-calibrated collision check shared by every selected source.
 
@@ -137,6 +186,66 @@ class ModelCollisionGuard:
     """
 
     def __init__(self, api):
+        self.control = api.teleop["control"]
+        self.minimum = float(self.control.get("collision_min_distance", .02))
+        self.epsilon = float(self.control.get("collision_escape_epsilon", 1e-5))
+        home_tolerance = float(self.control.get("collision_home_tolerance", .008))
+        self.required = {n for group in api.groups.values() for n in group}
+        self._cpp = None
+        self.bullet = None
+        self.client = -1
+        self.robot = -1
+
+        use_native = (
+            _native_collision is not None
+            and os.environ.get("HC_NATIVE_EXT", "1") != "0"
+        )
+        if use_native:
+            try:
+                self._init_native(api, home_tolerance)
+                return
+            except Exception:
+                self._cpp = None
+
+        self._init_pybullet(api, home_tolerance)
+
+    def _init_native(self, api, home_tolerance: float) -> None:
+        self.joints, self.names, self.links, parents, shapes = _parse_urdf_kinematics(
+            api.urdf_path
+        )
+        self.home = {
+            n: float(api.teleop["robot"]["initial_joints"].get(n, 0.0))
+            for n in self.joints
+        }
+        roots = [
+            self.links[api.teleop["arms"][side]["generic_task_base_link"]]
+            for side in ("right", "left")
+        ]
+        _, _, raw_pairs = build_protected_pairs(
+            shapes,
+            parents,
+            *roots,
+            int(self.control.get("collision_ignore_graph_distance", 2)),
+            check_intra_arm=bool(self.control.get("collision_check_intra_arm", False)),
+            check_inter_arm=bool(self.control.get("collision_check_inter_arm", True)),
+            check_arm_body=bool(self.control.get("collision_check_arm_body", True)),
+        )
+        pair_names = [(self.names[a], self.names[b]) for a, b in raw_pairs]
+        self._cpp = _native_collision.CppCollisionGuard(
+            str(api.urdf_path),
+            self.home,
+            pair_names,
+            self.minimum,
+            home_tolerance,
+            self.epsilon,
+        )
+        self.clearances = {
+            (self.links[a], self.links[b]): float(clearance)
+            for a, b, clearance in self._cpp.pair_clearances()
+        }
+        self.pairs = list(self.clearances.keys())
+
+    def _init_pybullet(self, api, home_tolerance: float) -> None:
         import pybullet as bullet
 
         self.bullet = bullet
@@ -145,9 +254,6 @@ class ModelCollisionGuard:
             raise RuntimeError("cannot create shared collision model")
         self.robot = bullet.loadURDF(str(api.urdf_path), useFixedBase=True,
                                     physicsClientId=self.client)
-        self.control = api.teleop["control"]
-        self.minimum = float(self.control.get("collision_min_distance", .02))
-        self.epsilon = float(self.control.get("collision_escape_epsilon", 1e-5))
         self.joints, self.links, parents = {}, {}, {}
         self.names = {-1: bullet.getBodyInfo(self.robot, physicsClientId=self.client)[0].decode()}
         self.links[self.names[-1]] = -1
@@ -159,7 +265,6 @@ class ModelCollisionGuard:
             self.links[self.names[index]] = index
             parents[index] = int(info[16])
         self.home = {n: float(api.teleop["robot"]["initial_joints"].get(n, 0.)) for n in self.joints}
-        self.required = {n for group in api.groups.values() for n in group}
         self._apply(self.home)
         shapes = {i for i in self.names if bullet.getCollisionShapeData(self.robot, i, physicsClientId=self.client)}
         roots = [self.links[api.teleop["arms"][side]["generic_task_base_link"]] for side in ("right", "left")]
@@ -171,8 +276,7 @@ class ModelCollisionGuard:
         self.clearances = {}
         for pair in self.pairs:
             distance = self._distance(pair, self.minimum)
-            self.clearances[pair] = calibrated_clearance(self.minimum, distance,
-                float(self.control.get("collision_home_tolerance", .008)))
+            self.clearances[pair] = calibrated_clearance(self.minimum, distance, home_tolerance)
 
     def _apply(self, values):
         for name, value in values.items():
@@ -188,6 +292,8 @@ class ModelCollisionGuard:
         return min(float(p[8]) for p in points) if points else None
 
     def _collision(self, values):
+        if self._cpp is not None:
+            return self._cpp.evaluate(values)
         self._apply(values)
         worst = None
         for pair, clearance in self.clearances.items():
@@ -201,6 +307,8 @@ class ModelCollisionGuard:
     def check(self, measured, command):
         if not self.required <= measured.keys():
             raise ValueError("collision check requires complete arm/body feedback")
+        if self._cpp is not None:
+            return self._cpp.check(measured, command)
         state = {**self.home, **measured}
         current = self._collision(state)
         candidate = self._collision({**state, **command})
@@ -208,6 +316,7 @@ class ModelCollisionGuard:
         return allowed, candidate, current is not None
 
     def close(self):
+        self._cpp = None
         if self.client >= 0:
             self.bullet.disconnect(self.client)
             self.client = -1
