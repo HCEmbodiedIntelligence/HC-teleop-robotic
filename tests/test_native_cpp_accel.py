@@ -622,7 +622,9 @@ def test_v23_cpp_ros2_node_live_e2e_openarmx_and_x1_intervention():
         rclpy.shutdown()
         proc2.terminate()
         try:
-            proc2.wait(timeout=3)
+            _, stderr2 = proc2.communicate(timeout=3)
         except subprocess.TimeoutExpired:
             proc2.kill()
-            proc2.wait(timeout=3)
+            _, stderr2 = proc2.communicate(timeout=3)
+    # ControlRuntime waits for this exact startup readiness marker in v23_solver.log.
+    assert b"reconstructed controller_v2_3 started:" in stderr2

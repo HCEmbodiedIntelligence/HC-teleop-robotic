@@ -289,8 +289,8 @@ class ControllerV23Node : public rclcpp::Node {
     tick_timer_ = this->create_wall_timer(period, [this]() { on_tick(); });
 
     RCLCPP_INFO(this->get_logger(),
-                "reconstructed controller_v2_3 (C++17) started: %zu free "
-                "joints, %d tasks, rate=%.1f Hz, intervention=%s",
+                "reconstructed controller_v2_3 started: %zu free "
+                "joints, %d tasks, rate=%.1f Hz, backend=cpp17, intervention=%s",
                 controller_->free_joint_names().size(),
                 controller_->total_task_count(), ros_cfg.rate,
                 intervention_enabled_ ? "enabled" : "disabled");
